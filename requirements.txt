@@ -1,0 +1,5 @@
+# Build dependencies for Python wheel generation and deployment
+build>=1.0.0
+setuptools>=61.0
+wheel>=0.38.0
+twine>=4.0.0

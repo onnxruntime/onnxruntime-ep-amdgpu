@@ -1,0 +1,174 @@
+#==============================================================================#
+# File extensions to be ignored anywhere in the tree.
+#==============================================================================#
+
+# Temp files created by most text editors
+*~
+
+# Merge files created by git
+*.orig
+
+# Reject files created by patch
+*.rej
+
+# Byte compiled python modules
+*.pyc
+*.pyd
+__pycache__/
+
+# Vim swap files
+.*.sw?
+*.sw?
+
+# OS X specific files
+.DS_Store
+
+#==============================================================================#
+# Environment / secret files — CRITICAL: prevents accidental commit of
+# credentials, tokens, API keys, and other sensitive material.
+#==============================================================================#
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.jks
+*.keystore
+**/secrets/
+**/credentials/
+**/.secrets
+*.secret
+.ssh/
+
+#==============================================================================#
+# IDE and editor configuration
+#==============================================================================#
+
+# Visual Studio
+.vs/
+
+# VSCode — ignore by default, allow shared configs at repo root
+/.vscode/*
+!/.vscode/settings.json
+!/.vscode/extensions.json
+
+# JetBrains (CLion, PyCharm, IntelliJ, etc.)
+.idea/
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# Eclipse
+.project
+.cproject
+.pydevproject
+.settings/
+
+# Cursor
+.cursor
+.cursorignore
+.cursorindexingignore
+
+# Coding assistant files
+.agents/
+.claude/
+.codex/
+.gemini/
+CLAUDE.md
+GEMINI.md
+AGENTS.md
+
+#==============================================================================#
+# Build artifacts and output
+#==============================================================================#
+
+# Build directories (root only)
+/build*/
+/cmake-build*/
+/out/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeSettings.json
+CMakePresets.json
+CMakeUserPresets.json
+/compile_commands.json
+/install_manifest.txt
+
+# Compiled objects and libraries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dll
+*.dylib
+*.exe
+
+# Debug symbols
+*.pdb
+*.dSYM/
+*.ilk
+
+# Package files
+*.tar.gz
+*.zip
+*.whl
+*.egg
+*.egg-info/
+dist/
+
+#==============================================================================#
+# Python
+#==============================================================================#
+.pytest_cache/
+.mypy_cache/
+.tox/
+.venv/
+venv/
+venv_*/
+
+#==============================================================================#
+# Documentation artifacts
+#==============================================================================#
+docs/_build/
+docs/_doxygen/
+docs/doxygen/html/
+docs/doxygen/xml/
+
+#==============================================================================#
+# Tags and indexing
+#==============================================================================#
+/tags
+/TAGS
+/GPATH
+/GRTAGS
+/GSYMS
+/GTAGS
+/ID
+.gitusers
+
+# clangd index
+.clangd/
+.cache/
+
+#==============================================================================#
+# Profiling output
+#==============================================================================#
+*.profraw
+*.profdata
+*.pftrace
+
+#==============================================================================#
+# OS / misc
+#==============================================================================#
+Thumbs.db
+desktop.ini

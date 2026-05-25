@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "onnxruntime-ep-directml"
+version = "1.0.0"
+description = "ONNX Runtime DirectML Execution Provider"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [
+    { name = "AMD" }
+]
+classifiers = [
+    "Development Ort::Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Repository = "https://github.com/onnxruntime/onnxruntime-ep-amdgpu"
+
+[tool.setuptools.packages.find]
+include = ["onnxruntime_ep_directml*"]
+
+[tool.setuptools.package-data]
+onnxruntime_ep_directml = ["*.dll", "*.pdb"]
+
+[tool.ep]
+module_name = "onnxruntime_ep_directml"
+
+[[tool.ep.components]]
+library = "directml-ep"
+ep_name = "DmlExecutionProvider"
