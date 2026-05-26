@@ -823,6 +823,17 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
         }
 
         bool requiredConstantCpuInputsAvailable = true;
+#ifdef DML_PERF_PROFILE
+        {
+            char _buf[256];
+            std::snprintf(_buf, sizeof(_buf),
+                "[ABI_UNSAFE] ctor: op=%s  since_ver=%d  required_const_count=%zu\n",
+                kerneInfo.node().OpType().c_str(),
+                kerneInfo.node().SinceVersion(),
+                requiredConstantCpuInputs.size());
+            Dml::DmlPerfWriteLog(_buf);
+        }
+#endif
         for (uint32_t index : requiredConstantCpuInputs)
         {
             int isConstant = 0;
@@ -831,6 +842,16 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
                 m_ortKernelInfo, index, &isConstant, &constantValue);
             if (checkStatus) m_ortApi->ReleaseStatus(checkStatus);
             bool available = (isConstant && constantValue != nullptr);
+#ifdef DML_PERF_PROFILE
+            {
+                char _buf[320];
+                std::snprintf(_buf, sizeof(_buf),
+                    "[ABI_UNSAFE] ctor const[%u]: op=%s  ki_isconst=%d  ki_val=%p  available=%d\n",
+                    index, kerneInfo.node().OpType().c_str(), isConstant,
+                    (void*)constantValue, (int)available);
+                Dml::DmlPerfWriteLog(_buf);
+            }
+#endif
             if (!available)
             {
                 requiredConstantCpuInputsAvailable = false;
@@ -1000,6 +1021,16 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
                 const OrtValue* constantValue = nullptr;
                 OrtStatus* getStatus = m_ortApi->KernelInfoGetConstantInput_tensor(
                     m_ortKernelInfo, inputIndex, &isConstant, &constantValue);
+#ifdef DML_PERF_PROFILE
+                {
+                    char _buf[320];
+                    std::snprintf(_buf, sizeof(_buf),
+                        "[ABI_UNSAFE] lazy const[%u]: op=%s  ki_isconst=%d  ki_val=%p  ki_status=%p\n",
+                        inputIndex, Node().OpType().c_str(), isConstant,
+                        (void*)constantValue, (void*)getStatus);
+                    Dml::DmlPerfWriteLog(_buf);
+                }
+#endif
                 if (getStatus == nullptr && isConstant && constantValue != nullptr)
                 {
                     auto wrappedTensor = Microsoft::WRL::Make<Dml::AbiSafeTensor>(
@@ -1012,6 +1043,15 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
                     if (getStatus) m_ortApi->ReleaseStatus(getStatus);
                     // Fall back to runtime input tensor (mirrors old plugin's constantInputGetter using context->Input<onnxruntime::Tensor>())
                     const onnxruntime::Tensor* tensor = context->Input<onnxruntime::Tensor>(inputIndex);
+#ifdef DML_PERF_PROFILE
+                    {
+                        char _buf[320];
+                        std::snprintf(_buf, sizeof(_buf),
+                            "[ABI_UNSAFE] lazy const[%u] ki-miss -> ctx fallback: op=%s  ctx_tensor=%p\n",
+                            inputIndex, Node().OpType().c_str(), (void*)tensor);
+                        Dml::DmlPerfWriteLog(_buf);
+                    }
+#endif
                     if (tensor)
                     {
                         auto internalOpCapture = m_internalOperator;
@@ -1069,6 +1109,14 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
 
             if (RequiresLazyInitialization())
             {
+#ifdef DML_PERF_PROFILE
+                {
+                    char _buf[256]; std::snprintf(_buf, sizeof(_buf),
+                        "[ABI_UNSAFE] lazy-init triggered: op=%s  ctx_input_count=%d\n",
+                        Node().OpType().c_str(), context->InputCount());
+                    Dml::DmlPerfWriteLog(_buf);
+                }
+#endif
                 m_inputShapesOfKernelInference = GetInputShapes(context);
 
                 m_constantInputTensorContentsOfKernel.resize(context->InputCount());

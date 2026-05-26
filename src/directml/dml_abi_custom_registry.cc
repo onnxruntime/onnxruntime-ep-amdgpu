@@ -469,7 +469,18 @@ HRESULT STDMETHODCALLTYPE PluginAbiCustomRegistry::RegisterOperatorKernel(
 
             THROW_IF_NOT_OK(m_kernelRegistry->RegisterCustomKernel(create_info));
 
-            // Build key from domain and operator name
+            // Versioned key (domain::opname::sinceVersion) ensures ConvertKernelRegistryToOrtKernelRegistry
+            // gets the correct per-version kernelFactory. Ops like Pad, Slice, and Clip change their
+            // interface between versions (e.g., pads moves from attribute to input tensor at v11), so
+            // each version must map to its own factory.
+            int since_ver_start = 0, since_ver_end = 0;
+            kernelDef->SinceVersion(&since_ver_start, &since_ver_end);
+            std::string versionedKey = std::string(kernelDef->Domain()) + "::" +
+                                       std::string(kernelDef->OpName()) + "::" +
+                                       std::to_string(since_ver_start);
+            (*m_internalRegInfoMap)[versionedKey] = regInfo;
+
+            // Unversioned key for IsNodeSupportedByDml (supportQuery only, version-agnostic).
             std::string regKey = std::string(kernelDef->Domain()) + "::" + std::string(kernelDef->OpName());
             (*m_internalRegInfoMap)[regKey] = regInfo;
         } else {

@@ -6,6 +6,10 @@
 #include "core/common/inlined_containers.h"
 #include "core/common/inlined_containers_fwd.h"
 #include "core/framework/fuse_nodes_funcs.h"
+#ifdef DML_PERF_PROFILE
+#include <cstdio>
+#include "dml_abi_kernel.h"
+#endif
 
 using namespace Windows::AI::MachineLearning::Adapter;
 
@@ -83,7 +87,6 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     if(ConvertKernelRegistryToOrtKernelRegistry() != nullptr) {
         throw std::runtime_error("Failed to convert internal kernel registry to OrtKernelRegistry");
     }
-
 }
 
 ONNXTensorElementDataType ExecutionProviderPlugin::GetElementTypeFromMLDataType(onnxruntime::MLDataType ml_type) {
@@ -222,8 +225,13 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
             func_state->ort_api_ptr = &ort_api;
             func_state->operator_name = def->OpName();
 
-            // Build key from domain and operator name
-            std::string regKey = std::string(def->Domain()) + "::" + std::string(def->OpName());
+            // Versioned key (domain::opname::sinceVersion) — must match what dml_abi_custom_registry.cc
+            // writes. Required because ops like Pad, Slice, and Clip change their interface between
+            // versions (e.g., inputs vs attributes), so each version needs its own kernelFactory.
+            int since_ver_start = 0, since_ver_end = 0;
+            def->SinceVersion(&since_ver_start, &since_ver_end);
+            std::string regKey = std::string(def->Domain()) + "::" + std::string(def->OpName()) +
+                                 "::" + std::to_string(since_ver_start);
 
             // Check if we have internal registration info for ABI-safe path
             auto reg_info_iter = m_internalRegInfoMap->find(regKey);
@@ -235,11 +243,20 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
                 func_state->kernel_factory = reg_info->kernelFactory;
                 func_state->shape_inferrer = reg_info->shapeInferrer;
                 func_state->default_attributes = &reg_info->defaultAttributes;
-                func_state->required_constant_cpu_inputs = reg_info->requiredConstantCpuInputs;
+                // Derive required_constant_cpu_inputs from the versioned KernelDef rather than
+                // reg_info, which may reflect a different version's constants. KernelDef is
+                // per-registration and authoritative for the specific version being registered.
+                for (const auto& [input_index, mem_type] : def->InputMemoryTypeArgs()) {
+                    if (mem_type == OrtMemTypeCPUInput) {
+                        func_state->required_constant_cpu_inputs.push_back(
+                            static_cast<uint32_t>(input_index));
+                    }
+                }
                 func_state->requires_input_shapes_at_creation = reg_info->requiresInputShapesAtCreation;
                 func_state->requires_output_shapes_at_creation = reg_info->requiresOutputShapesAtCreation;
                 func_state->is_internal_operator = reg_info->isInternalOperator;
                 func_state->dml_execution_provider = m_executionProvider.get();
+                func_state->ep_plugin = this;
 
                 // Populate tensor attribute names by operator name — these are tensor-typed ONNX attributes
                 // that cannot be stored in AttributeMap (which only supports int/float/string).
@@ -263,6 +280,7 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
                 return st;
             }
 
+            m_kernelCreateFuncStateByOpName[func_state->operator_name] = func_state.get();
             m_kernelCreateFuncStates.push_back(std::move(func_state));
         }
 
@@ -311,33 +329,55 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
         auto* state = static_cast<KernelCreateFuncState*>(kernel_create_func_state);
 
         // TRY ABI-SAFE PATH FIRST
-         if (state->kernel_factory)
+        if (state->kernel_factory)
         {
             try {
-                // Collect any constant CPU inputs that are already available as initializers.
-                // When a required constant is not yet available (dynamic input, not an initializer),
-                // pass an empty map — DmlAbiKernel_Create will detect this and set needs_lazy_init,
-                // deferring kernel creation to the first Compute call (mirrors unsafe path behavior).
-                std::unordered_map<uint32_t, Microsoft::WRL::ComPtr<IMLOperatorTensor>> constant_tensors;
-                for (uint32_t input_index : state->required_constant_cpu_inputs) {
-                    int is_constant = 0;
-                    const OrtValue* constant_value = nullptr;
-                    OrtStatus* get_status = state->ort_api_ptr->KernelInfoGetConstantInput_tensor(
-                        info, input_index, &is_constant, &constant_value);
+                // Resolve required constant inputs via two stages:
+                // 1. KernelInfoGetConstantInput_tensor — covers statically visible initializers.
+                // 2. m_graphInitializerMap — fallback for initializers not visible through the
+                //    plugin EP's OrtKernelInfo* wrapper (e.g., inputs not wired as graph edges).
+                // If both fail, pass an empty map so DmlAbiKernel_Create defers to lazy init.
+                std::unordered_map<uint32_t, Microsoft::WRL::ComPtr<IMLOperatorTensor>> constants_to_pass;
+                bool required_constants_available = true;
 
-                    if (get_status == nullptr && is_constant && constant_value != nullptr) {
-                        auto tensor = Microsoft::WRL::Make<Dml::AbiSafeTensor>(
-                            constant_value,
-                            state->ort_api_ptr,
-                            state->dml_execution_provider);
-                        constant_tensors[input_index] = Microsoft::WRL::ComPtr<IMLOperatorTensor>(tensor.Get());
-                    } else {
-                        if (get_status) {
-                            state->ort_api_ptr->ReleaseStatus(get_status);
+                for (uint32_t input_index : state->required_constant_cpu_inputs) {
+                    const OrtValue* resolved_value = nullptr;
+
+                    // Stage 1: KernelInfoGetConstantInput_tensor
+                    int is_constant = 0;
+                    const OrtValue* ki_value = nullptr;
+                    OrtStatus* ki_st = state->ort_api_ptr->KernelInfoGetConstantInput_tensor(
+                        info, input_index, &is_constant, &ki_value);
+                    if (ki_st) state->ort_api_ptr->ReleaseStatus(ki_st);
+                    if (is_constant && ki_value != nullptr) {
+                        resolved_value = ki_value;
+                    }
+
+                    // Stage 2: graph initializer map (fallback for optional inputs not visible
+                    // as connected node edges, e.g. Pad's pads/constant_value/axes).
+                    if (resolved_value == nullptr) {
+                        size_t name_len = 0;
+                        state->ort_api_ptr->KernelInfo_GetInputName(info, input_index, nullptr, &name_len);
+                        if (name_len > 0 && state->ep_plugin) {
+                            std::string input_name(name_len, '\0');
+                            OrtStatus* name_st = state->ort_api_ptr->KernelInfo_GetInputName(
+                                info, input_index, input_name.data(), &name_len);
+                            if (!name_st) {
+                                auto it = state->ep_plugin->m_graphInitializerMap.find(input_name);
+                                if (it != state->ep_plugin->m_graphInitializerMap.end()) {
+                                    resolved_value = it->second;
+                                }
+                            }
+                            if (name_st) state->ort_api_ptr->ReleaseStatus(name_st);
                         }
-                        // Required constant not yet available — pass empty map; DmlAbiKernel_Create
-                        // will force needs_lazy_init and defer kernel creation to Compute time.
-                        constant_tensors.clear();
+                    }
+
+                    if (resolved_value != nullptr) {
+                        constants_to_pass[input_index] = Microsoft::WRL::Make<Dml::AbiSafeTensor>(
+                            resolved_value, state->ort_api_ptr, state->dml_execution_provider);
+                    } else {
+                        // Dynamically computed — defer to lazy init at Compute time.
+                        required_constants_available = false;
                         break;
                     }
                 }
@@ -355,26 +395,60 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
                 creation_state.ort_api = state->ort_api_ptr;
                 creation_state.operator_name = state->operator_name.c_str();
 
-                OrtStatus* abi_safe_status = Dml::DmlAbiKernel_Create(
-                    &creation_state, info, kernel_out, std::move(constant_tensors));
-
-                if (abi_safe_status == nullptr && *kernel_out != nullptr) {
-                    return nullptr;  // SUCCESS - ABI-safe path worked
+                // Pass the resolved constants (or empty map for lazy-init case).
+                // DmlAbiKernel_Create sets needs_lazy_init=true when required_constants_available=false,
+                // returning a valid deferred kernel. DmlAbiKernel_Compute then fetches dynamically
+                // computed constants from the execution context at first call.
+                std::unordered_map<uint32_t, Microsoft::WRL::ComPtr<IMLOperatorTensor>> constants_final;
+                if (required_constants_available) {
+                    constants_final = std::move(constants_to_pass);
                 }
 
-                // ABI-safe path failed — release the error and fall through to unsafe fallback
+#ifdef DML_PERF_PROFILE
+                {
+                    char _buf[320];
+                    std::snprintf(_buf, sizeof(_buf),
+                        "[ABI_SAFE] DmlAbiKernel_Create entry: op=%s  constants_ready=%d  passing=%zu constants\n",
+                        state->operator_name.c_str(), (int)required_constants_available, constants_final.size());
+                    Dml::DmlPerfWriteLog(_buf);
+                }
+#endif
+
+                OrtStatus* abi_safe_status = Dml::DmlAbiKernel_Create(
+                    &creation_state, info, kernel_out, std::move(constants_final));
+
+                if (abi_safe_status == nullptr && *kernel_out != nullptr) {
+#ifdef DML_PERF_PROFILE
+                    { char _buf[256]; std::snprintf(_buf, sizeof(_buf), "[ABI_SAFE] success: op=%s  (kernel=%p)\n",
+                        state->operator_name.c_str(), (void*)*kernel_out); Dml::DmlPerfWriteLog(_buf); }
+                    { char _buf[256]; std::snprintf(_buf, sizeof(_buf), "[DML_PERF] path=safe  op=%s\n",
+                        state->operator_name.c_str()); Dml::DmlPerfWriteLog(_buf); }
+#endif
+                    return nullptr;
+                }
+
+#ifdef DML_PERF_PROFILE
+                { char _buf[256]; std::snprintf(_buf, sizeof(_buf),
+                    "[ABI_SAFE] FAILED: op=%s  status=%p  kernel=%p  -> falling to unsafe\n",
+                    state->operator_name.c_str(), (void*)abi_safe_status, (void*)*kernel_out);
+                  Dml::DmlPerfWriteLog(_buf); }
+#endif
                 if (abi_safe_status) {
                     state->ort_api_ptr->ReleaseStatus(abi_safe_status);
                 }
                 *kernel_out = nullptr;
 
             } catch (...) {
-                // ABI-safe path threw an exception - fall through to unsafe fallback
                 *kernel_out = nullptr;
             }
         }
 
         // FALLBACK: ABI-UNSAFE PATH (when ABI-safe fails or isn't available)
+#ifdef DML_PERF_PROFILE
+        { char _buf[256]; std::snprintf(_buf, sizeof(_buf),
+            "[DML_PERF] path=unsafe op=%s  (safe path absent or failed)\n[ABI_UNSAFE] entry: op=%s\n",
+            state->operator_name.c_str(), state->operator_name.c_str()); Dml::DmlPerfWriteLog(_buf); }
+#endif
 
         if (!state->kernel_create_fn) {
             std::string error_msg = "Kernel registration missing both kernel_factory and kernel_create_fn - cannot create kernel";
@@ -477,6 +551,33 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         }
     }
 
+    // Build a flat map of all graph initializers keyed by name, used as a fallback in
+    // DmlKernelCreateFuncAdapter when KernelInfoGetConstantInput_tensor cannot see an
+    // initializer. Graph_GetInitializers covers all initializers including those not wired
+    // as connected node edges. ONNX value names are unique within a graph, so name is an
+    // unambiguous key.
+    ep->m_graphInitializerMap.clear();
+    {
+        size_t num_initializers = 0;
+        ep->ort_api.Graph_GetNumInitializers(graph, &num_initializers);
+        if (num_initializers > 0) {
+            std::vector<const OrtValueInfo*> initializer_infos(num_initializers);
+            ep->ort_api.Graph_GetInitializers(graph, initializer_infos.data(), num_initializers);
+            for (const OrtValueInfo* vi : initializer_infos) {
+                if (!vi) continue;
+                const char* name_cstr = nullptr;
+                OrtStatus* name_st = ep->ort_api.GetValueInfoName(vi, &name_cstr);
+                if (name_st || !name_cstr) { if (name_st) ep->ort_api.ReleaseStatus(name_st); continue; }
+                const OrtValue* init_value = nullptr;
+                OrtStatus* val_st = ep->ort_api.ValueInfo_GetInitializerValue(vi, &init_value);
+                if (val_st == nullptr && init_value != nullptr) {
+                    ep->m_graphInitializerMap[name_cstr] = init_value;
+                }
+                if (val_st) ep->ort_api.ReleaseStatus(val_st);
+            }
+        }
+    }
+
     // Get the list of nodes that should stay on the CPU
     std::unordered_set<size_t> cpuPreferredNodes = ep->GetCpuPreferredNodes(graph, graph_support_info, tentativeNodes);
     std::vector<const OrtNode*> supportedNodes;
@@ -494,7 +595,6 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         {
             ep->ep_api.EpGraphSupportInfo_AddSingleNode(graph_support_info, node);
             supportedNodes.push_back(node);
-            // ep_api.EpGraphSupportInfo_AddNodesToFuse(graph_support_info, &node, 1, nullptr);
         }
     }
 
