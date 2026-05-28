@@ -190,7 +190,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, std::string_view ep_na
       bucketized_buffer_memory_info_{nullptr},
       readonly_memory_info_{nullptr},
       cpu_input_allocator_{nullptr},
-      dml_data_transfer_implementation{nullptr}
+      dml_data_transfer_implementation{std::make_unique<DMLDataTransfer>(api_ptrs)}
 {
     GetName = GetNameImpl;
     GetVendor = GetVendorImpl;
@@ -239,7 +239,6 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, std::string_view ep_na
                                 0,
                                 OrtDeviceAllocator};\
 
-    dml_data_transfer_implementation = std::make_unique<DMLDataTransfer>(api_ptrs);
 }
 
 const char* ORT_API_CALL ProviderFactory::GetNameImpl(const OrtEpFactory* this_ptr) noexcept {
@@ -327,6 +326,13 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
     // keep a non-owning raw pointer to the EP for use in the data transfer implementation
     factory->m_ep_raw = factory->m_ep.get();
 
+    // Attach the new EP to the factory-owned data transfer so copies can be serviced.
+    if (factory->dml_data_transfer_implementation) {
+        factory->dml_data_transfer_implementation->AttachExecutionProvider(
+            factory->m_ep_raw->GetInternetalExecutionProvider());
+        factory->dml_data_transfer_implementation->AttachFactoryEpRef(&factory->m_ep_raw);
+    }
+
     *ep = factory->m_ep.release();
     return nullptr;
 }
@@ -336,7 +342,11 @@ void ORT_API_CALL ProviderFactory::ReleaseEpImpl(OrtEpFactory* this_ptr, OrtEp* 
     auto& factory = *static_cast<ProviderFactory*>(this_ptr);
     if (ep) {
         factory.m_ep_raw = nullptr; // invalidate observer before deletion
-        // Match the AddRef() in CreateEpImpl().
+        // Clear the factory-owned data transfer's EP reference so the EP's ref count
+        // can reach zero and GPU resources are freed when the session ends.
+        if (factory.dml_data_transfer_implementation) {
+            factory.dml_data_transfer_implementation->AttachExecutionProvider(nullptr);
+        }
         ExecutionProviderPlugin* provider = static_cast<ExecutionProviderPlugin*>(ep);
         delete provider;
     }
@@ -362,14 +372,10 @@ void ORT_API_CALL ProviderFactory::ReleaseAllocatorImpl(OrtEpFactory* /*this*/, 
 OrtStatus* ORT_API_CALL ProviderFactory::CreateDataTransferImpl(OrtEpFactory* this_ptr, OrtDataTransferImpl** data_transfer) noexcept
 {
     auto* factory = static_cast<ProviderFactory*>(this_ptr);
-    auto transfer = std::make_unique<DMLDataTransfer>(ApiPtrs({factory->ort_api, factory->ep_api, factory->model_editor_api}));
-
-    if (factory->m_ep_raw != nullptr) {
-        transfer->AttachExecutionProvider(factory->m_ep_raw->GetInternetalExecutionProvider());
-    }
-    // Pass a pointer to m_ep_raw so CopyTensorsImpl can lazily resolve the EP after CreateEpImpl runs.
-    transfer->AttachFactoryEpRef(&factory->m_ep_raw);
-    *data_transfer = transfer.release();
+    // Return the factory-owned data transfer. The factory manages its lifetime via unique_ptr;
+    // ORT's Release() call is intentionally ignored (no-op in ReleaseImpl).
+    // The EP reference is attached in CreateEpImpl and cleared in ReleaseEpImpl.
+    *data_transfer = factory->dml_data_transfer_implementation.get();
     return nullptr;
 }
 
