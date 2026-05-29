@@ -15,6 +15,12 @@
 #include <unordered_map>
 #include <cstddef>
 #include <cstring>
+#ifdef DML_PERF_PROFILE
+#include <atomic>
+#include <chrono>
+#include <string_view>
+#include "common/make_string.h"
+#endif
 
 #include "DmlExecutionProvider/DmlEdgeShapes.h"
 
@@ -139,9 +145,7 @@ public:
         const OrtApi* ort_api,
         const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes,
         const PluginDmlExecutionProviderImpl* execution_provider,
-        const OrtKernelInfo* kernel_info = nullptr,
-        const std::vector<uint32_t>* required_constant_cpu_inputs = nullptr,
-        const std::unordered_map<uint32_t, Microsoft::WRL::ComPtr<IMLOperatorTensor>>* prefetched_constant_tensors = nullptr);
+        const OrtKernelInfo* kernel_info = nullptr);
 
     // IMLOperatorAttributes methods
     STDMETHOD(GetAttributeElementCount)(
@@ -225,10 +229,6 @@ private:
     const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes_;
     const PluginDmlExecutionProviderImpl* execution_provider_;
     const OrtKernelInfo* kernel_info_;  // For accessing actual node attributes
-    const std::vector<uint32_t>* required_constant_cpu_inputs_;  // non-owning; mirrors unsafe path required list
-    // Pre-fetched constant tensors from lazy-init — same tensors the unsafe path's constantInputGetter provides.
-    // When set, GetConstantInputTensor serves from this map rather than re-fetching via the C API.
-    const std::unordered_map<uint32_t, Microsoft::WRL::ComPtr<IMLOperatorTensor>>* prefetched_constant_tensors_;
 
     // Stores output shapes set by the shape inferrer
     std::vector<std::vector<uint32_t>> inferred_output_shapes_;
@@ -406,6 +406,70 @@ struct TensorContent {
     std::vector<std::byte> data;
 };
 
+// ============================================================================
+// Snapshot Tensor - presents a TensorContent snapshot as IMLOperatorTensor
+// Used in the shape-change path to re-supply constants originally fetched at
+// kernel creation time (e.g. Pad's pads input which KernelInfoGetConstantInput
+// cannot see at compute time via the plugin EP's OrtKernelInfo*).
+// ============================================================================
+
+class SnapshotTensor : public Microsoft::WRL::RuntimeClass<
+    Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+    IMLOperatorTensor>
+{
+public:
+    explicit SnapshotTensor(const TensorContent& content) : content_(content) {}
+
+    STDMETHOD_(uint32_t, GetDimensionCount)() const noexcept override {
+        return static_cast<uint32_t>(content_.shape.size());
+    }
+
+    STDMETHOD(GetShape)(uint32_t dimensionCount, uint32_t* dimensions) const noexcept override {
+        if (!dimensions) return E_POINTER;
+        const uint32_t actual = static_cast<uint32_t>(content_.shape.size());
+        const uint32_t count = std::min(dimensionCount, actual);
+        for (uint32_t i = 0; i < count; ++i) dimensions[i] = content_.shape[i];
+        return S_OK;
+    }
+
+    STDMETHOD_(MLOperatorTensorDataType, GetTensorDataType)() const noexcept override {
+        return content_.type;
+    }
+
+    STDMETHOD_(bool, IsCpuData)() const noexcept override { return true; }
+
+    STDMETHOD_(bool, IsDataInterface)() const noexcept override { return false; }
+
+    STDMETHOD_(void*, GetData)() noexcept override {
+        if (content_.data.empty()) return nullptr;
+        return const_cast<std::byte*>(content_.data.data());
+    }
+
+    STDMETHOD_(void, GetDataInterface)(IUnknown** dataInterface) noexcept override {
+        if (dataInterface) *dataInterface = nullptr;
+    }
+
+private:
+    TensorContent content_;
+};
+
+#ifdef DML_PERF_PROFILE
+// Per-kernel counters accumulated across all Compute() calls.
+// All fields are std::atomic so they can be incremented without locks from Compute().
+struct DmlAbiKernelPerfCounters {
+    std::atomic<uint64_t> compute_calls{0};
+    std::atomic<uint64_t> shape_change_checks{0};   // times shape-change detection path ran
+    std::atomic<uint64_t> shape_changes_detected{0}; // times a shape/const change was found
+    std::atomic<uint64_t> lazy_inits{0};             // times lazy init ran
+    // Accumulated nanoseconds for each logical section of Compute()
+    std::atomic<uint64_t> ns_context_construction{0};
+    std::atomic<uint64_t> ns_transition_pre{0};
+    std::atomic<uint64_t> ns_kernel_compute{0};
+    std::atomic<uint64_t> ns_transition_post{0};
+    std::atomic<uint64_t> ns_shape_change_check{0};
+};
+#endif
+
 // ABI-safe kernel - stores DML operator directly
 struct DmlAbiKernel {
     Microsoft::WRL::ComPtr<IMLOperatorKernel> ml_operator_kernel;
@@ -415,6 +479,11 @@ struct DmlAbiKernel {
     std::vector<std::vector<uint32_t>> inferred_output_shapes;  // Shapes from graph inference
     std::string operator_name;  // For debugging
 
+    // Profiling - only active when DML_PERF_PROFILE=1
+#ifdef DML_PERF_PROFILE
+    std::unique_ptr<DmlAbiKernelPerfCounters> perf;
+#endif
+
     // For runtime shape inference (e.g., Reshape with constant shape input)
     Microsoft::WRL::ComPtr<IMLOperatorShapeInferrer> shape_inferrer;
     std::vector<uint32_t> required_constant_cpu_inputs;
@@ -423,6 +492,7 @@ struct DmlAbiKernel {
     // For lazy kernel creation when shapes are dynamic
     bool needs_lazy_init = false;  // True if kernel wasn't created yet due to dynamic shapes
     bool requires_input_shapes_at_creation = false;  // Static flag for HasTensorShapeDescription
+    bool requires_output_shapes_at_creation = false;  // When true, shape inferrer must run before CreateKernel
     Microsoft::WRL::ComPtr<IMLOperatorKernelFactory> kernel_factory;  // Factory to create kernel lazily
     const OrtKernelInfo* kernel_info = nullptr;  // Stored for lazy initialization (lifetime managed by ORT)
 
@@ -474,5 +544,18 @@ inline DmlAbiKernel* GetDmlAbiKernelFromImpl(OrtKernelImpl* impl) {
         reinterpret_cast<char*>(impl) + sizeof(OrtKernelImpl)
     );
 }
+
+
+#ifdef DML_PERF_PROFILE
+void DmlPerfWriteLogImpl(std::string_view msg) noexcept;
+
+inline std::string Hex(uint32_t v) { return fmt::format("0x{:08X}", v); }
+
+#define DML_PERF_LOG(...) Dml::DmlPerfWriteLogImpl(MakeString(__VA_ARGS__))
+
+void PrintKernelPerfCounters(const DmlAbiKernel& kernel) noexcept;
+#else
+#define DML_PERF_LOG(...)
+#endif
 
 } // namespace Dml

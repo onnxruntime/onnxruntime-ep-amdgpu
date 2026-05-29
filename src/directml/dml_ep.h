@@ -98,6 +98,7 @@ private:
         bool is_internal_operator = false;  // For resource state transitions (MemcpyToHost/FromHost)
         std::vector<std::string> tensor_attribute_names;  // Tensor-typed ONNX attribute names (e.g., ConstantOfShape's "value")
         const Dml::PluginDmlExecutionProviderImpl* dml_execution_provider = nullptr;
+        ExecutionProviderPlugin* ep_plugin = nullptr;  // For m_graphInitializerMap access during constant resolution
 
         // FALLBACK: ABI-UNSAFE PATH (when ABI-safe fails, e.g., E_UNEXPECTED)
         onnxruntime::KernelCreateFn* kernel_create_fn = nullptr;
@@ -246,7 +247,13 @@ private:
 
     KernelCreateFuncState m_kernelCreateFuncStateTemplate;
     std::vector<std::unique_ptr<KernelCreateFuncState>> m_kernelCreateFuncStates;
+    std::unordered_map<std::string, KernelCreateFuncState*> m_kernelCreateFuncStateByOpName;
     std::vector<UniqueOrtKernelDef> m_ortKernelDefs;
+
+    // Flat map of all graph initializers by name, built once at GetCapabilityImpl time.
+    // OrtValue* lifetime is valid for the session lifetime. Used as a fallback constant
+    // source in DmlKernelCreateFuncAdapter when KernelInfoGetConstantInput_tensor misses.
+    std::unordered_map<std::string, const OrtValue*> m_graphInitializerMap;
 
     bool m_native16BitShaderOpsSupported = false;
     bool m_isMcdmDevice = false;
