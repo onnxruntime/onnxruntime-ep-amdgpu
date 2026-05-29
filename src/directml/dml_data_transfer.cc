@@ -71,5 +71,6 @@ OrtStatus* ORT_API_CALL DMLDataTransfer::CopyTensorsImpl(OrtDataTransferImpl* th
 
 /*static*/
 void ORT_API_CALL DMLDataTransfer::ReleaseImpl(OrtDataTransferImpl* this_ptr) noexcept {
-    // Factories should own and manage the DataTransfer object - do not delete it here!
+    // Factory owns this object and manages its lifetime via dml_data_transfer_implementation unique_ptr.
+    // ORT's Release call is intentionally ignored — the factory destructor handles cleanup.
 }

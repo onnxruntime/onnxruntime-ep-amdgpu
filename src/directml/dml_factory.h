@@ -103,14 +103,13 @@ private:
     Ort::MemoryInfo readonly_memory_info_;
     Ort::MemoryInfo cpu_input_allocator_;
 
-    // pass these to ep
     ComPtr<ID3D12Device> d3d12_device;
     ComPtr<ID3D12CommandQueue> cmd_queue;
     ComPtr<IDMLDevice> dml_device;
 
     std::unique_ptr<ExecutionProviderPlugin> m_ep;
     ExecutionProviderPlugin* m_ep_raw = nullptr; // non-owning observer pointer
-    std::unique_ptr<DMLDataTransfer> dml_data_transfer_implementation; // data transfer implementation for this factory
+    std::unique_ptr<DMLDataTransfer> dml_data_transfer_implementation; // factory-owned, shared across sessions
 };
 
 
