@@ -6,10 +6,7 @@
 #include "core/common/inlined_containers.h"
 #include "core/common/inlined_containers_fwd.h"
 #include "core/framework/fuse_nodes_funcs.h"
-#ifdef DML_PERF_PROFILE
-#include <cstdio>
 #include "dml_abi_kernel.h"
-#endif
 
 using namespace Windows::AI::MachineLearning::Adapter;
 
@@ -230,8 +227,8 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
             // versions (e.g., inputs vs attributes), so each version needs its own kernelFactory.
             int since_ver_start = 0, since_ver_end = 0;
             def->SinceVersion(&since_ver_start, &since_ver_end);
-            std::string regKey = std::string(def->Domain()) + "::" + std::string(def->OpName()) +
-                                 "::" + std::to_string(since_ver_start);
+            std::string regKey{std::string{def->Domain()} + "::" + std::string{def->OpName()} +
+                               "::" + std::to_string(since_ver_start)};
 
             // Check if we have internal registration info for ABI-safe path
             auto reg_info_iter = m_internalRegInfoMap->find(regKey);
@@ -404,35 +401,21 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
                     constants_final = std::move(constants_to_pass);
                 }
 
-#ifdef DML_PERF_PROFILE
-                {
-                    char _buf[320];
-                    std::snprintf(_buf, sizeof(_buf),
-                        "[ABI_SAFE] DmlAbiKernel_Create entry: op=%s  constants_ready=%d  passing=%zu constants\n",
-                        state->operator_name.c_str(), (int)required_constants_available, constants_final.size());
-                    Dml::DmlPerfWriteLog(_buf);
-                }
-#endif
+                DML_PERF_LOG("[ABI_SAFE] DmlAbiKernel_Create entry: op=", state->operator_name,
+                    "  constants_ready=", required_constants_available,
+                    "  passing=", constants_final.size(), " constants\n");
 
                 OrtStatus* abi_safe_status = Dml::DmlAbiKernel_Create(
                     &creation_state, info, kernel_out, std::move(constants_final));
 
                 if (abi_safe_status == nullptr && *kernel_out != nullptr) {
-#ifdef DML_PERF_PROFILE
-                    { char _buf[256]; std::snprintf(_buf, sizeof(_buf), "[ABI_SAFE] success: op=%s  (kernel=%p)\n",
-                        state->operator_name.c_str(), (void*)*kernel_out); Dml::DmlPerfWriteLog(_buf); }
-                    { char _buf[256]; std::snprintf(_buf, sizeof(_buf), "[DML_PERF] path=safe  op=%s\n",
-                        state->operator_name.c_str()); Dml::DmlPerfWriteLog(_buf); }
-#endif
+                    DML_PERF_LOG("[ABI_SAFE] success: op=", state->operator_name, "  (kernel=", (void*)*kernel_out, ")\n");
+                    DML_PERF_LOG("[DML_PERF] path=safe  op=", state->operator_name, "\n");
                     return nullptr;
                 }
 
-#ifdef DML_PERF_PROFILE
-                { char _buf[256]; std::snprintf(_buf, sizeof(_buf),
-                    "[ABI_SAFE] FAILED: op=%s  status=%p  kernel=%p  -> falling to unsafe\n",
-                    state->operator_name.c_str(), (void*)abi_safe_status, (void*)*kernel_out);
-                  Dml::DmlPerfWriteLog(_buf); }
-#endif
+                DML_PERF_LOG("[ABI_SAFE] FAILED: op=", state->operator_name,
+                    "  status=", (void*)abi_safe_status, "  kernel=", (void*)*kernel_out, "  -> falling to unsafe\n");
                 if (abi_safe_status) {
                     state->ort_api_ptr->ReleaseStatus(abi_safe_status);
                 }
@@ -444,11 +427,8 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
         }
 
         // FALLBACK: ABI-UNSAFE PATH (when ABI-safe fails or isn't available)
-#ifdef DML_PERF_PROFILE
-        { char _buf[256]; std::snprintf(_buf, sizeof(_buf),
-            "[DML_PERF] path=unsafe op=%s  (safe path absent or failed)\n[ABI_UNSAFE] entry: op=%s\n",
-            state->operator_name.c_str(), state->operator_name.c_str()); Dml::DmlPerfWriteLog(_buf); }
-#endif
+        DML_PERF_LOG("[DML_PERF] path=unsafe op=", state->operator_name,
+            "  (safe path absent or failed)\n[ABI_UNSAFE] entry: op=", state->operator_name, "\n");
 
         if (!state->kernel_create_fn) {
             std::string error_msg = "Kernel registration missing both kernel_factory and kernel_create_fn - cannot create kernel";

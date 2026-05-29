@@ -18,6 +18,8 @@
 #ifdef DML_PERF_PROFILE
 #include <atomic>
 #include <chrono>
+#include <string_view>
+#include "common/make_string.h"
 #endif
 
 #include "DmlExecutionProvider/DmlEdgeShapes.h"
@@ -545,8 +547,15 @@ inline DmlAbiKernel* GetDmlAbiKernelFromImpl(OrtKernelImpl* impl) {
 
 
 #ifdef DML_PERF_PROFILE
-void DmlPerfWriteLog(const char* msg) noexcept;
+void DmlPerfWriteLogImpl(std::string_view msg) noexcept;
+
+inline std::string Hex(uint32_t v) { return fmt::format("0x{:08X}", v); }
+
+#define DML_PERF_LOG(...) Dml::DmlPerfWriteLogImpl(MakeString(__VA_ARGS__))
+
 void PrintKernelPerfCounters(const DmlAbiKernel& kernel) noexcept;
+#else
+#define DML_PERF_LOG(...)
 #endif
 
 } // namespace Dml

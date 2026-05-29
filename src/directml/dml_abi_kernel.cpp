@@ -12,7 +12,7 @@
 #include <filesystem>
 #include <new>
 #ifdef DML_PERF_PROFILE
-#include <cstdio>
+#include <fmt/format.h>
 #endif
 
 namespace Dml {
@@ -35,7 +35,12 @@ static inline uint64_t NowNs() noexcept {
             std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-// Opens (or returns the already-open) log file at <exe_dir>\dml_perf.log.
+static std::mutex& GetPerfMutex() noexcept {
+    static std::mutex s_mutex;
+    return s_mutex;
+}
+
+// Opens (or returns the already-open) log file at <exe_dir>/dml_perf.log.
 // Called under the perf mutex; not thread-safe on its own.
 static FILE* GetOrOpenPerfLogFile() noexcept {
     static FILE* s_file = nullptr;
@@ -43,56 +48,58 @@ static FILE* GetOrOpenPerfLogFile() noexcept {
     if (s_tried) return s_file;
     s_tried = true;
 
-    char exe_path[MAX_PATH] = {};
-    GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
-    char* last_sep = strrchr(exe_path, '\\');
-    if (last_sep) *(last_sep + 1) = '\0';  // keep trailing backslash
+    std::wstring exe_path;
+    DWORD capacity = MAX_PATH;
+    while (true) {
+        exe_path.resize(capacity);
+        DWORD written = GetModuleFileNameW(nullptr, exe_path.data(), capacity);
+        if (written == 0) return s_file;
+        if (written < capacity) { exe_path.resize(written); break; }
+        capacity *= 2;
+    }
+    std::filesystem::path log_path = std::filesystem::path(exe_path).parent_path() / L"dml_perf.log";
 
-    char log_path[MAX_PATH + 20] = {};
-    std::snprintf(log_path, sizeof(log_path), "%sdml_perf.log", exe_path);
-
-    s_file = fopen(log_path, "a");
-    if (s_file) {
-        fputs("=== DML_PERF session start ===\n", s_file);
-        fflush(s_file);
+    s_file = _wfopen(log_path.c_str(), L"a");
+    if (s_file != nullptr) {
+        fmt::println(s_file, "=== DML_PERF session start ===");
+        std::fflush(s_file);
     }
     return s_file;
 }
 
-static std::mutex& GetPerfMutex() noexcept {
-    static std::mutex s_mutex;
-    return s_mutex;
-}
-
-void DmlPerfWriteLog(const char* msg) noexcept {
+void DmlPerfWriteLogImpl(std::string_view msg) noexcept {
     std::lock_guard<std::mutex> lock(GetPerfMutex());
     FILE* f = GetOrOpenPerfLogFile();
-    if (!f) return;
-    fputs(msg, f);
-    fflush(f);
+    if (f == nullptr) return;
+    fmt::print(f, "{}", msg);
+    std::fflush(f);
 }
 
 void PrintKernelPerfCounters(const DmlAbiKernel& kernel) noexcept {
-    if (!kernel.perf) return;
+    if (kernel.perf != nullptr)
+    {
+        return;
+    }
     const auto& p = *kernel.perf;
     uint64_t calls = p.compute_calls.load(std::memory_order_relaxed);
     if (calls == 0) return;
-    char buf[512];
-    std::snprintf(buf, sizeof(buf),
-        "[DML_PERF] op=%-30s calls=%llu "
-        "ctx_ctor=%6llu us  pre_trans=%6llu us  kern=%6llu us  post_trans=%6llu us  "
-        "shape_chk=%6llu us  lazy_inits=%llu  shape_changes=%llu\n",
-        kernel.operator_name.c_str(),
-        (unsigned long long)calls,
-        (unsigned long long)(p.ns_context_construction.load(std::memory_order_relaxed) / 1000 / std::max(calls, 1ull)),
-        (unsigned long long)(p.ns_transition_pre.load(std::memory_order_relaxed)       / 1000 / std::max(calls, 1ull)),
-        (unsigned long long)(p.ns_kernel_compute.load(std::memory_order_relaxed)       / 1000 / std::max(calls, 1ull)),
-        (unsigned long long)(p.ns_transition_post.load(std::memory_order_relaxed)      / 1000 / std::max(calls, 1ull)),
-        (unsigned long long)(p.ns_shape_change_check.load(std::memory_order_relaxed)   / 1000 / std::max(calls, 1ull)),
-        (unsigned long long)p.lazy_inits.load(std::memory_order_relaxed),
-        (unsigned long long)p.shape_changes_detected.load(std::memory_order_relaxed)
-    );
-    DmlPerfWriteLog(buf);
+    std::lock_guard<std::mutex> lock(GetPerfMutex());
+    FILE* f = GetOrOpenPerfLogFile();
+    if (f == nullptr) return;
+    fmt::println(f,
+        "[DML_PERF] op={:<30} calls={} "
+        "ctx_ctor={:6} us  pre_trans={:6} us  kern={:6} us  post_trans={:6} us  "
+        "shape_chk={:6} us  lazy_inits={}  shape_changes={}",
+        kernel.operator_name,
+        calls,
+        p.ns_context_construction.load(std::memory_order_relaxed) / 1000 / std::max(calls, 1ull),
+        p.ns_transition_pre.load(std::memory_order_relaxed)       / 1000 / std::max(calls, 1ull),
+        p.ns_kernel_compute.load(std::memory_order_relaxed)       / 1000 / std::max(calls, 1ull),
+        p.ns_transition_post.load(std::memory_order_relaxed)      / 1000 / std::max(calls, 1ull),
+        p.ns_shape_change_check.load(std::memory_order_relaxed)   / 1000 / std::max(calls, 1ull),
+        p.lazy_inits.load(std::memory_order_relaxed),
+        p.shape_changes_detected.load(std::memory_order_relaxed));
+    std::fflush(f);
 }
 
 // Local helper macros - used only inside DmlAbiKernel_Compute.
@@ -101,16 +108,16 @@ void PrintKernelPerfCounters(const DmlAbiKernel& kernel) noexcept {
 // DMLPERF_T0   : record start time into <name>_t0.
 // DMLPERF_ADD  : accumulate elapsed ns since <name>_t0 into a counter.
 #define DMLPERF_CTX(k)          DmlAbiKernelPerfCounters* _perf = (k)->perf.get()
-#define DMLPERF_INC(f)          do { if (_perf) _perf->f.fetch_add(1, std::memory_order_relaxed); } while(0)
-#define DMLPERF_T0(name)        const uint64_t name##_t0 = _perf ? NowNs() : 0
-#define DMLPERF_ADD(field,name) do { if (_perf) _perf->field.fetch_add(NowNs() - name##_t0, std::memory_order_relaxed); } while(0)
+#define DMLPERF_INC(f)          do { if (_perf != nullptr) _perf->f.fetch_add(1, std::memory_order_relaxed); } while(0)
+#define DMLPERF_T0(name)        const uint64_t name##_t0 = (_perf != nullptr) ? NowNs() : 0
+#define DMLPERF_ADD(field,name) do { if (_perf != nullptr) _perf->field.fetch_add(NowNs() - name##_t0, std::memory_order_relaxed); } while(0)
 
 #else  // DML_PERF_PROFILE not defined - all macros are no-ops
 
-#define DMLPERF_CTX(k)          ((void)0)
-#define DMLPERF_INC(f)          ((void)0)
-#define DMLPERF_T0(name)        ((void)0)
-#define DMLPERF_ADD(field,name) ((void)0)
+#define DMLPERF_CTX(k)
+#define DMLPERF_INC(f)
+#define DMLPERF_T0(name)
+#define DMLPERF_ADD(field,name)
 
 #endif // DML_PERF_PROFILE
 
@@ -1443,76 +1450,68 @@ HRESULT AbiSafeShapeInferenceContext::GetStringAttributeElement(
 }
 
 uint32_t AbiSafeShapeInferenceContext::GetInputCount() const noexcept {
-    if (!ort_api_) return 0;
+    if (ort_api_ == nullptr) return 0;
 
     size_t count = 0;
-    OrtStatus* status = nullptr;
 
     // Try runtime context first (if available)
-    if (kernel_context_) {
-        status = ort_api_->KernelContext_GetInputCount(kernel_context_, &count);
-        if (!status) {
+    if (kernel_context_ != nullptr) {
+        if (Ort::Status status{ort_api_->KernelContext_GetInputCount(kernel_context_, &count)}; status.IsOK()) {
             return static_cast<uint32_t>(count);
         }
-        ort_api_->ReleaseStatus(status);
     }
 
     // Fall back to kernel_info at session init
-    if (kernel_info_ && ort_api_->KernelInfo_GetInputCount) {
-        status = ort_api_->KernelInfo_GetInputCount(kernel_info_, &count);
-        if (!status) {
+    if (kernel_info_ != nullptr && ort_api_->KernelInfo_GetInputCount) {
+        if (Ort::Status status{ort_api_->KernelInfo_GetInputCount(kernel_info_, &count)}; status.IsOK()) {
             return static_cast<uint32_t>(count);
         }
-        if (status) ort_api_->ReleaseStatus(status);
     }
 
     return 0;
 }
 
 uint32_t AbiSafeShapeInferenceContext::GetOutputCount() const noexcept {
-    if (!ort_api_) return 0;
+    if (ort_api_ == nullptr) return 0;
 
     size_t count = 0;
-    OrtStatus* status = nullptr;
 
     // Try runtime context first (if available)
-    if (kernel_context_) {
-        status = ort_api_->KernelContext_GetOutputCount(kernel_context_, &count);
-        if (!status) {
+    if (kernel_context_ != nullptr) {
+        if (Ort::Status status{ort_api_->KernelContext_GetOutputCount(kernel_context_, &count)}; status.IsOK()) {
             return static_cast<uint32_t>(count);
         }
-        ort_api_->ReleaseStatus(status);
     }
 
     // Fall back to kernel_info at session init
-    if (kernel_info_ && ort_api_->KernelInfo_GetOutputCount) {
-        status = ort_api_->KernelInfo_GetOutputCount(kernel_info_, &count);
-        if (!status) {
+    if (kernel_info_ != nullptr && ort_api_->KernelInfo_GetOutputCount) {
+        if (Ort::Status status{ort_api_->KernelInfo_GetOutputCount(kernel_info_, &count)}; status.IsOK()) {
             return static_cast<uint32_t>(count);
         }
-        if (status) ort_api_->ReleaseStatus(status);
     }
 
     return 0;
 }
 
 bool AbiSafeShapeInferenceContext::IsInputValid(uint32_t inputIndex) const noexcept {
-    if (!ort_api_) return false;
+    if (ort_api_ == nullptr) return false;
 
     // Mirror OpNodeInfoWrapper::IsInputValid: index in range AND type/value is non-null.
-    if (kernel_context_) {
+    if (kernel_context_ != nullptr) {
         const OrtValue* value = nullptr;
-        OrtStatus* status = ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &value);
-        if (status) { ort_api_->ReleaseStatus(status); return false; }
+        if (Ort::Status status{ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &value)}; !status.IsOK()) {
+            return false;
+        }
         return value != nullptr;
     }
 
-    if (kernel_info_ && ort_api_->KernelInfo_GetInputTypeInfo) {
+    if (kernel_info_ != nullptr && ort_api_->KernelInfo_GetInputTypeInfo) {
         OrtTypeInfo* type_info = nullptr;
-        OrtStatus* status = ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info);
-        if (status) { ort_api_->ReleaseStatus(status); return false; }
+        if (Ort::Status status{ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info)}; !status.IsOK()) {
+            return false;
+        }
         bool valid = (type_info != nullptr);
-        if (type_info) ort_api_->ReleaseTypeInfo(type_info);
+        if (type_info != nullptr) ort_api_->ReleaseTypeInfo(type_info);
         return valid;
     }
 
@@ -1520,12 +1519,13 @@ bool AbiSafeShapeInferenceContext::IsInputValid(uint32_t inputIndex) const noexc
 }
 
 bool AbiSafeShapeInferenceContext::IsOutputValid(uint32_t outputIndex) const noexcept {
-    if (!ort_api_ || !kernel_info_) return false;
+    if (ort_api_ == nullptr || kernel_info_ == nullptr) return false;
     OrtTypeInfo* type_info = nullptr;
-    OrtStatus* status = ort_api_->KernelInfo_GetOutputTypeInfo(kernel_info_, outputIndex, &type_info);
-    if (status) { ort_api_->ReleaseStatus(status); return false; }
+    if (Ort::Status status{ort_api_->KernelInfo_GetOutputTypeInfo(kernel_info_, outputIndex, &type_info)}; !status.IsOK()) {
+        return false;
+    }
     bool valid = (type_info != nullptr);
-    if (type_info) ort_api_->ReleaseTypeInfo(type_info);
+    if (type_info != nullptr) ort_api_->ReleaseTypeInfo(type_info);
     return valid;
 }
 
@@ -1533,56 +1533,45 @@ HRESULT AbiSafeShapeInferenceContext::GetInputEdgeDescription(
     uint32_t inputIndex,
     MLOperatorEdgeDescription* edgeDescription) const noexcept {
 
-    if (!edgeDescription) return E_POINTER;
-    if (!ort_api_) return E_FAIL;
+    if (edgeDescription == nullptr) return E_POINTER;
+    if (ort_api_ == nullptr) return E_FAIL;
     // Note: kernel_context_ can be nullptr at session init - we'll fall back to kernel_info_ below
 
     OrtTypeInfo* type_info = nullptr;
-    OrtStatus* status = nullptr;
 
     // Try runtime context first (if available)
-    if (kernel_context_) {
+    if (kernel_context_ != nullptr) {
         const OrtValue* input_value = nullptr;
-        status = ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value);
-        if (!status && input_value) {
-            status = ort_api_->GetTypeInfo(input_value, &type_info);
-            if (status) {
-                ort_api_->ReleaseStatus(status);
-                status = nullptr;
+        if (Ort::Status status{ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value)}; status.IsOK() && input_value != nullptr) {
+            Ort::Status type_status{ort_api_->GetTypeInfo(input_value, &type_info)};
+            if (!type_status.IsOK()) {
+                type_info = nullptr;
             }
-        } else if (status) {
-            ort_api_->ReleaseStatus(status);
-            status = nullptr;
         }
     }
 
     // Fall back to kernel_info if runtime didn't work or isn't available
-    if (!type_info && kernel_info_ && ort_api_->KernelInfo_GetInputTypeInfo) {
-        status = ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info);
-        if (status) {
-            ort_api_->ReleaseStatus(status);
+    if (type_info == nullptr && kernel_info_ != nullptr && ort_api_->KernelInfo_GetInputTypeInfo) {
+        if (Ort::Status status{ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info)}; !status.IsOK()) {
             return E_INVALIDARG;
         }
     }
 
-    if (!type_info) {
+    if (type_info == nullptr) {
         return E_INVALIDARG;
     }
 
     // We have type_info from either runtime or kernel_info
     ONNXType onnx_type;
-    status = ort_api_->GetOnnxTypeFromTypeInfo(type_info, &onnx_type);
-    if (status) {
+    if (Ort::Status status{ort_api_->GetOnnxTypeFromTypeInfo(type_info, &onnx_type)}; !status.IsOK()) {
         ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
         return E_FAIL;
     }
 
     if (onnx_type == ONNX_TYPE_TENSOR) {
         edgeDescription->edgeType = MLOperatorEdgeType::Tensor;
         const OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
-        status = ort_api_->CastTypeInfoToTensorInfo(type_info, &tensor_info);
-        if (status == nullptr && tensor_info) {
+        if (Ort::Status status{ort_api_->CastTypeInfoToTensorInfo(type_info, &tensor_info)}; status.IsOK() && tensor_info != nullptr) {
             ONNXTensorElementDataType elem_type;
             ort_api_->GetTensorElementType(tensor_info, &elem_type);
             edgeDescription->tensorDataType = static_cast<MLOperatorTensorDataType>(elem_type);
@@ -1599,43 +1588,40 @@ HRESULT AbiSafeShapeInferenceContext::GetInputTensorDimensionCount(
     uint32_t inputIndex,
     uint32_t* dimensionCount) const noexcept {
 
-    if (!dimensionCount) {
+    if (dimensionCount == nullptr) {
         return E_POINTER;
     }
-    if (!ort_api_) {
+    if (ort_api_ == nullptr) {
         return E_FAIL;
     }
     // Note: kernel_context_ can be nullptr at session init - we'll fall back to kernel_info_ below
 
     // Try to get runtime tensor first (only if kernel_context_ is available)
     const OrtValue* input_value = nullptr;
-    OrtStatus* status = nullptr;
-    if (kernel_context_) {
-        status = ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value);
+    if (kernel_context_ != nullptr) {
+        Ort::Status status{ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value)};
+        if (!status.IsOK()) {
+            input_value = nullptr;
+        }
     }
-    if (!status && input_value) {
+    if (input_value != nullptr) {
         // Runtime tensor available
         OrtTensorTypeAndShapeInfo* shape_info = nullptr;
-        status = ort_api_->GetTensorTypeAndShape(input_value, &shape_info);
-        if (!status) {
+        if (Ort::Status status{ort_api_->GetTensorTypeAndShape(input_value, &shape_info)}; status.IsOK()) {
             size_t dim_count = 0;
             ort_api_->GetDimensionsCount(shape_info, &dim_count);
             *dimensionCount = static_cast<uint32_t>(dim_count);
             ort_api_->ReleaseTensorTypeAndShapeInfo(shape_info);
             return S_OK;
         }
-        if (status) ort_api_->ReleaseStatus(status);
     }
-    if (status) ort_api_->ReleaseStatus(status);
 
     // Fall back to graph shape from kernel_info (for initializers/constants)
-    if (kernel_info_ && ort_api_->KernelInfo_GetInputTypeInfo) {
+    if (kernel_info_ != nullptr && ort_api_->KernelInfo_GetInputTypeInfo) {
         OrtTypeInfo* type_info = nullptr;
-        status = ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info);
-        if (!status && type_info) {
+        if (Ort::Status status{ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info)}; status.IsOK() && type_info != nullptr) {
             const OrtTensorTypeAndShapeInfo* shape_info = nullptr;
-            status = ort_api_->CastTypeInfoToTensorInfo(type_info, &shape_info);
-            if (!status && shape_info) {
+            if (Ort::Status cast_status{ort_api_->CastTypeInfoToTensorInfo(type_info, &shape_info)}; cast_status.IsOK() && shape_info != nullptr) {
                 size_t dim_count = 0;
                 ort_api_->GetDimensionsCount(shape_info, &dim_count);
                 *dimensionCount = static_cast<uint32_t>(dim_count);
@@ -1644,7 +1630,6 @@ HRESULT AbiSafeShapeInferenceContext::GetInputTensorDimensionCount(
             }
             ort_api_->ReleaseTypeInfo(type_info);
         }
-        if (status) ort_api_->ReleaseStatus(status);
     }
 
     return E_INVALIDARG;
@@ -1655,24 +1640,24 @@ HRESULT AbiSafeShapeInferenceContext::GetInputTensorShape(
     uint32_t dimensionCount,
     uint32_t* dimensions) const noexcept {
 
-    if (!dimensions && dimensionCount > 0) {
+    if (dimensions == nullptr && dimensionCount > 0) {
         return E_POINTER;
     }
-    if (!ort_api_) {
+    if (ort_api_ == nullptr) {
         return E_FAIL;
     }
 
-    OrtStatus* status = nullptr;
-
     // Prefer runtime shape when available (mirrors GetInputTensorDimensionCount behavior)
     const OrtValue* input_value = nullptr;
-    if (kernel_context_) {
-        status = ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value);
+    if (kernel_context_ != nullptr) {
+        Ort::Status status{ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value)};
+        if (!status.IsOK()) {
+            input_value = nullptr;
+        }
     }
-    if (!status && input_value) {
+    if (input_value != nullptr) {
         OrtTensorTypeAndShapeInfo* shape_info = nullptr;
-        status = ort_api_->GetTensorTypeAndShape(input_value, &shape_info);
-        if (!status) {
+        if (Ort::Status status{ort_api_->GetTensorTypeAndShape(input_value, &shape_info)}; status.IsOK()) {
             size_t dim_count = 0;
             ort_api_->GetDimensionsCount(shape_info, &dim_count);
             if (dimensionCount == static_cast<uint32_t>(dim_count)) {
@@ -1682,23 +1667,18 @@ HRESULT AbiSafeShapeInferenceContext::GetInputTensorShape(
                 for (size_t i = 0; i < dim_count; ++i) {
                     dimensions[i] = static_cast<uint32_t>(dims[i]);
                 }
-                if (status) ort_api_->ReleaseStatus(status);
                 return S_OK;
             }
             ort_api_->ReleaseTensorTypeAndShapeInfo(shape_info);
         }
-        if (status) ort_api_->ReleaseStatus(status);
     }
-    if (status) ort_api_->ReleaseStatus(status);
 
     // Fall back to graph shape from kernel_info (for initializers/constants at session init)
-    if (kernel_info_ && ort_api_->KernelInfo_GetInputTypeInfo) {
+    if (kernel_info_ != nullptr && ort_api_->KernelInfo_GetInputTypeInfo) {
         OrtTypeInfo* type_info = nullptr;
-        status = ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info);
-        if (!status && type_info) {
+        if (Ort::Status status{ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info)}; status.IsOK() && type_info != nullptr) {
             const OrtTensorTypeAndShapeInfo* shape_info = nullptr;
-            status = ort_api_->CastTypeInfoToTensorInfo(type_info, &shape_info);
-            if (!status && shape_info) {
+            if (Ort::Status cast_status{ort_api_->CastTypeInfoToTensorInfo(type_info, &shape_info)}; cast_status.IsOK() && shape_info != nullptr) {
                 size_t dim_count = 0;
                 ort_api_->GetDimensionsCount(shape_info, &dim_count);
                 if (dimensionCount == static_cast<uint32_t>(dim_count)) {
@@ -1708,13 +1688,11 @@ HRESULT AbiSafeShapeInferenceContext::GetInputTensorShape(
                     for (size_t i = 0; i < dim_count; ++i) {
                         dimensions[i] = static_cast<uint32_t>(dims[i]);
                     }
-                    if (status) ort_api_->ReleaseStatus(status);
                     return S_OK;
                 }
             }
             ort_api_->ReleaseTypeInfo(type_info);
         }
-        if (status) ort_api_->ReleaseStatus(status);
     }
 
     return E_INVALIDARG;
@@ -1757,25 +1735,19 @@ HRESULT AbiSafeShapeInferenceContext::GetConstantInputTensor(
     }
 
     const OrtValue* input_value = nullptr;
-    OrtStatus* status = nullptr;
 
     // Try runtime context first (if available)
-    if (kernel_context_) {
-        status = ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value);
-#ifdef DML_PERF_PROFILE
-        { char _buf[256]; std::snprintf(_buf, sizeof(_buf),
-            "[ABI_SAFE] ShapeCtx::GetConstantInput[%u]: ctx_status=%p  value=%p\n",
-            inputIndex, (void*)status, (void*)input_value);
-          DmlPerfWriteLog(_buf); }
-#endif
-        if (status || !input_value) {
-            if (status) ort_api_->ReleaseStatus(status);
+    if (kernel_context_ != nullptr) {
+        Ort::Status status{ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value)};
+        DML_PERF_LOG("[ABI_SAFE] ShapeCtx::GetConstantInput[", inputIndex, "]: ctx_status=",
+            status.IsOK() ? "OK" : "ERR", "  value=", (void*)input_value, "\n");
+        if (!status.IsOK() || input_value == nullptr) {
             input_value = nullptr;
         }
     }
 
     // Fall back to kernel_info for constant inputs at session init
-    if (!input_value && kernel_info_ && ort_api_->KernelInfoGetConstantInput_tensor) {
+    if (input_value == nullptr && kernel_info_ != nullptr && ort_api_->KernelInfoGetConstantInput_tensor) {
         // First check if the input index is valid
         uint32_t input_count = GetInputCount();
         if (inputIndex >= input_count) {
@@ -1785,14 +1757,12 @@ HRESULT AbiSafeShapeInferenceContext::GetConstantInputTensor(
         }
 
         int is_constant = 0;
-        status = ort_api_->KernelInfoGetConstantInput_tensor(kernel_info_, inputIndex, &is_constant, &input_value);
-        if (status) {
-            ort_api_->ReleaseStatus(status);
+        if (Ort::Status status{ort_api_->KernelInfoGetConstantInput_tensor(kernel_info_, inputIndex, &is_constant, &input_value)}; !status.IsOK()) {
             // Return S_OK with nullptr rather than error - shape inferencer will handle it
             *tensor = nullptr;
             return S_OK;
         }
-        if (!is_constant || !input_value) {
+        if (is_constant == 0 || input_value == nullptr) {
             // Not a constant input - return S_OK with nullptr to match unsafe path behavior
             // Shape inferencers will check for nullptr and fall back to attributes
             *tensor = nullptr;
@@ -2986,18 +2956,12 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
         bool needs_lazy_init = !required_constants_available
                              || (state->requires_input_shapes_at_creation && !shapes_available);
 
-#ifdef DML_PERF_PROFILE
-        {
-            char _buf[320];
-            std::snprintf(_buf, sizeof(_buf),
-                "[ABI_SAFE] DmlAbiKernel_Create: op=%s  requires_input_shapes=%d  shapes_available=%d  "
-                "required_constants_available=%d  needs_lazy_init=%d  constant_tensors_passed=%zu\n",
-                state->operator_name ? state->operator_name : "?",
-                (int)state->requires_input_shapes_at_creation, (int)shapes_available,
-                (int)required_constants_available, (int)needs_lazy_init, constant_tensors_count);
-            DmlPerfWriteLog(_buf);
-        }
-#endif
+        DML_PERF_LOG("[ABI_SAFE] DmlAbiKernel_Create: op=", state->operator_name ? state->operator_name : "?",
+            "  requires_input_shapes=", state->requires_input_shapes_at_creation,
+            "  shapes_available=", shapes_available,
+            "  required_constants_available=", required_constants_available,
+            "  needs_lazy_init=", needs_lazy_init,
+            "  constant_tensors_passed=", constant_tensors_count, "\n");
 
         // Create the DML operator kernel using the factory (unless lazy init needed)
         Microsoft::WRL::ComPtr<IMLOperatorKernel> ml_kernel;
@@ -3053,11 +3017,9 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
                         // Mirrors unsafe path: InferAndVerifyOutputSizes throws on failure when
                         // requiresOutputShapesAtCreation=true. Fail here rather than proceeding with
                         // no output shapes, which would produce incorrect tensor allocations.
-                        char error_buf[256];
-                        snprintf(error_buf, sizeof(error_buf),
-                                 "Eager shape inference failed with HR=0x%08X for %s",
-                                 (unsigned)shape_hr, state->operator_name ? state->operator_name : "unknown");
-                        return state->ort_api->CreateStatus(ORT_FAIL, error_buf);
+                        return state->ort_api->CreateStatus(ORT_FAIL,
+                            fmt::format("Eager shape inference failed with HR=0x{:08X} for {}",
+                                (unsigned)shape_hr, state->operator_name ? state->operator_name : "unknown").c_str());
                     }
                 } else {
                 }
@@ -3072,19 +3034,13 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
 
             hr = state->kernel_factory->CreateKernel(context_interface.Get(), &ml_kernel);
 
-#ifdef DML_PERF_PROFILE
-            { char _buf[256]; std::snprintf(_buf, sizeof(_buf),
-                "[ABI_SAFE] eager CreateKernel: op=%s  HR=0x%08X  kernel=%p\n",
-                state->operator_name ? state->operator_name : "?", (unsigned)hr, (void*)ml_kernel.Get());
-              DmlPerfWriteLog(_buf); }
-#endif
+        DML_PERF_LOG("[ABI_SAFE] eager CreateKernel: op=", state->operator_name ? state->operator_name : "?",
+            "  HR=", Hex(hr), "  kernel=", (void*)ml_kernel.Get(), "\n");
 
             if (FAILED(hr) || !ml_kernel) {
-                char error_buf[256];
-                snprintf(error_buf, sizeof(error_buf),
-                         "ABI-safe kernel creation failed with HR=0x%08X for %s",
-                         hr, state->operator_name ? state->operator_name : "unknown");
-                return state->ort_api->CreateStatus(ORT_FAIL, error_buf);
+                return state->ort_api->CreateStatus(ORT_FAIL,
+                    fmt::format("ABI-safe kernel creation failed with HR=0x{:08X} for {}",
+                        (unsigned)hr, state->operator_name ? state->operator_name : "unknown").c_str());
             }
         }
 
@@ -3276,11 +3232,8 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             size_t lazy_input_count = 0;
             kernel->ort_api->KernelContext_GetInputCount(context, &lazy_input_count);
 
-#ifdef DML_PERF_PROFILE
-            { char _buf[256]; std::snprintf(_buf, sizeof(_buf),
-                "[ABI_SAFE] lazy-init triggered: op=%s  ctx_input_count=%zu\n",
-                kernel->operator_name.c_str(), lazy_input_count); DmlPerfWriteLog(_buf); }
-#endif
+        DML_PERF_LOG("[ABI_SAFE] lazy-init triggered: op=", kernel->operator_name,
+            "  ctx_input_count=", lazy_input_count, "\n");
 
             Windows::AI::MachineLearning::Adapter::EdgeShapes runtime_input_shapes(lazy_input_count);
             for (size_t i = 0; i < lazy_input_count; ++i) {
@@ -3327,12 +3280,9 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                 }
             }
 
-#ifdef DML_PERF_PROFILE
-            { char _buf[256]; std::snprintf(_buf, sizeof(_buf),
-                "[ABI_SAFE] lazy-init constants: op=%s  resolved=%zu / %zu required\n",
-                kernel->operator_name.c_str(), lazy_constant_tensors.size(),
-                kernel->required_constant_cpu_inputs.size()); DmlPerfWriteLog(_buf); }
-#endif
+        DML_PERF_LOG("[ABI_SAFE] lazy-init constants: op=", kernel->operator_name,
+            "  resolved=", lazy_constant_tensors.size(),
+            " / ", kernel->required_constant_cpu_inputs.size(), " required\n");
 
             // Snapshot constant tensor contents BEFORE moving lazy_constant_tensors into creation_context.
             // Mirrors PluginDmlAbiOpKernel lazy init: FillConstantInputs is called before CreateKernel.
@@ -3409,30 +3359,20 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             Microsoft::WRL::ComPtr<IMLOperatorKernel> ml_kernel;
             hr = kernel->kernel_factory->CreateKernel(context_interface.Get(), &ml_kernel);
 
-#ifdef DML_PERF_PROFILE
-            { char _buf[256]; std::snprintf(_buf, sizeof(_buf),
-                "[ABI_SAFE] lazy-init CreateKernel: op=%s  HR=0x%08X  kernel=%p\n",
-                kernel->operator_name.c_str(), (unsigned)hr, (void*)ml_kernel.Get());
-              DmlPerfWriteLog(_buf); }
-#endif
+        DML_PERF_LOG("[ABI_SAFE] lazy-init CreateKernel: op=", kernel->operator_name,
+            "  HR=", Hex(hr), "  kernel=", (void*)ml_kernel.Get(), "\n");
 
             if (FAILED(hr) || !ml_kernel) {
-                char error_buf[256];
-                snprintf(error_buf, sizeof(error_buf),
-                         "Lazy kernel creation failed with HR=0x%08X for %s",
-                         hr, kernel->operator_name.c_str());
-                return kernel->ort_api->CreateStatus(ORT_FAIL, error_buf);
+                return kernel->ort_api->CreateStatus(ORT_FAIL,
+                    fmt::format("Lazy kernel creation failed with HR=0x{:08X} for {}",
+                        (unsigned)hr, kernel->operator_name).c_str());
             }
 
             // Store the created kernel
             kernel->ml_operator_kernel = std::move(ml_kernel);
             kernel->needs_lazy_init = false;  // Mark as initialized
 
-#ifdef DML_PERF_PROFILE
-            { char _buf[256]; std::snprintf(_buf, sizeof(_buf),
-                "[ABI_SAFE] lazy-init SUCCESS: op=%s  kernel ready\n",
-                kernel->operator_name.c_str()); DmlPerfWriteLog(_buf); }
-#endif
+        DML_PERF_LOG("[ABI_SAFE] lazy-init SUCCESS: op=", kernel->operator_name, "  kernel ready\n");
 
             kernel->input_shapes_of_kernel_inference = runtime_input_shapes;  // For shape-change detection
 
