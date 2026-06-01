@@ -18,7 +18,7 @@
 
 using Microsoft::WRL::ComPtr;
 
-namespace Dml {
+namespace dml_ep {
 class DmlSubAllocator;
 class PluginDmlExecutionContext;
 
@@ -102,4 +102,4 @@ private:
 #endif
 };
 
-} // namespace Dml
+}  // namespace dml_ep

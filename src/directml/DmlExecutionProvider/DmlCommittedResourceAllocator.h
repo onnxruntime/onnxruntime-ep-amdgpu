@@ -5,8 +5,8 @@
 
 #include "DmlSubAllocator.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     struct DmlResourceWrapper;
 
     class DmlCommittedResourceAllocator : public DmlSubAllocator
@@ -18,4 +18,5 @@ namespace Dml
     private:
         ID3D12Device* m_device = nullptr;
     };
-}
+
+}  // namespace dml_ep

@@ -5,7 +5,8 @@
 
 // #define PRINT_OUTSTANDING_ALLOCATIONS
 
-namespace Dml {
+namespace dml_ep {
+
 PluginDmlAllocationInfo::~PluginDmlAllocationInfo() {
     if (m_owner) {
         m_owner->FreeResource(this, m_pooledResourceId);
@@ -205,4 +206,4 @@ void DmlBucketizedBufferAllocator::SetDefaultRoundingMode(AllocatorRoundingMode 
     m_defaultRoundingMode = roundingMode;
 }
 
-} // namespace Dml
+}  // namespace dml_ep

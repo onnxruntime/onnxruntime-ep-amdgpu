@@ -9,8 +9,8 @@
 #include "DmlExecutionProvider/DescriptorPool.h"
 #include <gsl/span>
 
-namespace Dml
-{
+namespace dml_ep {
+
     class CommandQueue;
     class BucketizedBufferAllocator;
 
@@ -99,4 +99,4 @@ namespace Dml
         void SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap);
     };
 
-} // namespace Dml
+}  // namespace dml_ep

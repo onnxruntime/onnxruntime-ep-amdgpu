@@ -4,6 +4,7 @@
 #include "dml_data_transfer.h"
 #include <gsl/span>
 
+namespace dml_ep {
 
 DMLDataTransfer::DMLDataTransfer(ApiPtrs api_ptrs) : ApiPtrs(api_ptrs)
 {
@@ -13,12 +14,12 @@ DMLDataTransfer::DMLDataTransfer(ApiPtrs api_ptrs) : ApiPtrs(api_ptrs)
 
 }
 
-void DMLDataTransfer::AttachExecutionProvider(std::shared_ptr<Dml::PluginDmlExecutionProviderImpl> ep)
+void DMLDataTransfer::AttachExecutionProvider(std::shared_ptr<PluginDmlExecutionProviderImpl> ep)
 {
     m_executionProvider = ep;
 }
 
-void DMLDataTransfer::AttachFactoryEpRef(Dml::ExecutionProviderPlugin** ep_raw_ref)
+void DMLDataTransfer::AttachFactoryEpRef(ExecutionProviderPlugin** ep_raw_ref)
 {
     m_ep_raw_ref = ep_raw_ref;
 }
@@ -39,7 +40,7 @@ bool ORT_API_CALL DMLDataTransfer::CanCopyImpl(const OrtDataTransferImpl* this_p
     if ((src_type == OrtMemoryInfoDeviceType_GPU && is_src_device_AMD == true) ||
         (dst_type == OrtMemoryInfoDeviceType_GPU && is_dst_device_AMD == true)) {
         return true;
-    }
+        }
 
     return (src_type == OrtMemoryInfoDeviceType_GPU && dst_type == OrtMemoryInfoDeviceType_GPU) ||
         (src_type == OrtMemoryInfoDeviceType_GPU && dst_type == OrtMemoryInfoDeviceType_CPU) ||
@@ -74,3 +75,5 @@ void ORT_API_CALL DMLDataTransfer::ReleaseImpl(OrtDataTransferImpl* this_ptr) no
     // Factory owns this object and manages its lifetime via dml_data_transfer_implementation unique_ptr.
     // ORT's Release call is intentionally ignored — the factory destructor handles cleanup.
 }
+
+}  // namespace dml_ep

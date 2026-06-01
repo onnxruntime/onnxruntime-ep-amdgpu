@@ -3,8 +3,8 @@
 
 #include "DmlExecutionProvider/precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     DescriptorHeap::DescriptorHeap(ID3D12DescriptorHeap* heap) :
         m_heap(heap),
         m_capacity(heap->GetDesc().NumDescriptors),
@@ -124,4 +124,5 @@ namespace Dml
 
         return capacity;
     }
-}
+
+}  // namespace dml_ep

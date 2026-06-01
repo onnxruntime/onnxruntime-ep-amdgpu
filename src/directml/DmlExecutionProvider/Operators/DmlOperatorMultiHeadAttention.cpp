@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 class DmlOperatorMultiHeadAttention : public DmlOperator
 {
 public:
@@ -301,4 +301,4 @@ public:
 };
 
 DML_OP_DEFINE_CREATION_FUNCTION(MultiHeadAttention, DmlOperatorMultiHeadAttention);
-} // namespace Dml
+}  // namespace dml_ep

@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorTile : public DmlOperator, TileHelper
 {
@@ -70,4 +70,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(Tile, DmlOperatorTile);
 
-} // namespace Dml
+}  // namespace dml_ep

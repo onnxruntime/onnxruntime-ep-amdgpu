@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorScatter : public DmlOperator
 {
@@ -130,4 +130,4 @@ DML_OP_DEFINE_CREATION_FUNCTION(Scatter13, DmlOperatorScatter);
 DML_OP_DEFINE_CREATION_FUNCTION(ScatterElements, DmlOperatorScatter);
 DML_OP_DEFINE_CREATION_FUNCTION(ScatterND, DmlOperatorScatterNd);
 
-} // namespace Dml
+}  // namespace dml_ep

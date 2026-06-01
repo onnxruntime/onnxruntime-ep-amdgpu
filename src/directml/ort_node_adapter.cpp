@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <sstream>
 
-namespace Dml {
+namespace dml_ep {
 
 //==============================================================================
 // OrtValueInfoAdapter Implementation
@@ -423,4 +423,4 @@ std::string OrtNodeAdapter::ToString() const {
     return oss.str();
 }
 
-} // namespace Dml
+}  // namespace dml_ep

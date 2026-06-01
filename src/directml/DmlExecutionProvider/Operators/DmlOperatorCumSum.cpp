@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorCumSum : public DmlOperator
 {
@@ -54,4 +54,4 @@ public:
 DML_OP_DEFINE_CREATION_FUNCTION(CumSum11, DmlOperatorCumSum);
 DML_OP_DEFINE_CREATION_FUNCTION(CumSum14, DmlOperatorCumSum);
 
-} // namespace Dml
+}  // namespace dml_ep

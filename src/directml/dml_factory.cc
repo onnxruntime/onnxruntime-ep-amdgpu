@@ -9,7 +9,7 @@
 #include "dml_ep.h"
 #include "dml_factory.h"
 
-namespace Dml {
+namespace dml_ep {
 
 static bool IsHardwareAdapter(IDXCoreAdapter* adapter)
 {
@@ -594,7 +594,7 @@ bool ProviderFactory::IsGpuAllocator(const OrtMemoryInfo* memory_info) {
         (device_type == OrtMemoryInfoDeviceType_GPU);
 }
 
-}  // namespace Dml
+}  // namespace dml_ep
 
 extern "C" {
 
@@ -609,7 +609,7 @@ OrtStatus* CreateEpFactories(const char* registration_name, const OrtApiBase* or
         Ort::InitApi(ort_api);
 
         *num_factories = 1;
-        *factories = std::make_unique<Dml::ProviderFactory>(ApiPtrs{*ort_api, *ep_api, *model_editor_api},
+        *factories = std::make_unique<dml_ep::ProviderFactory>(ApiPtrs{*ort_api, *ep_api, *model_editor_api},
             registration_name, Ort::Logger{default_logger}).release();
 
         return nullptr;
@@ -620,7 +620,7 @@ OrtStatus* CreateEpFactories(const char* registration_name, const OrtApiBase* or
 }
 
 OrtStatus* ReleaseEpFactory(OrtEpFactory* factory) {
-    delete reinterpret_cast<Dml::ProviderFactory*>(factory);
+    delete reinterpret_cast<dml_ep::ProviderFactory*>(factory);
     return nullptr;
 }
 

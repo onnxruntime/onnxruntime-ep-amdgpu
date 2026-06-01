@@ -7,7 +7,7 @@
 
 using namespace Windows::AI::MachineLearning::Adapter;
 
-namespace Dml::GraphDescBuilder
+namespace dml_ep::GraphDescBuilder
 {
 
     #pragma warning(push)
@@ -226,12 +226,12 @@ namespace Dml::GraphDescBuilder
     // Main Points to note:
     //   - GraphDesc will always has sequential indices for input and intermediate edges.
     //   - 1 onnx node can be converted to one or more dml nodes.
-    GraphDesc BuildGraphDesc(
+    dml_ep::GraphDescBuilder::GraphDesc BuildGraphDesc(
         const uint8_t* isConstGpuGraphInput,
         const size_t isConstGpuGraphInputCount,
         const std::unordered_map<std::string, std::pair<const ONNX_NAMESPACE::TensorProto*, bool>>& isInitializerTransferable,
-        const std::unordered_map<std::string, GraphNodeProperties>& graphNodePropertyMap,
-        const PluginDmlExecutionProviderImpl* executionHandle,
+        const std::unordered_map<std::string, dml_ep::GraphNodeProperties>& graphNodePropertyMap,
+        const dml_ep::PluginDmlExecutionProviderImpl* executionHandle,
         const std::filesystem::path& modelPath,
         gsl::span<const onnxruntime::Node* const> subgraphNodes,
         gsl::span<const onnxruntime::NodeArg* const> subgraphInputs,
@@ -301,7 +301,7 @@ namespace Dml::GraphDescBuilder
         {
             const onnxruntime::Node& node = *subgraphNode;
 
-            const GraphNodeProperties& graphNodeProps = graphNodePropertyMap.find(GetUniqueNodeName(node))->second;
+            const dml_ep::GraphNodeProperties& graphNodeProps = graphNodePropertyMap.find(GetUniqueNodeName(node))->second;
             const auto& requiredConstantCpuInputs = graphNodeProps.internalRegInfo->requiredConstantCpuInputs;
 
             MLOperatorTensorGetter constantCpuNodeInputGetter = [&node, &constantCpuGraphInputGetter, &requiredConstantCpuInputs](uint32_t inputIndex)
@@ -400,7 +400,7 @@ namespace Dml::GraphDescBuilder
                         DmlBufferTensorDesc* tensorDesc = toNodeInputTensorDescs[operatorDmlGraphInputEdge.ToNodeInputIndex];
                         ComPtr<OnnxTensorWrapper> constantInput;
 
-                        if (tensorDesc->totalTensorSizeInBytes < c_maxConstNodeDataSize)
+                        if (tensorDesc->totalTensorSizeInBytes < dml_ep::GraphDescBuilder::c_maxConstNodeDataSize)
                         {
                             constantInput = constantCpuGraphInputGetter(arg->Name());
                         }
@@ -422,7 +422,7 @@ namespace Dml::GraphDescBuilder
                         }
                         else
                         {
-                            ConstantName constantFileName = {GetSanitizedFileName(arg->Name())};
+                            ConstantName constantFileName = {dml_ep::GetSanitizedFileName(arg->Name())};
                             constantNode.Desc = constantFileName;
                         }
                         dmlGraphNodeOutputNameToNodeAndIndexMap[arg->Name()] = {static_cast<uint32_t>(dmlGraphNodes.size()), 0};
@@ -582,15 +582,16 @@ namespace Dml::GraphDescBuilder
                                serializedGraphInputIndexToSubgraphInputIndex,
                                serializedGraphLargeConstantNameToSubgraphInputIndex);
 
-        GraphDesc graphDesc{};
+        dml_ep::GraphDescBuilder::GraphDesc graphDesc{};
         graphDesc.InputCount = static_cast<uint32_t>(dmlGraphInputEdges.size());
         graphDesc.OutputCount = static_cast<uint32_t>(subgraphOutputs.size());
         graphDesc.Nodes = std::move(dmlGraphNodes);
         graphDesc.InputEdges = std::move(dmlGraphInputEdges);
         graphDesc.OutputEdges = std::move(dmlGraphOutputEdges);
         graphDesc.IntermediateEdges = std::move(dmlGraphIntermediateEdges);
-        graphDesc.reuseCommandList = (subgraphNodes.size() >= minNodeCountToReuseCommandList || executionHandle->IsMcdmDevice());
+        graphDesc.reuseCommandList = (subgraphNodes.size() >= dml_ep::GraphDescBuilder::minNodeCountToReuseCommandList || executionHandle->IsMcdmDevice());
         graphDesc.outputShapes = std::move(graphOutputShapes);
         return graphDesc;
     }
-}
+
+}  // namespace dml_ep

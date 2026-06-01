@@ -7,8 +7,8 @@
 #include <unordered_map>
 #include "DmlExecutionProvider/GraphDescBuilder.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     class GraphPartition
     {
     public:
@@ -54,4 +54,4 @@ namespace Dml
         gsl::span<const onnxruntime::NodeIndex> additionalSplittingNodes,
         const std::unordered_map<std::string, const onnxruntime::NodeArg*>& implicitInputs,
         bool allowDmlGraphDynamicShapes);
-} // namespace Dml
+}  // namespace dml_ep

@@ -59,7 +59,7 @@ struct DmlSTFTParameters
             MLOperatorEdgeDescription edgeDesc = kernelInfo.GetInputEdgeDescription(0);
 
             assert(edgeDesc.edgeType == MLOperatorEdgeType::Tensor);
-            this->dataType = Dml::GetDmlDataTypeFromMlDataType(edgeDesc.tensorDataType);
+            this->dataType = dml_ep::GetDmlDataTypeFromMlDataType(edgeDesc.tensorDataType);
         }
 
         // input 1: frame_step (required; constant; scalar)
@@ -192,7 +192,7 @@ class DmlSTFTOperator : public WRL::Base<IMLOperatorKernel>
 private:
     ComPtr<ID3D12Device> m_d3dDevice;
     ComPtr<IDMLDevice> m_dmlDevice;
-    ComPtr<Dml::IExecutionProvider> m_dmlProvider;
+    ComPtr<dml_ep::IExecutionProvider> m_dmlProvider;
 
     struct
     {
@@ -246,7 +246,7 @@ public:
             dftAxis,
             params.isOnesided,
             dftIsInverse,
-            Dml::GetMlDataTypeFromDmlDataType(params.dataType)
+            dml_ep::GetMlDataTypeFromDmlDataType(params.dataType)
         );
 
         m_dftOperator.inputDims = { params.batchSize * params.frameCount, params.frameSize, 1 };

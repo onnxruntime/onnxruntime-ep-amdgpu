@@ -3,8 +3,8 @@
 
 #pragma once
 
-namespace Dml
-{
+namespace dml_ep {
+
 // D3D12.x interfaces inherit from IGraphicsUnknown, which does not inherit from IUnknown. This
 // wrapper exists to pass IGraphicsUnknown-inheriting objects to functions with IUnknown parameters.
 #ifdef _GAMING_XBOX
@@ -54,4 +54,5 @@ private:
 #else
 #define GRAPHICS_THROW_IF_FAILED(hr) ORT_THROW_IF_FAILED(hr)
 #endif
-} // namespace Dml
+
+}  // namespace dml_ep

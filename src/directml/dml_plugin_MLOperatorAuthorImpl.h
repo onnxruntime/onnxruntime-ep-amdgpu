@@ -18,7 +18,7 @@
 #include "core/framework/tensor_type_and_shape.h"
 #include "core/framework/onnxruntime_sequence_type_info.h"
 
-namespace Dml {
+namespace dml_ep {
 class PluginDmlExecutionProviderImpl;
 }
 
@@ -79,7 +79,7 @@ public:
                         bool allowInputShapeQuery, bool allowOutputShapeQuery, bool isInternalOperator,
                         const AttributeMap* defaultAttributes, gsl::span<const uint32_t> requiredConstantCpuInputs,
                         MLOperatorTensorGetter& constantInputGetter,
-                        const Dml::PluginDmlExecutionProviderImpl* pluginDmlEp,
+                        const dml_ep::PluginDmlExecutionProviderImpl* pluginDmlEp,
                         const onnxruntime::OpKernelContext* kernelContext = nullptr);
 
     // HasTensorShapeDescription returns false if and only if the kernel is registered using
@@ -140,7 +140,7 @@ public:
     ~PluginOpKernelContextWrapper();
 
     PluginOpKernelContextWrapper(onnxruntime::OpKernelContext* context,
-                                 const Dml::PluginDmlExecutionProviderImpl* pluginDmlEp,
+                                 const dml_ep::PluginDmlExecutionProviderImpl* pluginDmlEp,
                            bool isInternalOperator, const EdgeShapes* outputShapes);
 
     bool STDMETHODCALLTYPE IsSequenceInputTensor(uint32_t inputIndex) const noexcept override;
@@ -193,7 +193,7 @@ protected:
     std::vector<std::vector<ComPtr<TensorWrapper>>> m_inputTensors;
     std::vector<std::vector<ComPtr<TensorWrapper>>> m_outputTensors;
 
-    const Dml::PluginDmlExecutionProviderImpl* m_provider = nullptr;
+    const dml_ep::PluginDmlExecutionProviderImpl* m_provider = nullptr;
     ComPtr<IWinmlExecutionProvider> m_winmlProvider;
     bool m_internalOperator = false;
 
@@ -219,7 +219,7 @@ class PluginDmlAbiOpKernel : public onnxruntime::OpKernel
         gsl::span<const uint32_t> requiredConstantCpuInputs,
         IMLOperatorShapeInferrer* shapeInferrer,
         const AttributeMap* defaultAttributes,
-        const Dml::PluginDmlExecutionProviderImpl* pluginDmlEp);
+        const dml_ep::PluginDmlExecutionProviderImpl* pluginDmlEp);
 
     Ort::Status Compute(onnxruntime::OpKernelContext* context) const override;
  protected:
@@ -273,7 +273,7 @@ class PluginDmlAbiOpKernel : public onnxruntime::OpKernel
     ComPtr<IUnknown> m_abiExecutionObject;
 
     const AttributeMap* m_defaultAttributes = nullptr;
-    const Dml::PluginDmlExecutionProviderImpl* m_dmlPluginExecutionProvider = nullptr;
+    const dml_ep::PluginDmlExecutionProviderImpl* m_dmlPluginExecutionProvider = nullptr;
 
     const OrtKernelInfo* m_ortKernelInfo = nullptr;
     const OrtApi* m_ortApi = nullptr;

@@ -20,8 +20,8 @@
 
 using namespace Windows::AI::MachineLearning::Adapter;
 
-namespace Dml
-{
+namespace dml_ep {
+
     GraphPartition* GraphPartition::GetRootMergedPartition()
     {
         return m_mergedPartition ? m_mergedPartition->GetRootMergedPartition() : this;
@@ -561,4 +561,4 @@ namespace Dml
 
         return partitions;
     }
-} // namespace Dml
+}  // namespace dml_ep

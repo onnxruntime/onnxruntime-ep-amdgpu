@@ -5,8 +5,8 @@
 #include "OperatorUtility.h"
 #include "OperatorAuthorHelper/OperatorVersions.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     namespace ActivationHelper
     {
         float GetDefaultAlpha(DML_OPERATOR_TYPE function)
@@ -520,4 +520,4 @@ namespace Dml
     }
     #pragma warning(pop)
 
-} // namespace Dml
+}  // namespace dml_ep

@@ -24,7 +24,7 @@ using Microsoft::WRL::ComPtr;
 #include "cpu_allocator.h"
 #include "dml_ep.h"
 
-namespace Dml {
+namespace dml_ep {
 
 class ProviderFactory : public OrtEpFactory, public ApiPtrs
 {
@@ -113,4 +113,4 @@ private:
 };
 
 
-}  // namespace Dml
+}  // namespace dml_ep

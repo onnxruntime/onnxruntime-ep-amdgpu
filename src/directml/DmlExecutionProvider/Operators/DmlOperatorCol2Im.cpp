@@ -3,8 +3,8 @@
 
 #include "./precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 #if DML_TARGET_VERSION >= 0x6400
 
@@ -60,4 +60,4 @@ DML_OP_DEFINE_CREATION_FUNCTION(Col2Im, DmlOperatorCol2Im);
 
 #endif // DML_TARGET_VERSION >= 0x6400
 
-}  // namespace Dml
+}  // namespace dml_ep

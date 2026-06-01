@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorPooling : public DmlOperator, public PoolingHelperBase
 {
@@ -203,4 +203,4 @@ DML_OP_DEFINE_CREATION_FUNCTION(GlobalMaxPool,         DmlOperatorPoolingTemplat
 DML_OP_DEFINE_CREATION_FUNCTION(LpPool,                DmlOperatorPoolingTemplate<DML_OPERATOR_LP_POOLING1, false>);
 DML_OP_DEFINE_CREATION_FUNCTION(GlobalLpPool,          DmlOperatorPoolingTemplate<DML_OPERATOR_LP_POOLING, true>);
 
-} // namespace Dml
+}  // namespace dml_ep

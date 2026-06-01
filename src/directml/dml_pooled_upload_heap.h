@@ -20,8 +20,8 @@ using Microsoft::WRL::ComPtr;
 
 using Microsoft::WRL::ComPtr;
 
-namespace Dml
-{
+namespace dml_ep {
+
     class PluginDmlExecutionContext;
 
     // Implements a non-blocking, ring-buffer style upload heap for copying CPU data to GPU resources.
@@ -111,4 +111,4 @@ namespace Dml
         size_t m_totalCapacity = 0; // Total size of all chunks, in bytes
     };
 
-} // namespace Dml
+}  // namespace dml_ep

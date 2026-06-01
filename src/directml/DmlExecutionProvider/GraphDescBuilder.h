@@ -7,8 +7,8 @@
 #include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
 #include "DmlExecutionProvider/ExecutionProvider.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     struct GraphNodeProperties
     {
         std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfo>
@@ -50,4 +50,5 @@ namespace Dml
             /*out*/ std::unordered_map<std::string_view, uint32_t>& serializedGraphLargeConstantNameToSubgraphInputIndex,
             /*out*/ std::vector<std::unique_ptr<std::byte[]>>& smallConstantData);
     }
-}
+
+}  // namespace dml_ep

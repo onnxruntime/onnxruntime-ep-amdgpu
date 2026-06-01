@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 template <bool gpuOutput>
 class DmlOperatorMemcpy : public DmlOperator
@@ -73,4 +73,4 @@ private:
 DML_OP_DEFINE_CREATION_FUNCTION(MemcpyFromHost, DmlOperatorMemcpy<true>);
 DML_OP_DEFINE_CREATION_FUNCTION(MemcpyToHost, DmlOperatorMemcpy<false>);
 
-} // namespace Dml
+}  // namespace dml_ep

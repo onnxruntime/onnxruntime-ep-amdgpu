@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 template <bool simplified>
 class DmlOperatorSkipLayerNormalization : public DmlOperator
@@ -228,4 +228,4 @@ void CALLBACK QuerySkipLayerNormalization(IMLOperatorSupportQueryContextPrivate*
 DML_OP_DEFINE_CREATION_FUNCTION(SkipLayerNormalization, DmlOperatorSkipLayerNormalization<false>);
 DML_OP_DEFINE_CREATION_FUNCTION(SkipSimplifiedLayerNormalization, DmlOperatorSkipLayerNormalization<true>);
 
-} // namespace Dml
+}  // namespace dml_ep

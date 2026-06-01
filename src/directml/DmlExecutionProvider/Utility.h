@@ -8,8 +8,8 @@
 #include <codecvt>
 #include <filesystem>        
 
-namespace Dml
-{
+namespace dml_ep {
+
     static inline std::wstring ConvertToWString(std::string_view str)
     {
         std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>,wchar_t> g_converterToUtf16;

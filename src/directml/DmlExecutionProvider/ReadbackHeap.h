@@ -3,8 +3,8 @@
 
 #pragma once
 
-namespace Dml
-{
+namespace dml_ep {
+
     class ExecutionContext;
 
     // Because we never perform more than one readback at a time, we don't need anything fancy for managing the
@@ -41,4 +41,4 @@ namespace Dml
         size_t m_capacity = 0;
     };
 
-} // namespace Dml
+}  // namespace dml_ep

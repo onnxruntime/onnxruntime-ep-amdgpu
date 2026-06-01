@@ -8,7 +8,7 @@
 #include <memory>
 #include <string>
 
-namespace Dml {
+namespace dml_ep {
 
 // Builds a plugin-side AttributeProto from an ORT-side OrtOpAttr* using only
 // the ORT C API (ReadOpAttr, OpAttr_GetName, OpAttr_GetType). This avoids
@@ -21,4 +21,4 @@ std::unique_ptr<ONNX_NAMESPACE::AttributeProto> BuildPluginAttributeProto(
 // Returns empty string on failure.
 std::string GetOpAttrName(const OrtOpAttr* ort_attr, const OrtApi& api);
 
-}  // namespace Dml
+}  // namespace dml_ep

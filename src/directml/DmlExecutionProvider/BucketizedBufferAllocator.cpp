@@ -8,8 +8,8 @@
 
 // #define PRINT_OUTSTANDING_ALLOCATIONS
 
-namespace Dml
-{
+namespace dml_ep {
+
     AllocationInfo::~AllocationInfo()
     {
         if (m_owner)
@@ -218,4 +218,4 @@ namespace Dml
     {
         m_defaultRoundingMode = roundingMode;
     }
-} // namespace Dml
+}  // namespace dml_ep

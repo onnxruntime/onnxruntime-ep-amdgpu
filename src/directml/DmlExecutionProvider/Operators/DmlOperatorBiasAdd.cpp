@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorBiasAdd : public DmlOperator
 {
@@ -110,4 +110,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(BiasAdd, DmlOperatorBiasAdd);
 
-} // namespace Dml
+}  // namespace dml_ep

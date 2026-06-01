@@ -25,11 +25,10 @@ public:
     }
 };
 
-namespace DmlPlugin 
-{
-    void RegisterDmlOperators(IMLOperatorRegistry* registry, const Dml::PluginDmlExecutionProviderImpl* executionProvider);
-    void RegisterCpuOperatorsAsDml(onnxruntime::KernelRegistry* registry);
-}
+namespace dml_ep {
+void RegisterDmlOperators(IMLOperatorRegistry* registry, const PluginDmlExecutionProviderImpl* executionProvider);
+void RegisterCpuOperatorsAsDml(onnxruntime::KernelRegistry* registry);
+}  // namespace dml_ep
 
 // Declares a callback creation function of the given operator class.
 // This does not register it, just declares it for usage by registration later.

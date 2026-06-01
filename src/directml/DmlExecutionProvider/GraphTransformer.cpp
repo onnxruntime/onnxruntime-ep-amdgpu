@@ -15,8 +15,8 @@
 #include "core/framework/kernel_type_str_resolver.h"
 #include "core/graph/graph_utils.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     GraphTransformer::GraphTransformer(
         const std::string& name,
         const PluginDmlExecutionProviderImpl* provider
@@ -199,11 +199,11 @@ namespace Dml
             for (auto& attribute : nodeToAdd.activationAttributes)
             {
                 // Change the name of the attribute to its fused node version
-                std::string fusedAttributeName = Dml::FusionHelpers::GetFusedAttributeName(attribute.first);
+                std::string fusedAttributeName = FusionHelpers::GetFusedAttributeName(attribute.first);
                 attribute.second.set_name(fusedAttributeName);
                 node.AddAttributeProto(attribute.second);
             }
         }
     }
 
-} // namespace Dml
+}  // namespace dml_ep

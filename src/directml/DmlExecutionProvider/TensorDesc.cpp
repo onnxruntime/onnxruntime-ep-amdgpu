@@ -3,7 +3,7 @@
 
 #include "precomp.h"
 
-using namespace Dml;
+namespace dml_ep {
 
 TensorDesc::TensorDesc(
     DML_TENSOR_DATA_TYPE dataType,
@@ -276,7 +276,7 @@ void TensorDesc::ForceUnsignedDataType()
         m_bufferTensorDesc.DataType = DML_TENSOR_DATA_TYPE_UINT4;
         break;
 
-    // Nothing to do if already unsigned.
+        // Nothing to do if already unsigned.
     case DML_TENSOR_DATA_TYPE_UINT64:
     case DML_TENSOR_DATA_TYPE_UINT32:
     case DML_TENSOR_DATA_TYPE_UINT16:
@@ -375,3 +375,4 @@ void TensorDesc::EnsureStridesExist() noexcept
     GetDescendingPackedStrides({m_sizes, m_bufferTensorDesc.DimensionCount}, {m_strides, m_bufferTensorDesc.DimensionCount});
     m_bufferTensorDesc.Strides = m_strides;
 }
+}  // namespace dml_ep

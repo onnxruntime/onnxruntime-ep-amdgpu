@@ -5,7 +5,7 @@
 
 #include "plugin_ep_utils.h"
 
-namespace Dml {
+namespace dml_ep {
 
 struct Info {
     int device_id{};
@@ -15,4 +15,4 @@ struct Info {
     explicit Info(const ProviderOptions& provider_options);
 };
 
-}  // namespace Dml
+}  // namespace dml_ep

@@ -23,8 +23,8 @@ using Base = Microsoft::WRL::RuntimeClass<
     TInterfaces...>;
 }
 
-namespace Dml
-{
+namespace dml_ep {
+
     using Microsoft::WRL::ComPtr;
     class PooledUploadHeap;
     class ReadbackHeap;
@@ -32,14 +32,14 @@ namespace Dml
     class BucketizedBufferAllocator;
     class ExecutionProvider;
 
-    class ExecutionProviderImpl : public WRL::Base<Dml::IExecutionProvider,
+    class ExecutionProviderImpl : public WRL::Base<IExecutionProvider,
                                   Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider>
     {
     public:
         ExecutionProviderImpl(
             IDMLDevice* dmlDevice,
             ID3D12Device* d3d12Device,
-            Dml::ExecutionContext* executionContext,
+            ExecutionContext* executionContext,
             bool enableMetacommands,
             bool enableGraphCapture,
             bool enableCpuSyncSpinning,
@@ -47,7 +47,7 @@ namespace Dml
 
         void ReleaseCompletedReferences();
 
-    public: // implements Dml::IExecutionProvider
+    public: // implements IExecutionProvider
         STDMETHOD(GetD3DDevice)(_COM_Outptr_ ID3D12Device** d3dDevice) const noexcept final;
 
         STDMETHOD(GetDmlDevice)(_COM_Outptr_ IDMLDevice** dmlDevice) const noexcept final;
@@ -265,7 +265,7 @@ namespace Dml
 
         explicit ExecutionProvider(
             IDMLDevice* dmlDevice,
-            Dml::ExecutionContext* executionContext,
+            ExecutionContext* executionContext,
             bool enableMetacommands,
             bool enableGraphCapture,
             bool enableSyncSpinning,
@@ -360,4 +360,4 @@ namespace Dml
         ComPtr<ExecutionProviderImpl> m_impl;
     };
 
-} // namespace Dml
+}  // namespace dml_ep

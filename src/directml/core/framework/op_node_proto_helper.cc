@@ -296,8 +296,8 @@ void AbiSafeProtoHelperNodeContext::InitializeFromPlugin(const OrtNodePlugin* no
         {
             if (attr_values[i])
             {
-                std::string name = Dml::GetOpAttrName(attr_values[i], *api_);
-                auto built = Dml::BuildPluginAttributeProto(attr_values[i], *api_);
+                std::string name = dml_ep::GetOpAttrName(attr_values[i], *api_);
+                auto built = dml_ep::BuildPluginAttributeProto(attr_values[i], *api_);
                 attributes_[name] = std::move(built);
             }
         }
@@ -339,8 +339,8 @@ void AbiSafeProtoHelperNodeContext::InitializeFromCApi(const OrtNode* node, cons
         {
             if (attr_values[i])
             {
-                std::string name = Dml::GetOpAttrName(attr_values[i], ort_api);
-                auto built = Dml::BuildPluginAttributeProto(attr_values[i], ort_api);
+                std::string name = dml_ep::GetOpAttrName(attr_values[i], ort_api);
+                auto built = dml_ep::BuildPluginAttributeProto(attr_values[i], ort_api);
                 attributes_[name] = std::move(built);
             }
         }

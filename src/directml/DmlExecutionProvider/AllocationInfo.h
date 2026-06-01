@@ -8,8 +8,8 @@
 #include "d3d12.h"
 #include "DmlResourceWrapper.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     class BucketizedBufferAllocator;
 
     class AllocationInfo : public Microsoft::WRL::RuntimeClass<
@@ -71,4 +71,5 @@ namespace Dml
         // The size requested during Alloc(), which may be smaller than the physical resource size
         size_t m_requestedSize;
     };
-}
+
+}  // namespace dml_ep

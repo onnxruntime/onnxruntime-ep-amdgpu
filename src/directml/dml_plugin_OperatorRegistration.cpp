@@ -225,8 +225,7 @@ ONNX_OPERATOR_KERNEL_EX(
 
 }
 
-namespace Dml
-{
+namespace dml_ep {
 
 enum class SupportedTensorDataTypes : uint64_t
 {
@@ -282,7 +281,7 @@ enum class SupportedTensorDataTypes : uint64_t
     Ints64Bit = UInt64|Int64,
     All = static_cast<uint64_t>(-1),
 };
-DEFINE_ENUM_FLAG_OPERATORS(Dml::SupportedTensorDataTypes);
+DEFINE_ENUM_FLAG_OPERATORS(SupportedTensorDataTypes);
 
 enum class DmlGraphSupport : uint32_t
 {
@@ -1196,13 +1195,7 @@ MLOperatorEdgeDescription SequenceEdgeDesc()
     return {MLOperatorEdgeType::SequenceTensor, static_cast<uint64_t>(MLTypeTraits<T>::TensorType)};
 }
 
-} // namespace Dml
-
-namespace DmlPlugin 
-{
-
-using namespace Dml;
-void RegisterDmlOperators(IMLOperatorRegistry* registry, const Dml::PluginDmlExecutionProviderImpl* executionProvider)
+void RegisterDmlOperators(IMLOperatorRegistry* registry, const PluginDmlExecutionProviderImpl* executionProvider)
 {
     ComPtr<IMLOperatorRegistryPrivate> registryPrivate;
     THROW_IF_FAILED(registry->QueryInterface(registryPrivate.GetAddressOf()));
@@ -1234,7 +1227,7 @@ void RegisterDmlOperators(IMLOperatorRegistry* registry, const Dml::PluginDmlExe
 #if _DEBUG
         // If some version of the operator is supported for fusion, check that each registered version is also supported.
         // This ensures that table of operators and versions supporting fusion does not become stale as operator sets are added.
-        Dml::FusionHelpers::AssertFusableOperatorSupportsVersionIfExists(desc.name, desc.domain, desc.minimumOperatorSetVersion);
+        FusionHelpers::AssertFusableOperatorSupportsVersionIfExists(desc.name, desc.domain, desc.minimumOperatorSetVersion);
 #endif
 
         // edgeDescs will accumulate the edge descriptions across all type constraints.
@@ -1358,4 +1351,4 @@ void RegisterCpuOperatorsAsDml(onnxruntime::KernelRegistry* registry) {
     }
 }
 
-} // namespace DmlPlugin
+}  // namespace dml_ep

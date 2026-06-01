@@ -50,8 +50,8 @@ Mask Index/Causal  Input   Weight   Bias
  https://github.com/microsoft/onnxruntime/blob/main/docs/ContribOperators.md#commicrosoftqattention
  */
 
-namespace Dml
-{
+namespace dml_ep {
+
 class DmlOperatorQAttention : public DmlOperator
 {
 public:
@@ -701,4 +701,4 @@ void CALLBACK QueryQAttention(IMLOperatorSupportQueryContextPrivate* context, /*
 }
 
 DML_OP_DEFINE_CREATION_FUNCTION(QAttention, DmlOperatorQAttention);
-}  // namespace Dml
+}  // namespace dml_ep

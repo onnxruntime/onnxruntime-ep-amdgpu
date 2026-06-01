@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorConcat : public DmlOperator, public ConcatHelper
 {
@@ -80,4 +80,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(Concat, DmlOperatorConcat);
 
-} // namespace Dml
+}  // namespace dml_ep

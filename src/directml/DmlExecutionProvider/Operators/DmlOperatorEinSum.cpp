@@ -67,8 +67,8 @@
 // - EinSum can accept a variable number of input tensors, but the DML EP only supports a limited count
 //   (falling back to CPU otherwise).
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorEinSum : public DmlOperator, public EinSumHelper
 {
@@ -417,4 +417,4 @@ void CALLBACK QueryEinSum(IMLOperatorSupportQueryContextPrivate* context, bool* 
 
 DML_OP_DEFINE_CREATION_FUNCTION(Einsum12, VersionedKernel<DmlOperatorEinSum, 12>);
 
-} // namespace Dml
+}  // namespace dml_ep

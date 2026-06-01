@@ -5,8 +5,8 @@
 #include "GraphDescBuilder.h"
 #include "DmlRuntimeGraphFusionTransformer.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     onnxruntime::OpKernel* CreateRuntimeFusedGraphKernel(
         const onnxruntime::OpKernelInfo& info,
         std::shared_ptr<const onnxruntime::IndexedSubGraph> indexedSubGraph,
@@ -18,4 +18,4 @@ namespace Dml
         std::unordered_map<std::string, GraphNodeProperties>&& partitionNodePropsMap,
         std::vector<ONNX_NAMESPACE::TensorProto>&& ownedInitializers
     );
-} // namespace Dml
+}  // namespace dml_ep

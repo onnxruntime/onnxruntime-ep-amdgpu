@@ -7,8 +7,8 @@
 #include "core/optimizer/graph_transformer.h"
 #include "core/framework/execution_providers.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 class PluginDmlExecutionProviderImpl;
 
 class DmlRuntimeGraphFusionTransformer : public onnxruntime::GraphTransformer
@@ -39,4 +39,5 @@ private:
 private:
     const PluginDmlExecutionProviderImpl* m_providerImpl = nullptr;
 };
-}
+
+}  // namespace dml_ep

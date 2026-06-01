@@ -3,8 +3,8 @@
 
 #include "dml_readback_heap.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     ComPtr<ID3D12Resource> PluginDmlReadbackHeap::CreateReadbackHeap(ID3D12Device* device, size_t size)
     {
         ComPtr<ID3D12Resource> readbackHeap;
@@ -156,4 +156,4 @@ namespace Dml
 
         m_readbackHeap->Unmap(0, nullptr);
     }
-} // namespace Dml
+}  // namespace dml_ep

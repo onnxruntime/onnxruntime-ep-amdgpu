@@ -9,8 +9,8 @@
 #include "DmlExecutionProvider/DmlResourceWrapper.h"
 #include <utility>
 
-namespace Dml
-{
+namespace dml_ep {
+
     class DmlBucketizedBufferAllocator;
 
     class PluginDmlAllocationInfo : public Microsoft::WRL::RuntimeClass<
@@ -72,4 +72,5 @@ namespace Dml
         // The size requested during Alloc(), which may be smaller than the physical resource size
         size_t m_requestedSize;
     };
-}
+
+}  // namespace dml_ep

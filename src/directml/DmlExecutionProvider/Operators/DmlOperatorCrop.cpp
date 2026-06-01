@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorCrop : public DmlOperator, public CropHelper
 {
@@ -43,4 +43,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(Crop, DmlOperatorCrop);
 
-} // namespace Dml
+}  // namespace dml_ep

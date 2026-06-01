@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorQuickGelu : public DmlOperator
 {
@@ -130,4 +130,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(QuickGelu, DmlOperatorQuickGelu);
 
-} // namespace Dml
+}  // namespace dml_ep

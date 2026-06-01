@@ -5,8 +5,8 @@
 
 #include <DirectML.h>
 
-namespace Dml
-{
+namespace dml_ep {
+
     struct DmlReusedCommandListState
     {
         // Re-usable command list, supporting descriptor heap, and DML binding table to update that heap.
@@ -28,4 +28,5 @@ namespace Dml
         mutable Microsoft::WRL::ComPtr<ID3D12Fence> fence;
         mutable uint64_t completionValue = 0;
     };
-}
+
+}  // namespace dml_ep

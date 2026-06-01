@@ -8,7 +8,7 @@
 #include "core/framework/allocator.h"     // onnxruntime::IAllocator, onnxruntime::AllocatorPtr
 #include <onnxruntime_c_api.h>            // OrtAllocator, ORT_API_VERSION
 
-namespace Dml {
+namespace dml_ep {
 
 class IAllocatorToOrtAllocatorAdapter final : public OrtAllocator {
 public:
@@ -77,4 +77,4 @@ inline onnxruntime::AllocatorPtr WrapOrtAllocatorAsIAllocator(std::shared_ptr<Or
     return std::make_shared<OrtAllocatorToIAllocatorAdapter>(std::move(ort_allocator));
 }
 
-}  // namespace Dml
+}  // namespace dml_ep

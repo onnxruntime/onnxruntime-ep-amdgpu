@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorOneHot : public DmlOperator, OneHotHelper
 {
@@ -76,4 +76,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(OneHot, DmlOperatorOneHot);
 
-} // namespace Dml
+}  // namespace dml_ep

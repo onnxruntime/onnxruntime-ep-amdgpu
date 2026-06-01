@@ -60,8 +60,8 @@
                         Join
 */
 
-namespace Dml
-{
+namespace dml_ep {
+
 class DmlOperatorRotaryEmbedding : public DmlOperator
 {
 public:
@@ -604,4 +604,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(RotaryEmbedding, DmlOperatorRotaryEmbedding);
 
-} // namespace Dml
+}  // namespace dml_ep

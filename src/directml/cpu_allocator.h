@@ -8,7 +8,7 @@
 #include <functional>
 #include <memory>
 
-namespace Dml {
+namespace dml_ep {
 
 // `OrtAllocator` is a C API struct. `BaseAllocator` is a minimal C++ struct which inherits from `OrtAllocator`.
 // Notably, `BaseAllocator` has a virtual destructor to enable a derived class to be deleted through a `BaseAllocator`
@@ -53,4 +53,4 @@ inline AllocationUniquePtr AllocateBytes(OrtAllocator* allocator, size_t num_byt
 }
 
 
-}  // namespace Dml
+}  // namespace dml_ep

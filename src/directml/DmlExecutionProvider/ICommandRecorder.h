@@ -3,8 +3,8 @@
 
 #pragma once
 
-namespace Dml
-{
+namespace dml_ep {
+
     class ICommandRecorder
     {
     public:
@@ -19,4 +19,4 @@ namespace Dml
         virtual bool HasUnsubmittedWork() = 0;
     };
 
-} // namespace Dml
+}  // namespace dml_ep

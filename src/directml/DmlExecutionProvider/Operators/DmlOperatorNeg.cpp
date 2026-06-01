@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorNeg : public DmlOperator
 {
@@ -32,4 +32,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(Neg, DmlOperatorNeg);
 
-} // namespace Dml
+}  // namespace dml_ep

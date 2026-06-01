@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorConvInteger : public DmlOperator, public ConvolutionHelperBase
 {
@@ -81,4 +81,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(ConvInteger, DmlOperatorConvInteger);
 
-} // namespace Dml
+}  // namespace dml_ep

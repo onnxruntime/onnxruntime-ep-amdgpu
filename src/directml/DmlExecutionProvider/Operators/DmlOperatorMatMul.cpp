@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorMatMul : public DmlOperator
 {
@@ -58,4 +58,4 @@ public:
 DML_OP_DEFINE_CREATION_FUNCTION(MatMul, DmlOperatorMatMul);
 DML_OP_DEFINE_CREATION_FUNCTION(DmlFusedMatMul, DmlOperatorMatMul);
 
-} // namespace Dml
+}  // namespace dml_ep

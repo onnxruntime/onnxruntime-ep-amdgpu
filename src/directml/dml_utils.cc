@@ -3,7 +3,7 @@
 
 #include "dml_utils.h"
 
-namespace Dml {
+namespace dml_ep {
 
     void D3DResourceHelper::CloseExecuteResetWait(
         ID3D12Device* d3d12Device,
@@ -92,7 +92,7 @@ namespace Dml {
     }
 
 
-}  // namespace Dml
+}  // namespace dml_ep
 
 #include "Eigen/Core"
 

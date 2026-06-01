@@ -5,7 +5,7 @@
 #include "provider_options_utils.h"
 #include "parse_string.h"
 
-namespace Dml {
+namespace dml_ep {
 
 namespace provider_option {
 constexpr auto kDeviceId = "device_id"sv;
@@ -14,4 +14,4 @@ constexpr auto kDeviceId = "device_id"sv;
 Info::Info(const ProviderOptions& provider_options) {
 }
 
-}  // namespace Dml
+}  // namespace dml_ep

@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorQLinearAdd : public DmlOperator
 {
@@ -75,4 +75,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(QLinearAdd, DmlOperatorQLinearAdd);
 
-} // namespace Dml
+}  // namespace dml_ep

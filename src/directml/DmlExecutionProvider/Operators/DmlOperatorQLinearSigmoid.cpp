@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 // QLinearSigmoid = Dequantize + Sigmoid + Quantize
 // This kernel is the first usage of graph based implementation
 class DmlOperatorQLinearSigmoid : public DmlOperator
@@ -178,4 +178,4 @@ void CALLBACK QueryQLinearSigmoid(IMLOperatorSupportQueryContextPrivate* context
 }
 
 DML_OP_DEFINE_CREATION_FUNCTION(QLinearSigmoid, DmlOperatorQLinearSigmoid);
-} // namespace Dml
+}  // namespace dml_ep

@@ -10,8 +10,8 @@
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
 using Microsoft::WRL::ComPtr;
 
-namespace Dml
-{
+namespace dml_ep {
+
     // A fixed-size ring of command allocators. Each time an allocator is retrieved, the allocator will
     // be reset if its previously recorded commands have finished executing on the GPU.
     template <size_t AllocatorCount>
@@ -76,4 +76,5 @@ namespace Dml
         size_t m_currentCommandAllocator = 0;
 
     };
-}
+
+}  // namespace dml_ep

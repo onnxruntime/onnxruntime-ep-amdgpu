@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorExpand : public DmlOperator, public ExpandHelper
 {
@@ -63,4 +63,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(Expand, DmlOperatorExpand);
 
-} // namespace Dml
+}  // namespace dml_ep

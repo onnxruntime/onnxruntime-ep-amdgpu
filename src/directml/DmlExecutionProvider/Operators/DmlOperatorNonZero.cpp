@@ -7,8 +7,8 @@
 #include "dml_execution_provider.h"
 #include "iallocator_to_ort_allocator_adapter.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorNonZero: public DmlOperator
 {
@@ -195,4 +195,4 @@ private:
 
 DML_OP_DEFINE_CREATION_FUNCTION(NonZero, DmlOperatorNonZero);
 
-} // namespace Dml
+}  // namespace dml_ep

@@ -73,7 +73,7 @@ int32_t OnnxTensorElementToProtoDataType(ONNXTensorElementDataType onnx_type) {
 
 }  // namespace
 
-namespace Dml {
+namespace dml_ep {
 
 std::string GetOpAttrName(const OrtOpAttr* ort_attr, const OrtApi& api) {
     if (!ort_attr) return {};
@@ -212,4 +212,4 @@ std::unique_ptr<ONNX_NAMESPACE::AttributeProto> BuildPluginAttributeProto(
     return attr_proto;
 }
 
-}  // namespace Dml
+}  // namespace dml_ep

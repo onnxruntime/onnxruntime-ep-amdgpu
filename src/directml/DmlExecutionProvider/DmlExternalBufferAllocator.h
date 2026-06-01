@@ -15,8 +15,8 @@
 #include "ErrorHandling.h"
 #include "DmlCommittedResourceWrapper.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     class DmlExternalBufferAllocator : public onnxruntime::IAllocator
     {
     public:
@@ -69,4 +69,5 @@ namespace Dml
     private:
         Microsoft::WRL::ComPtr<ID3D12Device> m_device;
     };
-}
+
+}  // namespace dml_ep

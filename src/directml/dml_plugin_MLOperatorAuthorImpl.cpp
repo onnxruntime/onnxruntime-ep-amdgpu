@@ -150,7 +150,7 @@ PluginOpKernelInfoWrapper::PluginOpKernelInfoWrapper(
     const AttributeMap* defaultAttributes,
     gsl::span<const uint32_t> requiredConstantCpuInputs,
     MLOperatorTensorGetter& constantInputGetter,
-    const Dml::PluginDmlExecutionProviderImpl* pluginDmlEp,
+    const dml_ep::PluginDmlExecutionProviderImpl* pluginDmlEp,
     const onnxruntime::OpKernelContext* kernelContext) 
     : OpNodeInfoWrapper(kerneInfo, inputShapeOverrides, defaultAttributes, requiredConstantCpuInputs, constantInputGetter,
                       kernelContext)
@@ -384,7 +384,7 @@ void PluginOpKernelContextWrapper::TransitionResourcesForOperatorIfRequired(bool
 
 PluginOpKernelContextWrapper::PluginOpKernelContextWrapper(
     onnxruntime::OpKernelContext* context,
-    const Dml::PluginDmlExecutionProviderImpl* provider,
+    const dml_ep::PluginDmlExecutionProviderImpl* provider,
     bool isInternalOperator,
     const EdgeShapes* outputShapes) :
     m_impl(context), m_outputShapes(outputShapes), m_provider(provider), m_internalOperator(isInternalOperator) {
@@ -779,7 +779,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
         gsl::span<const uint32_t> requiredConstantCpuInputs,
         IMLOperatorShapeInferrer* shapeInferrer,
         const AttributeMap* defaultAttributes,
-        const Dml::PluginDmlExecutionProviderImpl* pluginDmlEp)
+        const dml_ep::PluginDmlExecutionProviderImpl* pluginDmlEp)
         : OpKernel(kerneInfo),
         m_requiresInputShapesAtCreation(requiresInputShapesAtCreation),
         m_requiresOutputShapesAtCreation(requiresOutputShapesAtCreation),
@@ -883,7 +883,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
                     m_ortKernelInfo, inputIndex, &isConstant, &constantValue);
                 if (getStatus == nullptr && isConstant && constantValue != nullptr)
                 {
-                    constantTensors[inputIndex] = Microsoft::WRL::Make<Dml::AbiSafeTensor>(
+                    constantTensors[inputIndex] = Microsoft::WRL::Make<dml_ep::AbiSafeTensor>(
                         constantValue, m_ortApi, m_dmlPluginExecutionProvider);
                 }
                 else if (getStatus)
@@ -892,9 +892,9 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
                 }
             }
 
-            auto tensorAttrCache = Dml::FetchAllTensorAttributes(m_ortKernelInfo, m_ortApi, m_tensorAttributeNames);
+            auto tensorAttrCache = dml_ep::FetchAllTensorAttributes(m_ortKernelInfo, m_ortApi, m_tensorAttributeNames);
 
-            auto kernelCreationContext = Microsoft::WRL::Make<Dml::AbiSafeKernelCreationContext>(
+            auto kernelCreationContext = Microsoft::WRL::Make<dml_ep::AbiSafeKernelCreationContext>(
                 m_ortKernelInfo,
                 m_ortApi,
                 m_defaultAttributes,
@@ -1009,7 +1009,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
                     "  ki_isconst=", isConstant, "  ki_val=", (void*)constantValue, "  ki_status=", (void*)getStatus, "\n");
                 if (getStatus == nullptr && isConstant && constantValue != nullptr)
                 {
-                    auto wrappedTensor = Microsoft::WRL::Make<Dml::AbiSafeTensor>(
+                    auto wrappedTensor = Microsoft::WRL::Make<dml_ep::AbiSafeTensor>(
                         constantValue, m_ortApi, m_dmlPluginExecutionProvider);
                     constantTensorsForKernel[inputIndex] = wrappedTensor;
                 }
@@ -1039,9 +1039,9 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
             }
 
             OrtKernelContext* ortKernelContext = reinterpret_cast<OrtKernelContext*>(context);
-            auto tensorAttrCacheLazy = Dml::FetchAllTensorAttributes(m_ortKernelInfo, m_ortApi, m_tensorAttributeNames);
+            auto tensorAttrCacheLazy = dml_ep::FetchAllTensorAttributes(m_ortKernelInfo, m_ortApi, m_tensorAttributeNames);
 
-            auto kernelCreationContext = Microsoft::WRL::Make<Dml::AbiSafeKernelCreationContext>(
+            auto kernelCreationContext = Microsoft::WRL::Make<dml_ep::AbiSafeKernelCreationContext>(
                 m_ortKernelInfo,
                 m_ortApi,
                 m_defaultAttributes,
@@ -1408,7 +1408,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
         EdgeShapes& outputShapes,
         OrtKernelContext* ortContext) const
     {
-        auto inferenceContext = Microsoft::WRL::Make<Dml::AbiSafeShapeInferenceContext>(
+        auto inferenceContext = Microsoft::WRL::Make<dml_ep::AbiSafeShapeInferenceContext>(
             ortContext,
             m_ortApi,
             m_defaultAttributes,

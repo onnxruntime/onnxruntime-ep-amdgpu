@@ -16,7 +16,7 @@
 
 //
 
-namespace Dml {
+namespace dml_ep {
 
 using Microsoft::WRL::ComPtr;
     
@@ -55,4 +55,4 @@ public:
 };
 
 
-}   // namespace Dml
+}   // namespace dml_ep

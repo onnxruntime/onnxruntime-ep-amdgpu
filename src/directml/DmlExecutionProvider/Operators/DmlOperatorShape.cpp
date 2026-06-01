@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorShape : public DmlOperator, ShapeHelper
 {
@@ -51,4 +51,4 @@ public:
 // Special case makes sure that the input/output resource is created using the CPU allocator.
 DML_OP_DEFINE_CREATION_FUNCTION(Shape, DmlOperatorShape);
 
-} // namespace Dml
+}  // namespace dml_ep

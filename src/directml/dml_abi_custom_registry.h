@@ -12,7 +12,7 @@
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
 using Microsoft::WRL::ComPtr;
 
-namespace Dml {
+namespace dml_ep {
 class PluginDmlExecutionProviderImpl;
 }
 
@@ -29,7 +29,7 @@ using namespace Microsoft::WRL;
 class PluginAbiCustomRegistry : public WRL::Base<IMLOperatorRegistry, IMLOperatorRegistryPrivate> {
 public:
     PluginAbiCustomRegistry();
-    PluginAbiCustomRegistry(const Dml::PluginDmlExecutionProviderImpl* executionProvider);
+    PluginAbiCustomRegistry(const dml_ep::PluginDmlExecutionProviderImpl* executionProvider);
 
     HRESULT STDMETHODCALLTYPE RegisterOperatorSetSchema(
         const MLOperatorSetId* opSetId,
@@ -104,7 +104,7 @@ private:
     // Map between Lotus KernelDefs and extended data used during partitioning
     mutable std::shared_ptr<InternalRegistrationInfoMap> m_internalRegInfoMap;
 
-    const Dml::PluginDmlExecutionProviderImpl* m_dmlPluginExecutionProvider = nullptr;
+    const dml_ep::PluginDmlExecutionProviderImpl* m_dmlPluginExecutionProvider = nullptr;
 };
 
 } // namespace Windows::AI::MachineLearning::Adapter
