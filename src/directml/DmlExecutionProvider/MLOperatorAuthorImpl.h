@@ -2,7 +2,10 @@
 // Licensed under the MIT License.
 
 #pragma once
+
 #include <filesystem>
+
+#include "dml_client.h"
 
 #include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
 #include "OperatorAuthorHelper/OperatorHelper.h"
@@ -12,23 +15,10 @@
 #include "core/framework/tensorprotoutils.h"
 #include "core/framework/onnxruntime_typeinfo.h"
 #include "core/framework/tensor_type_and_shape.h"
-#include <wrl/client.h>
-#include <wrl/implements.h>
 
 interface IDMLOperator;
 
-namespace WRL
-{
-    template <typename... TInterfaces>
-    using Base = Microsoft::WRL::RuntimeClass<
-        Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
-        TInterfaces...
-        >;
-}
-
 namespace dml_ep {
-
-using namespace Microsoft::WRL;
 
 // Helper overloads for InputTensorShapesDefinedOnNode to work with both
 // TypeProto* (ProtoHelperNodeContext) and OrtTypeInfo* (AbiSafeProtoHelperNodeContext)
@@ -276,7 +266,7 @@ class OpNodeInfoWrapper : public Base1_t, public Base2_t, public Closable
     const AttributeMap* m_defaultAttributes = nullptr;
 };
 
-class TensorWrapper : public WRL::Base<IMLOperatorTensor>, public Closable
+class TensorWrapper : public Com<IMLOperatorTensor>, public Closable
 {
  public:
     TensorWrapper() = default;
@@ -320,7 +310,7 @@ class TensorWrapper : public WRL::Base<IMLOperatorTensor>, public Closable
 
 };
 
-class OnnxTensorWrapper : public WRL::Base<IMLOperatorTensor>, public Closable
+class OnnxTensorWrapper : public Com<IMLOperatorTensor>, public Closable
 {
  public:
     OnnxTensorWrapper() = default;
@@ -360,7 +350,7 @@ class OnnxTensorWrapper : public WRL::Base<IMLOperatorTensor>, public Closable
 
 class OpKernelInfoWrapper : public OpNodeInfoWrapper<
     onnxruntime::ProtoHelperNodeContext,
-    WRL::Base<
+    Com<
         Microsoft::WRL::ChainInterfaces<IMLOperatorKernelCreationContextNodeWrapperPrivate, IMLOperatorKernelCreationContextPrivate, IMLOperatorKernelCreationContext>,
         IMLOperatorTensorShapeDescription, IMLOperatorTensorShapeDescriptionPrivate, IMLOperatorAttributes1>,
     onnxruntime::null_type>
@@ -439,7 +429,7 @@ private:
 // OpKernelInfo used for DML graph fusion.  This uses the ONNX graph structures instead of ORT OpKernelInfo.
 class DmlGraphOpKernelInfoWrapper : public OpNodeInfoWrapper<
     onnxruntime::ProtoHelperNodeContext,
-    WRL::Base<
+    Com<
         Microsoft::WRL::ChainInterfaces<IMLOperatorKernelCreationContextPrivate, IMLOperatorKernelCreationContext>,
         IMLOperatorTensorShapeDescription, IMLOperatorTensorShapeDescriptionPrivate, IMLOperatorAttributes1>,
     onnxruntime::null_type>
@@ -488,7 +478,7 @@ private:
     DmlGraphNodeCreateInfo* m_graphNodeCreateInfo = nullptr;
 };
 
-class OpKernelContextWrapper : public WRL::Base<IMLOperatorKernelContext, IMLOperatorKernelContextPrivate>, public Closable
+class OpKernelContextWrapper : public Com<IMLOperatorKernelContext, IMLOperatorKernelContextPrivate>, public Closable
 {
  public:
     ~OpKernelContextWrapper();
@@ -537,8 +527,8 @@ class OpKernelContextWrapper : public WRL::Base<IMLOperatorKernelContext, IMLOpe
     onnxruntime::OpKernelContext* m_impl = nullptr;
     const EdgeShapes* m_outputShapes = nullptr;
 
-    std::vector<std::vector<ComPtr<TensorWrapper>>> m_inputTensors;
-    std::vector<std::vector<ComPtr<TensorWrapper>>> m_outputTensors;
+    std::vector<std::vector<Microsoft::WRL::ComPtr<TensorWrapper>>> m_inputTensors;
+    std::vector<std::vector<Microsoft::WRL::ComPtr<TensorWrapper>>> m_outputTensors;
 
     const onnxruntime::IExecutionProvider* m_provider = nullptr;
     Microsoft::WRL::ComPtr<IWinmlExecutionProvider> m_winmlProvider;
@@ -550,8 +540,8 @@ class OpKernelContextWrapper : public WRL::Base<IMLOperatorKernelContext, IMLOpe
 
     // Temporary allocations created by the kernel.  These will be freed to the allocator following
     // Compute being called on the kernel.  This list is used to maintain their lifetime.
-    mutable std::vector<ComPtr<IUnknown>> m_temporaryAllocations;
-    mutable std::vector<ComPtr<IUnknown>> m_temporaryAbiAllocations;
+    mutable std::vector<Microsoft::WRL::ComPtr<IUnknown>> m_temporaryAllocations;
+    mutable std::vector<Microsoft::WRL::ComPtr<IUnknown>> m_temporaryAbiAllocations;
 };
 
 class AbiOpKernel : public onnxruntime::OpKernel
@@ -620,14 +610,14 @@ class AbiOpKernel : public onnxruntime::OpKernel
 
 private:
     bool RequiredCpuInputChanged(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor, uint32_t index) const;
-    bool RequiredCpuInputChanged(const std::vector<ComPtr<IMLOperatorTensor>>& constantTensorSequence, uint32_t index) const;
+    bool RequiredCpuInputChanged(const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constantTensorSequence, uint32_t index) const;
     void FillConstantInputs(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const;
-    void FillConstantInputs(const std::vector<ComPtr<IMLOperatorTensor>>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const;
+    void FillConstantInputs(const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const;
 };
 
 class MLSchemaInferenceContext final : public OpNodeInfoWrapper<
     onnx::InferenceContext,
-    WRL::Base<
+    Com<
         Microsoft::WRL::ChainInterfaces<IMLOperatorShapeInferenceContextPrivate, IMLOperatorShapeInferenceContext>,
         IMLOperatorTypeInferenceContext, IMLOperatorAttributes, IMLOperatorAttributes1>,
     onnxruntime::null_type>
@@ -660,7 +650,7 @@ class MLSchemaInferenceContext final : public OpNodeInfoWrapper<
 
 class MLKernelInferenceContext final : public OpNodeInfoWrapper<
     onnxruntime::ProtoHelperNodeContext,
-    WRL::Base<Microsoft::WRL::ChainInterfaces<IMLOperatorShapeInferenceContextPrivate, IMLOperatorShapeInferenceContext>, IMLOperatorAttributes, IMLOperatorAttributes1>,
+    Com<Microsoft::WRL::ChainInterfaces<IMLOperatorShapeInferenceContextPrivate, IMLOperatorShapeInferenceContext>, IMLOperatorAttributes, IMLOperatorAttributes1>,
     onnxruntime::null_type>
 {
  public:
@@ -695,7 +685,7 @@ void PerformInferAndVerifyOutputSizes(
 
 class MLSupportQueryContext final : public OpNodeInfoWrapper<
     onnxruntime::ProtoHelperNodeContext,
-    WRL::Base<Microsoft::WRL::ChainInterfaces<IMLOperatorSupportQueryContextPrivate, IMLOperatorAttributes, IMLOperatorAttributes1>>,
+    Com<Microsoft::WRL::ChainInterfaces<IMLOperatorSupportQueryContextPrivate, IMLOperatorAttributes, IMLOperatorAttributes1>>,
     onnxruntime::null_type>
 {
  public:

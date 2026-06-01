@@ -161,8 +161,8 @@ namespace DmlGraphFusionHelper
         onnxruntime::Graph& graph,
         _Out_ std::vector<bool>& inputsUsed,
         _Inout_ std::vector<DML_BUFFER_BINDING>& initInputBindings,
-        _Inout_ std::vector<ComPtr<ID3D12Resource>>& nonOwnedGraphInputsFromInitializers,
-        _Inout_ std::vector<ComPtr<ID3D12Resource>>& initializeResourceRefs,
+        _Inout_ std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& nonOwnedGraphInputsFromInitializers,
+        _Inout_ std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& initializeResourceRefs,
         _Inout_opt_ std::vector<std::vector<std::byte>>* inputRawData)
     {
 
@@ -350,7 +350,7 @@ namespace DmlGraphFusionHelper
         const std::unordered_map<uint32_t, uint32_t>* serializedGraphInputIndexToSubgraphInputIndex,
         const std::unordered_map<std::string_view, uint32_t>* serializedGraphLargeConstantNameToSubgraphInputIndex,
         _Out_ DML_GRAPH_DESC& dmlGraphDesc,
-        _Inout_ std::vector<ComPtr<IDMLOperator>>& dmlOperators,
+        _Inout_ std::vector<Microsoft::WRL::ComPtr<IDMLOperator>>& dmlOperators,
         _Inout_ std::vector<DML_GRAPH_NODE_DESC>& dmlGraphNodes,
         _Inout_ std::vector<DML_GRAPH_EDGE_DESC>& dmlInputEdges,
         _Inout_ std::vector<DML_GRAPH_EDGE_DESC>& dmlOutputEdges,
@@ -548,7 +548,7 @@ namespace DmlGraphFusionHelper
 
         StackAllocator<1024> allocator;
         DML_GRAPH_DESC dmlGraphDesc = {};
-        std::vector<ComPtr<IDMLOperator>> dmlOperators;
+        std::vector<Microsoft::WRL::ComPtr<IDMLOperator>> dmlOperators;
         std::vector<DML_GRAPH_NODE_DESC> dmlGraphNodes;
         std::vector<DML_GRAPH_EDGE_DESC> dmlInputEdges;
         std::vector<DML_GRAPH_EDGE_DESC> dmlOutputEdges;
@@ -653,7 +653,7 @@ namespace DmlGraphFusionHelper
         // Populate input bindings for operator initialization
         std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> initializeResourceRefs; // For lifetime control
         std::vector<DML_BUFFER_BINDING> initInputBindings(fusedNodeInputCount);
-        std::vector<ComPtr<ID3D12Resource>> nonOwnedGraphInputsFromInitializers(fusedNodeInputCount);
+        std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> nonOwnedGraphInputsFromInitializers(fusedNodeInputCount);
 
         std::vector<bool> inputsUsed;
         ProcessInputData(

@@ -334,7 +334,7 @@ namespace dml_ep {
         mutable std::unordered_map<std::string, onnxruntime::TensorShape> m_inferredInputShapes;
         mutable std::deque<std::unique_ptr<DmlReusedCommandListState>> m_reusedCommandLists;
         mutable std::vector<uint8_t> m_isInputsUploadedByDmlEP;
-        mutable std::vector<ComPtr<ID3D12Resource>> m_nonOwnedGraphInputsFromInitializers;
+        mutable std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_nonOwnedGraphInputsFromInitializers;
     };
 
     onnxruntime::OpKernel* CreateRuntimeFusedGraphKernel(

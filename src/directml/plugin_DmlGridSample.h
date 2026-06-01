@@ -260,7 +260,7 @@ namespace PluginGridSampleHelpers
     }
 }
 
-class PluginDmlGridSampleOperator : public WRL::Base<IMLOperatorKernel>
+class PluginDmlGridSampleOperator : public dml_ep::Com<IMLOperatorKernel>
 {
 private:
     Microsoft::WRL::ComPtr<ID3D12Device> m_device;
@@ -721,7 +721,7 @@ public:
     }
 };
 
-struct GridSampleShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
+struct GridSampleShapeInferrer : public dml_ep::Com<IMLOperatorShapeInferrer>
 {
     STDMETHOD(InferOutputShapes)(IMLOperatorShapeInferenceContext* context) noexcept
     {
@@ -748,7 +748,7 @@ struct GridSampleShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
     }
 };
 
-class PluginDmlGridSampleOperatorFactory : public WRL::Base<IMLOperatorKernelFactory>
+class PluginDmlGridSampleOperatorFactory : public dml_ep::Com<IMLOperatorKernelFactory>
 {
 public:
     STDMETHOD(CreateKernel)(
