@@ -6,7 +6,6 @@
 
 #define ENABLE_GRAPH_COMPILATION
 
-using namespace Windows::AI::MachineLearning::Adapter;
 
 namespace dml_ep {
 
@@ -484,11 +483,11 @@ namespace dml_ep {
 
             onnxruntime::Tensor* dst_tensor = dst_tensors[i]->GetMutable<onnxruntime::Tensor>();
 
-            Windows::AI::MachineLearning::Adapter::TensorWrapper destInternal(
+            TensorWrapper destInternal(
                 dst_tensor, IsGpuTensor(*dst_tensor),
                 this, true);
 
-            Windows::AI::MachineLearning::Adapter::TensorWrapper srcInternal(
+            TensorWrapper srcInternal(
                 const_cast<onnxruntime::Tensor*>(&src_tensors[i]->Get<onnxruntime::Tensor>()),
                 IsGpuTensor(src_tensors[i]->Get<onnxruntime::Tensor>()),
                 this, true);
@@ -870,7 +869,7 @@ namespace dml_ep {
         return m_graphCapturingDone.find(graph_annotation_id) != m_graphCapturingDone.end();
     };
 
-    std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap>
+    std::shared_ptr<const InternalRegistrationInfoMap>
     PluginDmlExecutionProviderImpl::GetInternalRegistrationInfoMap() const
     {
         return m_internalRegInfoMap;

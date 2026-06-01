@@ -4,7 +4,7 @@
 #include "dml_abi_custom_registry.h"
 #include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
 #include "DmlExecutionProvider/precomp.h"
-namespace Windows::AI::MachineLearning::Adapter {
+namespace dml_ep {
 
 PluginAbiCustomRegistry::PluginAbiCustomRegistry() :
     m_kernelRegistry(std::make_shared<onnxruntime::CustomRegistry>()),
@@ -232,7 +232,7 @@ THROW_IF_NOT_OK(m_customRegistryOpsetVerMap[registryKey]->RegisterOpSet(schemaVe
                                                                         opSetId->version));
 
 return S_OK;
-} // namespace Windows::AI::MachineLearning::Adapter
+}  // namespace dml_ep
 ORT_CATCH_RETURN
 }
 
@@ -425,7 +425,7 @@ HRESULT STDMETHODCALLTYPE PluginAbiCustomRegistry::RegisterOperatorKernel(
                     onnxruntime::OpNodeProtoHelper<onnxruntime::ProtoHelperNodeContext> protoHelper(&nodeContext);
 
                     // Use the same list of required constant inputs for the shape inferrer and the kernel.
-                    InferAndVerifyOutputSizes(node, &defaultAttributesCapture, shapeInferrerCapture.Get(),
+                    PerformInferAndVerifyOutputSizes(node, &defaultAttributesCapture, shapeInferrerCapture.Get(),
                                               constantCpuInputCapture, constantInputGetter, inputShapesOverrides,
                                               *outputShapes);
 

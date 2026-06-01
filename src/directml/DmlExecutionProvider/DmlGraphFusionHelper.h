@@ -12,8 +12,6 @@
 #include "MLOperatorAuthorImpl.h"
 #include "DmlReusedCommandListState.h"
 
-using Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider;
-
 namespace dml_ep {
 
 namespace DmlGraphFusionHelper
@@ -40,7 +38,7 @@ namespace DmlGraphFusionHelper
         size_t tensorByteSize);
 
     void UnwrapTensor(
-        Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider* winmlProvider,
+        IWinmlExecutionProvider* winmlProvider,
         const onnxruntime::Tensor* tensor,
         ID3D12Resource** resource,
         uint64_t* allocId);
@@ -121,7 +119,7 @@ namespace DmlGraphFusionHelper
         gsl::span<const uint8_t> isInputsUploadedByDmlEP,
         const std::vector<bool>& inputsUsed,
         gsl::span<const Microsoft::WRL::ComPtr<ID3D12Resource>> nonOwnedGraphInputsFromInitializers,
-        const Windows::AI::MachineLearning::Adapter::EdgeShapes& outputShapes,
+        const EdgeShapes& outputShapes,
         IWinmlExecutionProvider* winmlProvider,
         IExecutionProvider* provider,
         IUnknown* persistentResourceAllocatorUnknown,

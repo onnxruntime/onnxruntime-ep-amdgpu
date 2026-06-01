@@ -375,4 +375,5 @@ void TensorDesc::EnsureStridesExist() noexcept
     GetDescendingPackedStrides({m_sizes, m_bufferTensorDesc.DimensionCount}, {m_strides, m_bufferTensorDesc.DimensionCount});
     m_bufferTensorDesc.Strides = m_strides;
 }
+
 }  // namespace dml_ep

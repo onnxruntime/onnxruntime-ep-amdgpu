@@ -18,4 +18,5 @@ namespace dml_ep {
         std::unordered_map<std::string, GraphNodeProperties>&& partitionNodePropsMap,
         std::vector<ONNX_NAMESPACE::TensorProto>&& ownedInitializers
     );
+
 }  // namespace dml_ep

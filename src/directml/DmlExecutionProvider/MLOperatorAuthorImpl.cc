@@ -18,8 +18,7 @@
 
 using namespace Microsoft::WRL;
 
-namespace Windows::AI::MachineLearning::Adapter
-{
+namespace dml_ep {
     // Helper functions to handle both TypeProto* and OrtTypeInfo* polymorphically
     namespace {
         // TypeProto* overload
@@ -2905,7 +2904,7 @@ namespace Windows::AI::MachineLearning::Adapter
         EdgeShapes& outputShapes) const
     {
         // call the non member function (below)
-        Windows::AI::MachineLearning::Adapter::InferAndVerifyOutputSizes(
+        PerformInferAndVerifyOutputSizes(
             Node(),
             m_defaultAttributes,
             m_shapeInferrer.Get(),
@@ -2916,7 +2915,7 @@ namespace Windows::AI::MachineLearning::Adapter
         );
     }
 
-    void InferAndVerifyOutputSizes(
+    void PerformInferAndVerifyOutputSizes(
         const onnxruntime::Node& node,
         const AttributeMap* defaultAttributes,
         IMLOperatorShapeInferrer* shapeInferrer,

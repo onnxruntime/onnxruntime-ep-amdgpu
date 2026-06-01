@@ -59,7 +59,7 @@ namespace dml_ep {
     class ExecutionProvider;
 
     class PluginDmlExecutionProviderImpl 
-        : public WRL::Base<IExecutionProvider, Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider>
+        : public WRL::Base<IExecutionProvider, IWinmlExecutionProvider>
         , public ApiPtrs
     {
     public:
@@ -204,7 +204,7 @@ namespace dml_ep {
         std::shared_ptr<OrtAllocator> GetGpuAllocator();
         std::shared_ptr<OrtAllocator> GetCpuInputAllocator();
 
-        std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap>
+        std::shared_ptr<const InternalRegistrationInfoMap>
         GetInternalRegistrationInfoMap() const;
 
         // Get the allocation object (IUnknown*) from a data pointer
@@ -263,7 +263,7 @@ namespace dml_ep {
         std::shared_ptr<DmlBucketizedBufferAllocator> m_allocator;
         std::shared_ptr<CpuAllocator> m_cpuInputAllocator;
         std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;
-        std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap> m_internalRegInfoMap;
+        std::shared_ptr<const InternalRegistrationInfoMap> m_internalRegInfoMap;
         mutable uint64_t m_partitionKernelPrefixVal = 0;
         bool m_closed = false;
         mutable std::chrono::time_point<std::chrono::steady_clock> m_lastUploadFlushTime;

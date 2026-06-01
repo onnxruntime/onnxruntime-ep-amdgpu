@@ -463,7 +463,7 @@ AbiSafeKernelContext::AbiSafeKernelContext(
     const std::vector<std::vector<uint32_t>>* inferred_output_shapes,
     IMLOperatorShapeInferrer* shape_inferrer,
     const std::vector<uint32_t>* required_constant_cpu_inputs,
-    const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes,
+    const AttributeMap* default_attributes,
     const OrtKernelInfo* kernel_info)
     : kernel_context_(kernel_context)
     , ort_api_(ort_api)
@@ -1133,7 +1133,7 @@ HRESULT AbiSafeKernelContext::GetSequenceOutputTensor(uint32_t outputIndex, uint
 AbiSafeShapeInferenceContext::AbiSafeShapeInferenceContext(
     OrtKernelContext* kernel_context,
     const OrtApi* ort_api,
-    const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes,
+    const AttributeMap* default_attributes,
     const PluginDmlExecutionProviderImpl* execution_provider,
     const OrtKernelInfo* kernel_info)
     : kernel_context_(kernel_context)
@@ -1865,7 +1865,7 @@ void PreFetchedTensorAttrWrapper::GetDataInterface(IUnknown** dataInterface) noe
 AbiSafeKernelCreationContext::AbiSafeKernelCreationContext(
     const OrtKernelInfo* kernel_info,
     const OrtApi* ort_api,
-    const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes,
+    const AttributeMap* default_attributes,
     const std::vector<uint32_t>* required_constant_cpu_inputs,
     const PluginDmlExecutionProviderImpl* execution_provider,
     std::unordered_map<uint32_t, Microsoft::WRL::ComPtr<IMLOperatorTensor>>&& constant_tensors,
@@ -1874,7 +1874,7 @@ AbiSafeKernelCreationContext::AbiSafeKernelCreationContext(
     bool is_internal_operator,
     bool requires_input_shapes_at_creation,
     std::unordered_map<std::string, PreFetchedTensorAttr> tensor_attribute_cache,
-    const Windows::AI::MachineLearning::Adapter::EdgeShapes* input_shapes_override)
+    const EdgeShapes* input_shapes_override)
     : kernel_info_(kernel_info)
     , ort_api_(ort_api)
     , default_attributes_(default_attributes)
@@ -1894,7 +1894,7 @@ AbiSafeKernelCreationContext::AbiSafeKernelCreationContext(
     // causes repeated GPU resource state invalidations, producing corrupted output.
     if (execution_provider_) {
         auto* provider = const_cast<PluginDmlExecutionProviderImpl*>(execution_provider_);
-        Microsoft::WRL::ComPtr<Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider> winml_provider;
+        Microsoft::WRL::ComPtr<IWinmlExecutionProvider> winml_provider;
         if (SUCCEEDED(provider->QueryInterface(IID_PPV_ARGS(&winml_provider)))) {
             winml_provider->GetABIExecutionInterfaceAndInvalidateState(
                 is_internal_operator_, abi_execution_object_.ReleaseAndGetAddressOf());
@@ -2827,7 +2827,7 @@ HRESULT AbiSafeKernelCreationContext::GetExecutionProvider(IUnknown** executionP
     // PluginDmlExecutionProviderImpl implements IWinmlExecutionProvider
     // Query for it and return
     return const_cast<PluginDmlExecutionProviderImpl*>(execution_provider_)->QueryInterface(
-        __uuidof(Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider),
+        __uuidof(IWinmlExecutionProvider),
         reinterpret_cast<void**>(executionProvider)
     );
 }
@@ -3234,7 +3234,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
         DML_PERF_LOG("[ABI_SAFE] lazy-init triggered: op=", kernel->operator_name,
             "  ctx_input_count=", lazy_input_count, "\n");
 
-            Windows::AI::MachineLearning::Adapter::EdgeShapes runtime_input_shapes(lazy_input_count);
+            EdgeShapes runtime_input_shapes(lazy_input_count);
             for (size_t i = 0; i < lazy_input_count; ++i) {
                 const OrtValue* input_value = nullptr;
                 kernel->ort_api->KernelContext_GetInput(context, i, &input_value);
@@ -3420,7 +3420,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
 
             size_t shape_input_count = 0;
             kernel->ort_api->KernelContext_GetInputCount(context, &shape_input_count);
-            Windows::AI::MachineLearning::Adapter::EdgeShapes current_shapes(shape_input_count);
+            EdgeShapes current_shapes(shape_input_count);
             for (size_t i = 0; i < shape_input_count; ++i) {
                 const OrtValue* input_value = nullptr;
                 kernel->ort_api->KernelContext_GetInput(context, i, &input_value);

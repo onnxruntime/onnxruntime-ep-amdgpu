@@ -14,9 +14,7 @@ namespace WRL
         >;
 }
 
-namespace Windows::AI::MachineLearning::Adapter
-{
-
+namespace dml_ep {
 
 class AbiCustomRegistry : public WRL::Base<IMLOperatorRegistry, IMLOperatorRegistryPrivate>
 {
@@ -109,4 +107,4 @@ class AbiCustomRegistry : public WRL::Base<IMLOperatorRegistry, IMLOperatorRegis
 
 };
 
-}    // namespace Windows::AI::MachineLearning::Adapter
+}  //  namespace dml_ep

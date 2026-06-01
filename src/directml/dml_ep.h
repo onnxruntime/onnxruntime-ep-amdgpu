@@ -89,7 +89,7 @@ private:
         // TRY ABI-SAFE PATH FIRST
         IMLOperatorKernelFactory* kernel_factory = nullptr;
         IMLOperatorShapeInferrer* shape_inferrer = nullptr;
-        const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes = nullptr;
+        const AttributeMap* default_attributes = nullptr;
         std::vector<uint32_t> required_constant_cpu_inputs;
         bool requires_input_shapes_at_creation = false;
         bool requires_output_shapes_at_creation = false;
@@ -214,7 +214,7 @@ private:
 
     bool DoesNodeContainSupportedDataTypes(
         const OrtNode* node,
-        const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfo* regInfo,
+        const InternalRegistrationInfo* regInfo,
         uint32_t supportedDeviceDataTypeMask, // Each bit corresponds to each DML_TENSOR_DATA_TYPE.
         bool native16BitShaderOpsSupported);
 
@@ -241,7 +241,7 @@ private:
     std::unordered_map<int, std::vector<std::unique_ptr<DmlReusedCommandListState>>> m_capturedGraphs;
     std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;
     OrtKernelRegistry* kernel_registry_;
-    std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap> m_internalRegInfoMap;
+    std::shared_ptr<const InternalRegistrationInfoMap> m_internalRegInfoMap;
 
     KernelCreateFuncState m_kernelCreateFuncStateTemplate;
     std::vector<std::unique_ptr<KernelCreateFuncState>> m_kernelCreateFuncStates;

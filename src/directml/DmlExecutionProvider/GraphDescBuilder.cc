@@ -5,7 +5,6 @@
 #include "DmlExecutionProvider/GraphDescBuilder.h"
 #include <stack>
 
-using namespace Windows::AI::MachineLearning::Adapter;
 
 namespace dml_ep::GraphDescBuilder
 {
@@ -330,7 +329,7 @@ namespace dml_ep::GraphDescBuilder
                 return tensor;
             };
 
-            Windows::AI::MachineLearning::Adapter::EdgeShapes inputShapesOverrides(node.InputDefs().size());
+            EdgeShapes inputShapesOverrides(node.InputDefs().size());
 
             // Override the input shapes with shapes that were previously inferred
             for (size_t inputIndex = 0; inputIndex < node.InputDefs().size(); ++inputIndex)
@@ -353,7 +352,7 @@ namespace dml_ep::GraphDescBuilder
                 }
             }
 
-            Windows::AI::MachineLearning::Adapter::EdgeShapes outputShapes;
+            EdgeShapes outputShapes;
             DmlGraphNodeCreateInfo operatorDmlGraphCreateInfo;
             graphNodeProps.internalRegInfo->graphNodeFactoryRegistration->factory(
                 node,
@@ -556,7 +555,7 @@ namespace dml_ep::GraphDescBuilder
             }
         }
 
-        Windows::AI::MachineLearning::Adapter::EdgeShapes graphOutputShapes(subgraphOutputs.size());
+        EdgeShapes graphOutputShapes(subgraphOutputs.size());
 
         // Add graph output nodes, which might be in a different order from the encapsulating node
         for (size_t outputIndex = 0; outputIndex < subgraphOutputs.size(); ++outputIndex)

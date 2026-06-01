@@ -18,7 +18,6 @@
 
 //#define PRINT_PARTITON_INFO
 
-using namespace Windows::AI::MachineLearning::Adapter;
 
 namespace dml_ep {
 
@@ -561,4 +560,5 @@ namespace dml_ep {
 
         return partitions;
     }
+
 }  // namespace dml_ep

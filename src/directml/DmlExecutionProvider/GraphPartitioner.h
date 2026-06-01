@@ -45,7 +45,7 @@ namespace dml_ep {
     std::vector<std::unique_ptr<GraphPartition>>
     BuildPartitions(
         const onnxruntime::GraphViewer& graph,
-        const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap& internalRegInfoMap,
+        const InternalRegistrationInfoMap& internalRegInfoMap,
         const onnxruntime::IExecutionProvider::IKernelLookup& kernel_lookup,
         uint32_t supportedDeviceDataTypeMask, // Each bit corresponds to each DML_TENSOR_DATA_TYPE.
         std::unordered_map<const onnxruntime::Node*, GraphNodeProperties>& graphNodePropertyMap,
@@ -54,4 +54,5 @@ namespace dml_ep {
         gsl::span<const onnxruntime::NodeIndex> additionalSplittingNodes,
         const std::unordered_map<std::string, const onnxruntime::NodeArg*>& implicitInputs,
         bool allowDmlGraphDynamicShapes);
+
 }  // namespace dml_ep

@@ -158,4 +158,5 @@ namespace dml_ep {
 
         m_readbackHeap->Unmap(0, nullptr);
     }
+
 }  // namespace dml_ep

@@ -26,8 +26,7 @@ namespace WRL
         >;
 }
 
-namespace Windows::AI::MachineLearning::Adapter
-{
+namespace dml_ep {
 
 using namespace Microsoft::WRL;
 
@@ -685,7 +684,7 @@ class MLKernelInferenceContext final : public OpNodeInfoWrapper<
     EdgeShapes& m_inferredOutputShapes;
 };
 
-void InferAndVerifyOutputSizes(
+void PerformInferAndVerifyOutputSizes(
     const onnxruntime::Node& node,
     const AttributeMap* defaultAttributes,
     IMLOperatorShapeInferrer* shapeInferrer,
@@ -725,4 +724,4 @@ bool TryGetStaticOutputShapes(const onnxruntime::Node& node, EdgeShapes& outputS
 bool ContainsEmptyDimensions(const EdgeShapes& shapes, gsl::span<const uint32_t> ignoredShapeIndices = gsl::span<const uint32_t>());
 
 std::tuple<std::unique_ptr<std::byte[]>, size_t> UnpackTensor(const onnx::TensorProto& initializer, const std::filesystem::path& modelPath);
-}    // namespace Windows::AI::MachineLearning::Adapter
+}  // namespace dml_ep

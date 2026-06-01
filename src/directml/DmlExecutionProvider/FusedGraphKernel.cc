@@ -7,7 +7,6 @@
 #include "FusedGraphKernel.h"
 #include "DmlGraphFusionHelper.h"
 
-using namespace Windows::AI::MachineLearning::Adapter;
 
 namespace dml_ep {
 
@@ -19,7 +18,7 @@ namespace dml_ep {
         FusedGraphKernel(
             const onnxruntime::OpKernelInfo& kernelInfo,
             Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiledExecutionPlanOperator,
-            Windows::AI::MachineLearning::Adapter::EdgeShapes& outputShapes,
+            EdgeShapes& outputShapes,
             bool reuseCommandList,
             std::vector<ComPtr<ID3D12Resource>>& nonOwnedGraphInputsFromInitializers,
             std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& initializeResourceRefs,
@@ -258,7 +257,7 @@ namespace dml_ep {
         const void* m_executionHandle = nullptr;
         Microsoft::WRL::ComPtr<IWinmlExecutionProvider> m_winmlProvider;
         Microsoft::WRL::ComPtr<IExecutionProvider> m_provider;
-        Windows::AI::MachineLearning::Adapter::EdgeShapes& m_outputShapes;
+        EdgeShapes& m_outputShapes;
 
         mutable std::deque<std::unique_ptr<DmlReusedCommandListState>> m_reusedCommandLists;
 
@@ -273,7 +272,7 @@ namespace dml_ep {
     onnxruntime::OpKernel* CreateFusedGraphKernel(
         const onnxruntime::OpKernelInfo& info,
         Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiledExecutionPlanOperator,
-        Windows::AI::MachineLearning::Adapter::EdgeShapes& outputShapes,
+        EdgeShapes& outputShapes,
         bool reuseCommandList,
         std::vector<ComPtr<ID3D12Resource>>& nonOwnedGraphInputsFromInitializers,
         std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& initializeResourceRefs,
@@ -294,4 +293,5 @@ namespace dml_ep {
             std::move(inputsUsed)
         );
     }
+
 }  // namespace dml_ep
