@@ -823,6 +823,9 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
         }
 
         bool requiredConstantCpuInputsAvailable = true;
+        DML_PERF_LOG("[ABI_UNSAFE] ctor: op=", kerneInfo.node().OpType(),
+            "  since_ver=", kerneInfo.node().SinceVersion(),
+            "  required_const_count=", requiredConstantCpuInputs.size(), "\n");
         for (uint32_t index : requiredConstantCpuInputs)
         {
             int isConstant = 0;
@@ -831,6 +834,8 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
                 m_ortKernelInfo, index, &isConstant, &constantValue);
             if (checkStatus) m_ortApi->ReleaseStatus(checkStatus);
             bool available = (isConstant && constantValue != nullptr);
+            DML_PERF_LOG("[ABI_UNSAFE] ctor const[", index, "]: op=", kerneInfo.node().OpType(),
+                "  ki_isconst=", isConstant, "  ki_val=", (void*)constantValue, "  available=", available, "\n");
             if (!available)
             {
                 requiredConstantCpuInputsAvailable = false;
@@ -1000,6 +1005,8 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
                 const OrtValue* constantValue = nullptr;
                 OrtStatus* getStatus = m_ortApi->KernelInfoGetConstantInput_tensor(
                     m_ortKernelInfo, inputIndex, &isConstant, &constantValue);
+                DML_PERF_LOG("[ABI_UNSAFE] lazy const[", inputIndex, "]: op=", Node().OpType(),
+                    "  ki_isconst=", isConstant, "  ki_val=", (void*)constantValue, "  ki_status=", (void*)getStatus, "\n");
                 if (getStatus == nullptr && isConstant && constantValue != nullptr)
                 {
                     auto wrappedTensor = Microsoft::WRL::Make<Dml::AbiSafeTensor>(
@@ -1012,6 +1019,8 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
                     if (getStatus) m_ortApi->ReleaseStatus(getStatus);
                     // Fall back to runtime input tensor (mirrors old plugin's constantInputGetter using context->Input<onnxruntime::Tensor>())
                     const onnxruntime::Tensor* tensor = context->Input<onnxruntime::Tensor>(inputIndex);
+                    DML_PERF_LOG("[ABI_UNSAFE] lazy const[", inputIndex, "] ki-miss -> ctx fallback: op=",
+                        Node().OpType(), "  ctx_tensor=", (void*)tensor, "\n");
                     if (tensor)
                     {
                         auto internalOpCapture = m_internalOperator;
@@ -1069,6 +1078,8 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
 
             if (RequiresLazyInitialization())
             {
+                DML_PERF_LOG("[ABI_UNSAFE] lazy-init triggered: op=", Node().OpType(),
+                    "  ctx_input_count=", context->InputCount(), "\n");
                 m_inputShapesOfKernelInference = GetInputShapes(context);
 
                 m_constantInputTensorContentsOfKernel.resize(context->InputCount());
