@@ -5,7 +5,7 @@
 #include "DmlExecutionProvider/CommandQueue.h"
 #include "dml_bucketized_buffer_allocator.h"
 
-using namespace Dml;
+namespace dml_ep {
 
 PluginDmlCommandRecorder::PluginDmlCommandRecorder(
     ID3D12Device* d3dDevice,
@@ -165,11 +165,11 @@ void PluginDmlCommandRecorder::ExecuteOperator(
     m_operationsRecordedInCurrentCommandList = true;
 
     // Barrier all outputs.
-    #pragma warning(push)
-    #pragma warning(disable: 6387)
+#pragma warning(push)
+#pragma warning(disable: 6387)
     auto uav = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
     m_currentCommandList->ResourceBarrier(1, &uav);
-    #pragma warning(pop)
+#pragma warning(pop)
 }
 
 void PluginDmlCommandRecorder::CopyBufferRegion(
@@ -237,11 +237,11 @@ void PluginDmlCommandRecorder::FillBufferWithPattern(
     m_operationsRecordedInCurrentCommandList = true;
 
     // Barrier all outputs.
-    #pragma warning(push)
-    #pragma warning(disable: 6387)
+#pragma warning(push)
+#pragma warning(disable: 6387)
     auto uav = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
     m_currentCommandList->ResourceBarrier(1, &uav);
-    #pragma warning(pop)
+#pragma warning(pop)
 }
 
 void PluginDmlCommandRecorder::ExecuteCommandList(
@@ -302,7 +302,7 @@ void PluginDmlCommandRecorder::ResourceBarrier(gsl::span<const D3D12_RESOURCE_BA
 
 void PluginDmlCommandRecorder::AddUAVBarrier()
 {
-    #pragma warning(suppress: 6387)
+#pragma warning(suppress: 6387)
     auto barrier = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
     m_currentCommandList->ResourceBarrier(1, &barrier);
     m_operationsRecordedInCurrentCommandList = true;
@@ -381,3 +381,4 @@ void PluginDmlCommandRecorder::SetDescriptorHeap(ID3D12DescriptorHeap* descripto
         m_currentCommandList->SetDescriptorHeaps(ARRAYSIZE(descriptorHeaps), descriptorHeaps);
     }
 }
+}  // namespace dml_ep

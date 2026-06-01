@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorRegionOfInterestAlign : public DmlOperator, public RoiAlignHelper
 {
@@ -70,4 +70,4 @@ public:
 DML_OP_DEFINE_CREATION_FUNCTION(RoiAlign10, VersionedKernel<DmlOperatorRegionOfInterestAlign, 10>);
 DML_OP_DEFINE_CREATION_FUNCTION(RoiAlign16, VersionedKernel<DmlOperatorRegionOfInterestAlign, 16>);
 
-} // namespace Dml
+}  // namespace dml_ep

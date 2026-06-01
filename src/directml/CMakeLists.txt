@@ -319,7 +319,6 @@ add_library(directml-ep MODULE
     DmlExecutionProvider/Operators/DmlOperatorTranspose.cpp
     DmlExecutionProvider/Operators/DmlOperatorTrilu.cpp
     DmlExecutionProvider/Operators/DmlOperatorValueScale2D.cpp
-    DmlExecutionProvider/Operators/OperatorRegistration.cpp
     DmlExecutionProvider/Operators/OperatorUtility.cpp
 
     #---- Core framework sources ----

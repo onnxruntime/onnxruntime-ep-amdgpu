@@ -35,7 +35,7 @@ namespace Windows::AI::MachineLearning::Adapter {
 // Include dml_execution_provider.h or IWinmlExecutionProvider.h before this header.
 // (dml_abi_kernel.cpp does this explicitly; other TUs reach it via precomp.h or dml_ep.h.)
 
-namespace Dml {
+namespace dml_ep {
 
 // Forward declarations
 class PluginDmlExecutionProviderImpl;
@@ -551,11 +551,11 @@ void DmlPerfWriteLogImpl(std::string_view msg) noexcept;
 
 inline std::string Hex(uint32_t v) { return fmt::format("0x{:08X}", v); }
 
-#define DML_PERF_LOG(...) Dml::DmlPerfWriteLogImpl(MakeString(__VA_ARGS__))
+#define DML_PERF_LOG(...) DmlPerfWriteLogImpl(MakeString(__VA_ARGS__))
 
 void PrintKernelPerfCounters(const DmlAbiKernel& kernel) noexcept;
 #else
 #define DML_PERF_LOG(...)
 #endif
 
-} // namespace Dml
+}  // namespace dml_ep

@@ -7,8 +7,8 @@
 #include <directx/d3dx12.h>
 #include <optional>
 
-namespace Dml
-{
+namespace dml_ep {
+
     // A contiguous range of descriptors.
     struct DescriptorRange
     {
@@ -86,4 +86,5 @@ namespace Dml
 
         void CreateHeap(uint32_t numDescriptors, D3D12_DESCRIPTOR_HEAP_FLAGS heapFlags);
     };
-}
+
+}  // namespace dml_ep

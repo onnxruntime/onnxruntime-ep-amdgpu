@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 // Copies first input and ignores others.  Used for operators which perform reshaping.
 class DmlOperatorCopy : public DmlOperator
 {
@@ -62,4 +62,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(Copy, DmlOperatorCopy);
 
-} // namespace Dml
+}  // namespace dml_ep

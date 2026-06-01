@@ -10,7 +10,7 @@ PluginAbiCustomRegistry::PluginAbiCustomRegistry() :
     m_kernelRegistry(std::make_shared<onnxruntime::CustomRegistry>()),
     m_internalRegInfoMap(std::make_shared<InternalRegistrationInfoMap>()) {}
 
-PluginAbiCustomRegistry::PluginAbiCustomRegistry(const Dml::PluginDmlExecutionProviderImpl* executionProvider) :
+PluginAbiCustomRegistry::PluginAbiCustomRegistry(const dml_ep::PluginDmlExecutionProviderImpl* executionProvider) :
     m_kernelRegistry(std::make_shared<onnxruntime::CustomRegistry>()),
     m_internalRegInfoMap(std::make_shared<InternalRegistrationInfoMap>()),
     m_dmlPluginExecutionProvider(executionProvider) {}
@@ -378,7 +378,7 @@ HRESULT STDMETHODCALLTYPE PluginAbiCustomRegistry::RegisterOperatorKernel(
         ComPtr<IMLOperatorShapeInferrer> shapeInferrerCapture = shapeInferrer;
         AttributeMap defaultAttributesCapture = GetDefaultAttributes(opKernel);
 
-        const Dml::PluginDmlExecutionProviderImpl* dmlProviderCapture = m_dmlPluginExecutionProvider;
+        const dml_ep::PluginDmlExecutionProviderImpl* dmlProviderCapture = m_dmlPluginExecutionProvider;
 
         auto lotusKernelCreateFn =
             [kernelFactoryCapture, requiresInputShapesAtCreation, requiresOutputShapesAtCreation, isInternalOperator,

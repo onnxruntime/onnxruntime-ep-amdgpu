@@ -47,8 +47,8 @@ WordEmbeddings    InputIds    SegmentEmbeddings    SegmentIds    PositionEmbeddi
  https://github.com/microsoft/onnxruntime/blob/main/docs/ContribOperators.md#com.microsoft.EmbedLayerNormalization
  */
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorEmbedLayerNormalization : public DmlOperator
 {
@@ -492,4 +492,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(EmbedLayerNormalization, DmlOperatorEmbedLayerNormalization);
 
-} // namespace Dml
+}  // namespace dml_ep

@@ -18,7 +18,7 @@ void convTransposeShapeInference(InferenceContext& ctx);
 }  // namespace ONNX_NAMESPACE
 
 namespace onnxruntime {
-namespace dml {
+namespace dml_ep {
 using ONNX_NAMESPACE::AttributeProto;
 using ONNX_NAMESPACE::OpSchema;
 using ONNX_NAMESPACE::OPTIONAL_VALUE;
@@ -338,5 +338,5 @@ void RegisterDmlSchemas() {
             *ctx.getOutputType(0)->mutable_tensor_type()->mutable_shape());
       });
 }
-}  // namespace dml
+}  // namespace dml_ep
 }  // namespace onnxruntime

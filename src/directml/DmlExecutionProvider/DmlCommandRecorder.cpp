@@ -6,7 +6,7 @@
 #include "DmlExecutionProvider/CommandQueue.h"
 #include "DmlExecutionProvider/BucketizedBufferAllocator.h"
 
-using namespace Dml;
+namespace dml_ep {
 
 DmlCommandRecorder::DmlCommandRecorder(
     ID3D12Device* d3dDevice,
@@ -382,3 +382,5 @@ void DmlCommandRecorder::SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap)
         m_currentCommandList->SetDescriptorHeaps(ARRAYSIZE(descriptorHeaps), descriptorHeaps);
     }
 }
+
+}  // namespace dml_ep

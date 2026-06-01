@@ -13,7 +13,7 @@ auto unmove_ptr(T&& t) {
     return &static_cast<T&>(t);
 }
 
-namespace Dml {
+namespace dml_ep {
 using namespace OperatorHelper;
 
 static const int MaximumDimensionCount = DML_TENSOR_DIMENSION_COUNT_MAX1;
@@ -71,4 +71,4 @@ void CastToClampedScalarUnion(DML_TENSOR_DATA_TYPE dataType, T value, DML_SCALAR
         assert(false);
     }
 }
-} // namespace Dml
+}  // namespace dml_ep

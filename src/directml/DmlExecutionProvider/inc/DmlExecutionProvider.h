@@ -26,8 +26,8 @@ enum class AllocatorRoundingMode
     Enabled = 1,
 };
 
-namespace Dml
-{
+namespace dml_ep {
+
     std::unique_ptr<onnxruntime::IExecutionProvider> CreateExecutionProvider(
         IDMLDevice* dmlDevice,
         ExecutionContext* execution_context,
@@ -53,4 +53,4 @@ namespace Dml
 
     void getDMLDevice(onnxruntime::IExecutionProvider* provider, _COM_Outptr_ IDMLDevice** dmlDevice);
 
-} // namespace Dml
+}  // namespace dml_ep

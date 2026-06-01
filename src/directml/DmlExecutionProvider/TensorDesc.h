@@ -3,8 +3,8 @@
 
 #pragma once
 
-namespace Dml
-{
+namespace dml_ep {
+
     class TensorDesc
     {
     public:

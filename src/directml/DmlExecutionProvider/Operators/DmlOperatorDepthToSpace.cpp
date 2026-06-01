@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorDepthToSpace : public DmlOperator, public DepthToSpaceHelper
 {
@@ -21,7 +21,7 @@ public:
         ML_CHECK_VALID_ARGUMENT(outputDescs.size() == 1);
 
         std::string mode = kernelCreationContext.GetOptionalAttribute<std::string>(AttrName::Mode, "DCR");
-        DML_DEPTH_SPACE_ORDER depthSpaceOrder = Dml::MapStringToDepthSpaceMode(mode);
+        DML_DEPTH_SPACE_ORDER depthSpaceOrder = MapStringToDepthSpaceMode(mode);
 
         DML_DEPTH_TO_SPACE1_OPERATOR_DESC operatorDesc = {};
         operatorDesc.InputTensor = inputDescs.data();
@@ -36,4 +36,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(DepthToSpace, DmlOperatorDepthToSpace);
 
-} // namespace Dml
+}  // namespace dml_ep

@@ -10,8 +10,8 @@ interface IDMLCompiledOperator;
 struct DML_BUFFER_BINDING;
 struct DML_BINDING_DESC;
 
-namespace Dml
-{
+namespace dml_ep {
+
     struct Binding
     {
         // Non-null if required at the stage where it is used, i.e. Initialization
@@ -78,4 +78,4 @@ namespace Dml
         STDMETHOD_(bool, CustomHeapsSupported)() const noexcept = 0;
         STDMETHOD_(bool, MetacommandsEnabled)() const noexcept = 0;
     };
-} // namespace Dml
+}  // namespace dml_ep

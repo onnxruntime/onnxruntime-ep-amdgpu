@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorLayerNormalization : public DmlOperator
 {
@@ -274,4 +274,4 @@ DML_OP_DEFINE_CREATION_FUNCTION(LayerNormalization, LayerNormalizationTemplate<f
 DML_OP_DEFINE_CREATION_FUNCTION(LayerNormalization17, LayerNormalizationTemplate<false>);
 DML_OP_DEFINE_CREATION_FUNCTION(SimplifiedLayerNormalization, LayerNormalizationTemplate<true>);
 
-} // namespace Dml
+}  // namespace dml_ep

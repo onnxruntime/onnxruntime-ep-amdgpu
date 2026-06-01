@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorTranspose : public DmlOperator, public TransposeHelper
 {
@@ -25,7 +25,7 @@ public:
         // Calculate strides from original shape.
         ML_CHECK_VALID_ARGUMENT(!originalSizes.empty());
         std::vector<uint32_t> inputStrides(originalSizes.size());
-        Dml::GetDescendingPackedStrides(originalSizes, /*out*/ inputStrides);
+        GetDescendingPackedStrides(originalSizes, /*out*/ inputStrides);
 
         std::vector<uint32_t> sizes(inputStrides.size());
         std::vector<uint32_t> strides(inputStrides.size());
@@ -57,4 +57,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(Transpose,  DmlOperatorTranspose);
 
-} // namespace Dml
+}  // namespace dml_ep

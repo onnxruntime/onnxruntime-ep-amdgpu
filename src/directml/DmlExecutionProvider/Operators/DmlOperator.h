@@ -5,8 +5,8 @@
 
 #include "OperatorUtility.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     class DmlOperator
     {
     public:
@@ -172,4 +172,4 @@ namespace Dml
         static const uint32_t zeroArray[8];
     };
 
-} // namespace Dml
+}  // namespace dml_ep

@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorCast : public DmlOperator
 {
@@ -99,4 +99,4 @@ DML_OP_DEFINE_CREATION_FUNCTION(CastLike15, DmlOperatorCast);
 DML_OP_DEFINE_CREATION_FUNCTION(CastLike19, DmlOperatorCast);
 DML_OP_DEFINE_CREATION_FUNCTION(CastLike21, DmlOperatorCast);
 
-} // namespace Dml
+}  // namespace dml_ep

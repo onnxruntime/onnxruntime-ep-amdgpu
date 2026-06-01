@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 constexpr NameAndIndex coordinateTransformationModes[] =
 {
@@ -261,7 +261,7 @@ public:
         }
 
         std::string mode = kernelCreationContext.GetOptionalAttribute<std::string>(AttrName::Mode, "NEAREST");
-        DML_INTERPOLATION_MODE interpolationMode = Dml::MapStringToInteropolationMode(mode);
+        DML_INTERPOLATION_MODE interpolationMode = MapStringToInteropolationMode(mode);
 
         // Map ONNX to DML's mode using offsets and rounding direction.
         // These offsets are in addition to the coordinate transform offsets.
@@ -365,4 +365,4 @@ DML_OP_DEFINE_CREATION_FUNCTION(Upsample7, VersionedKernel<DmlOperatorResize, 7>
 DML_OP_DEFINE_CREATION_FUNCTION(Upsample9, VersionedKernel<DmlOperatorResize, 9>);
 DML_OP_DEFINE_CREATION_FUNCTION(Upsample10, VersionedKernel<DmlOperatorResize, 10>);
 
-} // namespace Dml
+}  // namespace dml_ep

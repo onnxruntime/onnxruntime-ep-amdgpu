@@ -11,7 +11,7 @@
 #include <memory>
 #include <unordered_map>
 
-namespace Dml {
+namespace dml_ep {
 
 // Forward declarations
 class OrtNodeAdapter;
@@ -261,4 +261,4 @@ private:
     void InitializeFromCApi(const OrtNode* node, const OrtApi& ort_api);
 };
 
-} // namespace Dml
+}  // namespace dml_ep

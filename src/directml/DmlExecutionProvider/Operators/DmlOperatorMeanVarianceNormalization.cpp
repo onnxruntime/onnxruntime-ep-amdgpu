@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorMeanVarNormalization : public DmlOperator
 {
@@ -58,4 +58,4 @@ public:
 DML_OP_DEFINE_CREATION_FUNCTION(MeanVarianceNormalization, DmlOperatorMeanVarNormalization);
 DML_OP_DEFINE_CREATION_FUNCTION(DmlFusedMeanVarianceNormalization, DmlOperatorMeanVarNormalization);
 
-} // namespace Dml
+}  // namespace dml_ep

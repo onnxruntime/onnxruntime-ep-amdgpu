@@ -672,7 +672,7 @@ public:
             params.BluesteinZChirpParams.AFFT.Sizes = GetReshapedDimensions(inputDims, m_axis);
             params.BluesteinZChirpParams.AFFT.Sizes[1] = M;
             params.BluesteinZChirpParams.AFFT.Sizes.back() = 2;
-            Dml::GetDescendingPackedStrides(params.BluesteinZChirpParams.AFFT.Sizes, params.BluesteinZChirpParams.AFFT.Strides);
+            dml_ep::GetDescendingPackedStrides(params.BluesteinZChirpParams.AFFT.Sizes, params.BluesteinZChirpParams.AFFT.Strides);
 
             params.BluesteinZChirpParams.B.Sizes = std::array<uint32_t, 4> { 1, 1, M, 2 };
             params.BluesteinZChirpParams.B.Strides = std::array<uint32_t, 4> { M * 2, M * 2, 2, 1 };

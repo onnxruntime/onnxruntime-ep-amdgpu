@@ -6,8 +6,8 @@
 #include "core/framework/op_kernel.h"
 #include "core/optimizer/graph_transformer.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     class PluginDmlExecutionProviderImpl;
 
     // Applies transforms to a Lotus graph. The graph transformer is responsible for setting the execution provider
@@ -29,4 +29,4 @@ namespace Dml
         const PluginDmlExecutionProviderImpl* m_providerImpl = nullptr;
     };
 
-} // namespace Dml
+}  // namespace dml_ep

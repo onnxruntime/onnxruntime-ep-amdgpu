@@ -3,8 +3,8 @@
 
 #include "dml_pooled_upload_heap.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 PluginDmlPooledUploadHeap::PluginDmlPooledUploadHeap(ID3D12Device* device, PluginDmlExecutionContext* executionContext)
         : m_device(device)
         , m_executionContext(executionContext)
@@ -279,4 +279,4 @@ PluginDmlPooledUploadHeap::PluginDmlPooledUploadHeap(ID3D12Device* device, Plugi
 
     #endif // #ifdef _DEBUG
     }
-} // namespace Dml
+}  // namespace dml_ep

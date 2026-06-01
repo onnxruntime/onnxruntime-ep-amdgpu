@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorReduce : public DmlOperator, public ReduceHelperBase
 {
@@ -140,4 +140,4 @@ DML_OP_DEFINE_CREATION_FUNCTION(ReduceMin,       DmlOperatorReduceTemplate<DML_R
 DML_OP_DEFINE_CREATION_FUNCTION(ArgMax,          DmlOperatorReduceTemplate<DML_REDUCE_FUNCTION_ARGMAX>);
 DML_OP_DEFINE_CREATION_FUNCTION(ArgMin,          DmlOperatorReduceTemplate<DML_REDUCE_FUNCTION_ARGMIN>);
 
-} // namespace Dml
+}  // namespace dml_ep

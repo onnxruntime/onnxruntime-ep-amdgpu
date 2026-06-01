@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorSpaceToDepth : public DmlOperator, public SpaceToDepthHelper
 {
@@ -32,4 +32,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(SpaceToDepth, DmlOperatorSpaceToDepth);
 
-} // namespace Dml
+}  // namespace dml_ep

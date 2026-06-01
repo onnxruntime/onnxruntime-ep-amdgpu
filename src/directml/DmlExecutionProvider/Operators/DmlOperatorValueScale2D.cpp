@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 // https://github.com/onnx/onnx/blob/main/docs/Operators.md#experimental-imagescaler
 class DmlOperatorValueScale2d : public DmlOperator
@@ -41,4 +41,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(ImageScaler, DmlOperatorValueScale2d);
 
-} // namespace Dml
+}  // namespace dml_ep

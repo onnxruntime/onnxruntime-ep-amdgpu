@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorActivation : public DmlOperator
 {
@@ -206,4 +206,4 @@ DML_OP_DEFINE_CREATION_FUNCTION(Hardmax13,           DmlOperatorActivationTempla
 DML_OP_DEFINE_CREATION_FUNCTION(Shrink,              DmlOperatorActivationTemplate<DML_OPERATOR_ACTIVATION_SHRINK>);
 DML_OP_DEFINE_CREATION_FUNCTION(Gelu,                DmlOperatorActivationTemplate<DML_OPERATOR_ACTIVATION_GELU>);
 
-} // namespace Dml
+}  // namespace dml_ep

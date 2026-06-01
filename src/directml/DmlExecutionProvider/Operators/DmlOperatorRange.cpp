@@ -4,8 +4,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorRange : public DmlOperator, RangeHelper
 {
@@ -40,4 +40,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(Range, DmlOperatorRange);
 
-} // namespace Dml
+}  // namespace dml_ep

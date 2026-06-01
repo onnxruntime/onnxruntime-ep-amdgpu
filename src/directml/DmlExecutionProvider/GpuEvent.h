@@ -10,8 +10,8 @@
 #include "DmlExecutionProvider/ErrorHandling.h"
 #include "core/common/spin_pause.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     // Represents a fence which will be signaled at some point (usually by the GPU).
     struct GpuEvent
     {
@@ -47,4 +47,4 @@ namespace Dml
         }
     };
 
-} // namespace Dml
+}  // namespace dml_ep

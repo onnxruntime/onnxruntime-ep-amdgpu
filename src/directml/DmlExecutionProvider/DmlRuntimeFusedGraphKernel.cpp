@@ -10,8 +10,8 @@
 
 using namespace Windows::AI::MachineLearning::Adapter;
 
-namespace Dml
-{
+namespace dml_ep {
+
     class DmlRuntimeFusedGraphKernel : public onnxruntime::OpKernel
     {
     public:
@@ -310,7 +310,7 @@ namespace Dml
 
     private:
         ComPtr<IWinmlExecutionProvider> m_winmlProvider;
-        ComPtr<Dml::IExecutionProvider> m_provider;
+        ComPtr<IExecutionProvider> m_provider;
 
         mutable std::optional<DML_BUFFER_BINDING> m_persistentResourceBinding;
         std::shared_ptr<const onnxruntime::IndexedSubGraph> m_indexedSubGraph;
@@ -361,4 +361,4 @@ namespace Dml
             std::move(ownedInitializers)
         );
     }
-} // namespace Dml
+}  // namespace dml_ep

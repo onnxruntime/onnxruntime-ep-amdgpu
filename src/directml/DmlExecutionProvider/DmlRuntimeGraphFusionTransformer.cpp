@@ -15,8 +15,8 @@
 #include "MLOperatorAuthorImpl.h"
 #include "DmlGraphFusionHelper.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     namespace
     {
         struct CompiledPartitionInfo
@@ -162,4 +162,5 @@ namespace Dml
 
         return STATUS_OK;
     }
-}
+
+}  // namespace dml_ep

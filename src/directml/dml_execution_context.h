@@ -19,7 +19,7 @@
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
 using Microsoft::WRL::ComPtr;
 
-namespace Dml {
+namespace dml_ep {
 class CommandQueue;
 class DmlBucketizedBufferAllocator;
 // Asynchronously performs GPU work, and automatically manages command list recording and submission to queues.
@@ -105,4 +105,4 @@ private:
     bool m_keepOpen = false;
 };
 
-} // namespace Dml
+}  // namespace dml_ep

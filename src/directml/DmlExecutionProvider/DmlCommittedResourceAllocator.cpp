@@ -6,8 +6,8 @@
 #include "DmlResourceWrapper.h"
 #include "DmlCommittedResourceWrapper.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     ComPtr<DmlResourceWrapper> DmlCommittedResourceAllocator::Alloc(size_t size)
     {
         ComPtr<ID3D12Resource> resource;
@@ -25,4 +25,5 @@ namespace Dml
         wil::MakeOrThrow<DmlCommittedResourceWrapper>(std::move(resource)).As(&resourceWrapper);
         return resourceWrapper;
     }
-}
+
+}  // namespace dml_ep

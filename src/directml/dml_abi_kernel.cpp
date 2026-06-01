@@ -15,7 +15,7 @@
 #include <fmt/format.h>
 #endif
 
-namespace Dml {
+namespace dml_ep {
 
 using Microsoft::WRL::ComPtr;
 
@@ -3696,4 +3696,4 @@ void ORT_API_CALL DmlAbiKernel_Release(OrtKernelImpl* this_ptr) noexcept {
     }
 }
 
-} // namespace Dml
+}  // namespace dml_ep

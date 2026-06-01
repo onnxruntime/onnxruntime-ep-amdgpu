@@ -4,8 +4,8 @@
 #include "dml_common.h"
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 DML_TENSOR_DATA_TYPE GetDmlDataTypeFromMlDataTypeNoThrow(MLOperatorTensorDataType tensorDataType) noexcept
 {
@@ -179,4 +179,4 @@ void GetDescendingPackedStrides(gsl::span<const uint32_t> sizes, /*out*/ gsl::sp
     }
 }
 
-} // namespace Dml
+}  // namespace dml_ep

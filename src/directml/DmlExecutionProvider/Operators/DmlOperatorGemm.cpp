@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorGemm : public DmlOperator, public GemmHelper
 {
@@ -58,4 +58,4 @@ public:
 DML_OP_DEFINE_CREATION_FUNCTION(Gemm, DmlOperatorGemm);
 DML_OP_DEFINE_CREATION_FUNCTION(DmlFusedGemm, DmlOperatorGemm);
 
-} // namespace Dml
+}  // namespace dml_ep

@@ -5,8 +5,8 @@
 #include "PooledUploadHeap.h"
 #include "ExecutionContext.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     PooledUploadHeap::PooledUploadHeap(ID3D12Device* device, ExecutionContext* executionContext)
         : m_device(device)
         , m_executionContext(executionContext)
@@ -280,4 +280,4 @@ namespace Dml
 
     #endif // #ifdef _DEBUG
     }
-} // namespace Dml
+}  // namespace dml_ep

@@ -47,7 +47,7 @@ using Microsoft::WRL::ComPtr;
 
 class DMLDataTransfer;
 
-namespace Dml {
+namespace dml_ep {
 
 class ExecutionProviderPlugin 
     : public OrtEp
@@ -66,7 +66,7 @@ public:
 
     void ReleaseCompletedReferences();
 
-    std::shared_ptr<Dml::PluginDmlExecutionProviderImpl> GetInternetalExecutionProvider();
+    std::shared_ptr<PluginDmlExecutionProviderImpl> GetInternetalExecutionProvider();
     bool IsGetCapabilityCompleted();
 
     DMLDataTransfer* GetDataTransfer();
@@ -97,7 +97,7 @@ private:
         bool requires_output_shapes_at_creation = false;
         bool is_internal_operator = false;  // For resource state transitions (MemcpyToHost/FromHost)
         std::vector<std::string> tensor_attribute_names;  // Tensor-typed ONNX attribute names (e.g., ConstantOfShape's "value")
-        const Dml::PluginDmlExecutionProviderImpl* dml_execution_provider = nullptr;
+        const PluginDmlExecutionProviderImpl* dml_execution_provider = nullptr;
         ExecutionProviderPlugin* ep_plugin = nullptr;  // For m_graphInitializerMap access during constant resolution
 
         // FALLBACK: ABI-UNSAFE PATH (when ABI-safe fails, e.g., E_UNEXPECTED)
@@ -204,9 +204,9 @@ private:
 
     bool IsCpuAllocator(const OrtMemoryInfo* memory_info);
     bool IsGpuAllocator(const OrtMemoryInfo* memory_info);
-    bool IsCustomOpShader(const Dml::OrtNodeAdapter& adapter);
-    bool IsCpuOnDmlOperator(const Dml::OrtNodeAdapter& adapter);
-    bool IsDmlSequenceOperator(const Dml::OrtNodeAdapter& adapter);
+    bool IsCustomOpShader(const OrtNodeAdapter& adapter);
+    bool IsCpuOnDmlOperator(const OrtNodeAdapter& adapter);
+    bool IsDmlSequenceOperator(const OrtNodeAdapter& adapter);
     bool IsSmallInitializer(const OrtGraph* graph, const OrtValueInfo* valueInfo);
 
     bool IsNodeSupportedByDml(
@@ -270,11 +270,11 @@ private:
     int m_currentGraphAnnotationId = 0;
     std::unordered_set<int> m_graphCapturingDone;
 
-    std::shared_ptr<Dml::PluginDmlExecutionProviderImpl> m_executionProvider;
+    std::shared_ptr<PluginDmlExecutionProviderImpl> m_executionProvider;
     std::unique_ptr<DMLDataTransfer> m_dataTransfer;
     static constexpr std::chrono::milliseconds m_batchFlushInterval = std::chrono::milliseconds(10);
 
     int64_t kSmallInitializerThreshold = 100;
 };
 
-}  // namespace Dml
+}  // namespace dml_ep

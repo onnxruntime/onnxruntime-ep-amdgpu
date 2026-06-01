@@ -5,8 +5,8 @@
 #include "GraphDescBuilder.h"
 #include "DmlGraphFusionTransformer.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     onnxruntime::OpKernel* CreateFusedGraphKernel(
         const onnxruntime::OpKernelInfo& info,
         ComPtr<IDMLCompiledOperator> compiledExecutionPlanOperator,
@@ -18,4 +18,4 @@ namespace Dml
         std::vector<uint8_t>&& isInputsUploadedByDmlEP,
         std::vector<bool>&& inputsUsed
     );
-} // namespace Dml
+}  // namespace dml_ep

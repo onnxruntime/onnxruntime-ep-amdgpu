@@ -130,8 +130,8 @@ inline UINT64 DMLCalcBufferTensorSize(
     return minimumImpliedSizeInBytes;
 }
 
-namespace dml
-{
+namespace dml {
+
     namespace detail
     {
         // Provide non-member size() and data(). Defaults to standard library implementation (if available)
@@ -4519,4 +4519,4 @@ namespace dml
         }
     } // namespace detail
 
-} // namespace dml
+}  // namespace dml

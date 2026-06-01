@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 bool AreAllStridesIdentical(gsl::span<const TensorDesc> tensorDescs)
 {
@@ -553,7 +553,7 @@ public:
             // "axis" attribute even when the attribute doesn't actually exist in the model, which
             // would cause a validation failure here.
             const int32_t signedAxis = gsl::narrow_cast<int32_t>(kernelInfo.GetAttribute<int64_t>(AttrName::Axis));
-            axis = Dml::HandleNegativeAxis(signedAxis, outputShapeDimCount, /*validateAxis*/ false);
+            axis = HandleNegativeAxis(signedAxis, outputShapeDimCount, /*validateAxis*/ false);
         }
 
         // Explicitly reshape each of the inputs after the first input (scale tensor and optional zero point tensor).
@@ -943,4 +943,4 @@ DML_OP_DEFINE_CREATION_FUNCTION(Round,              DmlOperatorElementwiseRound)
 DML_OP_DEFINE_CREATION_FUNCTION(DmlFusedAdd,         DmlOperatorElementwiseBinary<DML_ELEMENT_WISE_ADD1_OPERATOR_DESC>);
 DML_OP_DEFINE_CREATION_FUNCTION(DmlFusedSum,         DmlOperatorElementwiseBinaryLoop<DML_ELEMENT_WISE_ADD1_OPERATOR_DESC>);
 
-} // namespace Dml
+}  // namespace dml_ep

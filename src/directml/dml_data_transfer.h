@@ -17,15 +17,9 @@
 #include "DmlExecutionProvider/DmlCommittedResourceAllocator.h"
 #include <memory>
 
+namespace dml_ep {
 
-namespace Dml
-{
-    class PluginDmlExecutionContext;
-    class PluginDmlPooledUploadHeap;
-    class PluginDmlReadbackHeap;
-    class DmlBucketizedBufferAllocator;
-    class ExecutionProviderPlugin;
-    } // namespace Dml
+class ExecutionProviderPlugin;
 
 class DMLDataTransfer : public OrtDataTransferImpl, public ApiPtrs
 {
@@ -42,15 +36,17 @@ public:
 
     static void ORT_API_CALL ReleaseImpl(OrtDataTransferImpl* this_ptr) noexcept;
 
-    void AttachExecutionProvider(std::shared_ptr<Dml::PluginDmlExecutionProviderImpl> ep);
+    void AttachExecutionProvider(std::shared_ptr<PluginDmlExecutionProviderImpl> ep);
     // Stores a pointer to the factory's m_ep_raw so that CopyTensorsImpl can lazily resolve
     // the EP the first time a copy is requested (factory CreateDataTransfer is called before
     // the EP instance exists).
-    void AttachFactoryEpRef(Dml::ExecutionProviderPlugin** ep_raw_ref);
+    void AttachFactoryEpRef(ExecutionProviderPlugin** ep_raw_ref);
 
 private:
     static bool IsGpuTensor(const onnxruntime::Tensor& tensor);
 
-    std::shared_ptr<Dml::PluginDmlExecutionProviderImpl> m_executionProvider;
-    Dml::ExecutionProviderPlugin** m_ep_raw_ref = nullptr; // non-owning ptr to factory's m_ep_raw
+    std::shared_ptr<PluginDmlExecutionProviderImpl> m_executionProvider;
+    ExecutionProviderPlugin** m_ep_raw_ref = nullptr; // non-owning ptr to factory's m_ep_raw
 };
+
+}  // namespace dml_ep

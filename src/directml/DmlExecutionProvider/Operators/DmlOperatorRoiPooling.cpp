@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorRegionOfInterestPooling : public DmlOperator, public RoiPoolingHelper
 {
@@ -39,4 +39,4 @@ private:
 
 DML_OP_DEFINE_CREATION_FUNCTION(MaxRoiPool, DmlOperatorRegionOfInterestPooling);
 
-} // namespace Dml
+}  // namespace dml_ep

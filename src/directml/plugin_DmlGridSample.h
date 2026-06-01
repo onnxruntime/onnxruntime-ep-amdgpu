@@ -198,7 +198,7 @@ struct DmlGridSampleParameters
             MLOperatorEdgeDescription edgeDesc = kernelInfo.GetInputEdgeDescription(DmlGridSampleKernelInputIndex::Input);
 
             assert(edgeDesc.edgeType == MLOperatorEdgeType::Tensor);
-            this->dataType = Dml::GetDmlDataTypeFromMlDataType(edgeDesc.tensorDataType);
+            this->dataType = dml_ep::GetDmlDataTypeFromMlDataType(edgeDesc.tensorDataType);
         }
 
         // input 1: grid (required; tensor)
@@ -574,9 +574,9 @@ public:
         std::array<uint32_t, 4> inputStrides;
         std::array<uint32_t, 4> gridStrides;
         std::array<uint32_t, 4> outputStrides;
-        Dml::GetDescendingPackedStrides(inputDims, inputStrides);
-        Dml::GetDescendingPackedStrides(gridDims, gridStrides);
-        Dml::GetDescendingPackedStrides(outputDims, outputStrides);
+        dml_ep::GetDescendingPackedStrides(inputDims, inputStrides);
+        dml_ep::GetDescendingPackedStrides(gridDims, gridStrides);
+        dml_ep::GetDescendingPackedStrides(outputDims, outputStrides);
 
         // Transition resources from common to UAV state
         D3D12_RESOURCE_BARRIER barriers[3];

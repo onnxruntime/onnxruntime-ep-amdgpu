@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorBatchNormalization : public DmlOperator, BatchNormalizationHelper
 {
@@ -207,4 +207,4 @@ void CALLBACK QueryBatchNormalization(IMLOperatorSupportQueryContextPrivate* con
 DML_OP_DEFINE_CREATION_FUNCTION(BatchNormalization, DmlOperatorBatchNormalization);
 DML_OP_DEFINE_CREATION_FUNCTION(DmlFusedBatchNormalization, DmlOperatorBatchNormalization);
 
-} // namespace Dml
+}  // namespace dml_ep

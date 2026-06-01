@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorAffine : public DmlOperator
 {
@@ -34,4 +34,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(Affine, DmlOperatorAffine);
 
-} // namespace Dml
+}  // namespace dml_ep

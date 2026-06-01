@@ -4,8 +4,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorReverseSequence : public DmlOperator
 {
@@ -65,4 +65,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(ReverseSequence, DmlOperatorReverseSequence);
 
-} // namespace Dml
+}  // namespace dml_ep

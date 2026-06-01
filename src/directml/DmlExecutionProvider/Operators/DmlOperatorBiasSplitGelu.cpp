@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorBiasSplitGelu : public DmlOperator
 {
@@ -144,4 +144,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(BiasSplitGelu, DmlOperatorBiasSplitGelu);
 
-} // namespace Dml
+}  // namespace dml_ep

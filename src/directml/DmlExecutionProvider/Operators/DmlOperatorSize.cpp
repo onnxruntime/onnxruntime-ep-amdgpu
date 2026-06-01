@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorSize : public DmlOperator, SizeHelper
 {
@@ -46,4 +46,4 @@ public:
 // Special case makes sure that the input/output resource is created using the CPU allocator.
 DML_OP_DEFINE_CREATION_FUNCTION(Size, DmlOperatorSize);
 
-} // namespace Dml
+}  // namespace dml_ep

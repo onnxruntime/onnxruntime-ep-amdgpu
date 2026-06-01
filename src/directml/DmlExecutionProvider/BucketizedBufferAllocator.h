@@ -9,8 +9,8 @@
 #include "DmlExecutionProvider/DmlResourceWrapper.h"
 #include "DmlExecutionProvider/AllocationInfo.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     class DmlSubAllocator;
 
     class CPUAllocator : public onnxruntime::IAllocator
@@ -99,4 +99,4 @@ namespace Dml
     #endif
     };
 
-} // namespace Dml
+}  // namespace dml_ep

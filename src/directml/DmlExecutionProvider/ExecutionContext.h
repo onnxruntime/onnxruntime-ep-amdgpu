@@ -8,8 +8,8 @@
 #include "DmlExecutionProvider/DmlCommandRecorder.h"
 #include <gsl/gsl>
 
-namespace Dml
-{
+namespace dml_ep {
+
     class CommandQueue;
 
     // Asynchronously performs GPU work, and automatically manages command list recording and submission to queues.
@@ -110,4 +110,4 @@ namespace Dml
         bool m_keepOpen = false;
     };
 
-} // namespace Dml
+}  // namespace dml_ep

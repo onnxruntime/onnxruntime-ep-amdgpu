@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 class DmlOperatorMatMulNBits : public DmlOperator
 {
 public:
@@ -199,4 +199,4 @@ void CALLBACK QueryMatMulNBits(IMLOperatorSupportQueryContextPrivate* context, /
 }
 
 DML_OP_DEFINE_CREATION_FUNCTION(MatMulNBits, DmlOperatorMatMulNBits);
-} // namespace Dml
+}  // namespace dml_ep

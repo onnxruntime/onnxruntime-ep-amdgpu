@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorGroupNorm : public DmlOperator
 {
@@ -294,4 +294,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(GroupNorm, DmlOperatorGroupNorm);
 
-} // namespace Dml
+}  // namespace dml_ep

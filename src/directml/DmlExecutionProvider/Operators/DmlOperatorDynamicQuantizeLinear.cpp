@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorDynamicQuantizeLinear : public DmlOperator
 {    
@@ -51,4 +51,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(DynamicQuantizeLinear, DmlOperatorDynamicQuantizeLinear);
 
-} // namespace Dml
+}  // namespace dml_ep

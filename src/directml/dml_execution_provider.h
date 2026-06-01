@@ -51,8 +51,8 @@ using Base = Microsoft::WRL::RuntimeClass<
     TInterfaces...>;
 }
 
-namespace Dml
-{
+namespace dml_ep {
+
     using Microsoft::WRL::ComPtr;
     class PooledUploadHeap;
     class ReadbackHeap;
@@ -61,7 +61,7 @@ namespace Dml
     class ExecutionProvider;
 
     class PluginDmlExecutionProviderImpl 
-        : public WRL::Base<Dml::IExecutionProvider, Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider>
+        : public WRL::Base<IExecutionProvider, Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider>
         , public ApiPtrs
     {
     public:
@@ -70,7 +70,7 @@ namespace Dml
         PluginDmlExecutionProviderImpl(
             IDMLDevice* dmlDevice,
             ID3D12Device* d3d12Device,
-            Dml::PluginDmlExecutionContext* executionContext,
+            PluginDmlExecutionContext* executionContext,
             const ApiPtrs& api_ptrs,
             bool enableMetacommands,
             bool enableGraphCapture,
@@ -83,7 +83,7 @@ namespace Dml
                                     OrtValue** dst_tensors_ptr, OrtSyncStream** streams_ptr,
                                     size_t num_tensors);
 
-    public: // implements Dml::IExecutionProvider
+    public: // implements IExecutionProvider
         STDMETHOD(GetD3DDevice)(_COM_Outptr_ ID3D12Device** d3dDevice) const noexcept final;
 
         STDMETHOD(GetDmlDevice)(_COM_Outptr_ IDMLDevice** dmlDevice) const noexcept final;
@@ -201,7 +201,7 @@ namespace Dml
         Ort::Status OnRunStart(const OrtRunOptions& run_options);
         Ort::Status OnRunEnd();
         int GetCurrentGraphAnnotationId() const { return m_currentGraphAnnotationId; }
-        void AppendCapturedGraph(int annotationId, std::unique_ptr<Dml::DmlReusedCommandListState> capturedGraph);
+        void AppendCapturedGraph(int annotationId, std::unique_ptr<DmlReusedCommandListState> capturedGraph);
         bool CpuSyncSpinningEnabled() const noexcept;
         std::shared_ptr<OrtAllocator> GetGpuAllocator();
         std::shared_ptr<OrtAllocator> GetCpuInputAllocator();
@@ -252,7 +252,7 @@ namespace Dml
         bool m_graphCaptured = false;
         bool m_graphCaptureEnabled = false;
 
-        std::unordered_map<int, std::vector<std::unique_ptr<Dml::DmlReusedCommandListState>>> m_capturedGraphs;
+        std::unordered_map<int, std::vector<std::unique_ptr<DmlReusedCommandListState>>> m_capturedGraphs;
         std::unordered_set<int> m_graphCapturingDone;
         bool m_sessionInitialized = false;
         bool m_cpuSyncSpinningEnabled = false;
@@ -273,4 +273,4 @@ namespace Dml
         static constexpr std::chrono::milliseconds m_batchFlushInterval = std::chrono::milliseconds(10);
     };
 
-} // namespace Dml
+}  // namespace dml_ep

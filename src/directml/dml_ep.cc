@@ -10,15 +10,15 @@
 
 using namespace Windows::AI::MachineLearning::Adapter;
 
-namespace Dml {
+namespace dml_ep {
 
     static void CreateDmlKernelRegistry(
-        _In_ const Dml::PluginDmlExecutionProviderImpl* executionProvider,
+        _In_ const PluginDmlExecutionProviderImpl* executionProvider,
         _Out_ std::shared_ptr<onnxruntime::KernelRegistry>* registry,
         _Out_ std::shared_ptr<const InternalRegistrationInfoMap>* internalRegInfoMap)
     {
         ComPtr<PluginAbiCustomRegistry> abiRegistry = wil::MakeOrThrow<PluginAbiCustomRegistry>(executionProvider);
-        DmlPlugin::RegisterDmlOperators(abiRegistry.Get(), executionProvider);
+        RegisterDmlOperators(abiRegistry.Get(), executionProvider);
 
         assert(abiRegistry->GetRegistries().size() == 1);
 
@@ -26,7 +26,7 @@ namespace Dml {
         *registry = customRegistry->GetKernelRegistry();
         *internalRegInfoMap = abiRegistry->GetInternalRegInfoMap();
 
-        DmlPlugin::RegisterCpuOperatorsAsDml(registry->get());
+        RegisterCpuOperatorsAsDml(registry->get());
     }
     
 ExecutionProviderPlugin::~ExecutionProviderPlugin() {
@@ -67,7 +67,7 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     OrtEp::GetKernelRegistry = GetKernelRegistryImpl;
     IsConcurrentRunSupported = IsConcurrentRunSupportedImpl;
 
-    m_executionProvider = std::make_shared<Dml::PluginDmlExecutionProviderImpl>(
+    m_executionProvider = std::make_shared<PluginDmlExecutionProviderImpl>(
         m_dmlDevice.Get(),
         d3d12_device.Get(),
         m_context.Get(),
@@ -370,7 +370,7 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
                     }
 
                     if (resolved_value != nullptr) {
-                        constants_to_pass[input_index] = Microsoft::WRL::Make<Dml::AbiSafeTensor>(
+                        constants_to_pass[input_index] = Microsoft::WRL::Make<AbiSafeTensor>(
                             resolved_value, state->ort_api_ptr, state->dml_execution_provider);
                     } else {
                         // Dynamically computed — defer to lazy init at Compute time.
@@ -379,7 +379,7 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
                     }
                 }
 
-                Dml::DmlKernelCreationState creation_state;
+                DmlKernelCreationState creation_state;
                 creation_state.kernel_factory = state->kernel_factory;
                 creation_state.shape_inferrer = state->shape_inferrer;
                 creation_state.default_attributes = state->default_attributes;
@@ -405,7 +405,7 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
                     "  constants_ready=", required_constants_available,
                     "  passing=", constants_final.size(), " constants\n");
 
-                OrtStatus* abi_safe_status = Dml::DmlAbiKernel_Create(
+                OrtStatus* abi_safe_status = DmlAbiKernel_Create(
                     &creation_state, info, kernel_out, std::move(constants_final));
 
                 if (abi_safe_status == nullptr && *kernel_out != nullptr) {
@@ -755,7 +755,7 @@ bool ExecutionProviderPlugin::IsGpuAllocator(const OrtMemoryInfo* memory_info)
 }
 
 uint32_t ExecutionProviderPlugin::GetSupportedDeviceDataTypeMask() const {
-    return Dml::GetSupportedDeviceDataTypeMask(m_dmlDevice.Get());
+    return dml_ep::GetSupportedDeviceDataTypeMask(m_dmlDevice.Get());
 }
 
 std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const OrtGraph* graph,
@@ -1095,8 +1095,8 @@ bool ExecutionProviderPlugin::DoesNodeContainSupportedDataTypes(
     const char* op_type = nullptr;
     ort_api.Node_GetOperatorType(node, &op_type);
 
-    Dml::OrtNodeAdapter adapter(node, ort_api);
-    std::vector<const Dml::OrtValueInfoAdapter*> constantCpuInputs;
+    OrtNodeAdapter adapter(node, ort_api);
+    std::vector<const OrtValueInfoAdapter*> constantCpuInputs;
 
     if (regInfo != nullptr) {
         // Collect the list of CPU-bound input tensors, needed when checking 64-bit fallback
@@ -1114,7 +1114,7 @@ bool ExecutionProviderPlugin::DoesNodeContainSupportedDataTypes(
     bool nodeContainsSupportedDataTypes = true;
 
     // Callback to check each node's data type against registered operator support.
-    auto nodeCallback = [&](const Dml::OrtValueInfoAdapter& valueInfo, bool isInput) -> void {
+    auto nodeCallback = [&](const OrtValueInfoAdapter& valueInfo, bool isInput) -> void {
         // Get the tensor element data type for this node, comparing against what the device actually supports.
 
 
@@ -1248,7 +1248,7 @@ bool ExecutionProviderPlugin::TryGetTensorDataType(
     return false;
 }
 
-bool ExecutionProviderPlugin::IsCustomOpShader(const Dml::OrtNodeAdapter& adapter) {
+bool ExecutionProviderPlugin::IsCustomOpShader(const OrtNodeAdapter& adapter) {
     auto custom_ops = std::array<const char*, 3>{"DFT", "STFT", "GridSample"};
 
     for (auto& custom_op : custom_ops) {
@@ -1259,7 +1259,7 @@ bool ExecutionProviderPlugin::IsCustomOpShader(const Dml::OrtNodeAdapter& adapte
     return false;
 }
 
-bool ExecutionProviderPlugin::IsCpuOnDmlOperator(const Dml::OrtNodeAdapter& adapter) {
+bool ExecutionProviderPlugin::IsCpuOnDmlOperator(const OrtNodeAdapter& adapter) {
     auto cpuOnDmlOperators = std::array<const char*, 9>{
         "SequenceAt",         "SequenceConstruct",  "SequenceEmpty",
         "SequenceLength",     "SequenceErase",      "SequenceInsert",
@@ -1274,7 +1274,7 @@ bool ExecutionProviderPlugin::IsCpuOnDmlOperator(const Dml::OrtNodeAdapter& adap
     return false;
 }
 
-bool ExecutionProviderPlugin::IsDmlSequenceOperator(const Dml::OrtNodeAdapter& adapter) {
+bool ExecutionProviderPlugin::IsDmlSequenceOperator(const OrtNodeAdapter& adapter) {
     auto sequence_ops = std::array<const char*, 1>{"ConcatFromSequence"};
 
     for (auto& sequence_op : sequence_ops) {
@@ -1320,7 +1320,7 @@ void ExecutionProviderPlugin::Flush() const
     m_context->Flush();
 }
 
-std::shared_ptr<Dml::PluginDmlExecutionProviderImpl> ExecutionProviderPlugin::GetInternetalExecutionProvider() {
+std::shared_ptr<PluginDmlExecutionProviderImpl> ExecutionProviderPlugin::GetInternetalExecutionProvider() {
     return m_executionProvider;
 }
 
@@ -1336,4 +1336,4 @@ DMLDataTransfer* ExecutionProviderPlugin::GetDataTransfer()
 
 bool ExecutionProviderPlugin::GraphCaptureEnabled() const noexcept { return m_graphCaptureEnabled; }
 
-}  // namespace Dml
+}  // namespace dml_ep

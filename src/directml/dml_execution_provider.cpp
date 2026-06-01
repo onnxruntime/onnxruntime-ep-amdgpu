@@ -8,8 +8,8 @@
 
 using namespace Windows::AI::MachineLearning::Adapter;
 
-namespace Dml
-{
+namespace dml_ep {
+
     PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl()
     {
         //Close();
@@ -67,7 +67,7 @@ namespace Dml
     PluginDmlExecutionProviderImpl::PluginDmlExecutionProviderImpl(
         IDMLDevice* dmlDevice,
         ID3D12Device* d3d12Device,
-        Dml::PluginDmlExecutionContext* executionContext,
+        PluginDmlExecutionContext* executionContext,
         const ApiPtrs& api_ptrs,
         bool enableMetacommands,
         bool enableGraphCapture,
@@ -493,8 +493,8 @@ namespace Dml
                 IsGpuTensor(src_tensors[i]->Get<onnxruntime::Tensor>()),
                 this, true);
 
-            const size_t sourceSizeInBytes = Dml::ComputeByteSizeFromTensor(srcInternal);
-            const size_t dataSizeInBytes = Dml::ComputeByteSizeFromTensor(destInternal);
+            const size_t sourceSizeInBytes = ComputeByteSizeFromTensor(srcInternal);
+            const size_t dataSizeInBytes = ComputeByteSizeFromTensor(destInternal);
 
             assert(dataSizeInBytes == sourceSizeInBytes); // Tensors must be the same size
 
@@ -546,10 +546,10 @@ namespace Dml
     void PluginDmlExecutionProviderImpl::CpuToGpuCopy(IMLOperatorTensor* src,
                                                       IMLOperatorTensor* dst)
     {
-        const size_t dataSizeInBytes = Dml::ComputeByteSizeFromTensor(*dst);
+        const size_t dataSizeInBytes = ComputeByteSizeFromTensor(*dst);
 
         //// CPU -> GPU copy (upload)
-        const Dml::PluginDmlAllocationInfo* dstAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(dst).GetDataInterface().Get());
+        const PluginDmlAllocationInfo* dstAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(dst).GetDataInterface().Get());
 
         ID3D12Resource* dstData = dstAllocInfo->GetResource();
         const void* srcData = src->GetData();
@@ -567,10 +567,10 @@ namespace Dml
 
     void PluginDmlExecutionProviderImpl::GpuToGpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst)
     {
-        const size_t dataSizeInBytes = Dml::ComputeByteSizeFromTensor(*dst);
+        const size_t dataSizeInBytes = ComputeByteSizeFromTensor(*dst);
 
-        const Dml::PluginDmlAllocationInfo* srcAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(src).GetDataInterface().Get());
-        const Dml::PluginDmlAllocationInfo* dstAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(dst).GetDataInterface().Get());
+        const PluginDmlAllocationInfo* srcAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(src).GetDataInterface().Get());
+        const PluginDmlAllocationInfo* dstAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(dst).GetDataInterface().Get());
 
         ID3D12Resource* srcData = srcAllocInfo->GetResource();
         ID3D12Resource* dstData = dstAllocInfo->GetResource();
@@ -580,10 +580,10 @@ namespace Dml
 
     void PluginDmlExecutionProviderImpl::GpuToCpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst)
     {
-        const size_t dataSizeInBytes = Dml::ComputeByteSizeFromTensor(*dst);
+        const size_t dataSizeInBytes = ComputeByteSizeFromTensor(*dst);
 
         void* dstData = dst->GetData();
-        const Dml::PluginDmlAllocationInfo* srcAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(src).GetDataInterface().Get());
+        const PluginDmlAllocationInfo* srcAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(src).GetDataInterface().Get());
 
         ID3D12Resource* srcData = srcAllocInfo->GetResource();
 
@@ -709,7 +709,7 @@ namespace Dml
         // handle them, similar to the fallback in CUDAExecutionProvider::GetCapability for certain RNN/GRU/Conv
         // attributes.
 
-        return Dml::GetSupportedDeviceDataTypeMask(m_dmlDevice.Get());
+        return dml_ep::GetSupportedDeviceDataTypeMask(m_dmlDevice.Get());
     }
 
 
@@ -930,7 +930,7 @@ namespace Dml
         return STATUS_OK;
     }
 
-    void PluginDmlExecutionProviderImpl::AppendCapturedGraph(int annotationId, std::unique_ptr<Dml::DmlReusedCommandListState> capturedGraph)
+    void PluginDmlExecutionProviderImpl::AppendCapturedGraph(int annotationId, std::unique_ptr<DmlReusedCommandListState> capturedGraph)
     {
         m_capturedGraphs[annotationId].push_back(std::move(capturedGraph));
     }
@@ -978,4 +978,4 @@ namespace Dml
         return STATUS_OK;
     }
 
-} // namespace Dml
+}  // namespace dml_ep

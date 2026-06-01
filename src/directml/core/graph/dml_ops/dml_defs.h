@@ -6,7 +6,7 @@
 #include "core/graph/onnx_protobuf.h"
 
 namespace onnxruntime {
-namespace dml {
+namespace dml_ep {
 #define MS_DML_OPERATOR_SCHEMA(name) \
   MS_DML_OPERATOR_SCHEMA_UNIQ_HELPER(__COUNTER__, name)
 #define MS_DML_OPERATOR_SCHEMA_UNIQ_HELPER(Counter, name) \
@@ -26,5 +26,5 @@ namespace dml {
       schema_func(ONNX_NAMESPACE::OpSchema(#name, __FILE__, __LINE__))
 
 void RegisterDmlSchemas();
-}  // namespace dml
+}  // namespace dml_ep
 }  // namespace onnxruntime

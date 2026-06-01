@@ -9,8 +9,8 @@
 
 using namespace Windows::AI::MachineLearning::Adapter;
 
-namespace Dml
-{
+namespace dml_ep {
+
     class FusedGraphKernel : public onnxruntime::OpKernel
     {
     public:
@@ -105,7 +105,7 @@ namespace Dml
             // This requirement can be avoided by mantaining ring buffers.
             if (m_reusedCommandLists.empty())
             {
-                // Wrap tensors as required by Dml::IExecutionProvider::ExecuteOperator
+                // Wrap tensors as required by IExecutionProvider::ExecuteOperator
                 OpKernelContextWrapper contextWrapper(
                     kernelContext,
                     Info().GetExecutionProvider(),
@@ -257,7 +257,7 @@ namespace Dml
         std::vector<bool> m_inputsUsed;
         const void* m_executionHandle = nullptr;
         ComPtr<IWinmlExecutionProvider> m_winmlProvider;
-        ComPtr<Dml::IExecutionProvider> m_provider;
+        ComPtr<IExecutionProvider> m_provider;
         Windows::AI::MachineLearning::Adapter::EdgeShapes& m_outputShapes;
 
         mutable std::deque<std::unique_ptr<DmlReusedCommandListState>> m_reusedCommandLists;
@@ -294,4 +294,4 @@ namespace Dml
             std::move(inputsUsed)
         );
     }
-} // namespace Dml
+}  // namespace dml_ep

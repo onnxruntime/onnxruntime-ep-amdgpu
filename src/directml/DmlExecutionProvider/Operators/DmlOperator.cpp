@@ -4,8 +4,8 @@
 #include "precomp.h"
 #include "DmlOperator.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
     /*static*/ const uint32_t DmlOperator::zeroArray[8] = {};
 
@@ -907,4 +907,4 @@ namespace Dml
         bufferTensorDesc->TotalTensorSizeInBytes = (elementSize + 3) & ~3;
     }
 
-} // namespace Dml
+}  // namespace dml_ep

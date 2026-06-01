@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 // QLinearConcat = Dequantize + Join + Quantize
 class DmlOperatorQLinearConcat : public DmlOperator, public QLinearConcatHelper
 {
@@ -240,4 +240,4 @@ public:
 };
 
 DML_OP_DEFINE_CREATION_FUNCTION(QLinearConcat, DmlOperatorQLinearConcat);
-} // namespace Dml
+}  // namespace dml_ep

@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorGather : public DmlOperator, public GatherHelper
 {
@@ -119,4 +119,4 @@ DML_OP_DEFINE_CREATION_FUNCTION(Gather, DmlOperatorGather);
 DML_OP_DEFINE_CREATION_FUNCTION(GatherElements, DmlOperatorGatherElements);
 DML_OP_DEFINE_CREATION_FUNCTION(GatherND, DmlOperatorGatherNd);
 
-} // namespace Dml
+}  // namespace dml_ep

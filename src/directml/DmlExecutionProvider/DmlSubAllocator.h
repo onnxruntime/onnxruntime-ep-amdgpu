@@ -3,8 +3,8 @@
 
 #pragma once
 
-namespace Dml
-{
+namespace dml_ep {
+
     struct DmlResourceWrapper;
 
     class DmlSubAllocator
@@ -13,4 +13,5 @@ namespace Dml
         virtual Microsoft::WRL::ComPtr<DmlResourceWrapper> Alloc(size_t size) = 0;
         virtual ~DmlSubAllocator(){}
     };
-}
+
+}  // namespace dml_ep

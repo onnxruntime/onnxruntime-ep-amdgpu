@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorConcatFromSequence : public DmlOperator
 {
@@ -34,7 +34,7 @@ public:
         auto edgeDesc = kernelInfo.GetInputEdgeDescription(0);
         assert(edgeDesc.edgeType == MLOperatorEdgeType::SequenceTensor);
         auto sequenceInputDataType = edgeDesc.tensorDataType;
-        auto sequenceInputDmlDataType = Dml::GetDmlDataTypeFromMlDataTypeNoThrow(sequenceInputDataType);
+        auto sequenceInputDmlDataType = GetDmlDataTypeFromMlDataTypeNoThrow(sequenceInputDataType);
 
         // Ensure there the singular output is a tensors
         edgeDesc = kernelInfo.GetOutputEdgeDescription(0);
@@ -158,4 +158,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(ConcatFromSequence, DmlOperatorConcatFromSequence);
 
-} // namespace Dml
+}  // namespace dml_ep

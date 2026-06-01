@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorConvolution : public DmlOperator, public ConvolutionHelperBase
 {
@@ -148,4 +148,4 @@ DML_OP_DEFINE_CREATION_FUNCTION(DmlFusedConv,                   DmlOperatorConvo
 DML_OP_DEFINE_CREATION_FUNCTION(DmlFusedConvTranspose,          DmlOperatorConvolutionTemplate<DML_CONVOLUTION_MODE_CROSS_CORRELATION, DML_CONVOLUTION_DIRECTION_BACKWARD>);
 DML_OP_DEFINE_CREATION_FUNCTION(ConvTransposeWithDynamicPads,   DmlOperatorConvolutionTemplate<DML_CONVOLUTION_MODE_CROSS_CORRELATION, DML_CONVOLUTION_DIRECTION_BACKWARD, true>);
 
-} // namespace Dml
+}  // namespace dml_ep

@@ -3,8 +3,8 @@
 
 #include "./precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 // Base class for RNN ops (simple RNN, GRU, and LSTM).
 //
@@ -436,4 +436,4 @@ DML_OP_DEFINE_CREATION_FUNCTION(RNN,  DmlOperatorRecurrentNeuralNetwork);
 DML_OP_DEFINE_CREATION_FUNCTION(GRU,  DmlOperatorGatedRecurrentUnit);
 DML_OP_DEFINE_CREATION_FUNCTION(LSTM, DmlOperatorLongShortTermUnit);
 
-} // namespace Dml
+}  // namespace dml_ep

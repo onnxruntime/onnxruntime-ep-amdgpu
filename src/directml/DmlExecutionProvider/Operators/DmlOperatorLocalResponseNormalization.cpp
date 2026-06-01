@@ -3,8 +3,8 @@
 
 #include "precomp.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
 
 class DmlOperatorLocalResponseNormalization : public DmlOperator
 {
@@ -40,4 +40,4 @@ public:
 
 DML_OP_DEFINE_CREATION_FUNCTION(LRN, DmlOperatorLocalResponseNormalization);
 
-} // namespace Dml
+}  // namespace dml_ep

@@ -29,8 +29,8 @@ Abbreviations: B is batch_size, S is sequence_length, W is hidden_size
  For reference, refer to this Doc:
  https://github.com/microsoft/onnxruntime/blob/main/docs/ContribOperators.md#com.microsoft.Attention
  */
-namespace Dml
-{
+namespace dml_ep {
+
 class DmlOperatorAttention : public DmlOperator
 {
 public:
@@ -582,4 +582,4 @@ void CALLBACK QueryAttention(IMLOperatorSupportQueryContextPrivate* context, /*o
 }
 
 DML_OP_DEFINE_CREATION_FUNCTION(Attention, DmlOperatorAttention);
-} // namespace Dml
+}  // namespace dml_ep

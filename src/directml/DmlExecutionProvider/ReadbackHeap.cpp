@@ -5,8 +5,8 @@
 #include "DmlExecutionProvider/ReadbackHeap.h"
 #include "DmlExecutionProvider/ExecutionContext.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     static ComPtr<ID3D12Resource> CreateReadbackHeap(ID3D12Device* device, size_t size)
     {
         ComPtr<ID3D12Resource> readbackHeap;
@@ -158,4 +158,4 @@ namespace Dml
 
         m_readbackHeap->Unmap(0, nullptr);
     }
-} // namespace Dml
+}  // namespace dml_ep

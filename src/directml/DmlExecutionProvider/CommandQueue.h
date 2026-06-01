@@ -10,8 +10,8 @@
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
 using Microsoft::WRL::ComPtr;
 
-namespace Dml
-{
+namespace dml_ep {
+
     // Manages a D3D12 command queue and provides a waitable fence which is signaled with a monotonically increasing
     // value once each execute completes on the GPU.
     class CommandQueue
@@ -70,4 +70,4 @@ namespace Dml
         bool m_cpuSyncSpinningEnabled = false;
     };
 
-} // namespace Dml
+}  // namespace dml_ep

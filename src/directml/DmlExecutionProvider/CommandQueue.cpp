@@ -4,8 +4,8 @@
 #include "precomp.h"
 #include "CommandQueue.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     CommandQueue::CommandQueue(ID3D12CommandQueue* existingQueue, bool cpuSyncSpinningEnabled)
         : m_queue(existingQueue)
         , m_type(existingQueue->GetDesc().Type)
@@ -90,4 +90,4 @@ namespace Dml
         }
     }
 
-} // namespace Dml
+}  // namespace dml_ep

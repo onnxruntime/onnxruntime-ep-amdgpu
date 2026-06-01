@@ -14,8 +14,8 @@
 
 using Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider;
 
-namespace Dml
-{
+namespace dml_ep {
+
 namespace DmlGraphFusionHelper
 {
     template <typename T>
@@ -53,7 +53,7 @@ namespace DmlGraphFusionHelper
 
     template <size_t AllocatorSize>
     void ConvertGraphDesc(
-        const Dml::GraphDescBuilder::GraphDesc& graphDesc,
+        const GraphDescBuilder::GraphDesc& graphDesc,
         const uint32_t inputCount,
         const uint32_t outputCount,
         IDMLDevice* device,
@@ -127,4 +127,5 @@ namespace DmlGraphFusionHelper
         IUnknown* persistentResourceAllocatorUnknown,
         bool keepTemporaryResourceAlive);
 }
-}
+
+}  // namespace dml_ep

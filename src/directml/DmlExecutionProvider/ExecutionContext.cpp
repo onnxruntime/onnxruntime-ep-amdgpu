@@ -5,8 +5,8 @@
 #include "ExecutionContext.h"
 #include "CommandQueue.h"
 
-namespace Dml
-{
+namespace dml_ep {
+
     ExecutionContext::ExecutionContext(
         ID3D12Device* d3d12Device,
         IDMLDevice* dmlDevice,
@@ -233,4 +233,4 @@ namespace Dml
         return m_queue->GetType();
     }
 
-} // namespace Dml
+}  // namespace dml_ep

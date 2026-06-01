@@ -3,7 +3,8 @@
 
 #include "dml_execution_context.h"
 
-namespace Dml {
+namespace dml_ep {
+
 PluginDmlExecutionContext::PluginDmlExecutionContext(
     ID3D12Device* d3d12Device,
     IDMLDevice* dmlDevice,
@@ -193,4 +194,4 @@ D3D12_COMMAND_LIST_TYPE PluginDmlExecutionContext::GetCommandListTypeForQueue() 
     return m_queue->GetType();
 }
 
-} // namespace Dml
+}  // namespace dml_ep

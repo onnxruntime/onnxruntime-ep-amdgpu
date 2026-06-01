@@ -9,8 +9,8 @@
 
 using namespace Windows::AI::MachineLearning::Adapter;
 
-namespace Dml
-{
+namespace dml_ep {
+
 namespace DmlGraphFusionHelper
 {
     Microsoft::WRL::ComPtr<ID3D12Resource>
@@ -343,7 +343,7 @@ namespace DmlGraphFusionHelper
 
     template <size_t AllocatorSize>
     void ConvertGraphDesc(
-        const Dml::GraphDescBuilder::GraphDesc& graphDesc,
+        const GraphDescBuilder::GraphDesc& graphDesc,
         const uint32_t inputCount,
         const uint32_t outputCount,
         IDMLDevice* device,
@@ -1090,4 +1090,5 @@ namespace DmlGraphFusionHelper
         winmlProvider->QueueReference(persistentResourceAllocatorUnknown);
     }
 }
-}
+
+}  // namespace dml_ep

@@ -3,8 +3,8 @@
 
 #pragma once
 
-namespace Dml
-{
+namespace dml_ep {
+
     constexpr float DefaultEpsilon = 0.00001f;
 
     struct ActivationOperatorDescWrapper
@@ -91,4 +91,4 @@ namespace Dml
 
     DML_DEPTH_SPACE_ORDER MapStringToDepthSpaceMode(std::string_view mode);
 
-} // namespace Dml
+}  // namespace dml_ep
