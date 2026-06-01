@@ -49,7 +49,7 @@ void PluginDmlCommandRecorder::InitializeOperator(
     bindingTableDesc.GPUDescriptorHandle = descriptorRange.gpuHandle;
     bindingTableDesc.SizeInDescriptors = numDescriptors;
 
-    ComPtr<IDMLBindingTable> bindingTable;
+    Microsoft::WRL::ComPtr<IDMLBindingTable> bindingTable;
     ORT_THROW_IF_FAILED(m_dmlDevice->CreateBindingTable(&bindingTableDesc, IID_PPV_ARGS(&bindingTable)));
 
     // Create a temporary resource for initializing the op, if it's required.
@@ -125,7 +125,7 @@ void PluginDmlCommandRecorder::ExecuteOperator(
     bindingTableDesc.GPUDescriptorHandle = descriptorRange.gpuHandle;
     bindingTableDesc.SizeInDescriptors = numDescriptors;
 
-    ComPtr<IDMLBindingTable> bindingTable;
+    Microsoft::WRL::ComPtr<IDMLBindingTable> bindingTable;
     ORT_THROW_IF_FAILED(m_dmlDevice->CreateBindingTable(&bindingTableDesc, IID_PPV_ARGS(&bindingTable)));
 
     // Create a temporary resource for executing the op, if it's required.
@@ -287,7 +287,7 @@ void PluginDmlCommandRecorder::ExecuteCommandList(
     *completionValue = gpuEvent.fenceValue;
 }
 
-ComPtr<ID3D12GraphicsCommandList> PluginDmlCommandRecorder::GetCommandList()
+Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> PluginDmlCommandRecorder::GetCommandList()
 {
     // Assume operations are added by the caller after this returns
     m_operationsRecordedInCurrentCommandList = true;

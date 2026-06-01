@@ -60,7 +60,7 @@ namespace dml_ep {
         // as large as the previous bucket.
         struct Resource
         {
-            ComPtr<DmlResourceWrapper> resource;
+            Microsoft::WRL::ComPtr<DmlResourceWrapper> resource;
             uint64_t resourceId;
         };
 
@@ -75,7 +75,7 @@ namespace dml_ep {
         friend class AllocationInfo;
         void FreeResource(void* p, uint64_t resourceId);
 
-        ComPtr<ID3D12Device> m_device;
+        Microsoft::WRL::ComPtr<ID3D12Device> m_device;
         D3D12_HEAP_PROPERTIES m_heapProperties;
         D3D12_HEAP_FLAGS m_heapFlags;
         D3D12_RESOURCE_FLAGS m_resourceFlags;
@@ -90,7 +90,7 @@ namespace dml_ep {
         // initialization.
         AllocatorRoundingMode m_defaultRoundingMode = AllocatorRoundingMode::Disabled;
 
-        ComPtr<ExecutionContext> m_context;
+        Microsoft::WRL::ComPtr<ExecutionContext> m_context;
         std::unique_ptr<DmlSubAllocator> m_subAllocator;
 
     #ifndef NDEBUG

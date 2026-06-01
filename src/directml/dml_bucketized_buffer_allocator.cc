@@ -92,7 +92,7 @@ void* DmlBucketizedBufferAllocator::AllocImpl(size_t size, AllocatorRoundingMode
     // For some reason lotus likes requesting 0 bytes of memory
     size = std::max<size_t>(1, size);
 
-    ComPtr<DmlResourceWrapper> resourceWrapper;
+    Microsoft::WRL::ComPtr<DmlResourceWrapper> resourceWrapper;
     uint64_t resourceId = 0;
     uint64_t bucketSize = 0;
 
@@ -132,7 +132,7 @@ void* DmlBucketizedBufferAllocator::AllocImpl(size_t size, AllocatorRoundingMode
     assert(resourceWrapper->GetD3D12Resource()->GetDesc().Width == bucketSize);
     assert(resourceWrapper != nullptr);
 
-    ComPtr<PluginDmlAllocationInfo> allocInfo =
+    Microsoft::WRL::ComPtr<PluginDmlAllocationInfo> allocInfo =
         wil::MakeOrThrow<PluginDmlAllocationInfo>(this, ++m_currentAllocationId, resourceId, resourceWrapper.Get(), size);
 
 #if _DEBUG
@@ -146,7 +146,7 @@ void DmlBucketizedBufferAllocator::FreeImpl(void* p) {
     // Release Lotus's reference on the allocation.  The allocation
     // also inherits IUnknown, and once its final reference reaches zero
     // it will call FreeResource
-    ComPtr<PluginDmlAllocationInfo> allocInfo;
+    Microsoft::WRL::ComPtr<PluginDmlAllocationInfo> allocInfo;
     allocInfo.Attach(static_cast<PluginDmlAllocationInfo*>(p));
 }
 

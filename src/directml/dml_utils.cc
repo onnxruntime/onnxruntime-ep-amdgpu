@@ -18,7 +18,7 @@ namespace dml_ep {
 
         // Create a fence and event to wait for the command list to finish executing
         // note: In a real application, reuse fences and events to remove creation overhead. Fix later.
-        ComPtr<ID3D12Fence> d3D12Fence;
+        Microsoft::WRL::ComPtr<ID3D12Fence> d3D12Fence;
         ThrowIfFailed(d3d12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_GRAPHICS_PPV_ARGS(d3D12Fence.GetAddressOf())));
 
         wil::unique_handle fenceEventHandle(::CreateEvent(nullptr, true, false, nullptr));
@@ -33,7 +33,7 @@ namespace dml_ep {
         ThrowIfFailed(commandList->Reset(commandAllocator, nullptr));
     }
 
-    void D3DResourceHelper::CreateCommittedResourceHelper(ID3D12Device* device, ComPtr<ID3D12Resource>& buffer, size_t sizeInBytes)
+    void D3DResourceHelper::CreateCommittedResourceHelper(ID3D12Device* device, Microsoft::WRL::ComPtr<ID3D12Resource>& buffer, size_t sizeInBytes)
     {
         CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
         CD3DX12_RESOURCE_DESC bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(sizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
@@ -52,11 +52,11 @@ namespace dml_ep {
         ID3D12GraphicsCommandList* commandList,
         ID3D12CommandQueue* commandQueue,
         ID3D12CommandAllocator* commandAllocator,
-        ComPtr<ID3D12Resource>& destination,
+        Microsoft::WRL::ComPtr<ID3D12Resource>& destination,
         D3D12_SUBRESOURCE_DATA bufferSubresourceData,
         size_t size)
     {
-        ComPtr<ID3D12Resource> uploadBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer;
         CD3DX12_RESOURCE_DESC uploadBufferDesc = CD3DX12_RESOURCE_DESC::Buffer(size);
         CD3DX12_HEAP_PROPERTIES uploadHeapProps(D3D12_HEAP_TYPE_UPLOAD);
 
@@ -74,9 +74,9 @@ namespace dml_ep {
         CloseExecuteResetWait(device, commandQueue, commandAllocator, commandList);
     }
 
-    ComPtr<ID3D12Resource> D3DResourceHelper::CreateDmlCommittedResourceAllocator(ID3D12Device* device, size_t size)
+    Microsoft::WRL::ComPtr<ID3D12Resource> D3DResourceHelper::CreateDmlCommittedResourceAllocator(ID3D12Device* device, size_t size)
     {
-        ComPtr<ID3D12Resource> resource;
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
         CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
         auto buffer = CD3DX12_RESOURCE_DESC::Buffer(size, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 

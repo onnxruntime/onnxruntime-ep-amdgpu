@@ -286,7 +286,7 @@ namespace dml_ep::GraphDescBuilder
 
         auto constantCpuGraphInputGetter = [&isInitializerTransferable, &modelPath](const std::string& argName)
         {
-            ComPtr<OnnxTensorWrapper> tensorWrapper;
+            Microsoft::WRL::ComPtr<OnnxTensorWrapper> tensorWrapper;
             auto iter = isInitializerTransferable.find(argName);
             if (iter != isInitializerTransferable.end())
             {
@@ -306,7 +306,7 @@ namespace dml_ep::GraphDescBuilder
 
             MLOperatorTensorGetter constantCpuNodeInputGetter = [&node, &constantCpuGraphInputGetter, &requiredConstantCpuInputs](uint32_t inputIndex)
             {
-                ComPtr<IMLOperatorTensor> tensor = nullptr;
+                Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor = nullptr;
 
                 auto inputDefs = node.InputDefs();
 
@@ -398,7 +398,7 @@ namespace dml_ep::GraphDescBuilder
                         auto& operatorDmlGraphInputNode = operatorDmlGraphCreateInfo.nodes[operatorDmlGraphInputEdge.ToNodeIndex];
                         std::vector<DmlBufferTensorDesc*> toNodeInputTensorDescs = operatorDmlGraphInputNode->GetInputTensors();
                         DmlBufferTensorDesc* tensorDesc = toNodeInputTensorDescs[operatorDmlGraphInputEdge.ToNodeInputIndex];
-                        ComPtr<OnnxTensorWrapper> constantInput;
+                        Microsoft::WRL::ComPtr<OnnxTensorWrapper> constantInput;
 
                         if (tensorDesc->totalTensorSizeInBytes < dml_ep::GraphDescBuilder::c_maxConstNodeDataSize)
                         {

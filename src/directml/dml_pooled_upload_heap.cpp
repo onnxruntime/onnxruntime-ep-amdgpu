@@ -94,7 +94,7 @@ PluginDmlPooledUploadHeap::PluginDmlPooledUploadHeap(ID3D12Device* device, Plugi
     /* static */ PluginDmlPooledUploadHeap::Chunk PluginDmlPooledUploadHeap::CreateChunk(ID3D12Device* device,
                                                                                 size_t sizeInBytes)
     {
-        ComPtr<ID3D12Resource> uploadBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer;
         auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
         auto buffer = CD3DX12_RESOURCE_DESC::Buffer(sizeInBytes);
 

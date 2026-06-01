@@ -8,7 +8,6 @@
 
 #include <d3d12.h>
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-using Microsoft::WRL::ComPtr;
 
 namespace dml_ep {
 

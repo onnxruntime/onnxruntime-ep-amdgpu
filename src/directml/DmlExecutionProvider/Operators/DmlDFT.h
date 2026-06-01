@@ -37,7 +37,6 @@ namespace BluesteinChirp_Float16
 
 #include <sstream>
 
-using namespace Microsoft::WRL;
 
 namespace DFTHelpers {
     // Divides and rounds up
@@ -101,11 +100,11 @@ namespace DFTHelpers {
 class GpuDFTOperator : public WRL::Base<IMLOperatorKernel>
 {
 private:
-    ComPtr<ID3D12Device> m_device;
-    ComPtr<ID3D12RootSignature> m_stockhamFFTRootSignature;
-    ComPtr<ID3D12PipelineState> m_stockhamFFTPipelineState;
-    ComPtr<ID3D12RootSignature> m_bluesteinChirpRootSignature;
-    ComPtr<ID3D12PipelineState> m_bluesteinChirpPipelineState;
+    Microsoft::WRL::ComPtr<ID3D12Device> m_device;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_stockhamFFTRootSignature;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_stockhamFFTPipelineState;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_bluesteinChirpRootSignature;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_bluesteinChirpPipelineState;
 
     int64_t m_axis;
     bool m_isOnesided;
@@ -114,7 +113,7 @@ private:
     // Allocate temporary buffers if needed
     struct ResourceDesc
     {
-        ComPtr<ID3D12Resource> Resource;
+        Microsoft::WRL::ComPtr<ID3D12Resource> Resource;
         std::array<uint32_t, 4> Sizes;
         std::array<uint32_t, 4> Strides;
     };
@@ -213,10 +212,10 @@ public:
 
     GpuDFTOperator(IMLOperatorKernelCreationContext* context, int32_t version)
     {
-        ComPtr<IUnknown> executionObject;
+        Microsoft::WRL::ComPtr<IUnknown> executionObject;
         context->GetExecutionInterface(executionObject.GetAddressOf());
 
-        ComPtr<ID3D12GraphicsCommandList> commandList;
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
         executionObject.As(&commandList);
 
         ORT_THROW_IF_FAILED(commandList->GetDevice(IID_ID3D12Device, &m_device));
@@ -271,8 +270,8 @@ public:
         CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC desc;
         desc.Init_1_1(static_cast<uint32_t>(rootParameters.size()), rootParameters.data());
 
-        ComPtr<ID3DBlob> rootSignatureBlob;
-        ComPtr<ID3DBlob> rootSignatureErrorBlob;
+        Microsoft::WRL::ComPtr<ID3DBlob> rootSignatureBlob;
+        Microsoft::WRL::ComPtr<ID3DBlob> rootSignatureErrorBlob;
         ORT_THROW_IF_FAILED(D3D12SerializeVersionedRootSignature(
             &desc,
             rootSignatureBlob.GetAddressOf(),
@@ -335,8 +334,8 @@ public:
         CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC desc;
         desc.Init_1_1(static_cast<uint32_t>(rootParameters.size()), rootParameters.data());
 
-        ComPtr<ID3DBlob> rootSignatureBlob;
-        ComPtr<ID3DBlob> rootSignatureErrorBlob;
+        Microsoft::WRL::ComPtr<ID3DBlob> rootSignatureBlob;
+        Microsoft::WRL::ComPtr<ID3DBlob> rootSignatureErrorBlob;
         ORT_THROW_IF_FAILED(D3D12SerializeVersionedRootSignature(
             &desc,
             rootSignatureBlob.GetAddressOf(),
@@ -389,11 +388,11 @@ public:
         try
         {
             // Get the input tensor
-            ComPtr<IMLOperatorTensor> inputTensor;
+            Microsoft::WRL::ComPtr<IMLOperatorTensor> inputTensor;
             ORT_THROW_IF_FAILED(context->GetInputTensor(0, inputTensor.GetAddressOf()));
 
             // Get the output tensor
-            ComPtr<IMLOperatorTensor> outputTensor;
+            Microsoft::WRL::ComPtr<IMLOperatorTensor> outputTensor;
             context->GetOutputTensor(0, outputTensor.GetAddressOf());
 
             if (outputTensor->IsCpuData() || inputTensor->IsCpuData())
@@ -401,15 +400,15 @@ public:
                 return E_UNEXPECTED;
             }
 
-            ComPtr<IUnknown> executionObject;
-            ComPtr<ID3D12GraphicsCommandList> commandList;
+            Microsoft::WRL::ComPtr<IUnknown> executionObject;
+            Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
             context->GetExecutionInterface(executionObject.GetAddressOf());
             executionObject.As(&commandList);
 
             // Get the input and output shape sizes
             auto inputDims = GetTensorDimensions(inputTensor.Get());
             auto rank = static_cast<int32_t>(inputDims.size());
-            ComPtr<IMLOperatorTensor> axisTensor;
+            Microsoft::WRL::ComPtr<IMLOperatorTensor> axisTensor;
             if (SUCCEEDED(context->GetInputTensor(2, &axisTensor)) && axisTensor != nullptr)
             {
                 MLOperatorTensor tensor(axisTensor.Get());
@@ -420,19 +419,19 @@ public:
             auto outputDims = GetTensorDimensions(outputTensor.Get());
             ORT_THROW_HR_IF(E_FAIL, inputDims.size() != outputDims.size());
 
-            ComPtr<IUnknown> inputUnknown;
-            ComPtr<ID3D12Resource> inputResource;
+            Microsoft::WRL::ComPtr<IUnknown> inputUnknown;
+            Microsoft::WRL::ComPtr<ID3D12Resource> inputResource;
             inputTensor->GetDataInterface(inputUnknown.GetAddressOf());
             ORT_THROW_IF_FAILED(inputUnknown.As(&inputResource));
 
-            ComPtr<IUnknown> outputUnknown;
-            ComPtr<ID3D12Resource> outputResource;
+            Microsoft::WRL::ComPtr<IUnknown> outputUnknown;
+            Microsoft::WRL::ComPtr<ID3D12Resource> outputResource;
             outputTensor->GetDataInterface(outputUnknown.GetAddressOf());
             ORT_THROW_IF_FAILED(outputUnknown.As(&outputResource));
 
             // Get optional dft_length input
             uint32_t dftLength = inputDims[gsl::narrow<size_t>(m_axis)];
-            ComPtr<IMLOperatorTensor> dftLengthTensor;
+            Microsoft::WRL::ComPtr<IMLOperatorTensor> dftLengthTensor;
             if (SUCCEEDED(context->GetInputTensor(1, &dftLengthTensor)) && dftLengthTensor != nullptr)
             {
                 MLOperatorTensor tensor(dftLengthTensor.Get());
@@ -1025,9 +1024,9 @@ struct DFTShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
             }
             else
             {
-                ComPtr<IMLOperatorShapeInferenceContextPrivate> contextPrivate;
+                Microsoft::WRL::ComPtr<IMLOperatorShapeInferenceContextPrivate> contextPrivate;
                 ORT_THROW_IF_FAILED(context->QueryInterface(IID_PPV_ARGS(&contextPrivate)));
-                ComPtr<IMLOperatorTensor> axisTensor;
+                Microsoft::WRL::ComPtr<IMLOperatorTensor> axisTensor;
                 ORT_THROW_IF_FAILED(contextPrivate->GetConstantInputTensor(2, &axisTensor));
                 MLOperatorTensor tensor(axisTensor.Get());
                 axisValue = OperatorHelper::ReadScalarTensorCastToInt64(tensor);
@@ -1050,9 +1049,9 @@ struct DFTShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
             {
                 // If dft_length is specified, then we should honor the shape.
                 // If onesided this will be adjusted later on.
-                ComPtr<IMLOperatorShapeInferenceContextPrivate> contextPrivate;
+                Microsoft::WRL::ComPtr<IMLOperatorShapeInferenceContextPrivate> contextPrivate;
                 ORT_THROW_IF_FAILED(context->QueryInterface(IID_PPV_ARGS(&contextPrivate)));
-                ComPtr<IMLOperatorTensor> dftLengthTensor;
+                Microsoft::WRL::ComPtr<IMLOperatorTensor> dftLengthTensor;
                 ORT_THROW_IF_FAILED(contextPrivate->GetConstantInputTensor(1, &dftLengthTensor));
                 MLOperatorTensor tensor(dftLengthTensor.Get());
                 dftLength = gsl::narrow<uint32_t>(OperatorHelper::ReadScalarTensorCastToInt64(tensor));
@@ -1185,7 +1184,7 @@ public:
 
         std::array<uint32_t, 2> requiredConstantCpuInputs = { 1, 2 };
 
-        ComPtr<IMLOperatorRegistryPrivate> registryPrivate;
+        Microsoft::WRL::ComPtr<IMLOperatorRegistryPrivate> registryPrivate;
         ORT_THROW_IF_FAILED(registry->QueryInterface(IID_PPV_ARGS(&registryPrivate)));
 
         ORT_THROW_IF_FAILED(registryPrivate->RegisterOperatorKernel(

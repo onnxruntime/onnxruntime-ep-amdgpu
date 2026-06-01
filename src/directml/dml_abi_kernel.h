@@ -31,7 +31,7 @@ namespace Windows::AI::MachineLearning::Adapter {
 }
 
 // IWinmlExecutionProvider must be fully defined before this header is parsed
-// because AbiSafeKernelContext holds ComPtr<IWinmlExecutionProvider>.
+// because AbiSafeKernelContext holds Microsoft::WRL::ComPtr<IWinmlExecutionProvider>.
 // Include dml_execution_provider.h or IWinmlExecutionProvider.h before this header.
 // (dml_abi_kernel.cpp does this explicitly; other TUs reach it via precomp.h or dml_ep.h.)
 

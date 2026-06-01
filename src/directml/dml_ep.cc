@@ -17,7 +17,7 @@ namespace dml_ep {
         _Out_ std::shared_ptr<onnxruntime::KernelRegistry>* registry,
         _Out_ std::shared_ptr<const InternalRegistrationInfoMap>* internalRegInfoMap)
     {
-        ComPtr<PluginAbiCustomRegistry> abiRegistry = wil::MakeOrThrow<PluginAbiCustomRegistry>(executionProvider);
+        Microsoft::WRL::ComPtr<PluginAbiCustomRegistry> abiRegistry = wil::MakeOrThrow<PluginAbiCustomRegistry>(executionProvider);
         RegisterDmlOperators(abiRegistry.Get(), executionProvider);
 
         assert(abiRegistry->GetRegistries().size() == 1);
@@ -44,7 +44,7 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     std::string_view name, 
     ID3D12Device* d3d12_device_,
     IDMLDevice* dml_device_,
-    ComPtr<PluginDmlExecutionContext> executionContext)
+    Microsoft::WRL::ComPtr<PluginDmlExecutionContext> executionContext)
     : OrtEp{ORT_API_VERSION}
     , ApiPtrs{api_ptrs}
     , name_{name}

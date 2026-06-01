@@ -18,8 +18,7 @@
 
 namespace dml_ep {
 
-using Microsoft::WRL::ComPtr;
-    
+
 static void ThrowIfFailed(HRESULT hr) {
     if (FAILED(hr)) {
         throw std::runtime_error("HRESULT failed");
@@ -38,7 +37,7 @@ public:
 
     static void CreateCommittedResourceHelper(
         ID3D12Device* device,
-        ComPtr<ID3D12Resource>& buffer,
+        Microsoft::WRL::ComPtr<ID3D12Resource>& buffer,
         size_t sizeInBytes);
 
     static void UploadDataToGpuHelper(
@@ -46,11 +45,11 @@ public:
         ID3D12GraphicsCommandList* commandList,
         ID3D12CommandQueue* commandQueue,
         ID3D12CommandAllocator* commandAllocator,
-        ComPtr<ID3D12Resource>& destination,
+        Microsoft::WRL::ComPtr<ID3D12Resource>& destination,
         D3D12_SUBRESOURCE_DATA bufferSubresourceData,
         size_t size);
 
-    static ComPtr<ID3D12Resource> CreateDmlCommittedResourceAllocator(ID3D12Device* device, size_t size);
+    static Microsoft::WRL::ComPtr<ID3D12Resource> CreateDmlCommittedResourceAllocator(ID3D12Device* device, size_t size);
 
 };
 

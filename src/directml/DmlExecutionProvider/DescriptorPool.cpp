@@ -12,7 +12,7 @@ namespace dml_ep {
         m_headGpuHandle(heap->GetGPUDescriptorHandleForHeapStart()),
         m_heapFlags(heap->GetDesc().Flags)
     {
-        ComPtr<ID3D12Device> device;
+        Microsoft::WRL::ComPtr<ID3D12Device> device;
         GRAPHICS_THROW_IF_FAILED(heap->GetDevice(IID_GRAPHICS_PPV_ARGS(device.GetAddressOf())));
         m_handleIncrementSize = device->GetDescriptorHandleIncrementSize(heap->GetDesc().Type);
     }
@@ -107,7 +107,7 @@ namespace dml_ep {
         desc.NumDescriptors = numDescriptors;
         desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 
-        ComPtr<ID3D12DescriptorHeap> heap;
+        Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> heap;
         ORT_THROW_IF_FAILED(m_device->CreateDescriptorHeap(&desc, IID_GRAPHICS_PPV_ARGS(heap.GetAddressOf())));
 
         m_heaps.push_back(DescriptorHeap{heap.Get()});

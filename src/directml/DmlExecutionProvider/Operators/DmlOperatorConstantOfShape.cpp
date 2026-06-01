@@ -32,9 +32,9 @@ public:
         // Read the tensor attribute for the output fill pattern.
         if (kernelCreationContext.HasAttribute(AttrName::Value, MLOperatorAttributeTypeTensor))
         {
-            ComPtr<IMLOperatorKernelCreationContext> kernelCreationContextInterface = kernelCreationContext.GetInterface();
-            ComPtr<IMLOperatorAttributes1> attributes;
-            ComPtr<IMLOperatorTensor> valueTensor;
+            Microsoft::WRL::ComPtr<IMLOperatorKernelCreationContext> kernelCreationContextInterface = kernelCreationContext.GetInterface();
+            Microsoft::WRL::ComPtr<IMLOperatorAttributes1> attributes;
+            Microsoft::WRL::ComPtr<IMLOperatorTensor> valueTensor;
 
             // Get the extended attributes to be able to access the constant tensor.
             ORT_THROW_IF_FAILED(kernelCreationContextInterface.As(&attributes));

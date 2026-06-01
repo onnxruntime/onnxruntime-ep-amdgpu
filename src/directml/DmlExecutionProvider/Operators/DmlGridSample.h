@@ -100,7 +100,6 @@ namespace GridSample_float_fp16
 
 #include <sstream>
 
-using namespace Microsoft::WRL;
 
 enum DmlGridSampleKernelInputIndex : uint32_t
 {
@@ -257,16 +256,16 @@ namespace GridSampleHelpers
 class DmlGridSampleOperator : public WRL::Base<IMLOperatorKernel>
 {
 private:
-    ComPtr<ID3D12Device> m_device;
-    ComPtr<ID3D12RootSignature> m_gridSampleRootSignature;
-    ComPtr<ID3D12PipelineState> m_gridSamplePipelineState;
+    Microsoft::WRL::ComPtr<ID3D12Device> m_device;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_gridSampleRootSignature;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_gridSamplePipelineState;
     DmlGridSampleParameters m_params = {};
 
 
     // Allocate temporary buffers if needed
     struct ResourceDesc
     {
-        ComPtr<ID3D12Resource> Resource;
+        Microsoft::WRL::ComPtr<ID3D12Resource> Resource;
         std::array<uint32_t, 4> Sizes;
         std::array<uint32_t, 4> Strides;
     };
@@ -290,10 +289,10 @@ public:
 
     DmlGridSampleOperator(IMLOperatorKernelCreationContext* context)
     {
-        ComPtr<IUnknown> executionObject;
+        Microsoft::WRL::ComPtr<IUnknown> executionObject;
         context->GetExecutionInterface(executionObject.GetAddressOf());
 
-        ComPtr<ID3D12GraphicsCommandList> commandList;
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
         executionObject.As(&commandList);
 
         ORT_THROW_IF_FAILED(commandList->GetDevice(IID_ID3D12Device, &m_device));
@@ -346,8 +345,8 @@ public:
         CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC desc;
         desc.Init_1_1(static_cast<uint32_t>(rootParameters.size()), rootParameters.data());
 
-        ComPtr<ID3DBlob> rootSignatureBlob;
-        ComPtr<ID3DBlob> rootSignatureErrorBlob;
+        Microsoft::WRL::ComPtr<ID3DBlob> rootSignatureBlob;
+        Microsoft::WRL::ComPtr<ID3DBlob> rootSignatureErrorBlob;
         ORT_THROW_IF_FAILED(D3D12SerializeVersionedRootSignature(
             &desc,
             rootSignatureBlob.GetAddressOf(),
@@ -465,15 +464,15 @@ public:
         try
         {
             // Get the input tensor
-            ComPtr<IMLOperatorTensor> inputTensor;
+            Microsoft::WRL::ComPtr<IMLOperatorTensor> inputTensor;
             ORT_THROW_IF_FAILED(context->GetInputTensor(0, inputTensor.GetAddressOf()));
 
             // Get the grid tensor
-            ComPtr<IMLOperatorTensor> gridTensor;
+            Microsoft::WRL::ComPtr<IMLOperatorTensor> gridTensor;
             ORT_THROW_IF_FAILED(context->GetInputTensor(1, gridTensor.GetAddressOf()));
 
             // Get the output tensor
-            ComPtr<IMLOperatorTensor> outputTensor;
+            Microsoft::WRL::ComPtr<IMLOperatorTensor> outputTensor;
             context->GetOutputTensor(0, outputTensor.GetAddressOf());
 
             if (outputTensor->IsCpuData() || inputTensor->IsCpuData() || gridTensor->IsCpuData())
@@ -481,8 +480,8 @@ public:
                 return E_UNEXPECTED;
             }
 
-            ComPtr<IUnknown> executionObject;
-            ComPtr<ID3D12GraphicsCommandList> commandList;
+            Microsoft::WRL::ComPtr<IUnknown> executionObject;
+            Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
             context->GetExecutionInterface(executionObject.GetAddressOf());
             executionObject.As(&commandList);
 
@@ -491,18 +490,18 @@ public:
             auto gridDims = GetTensorDimensions(gridTensor.Get());
             auto outputDims = GetTensorDimensions(outputTensor.Get());
 
-            ComPtr<IUnknown> inputUnknown;
-            ComPtr<ID3D12Resource> inputResource;
+            Microsoft::WRL::ComPtr<IUnknown> inputUnknown;
+            Microsoft::WRL::ComPtr<ID3D12Resource> inputResource;
             inputTensor->GetDataInterface(inputUnknown.GetAddressOf());
             ORT_THROW_IF_FAILED(inputUnknown.As(&inputResource));
 
-            ComPtr<IUnknown> gridUnknown;
-            ComPtr<ID3D12Resource> gridResource;
+            Microsoft::WRL::ComPtr<IUnknown> gridUnknown;
+            Microsoft::WRL::ComPtr<ID3D12Resource> gridResource;
             gridTensor->GetDataInterface(gridUnknown.GetAddressOf());
             ORT_THROW_IF_FAILED(gridUnknown.As(&gridResource));
 
-            ComPtr<IUnknown> outputUnknown;
-            ComPtr<ID3D12Resource> outputResource;
+            Microsoft::WRL::ComPtr<IUnknown> outputUnknown;
+            Microsoft::WRL::ComPtr<ID3D12Resource> outputResource;
             outputTensor->GetDataInterface(outputUnknown.GetAddressOf());
             ORT_THROW_IF_FAILED(outputUnknown.As(&outputResource));
 
@@ -720,7 +719,7 @@ struct GridSampleShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
     {
         try
         {
-            ComPtr<IMLOperatorShapeInferenceContextPrivate> contextPrivate;
+            Microsoft::WRL::ComPtr<IMLOperatorShapeInferenceContextPrivate> contextPrivate;
             ORT_THROW_IF_FAILED(context->QueryInterface(IID_PPV_ARGS(&contextPrivate)));
 
             MLShapeInferenceContext inferenceContext(context);
@@ -838,7 +837,7 @@ public:
         auto shareInferrer = wil::MakeOrThrow<GridSampleShapeInferrer>();
         auto factory = wil::MakeOrThrow<DmlGridSampleOperatorFactory>();
 
-        ComPtr<IMLOperatorRegistryPrivate> registryPrivate;
+        Microsoft::WRL::ComPtr<IMLOperatorRegistryPrivate> registryPrivate;
         ORT_THROW_IF_FAILED(registry->QueryInterface(IID_PPV_ARGS(&registryPrivate)));
 
         ORT_THROW_IF_FAILED(registryPrivate->RegisterOperatorKernel(

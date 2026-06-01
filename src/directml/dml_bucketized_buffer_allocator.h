@@ -16,7 +16,6 @@
 //#include "flatbuffers/allocator.h"
 #include "DmlExecutionProvider/inc/DmlExecutionProvider.h"
 
-using Microsoft::WRL::ComPtr;
 
 namespace dml_ep {
 class DmlSubAllocator;
@@ -63,7 +62,7 @@ private:
     // The resources in each bucket are always sized as a power of two, and each bucket contains resources twice
     // as large as the previous bucket.
     struct Resource {
-        ComPtr<DmlResourceWrapper> resource;
+        Microsoft::WRL::ComPtr<DmlResourceWrapper> resource;
         uint64_t resourceId;
     };
 
@@ -77,7 +76,7 @@ private:
     friend class PluginDmlAllocationInfo;
     void FreeResource(void* p, uint64_t resourceId);
 
-    ComPtr<ID3D12Device> m_device;
+    Microsoft::WRL::ComPtr<ID3D12Device> m_device;
     D3D12_HEAP_PROPERTIES m_heapProperties;
     D3D12_HEAP_FLAGS m_heapFlags;
     D3D12_RESOURCE_FLAGS m_resourceFlags;
@@ -92,7 +91,7 @@ private:
     // initialization.
     AllocatorRoundingMode m_defaultRoundingMode = AllocatorRoundingMode::Disabled;
 
-    ComPtr<PluginDmlExecutionContext> m_context;
+    Microsoft::WRL::ComPtr<PluginDmlExecutionContext> m_context;
     std::unique_ptr<DmlSubAllocator> m_subAllocator;
     OrtMemoryInfo m_memoryInfo;
 

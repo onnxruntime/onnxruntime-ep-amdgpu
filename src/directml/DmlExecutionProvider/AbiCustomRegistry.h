@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
+#include "dml_plugin_MLOperatorAuthorImpl.h"
 
 namespace WRL
 {
@@ -17,7 +17,6 @@ namespace WRL
 namespace Windows::AI::MachineLearning::Adapter
 {
 
-using namespace Microsoft::WRL;
 
 class AbiCustomRegistry : public WRL::Base<IMLOperatorRegistry, IMLOperatorRegistryPrivate>
 {

@@ -19,7 +19,6 @@
 #include <wrl/client.h>
 
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-using Microsoft::WRL::ComPtr;
 
 #include "dml_execution_context.h"
 
@@ -49,16 +48,16 @@ namespace dml_ep {
             gsl::span<ID3D12Resource*> src,
             D3D12_RESOURCE_STATES srcState);
 
-        static ComPtr<ID3D12Resource> CreateReadbackHeap(ID3D12Device* device, size_t size);
+        static Microsoft::WRL::ComPtr<ID3D12Resource> CreateReadbackHeap(ID3D12Device* device, size_t size);
     private:
         void EnsureReadbackHeap(size_t size);
 
         static constexpr size_t c_initialCapacity = 1024 * 1024; // 1MB
 
-        ComPtr<ID3D12Device> m_device;
-        ComPtr<PluginDmlExecutionContext> m_executionContext;
+        Microsoft::WRL::ComPtr<ID3D12Device> m_device;
+        Microsoft::WRL::ComPtr<PluginDmlExecutionContext> m_executionContext;
 
-        ComPtr<ID3D12Resource> m_readbackHeap;
+        Microsoft::WRL::ComPtr<ID3D12Resource> m_readbackHeap;
         size_t m_capacity = 0;
     };
 

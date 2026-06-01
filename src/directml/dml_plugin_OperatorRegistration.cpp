@@ -19,7 +19,6 @@
 #include "plugin_DmlGridSample.h"
 
 
-using namespace Microsoft::WRL;
 using namespace OperatorHelper;
 
 #include "core/framework/TensorSeq.h"
@@ -1197,7 +1196,7 @@ MLOperatorEdgeDescription SequenceEdgeDesc()
 
 void RegisterDmlOperators(IMLOperatorRegistry* registry, const PluginDmlExecutionProviderImpl* executionProvider)
 {
-    ComPtr<IMLOperatorRegistryPrivate> registryPrivate;
+    Microsoft::WRL::ComPtr<IMLOperatorRegistryPrivate> registryPrivate;
     THROW_IF_FAILED(registry->QueryInterface(registryPrivate.GetAddressOf()));
 
     std::vector<MLOperatorEdgeTypeConstrant> typeConstraints;
@@ -1288,15 +1287,15 @@ void RegisterDmlOperators(IMLOperatorRegistry* registry, const PluginDmlExecutio
             totalTypeCount += typeConstraints[i].allowedTypeCount;
         }
 
-        ComPtr<MLOperatorKernelFactory> factory =  wil::MakeOrThrow<MLOperatorKernelFactory>(information.creationFunction);
-        ComPtr<MLOperatorShapeInferrer> shapeInferrer;
+        Microsoft::WRL::ComPtr<MLOperatorKernelFactory> factory =  wil::MakeOrThrow<MLOperatorKernelFactory>(information.creationFunction);
+        Microsoft::WRL::ComPtr<MLOperatorShapeInferrer> shapeInferrer;
 
         if (information.shapeInferenceFunction)
         {
             shapeInferrer = wil::MakeOrThrow<MLOperatorShapeInferrer>(information.shapeInferenceFunction);
         }
 
-        ComPtr<IMLOperatorSupportQueryPrivate> supportQuery;
+        Microsoft::WRL::ComPtr<IMLOperatorSupportQueryPrivate> supportQuery;
         if (information.supportQueryFunction)
         {
             supportQuery = wil::MakeOrThrow<MLOperatorSupportQuery>(information.supportQueryFunction);

@@ -131,12 +131,12 @@ public:
             // TODO: Remove this hack when DML supports native int64 for NonZero
             // We use the int64/uint32 stride hack here, so zero out the data before writing to it
             uint64_t tensorSizeInBytes = uint64_t(m_rank) * uint64_t(nonzeroElementCount) * sizeof(int64_t);
-            ComPtr<IDMLCompiledOperator> zeroOperator = InitializeZeroInt64Tensor(tensorSizeInBytes);
+            Microsoft::WRL::ComPtr<IDMLCompiledOperator> zeroOperator = InitializeZeroInt64Tensor(tensorSizeInBytes);
 
             // TODO: Remove this hack when DML supports native int64 for NonZero
             ExecuteZeroInt64Tensor(zeroOperator.Get(), outputTensor.GetInterface().Get());
 
-            ComPtr<IDMLCompiledOperator> sliceOperator = InitializeSlice(m_intermediateTensorDescs[1], nonzeroElementCount);
+            Microsoft::WRL::ComPtr<IDMLCompiledOperator> sliceOperator = InitializeSlice(m_intermediateTensorDescs[1], nonzeroElementCount);
 
             // Finally, we crop the output to the actual number of nonzero elements, thus removing the padding
             std::array<IMLOperatorTensor*, 1> sliceInputTensors = {nonzeroCoordinatesOutputTensors[1]};
@@ -151,7 +151,7 @@ public:
     }
 
 private:
-    ComPtr<IDMLCompiledOperator> InitializeSlice(TensorDesc& inputDesc, uint32_t nonzeroElementCount)
+    Microsoft::WRL::ComPtr<IDMLCompiledOperator> InitializeSlice(TensorDesc& inputDesc, uint32_t nonzeroElementCount)
     {
         assert(inputDesc.GetSizes().size() == 2);
 
@@ -177,10 +177,10 @@ private:
 
         DML_OPERATOR_DESC opDesc = { DML_OPERATOR_SLICE1, &sliceDesc };
 
-        ComPtr<IDMLOperator> dmlOperator;
+        Microsoft::WRL::ComPtr<IDMLOperator> dmlOperator;
         ORT_THROW_IF_FAILED(m_dmlDevice->CreateOperator(&opDesc, IID_PPV_ARGS(&dmlOperator)));
 
-        ComPtr<IDMLCompiledOperator> dmlCompiledOperator;
+        Microsoft::WRL::ComPtr<IDMLCompiledOperator> dmlCompiledOperator;
         ORT_THROW_IF_FAILED(m_dmlDevice->CompileOperator(dmlOperator.Get(), GetExecutionFlags(), IID_PPV_ARGS(&dmlCompiledOperator)));
 
         return dmlCompiledOperator;

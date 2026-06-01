@@ -8,9 +8,9 @@
 
 namespace dml_ep {
 
-    ComPtr<DmlResourceWrapper> DmlCommittedResourceAllocator::Alloc(size_t size)
+    Microsoft::WRL::ComPtr<DmlResourceWrapper> DmlCommittedResourceAllocator::Alloc(size_t size)
     {
-        ComPtr<ID3D12Resource> resource;
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
         auto buffer = CD3DX12_RESOURCE_DESC::Buffer(size, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         ORT_THROW_IF_FAILED(m_device->CreateCommittedResource(
             unmove_ptr(CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT)),
@@ -21,7 +21,7 @@ namespace dml_ep {
             IID_GRAPHICS_PPV_ARGS(resource.GetAddressOf())
         ));
 
-        ComPtr<DmlResourceWrapper> resourceWrapper;
+        Microsoft::WRL::ComPtr<DmlResourceWrapper> resourceWrapper;
         wil::MakeOrThrow<DmlCommittedResourceWrapper>(std::move(resource)).As(&resourceWrapper);
         return resourceWrapper;
     }

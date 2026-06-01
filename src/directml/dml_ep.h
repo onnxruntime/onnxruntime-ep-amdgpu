@@ -10,7 +10,6 @@
 //#include "DmlExecutionProvider/DmlCommon.h"
 #include "dml_common.h"
 #include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
-#include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
 #include "DmlExecutionProvider/AbiCustomRegistry.h"
 #include "DmlExecutionProvider/inc/DmlExecutionProvider.h"
 #include "DmlExecutionProvider/DmlCommittedResourceAllocator.h"
@@ -43,7 +42,6 @@
 
 #include <queue>
 
-using Microsoft::WRL::ComPtr;
 
 class DMLDataTransfer;
 
@@ -59,7 +57,7 @@ public:
         std::string_view name,
         ID3D12Device* d3d12_device,
         IDMLDevice* dml_device,
-        ComPtr<PluginDmlExecutionContext> executionContext);
+        Microsoft::WRL::ComPtr<PluginDmlExecutionContext> executionContext);
 
             //const OrtSessionOptions *session_options, const OrtLogger *logger,
     ~ExecutionProviderPlugin();
@@ -236,9 +234,9 @@ private:
     static constexpr uint32_t vendor_id_{0x1002};
     const std::string ep_version_{"0.1.0"};
 
-    ComPtr<ID3D12Device> d3d12_device;
-    ComPtr<IDMLDevice> m_dmlDevice;
-    ComPtr<PluginDmlExecutionContext> m_context;
+    Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;
+    Microsoft::WRL::ComPtr<IDMLDevice> m_dmlDevice;
+    Microsoft::WRL::ComPtr<PluginDmlExecutionContext> m_context;
     //std::shared_ptr<OrtAllocator> m_cpuInputAllocator;
     std::unordered_map<int, std::vector<std::unique_ptr<DmlReusedCommandListState>>> m_capturedGraphs;
     std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;

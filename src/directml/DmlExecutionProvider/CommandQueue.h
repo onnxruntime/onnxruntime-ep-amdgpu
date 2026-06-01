@@ -8,7 +8,6 @@
 #include <gsl/span>
 
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-using Microsoft::WRL::ComPtr;
 
 namespace dml_ep {
 
@@ -21,7 +20,7 @@ namespace dml_ep {
         CommandQueue(ID3D12CommandQueue* existingQueue, bool cpuSyncSpinningEnabled);
 
         D3D12_COMMAND_LIST_TYPE GetType() const { return m_type; }
-        ComPtr<ID3D12Fence> GetFence() const { return m_fence; }
+        Microsoft::WRL::ComPtr<ID3D12Fence> GetFence() const { return m_fence; }
         uint64_t GetLastFenceValue() const { return m_lastFenceValue; }
 
         void ExecuteCommandList(ID3D12CommandList* commandList);
@@ -43,7 +42,7 @@ namespace dml_ep {
         void QueueReference(IGraphicsUnknown* object, bool waitForUnsubmittedWork)
         {
             // TODO(justoeck): consider changing QueuedReference to hold a variant of
-            // ComPtr<IUnknown>, ComPtr<IGraphicsUnknown>.
+            // Microsoft::WRL::ComPtr<IUnknown>, Microsoft::WRL::ComPtr<IGraphicsUnknown>.
             auto wrapper = Microsoft::WRL::Make<GraphicsUnknownWrapper>(object);
             QueueReference(wrapper.Get(), waitForUnsubmittedWork);
         }
@@ -56,15 +55,15 @@ namespace dml_ep {
         struct QueuedReference
         {
             uint64_t fenceValue;
-            ComPtr<IUnknown> object;
+            Microsoft::WRL::ComPtr<IUnknown> object;
         };
 
         std::deque<QueuedReference> m_queuedReferences;
 
-        ComPtr<ID3D12CommandQueue> m_queue;
+        Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_queue;
         D3D12_COMMAND_LIST_TYPE m_type;
 
-        ComPtr<ID3D12Fence> m_fence;
+        Microsoft::WRL::ComPtr<ID3D12Fence> m_fence;
         uint64_t m_lastFenceValue = 0;
         bool m_closing = false;
         bool m_cpuSyncSpinningEnabled = false;

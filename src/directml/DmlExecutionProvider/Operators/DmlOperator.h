@@ -17,16 +17,16 @@ namespace dml_ep {
         virtual void Compute(const MLOperatorKernelContext& kernelContext);
 
     protected:
-        ComPtr<IExecutionProvider> m_executionProvider;
-        ComPtr<IDMLDevice> m_dmlDevice;
+        Microsoft::WRL::ComPtr<IExecutionProvider> m_executionProvider;
+        Microsoft::WRL::ComPtr<IDMLDevice> m_dmlDevice;
 
         // Tensor descs ordered based on index arrays passed to Initialize
         std::vector<TensorDesc> m_inputTensorDescs;
         std::vector<TensorDesc> m_outputTensorDescs;
 
-        ComPtr<IDMLCompiledOperator> m_compiledOperator;
-        ComPtr<ID3D12Resource> m_persistentResource;
-        ComPtr<IUnknown> m_persistentResourcePoolingUnk; // Controls when the persistent resource is returned to the pool
+        Microsoft::WRL::ComPtr<IDMLCompiledOperator> m_compiledOperator;
+        Microsoft::WRL::ComPtr<ID3D12Resource> m_persistentResource;
+        Microsoft::WRL::ComPtr<IUnknown> m_persistentResourcePoolingUnk; // Controls when the persistent resource is returned to the pool
         std::optional<DML_BUFFER_BINDING> m_persistentResourceBinding;
 
         void Initialize(
@@ -116,7 +116,7 @@ namespace dml_ep {
         //
         // It returns nullptr if there is no work to do (0 bytes).
         //
-        ComPtr<IDMLCompiledOperator> InitializeZeroInt64Tensor(uint64_t tensorSizeInBytes);
+        Microsoft::WRL::ComPtr<IDMLCompiledOperator> InitializeZeroInt64Tensor(uint64_t tensorSizeInBytes);
         void ExecuteZeroInt64Tensor(IDMLCompiledOperator* compiledOperator, IMLOperatorTensor* tensor);
 
         TensorDesc CreateTensorDescFromInput(
@@ -162,7 +162,7 @@ namespace dml_ep {
 
         void ConvertToDmlGraphDesc(const MLOperatorGraphDesc& operatorGraphDesc,
                                    _Out_ DML_GRAPH_DESC& graphDesc,
-                                   _Inout_ std::vector<ComPtr<IDMLOperator>>& dmlOperators,
+                                   _Inout_ std::vector<Microsoft::WRL::ComPtr<IDMLOperator>>& dmlOperators,
                                    _Inout_ std::vector<DML_OPERATOR_GRAPH_NODE_DESC>& dmlOperatorGraphNodes,
                                    _Inout_ std::vector<DML_GRAPH_NODE_DESC>& dmlGraphNodes,
                                    _Inout_ std::vector<DML_GRAPH_EDGE_DESC>& dmlInputEdges,

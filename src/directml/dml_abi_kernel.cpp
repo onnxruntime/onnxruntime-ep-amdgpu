@@ -3,7 +3,7 @@
 
 // dml_execution_provider.h must come before dml_abi_kernel.h so that
 // IWinmlExecutionProvider is fully defined when dml_abi_kernel.h's
-// AbiSafeKernelContext class (which has ComPtr<IWinmlExecutionProvider>)
+// AbiSafeKernelContext class (which has Microsoft::WRL::ComPtr<IWinmlExecutionProvider>)
 // is parsed by the compiler.
 #include "dml_execution_provider.h"
 #include "dml_abi_kernel.h"
@@ -17,7 +17,6 @@
 
 namespace dml_ep {
 
-using Microsoft::WRL::ComPtr;
 
 // Forward declarations for file-local helpers defined later in this file.
 static TensorContent SnapshotConstantInput(IMLOperatorTensor* tensor);
@@ -2094,7 +2093,7 @@ HRESULT AbiSafeKernelCreationContext::GetTensorShapeDescription(IMLOperatorTenso
     }
 
     // If shapes are available, return this object as the shape description interface
-    ComPtr<IMLOperatorTensorShapeDescription> ret = const_cast<AbiSafeKernelCreationContext*>(this);
+    Microsoft::WRL::ComPtr<IMLOperatorTensorShapeDescription> ret = const_cast<AbiSafeKernelCreationContext*>(this);
     *shapeInfo = ret.Detach();
     return S_OK;
 }

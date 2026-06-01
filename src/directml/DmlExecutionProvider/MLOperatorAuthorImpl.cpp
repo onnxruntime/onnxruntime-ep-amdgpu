@@ -235,7 +235,7 @@ namespace Windows::AI::MachineLearning::Adapter
         }
         else
         {
-            ComPtr<IUnknown> tmp = allocation;
+            Microsoft::WRL::ComPtr<IUnknown> tmp = allocation;
             *abiAllocation = tmp.Detach();
         }
     }
@@ -768,7 +768,7 @@ namespace Windows::AI::MachineLearning::Adapter
         if (executionHandle)
         {
             // We assume the execution object inherits IUnknown as its first base
-            ComPtr<IUnknown> providerExecutionObject = const_cast<IUnknown*>(static_cast<const IUnknown*>(executionHandle));
+            Microsoft::WRL::ComPtr<IUnknown> providerExecutionObject = const_cast<IUnknown*>(static_cast<const IUnknown*>(executionHandle));
             providerExecutionObject.As(&m_winmlProvider);
         }
 
@@ -1401,7 +1401,7 @@ namespace Windows::AI::MachineLearning::Adapter
                 //return MLStatus::REQUIREMENT_NOT_REGISTERED;
             }
 
-            ComPtr<IMLOperatorTensorShapeDescription> ret = const_cast<OpKernelInfoWrapper*>(this);
+            Microsoft::WRL::ComPtr<IMLOperatorTensorShapeDescription> ret = const_cast<OpKernelInfoWrapper*>(this);
             *shapeInfo = ret.Detach();
             return S_OK;
         }
@@ -1621,7 +1621,7 @@ namespace Windows::AI::MachineLearning::Adapter
                 //return MLStatus::REQUIREMENT_NOT_REGISTERED;
             }
 
-            ComPtr<IMLOperatorTensorShapeDescription> ret = const_cast<DmlGraphOpKernelInfoWrapper*>(this);
+            Microsoft::WRL::ComPtr<IMLOperatorTensorShapeDescription> ret = const_cast<DmlGraphOpKernelInfoWrapper*>(this);
             *shapeInfo = ret.Detach();
             return S_OK;
         }
@@ -1945,7 +1945,7 @@ namespace Windows::AI::MachineLearning::Adapter
             {
                 for (uint32_t j = 0; j < m_inputTensors[i].size(); ++j)
                 {
-                    ComPtr<IMLOperatorTensor> tensor;
+                    Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor;
                     if (m_inputTensors[i].size() == 1)
                     {
                         ORT_THROW_IF_FAILED(GetInputTensor(i, tensor.GetAddressOf()));
@@ -1957,7 +1957,7 @@ namespace Windows::AI::MachineLearning::Adapter
 
                     if (tensor)
                     {
-                        ComPtr<IUnknown> resource;
+                        Microsoft::WRL::ComPtr<IUnknown> resource;
                         tensor->GetDataInterface(resource.GetAddressOf());
                         if (resource)
                         {
@@ -1969,10 +1969,10 @@ namespace Windows::AI::MachineLearning::Adapter
 
             for (uint32_t i = 0; i < m_outputTensors.size(); ++i)
             {
-                ComPtr<IMLOperatorTensor> tensor;
+                Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor;
                 ORT_THROW_IF_FAILED(GetOutputTensor(i, tensor.GetAddressOf()));
 
-                ComPtr<IUnknown> resource;
+                Microsoft::WRL::ComPtr<IUnknown> resource;
                 tensor->GetDataInterface(resource.GetAddressOf());
                 if (resource)
                 {
@@ -2094,7 +2094,7 @@ namespace Windows::AI::MachineLearning::Adapter
                 auto inputTensor = m_impl->Input<onnxruntime::Tensor>(gsl::narrow_cast<int>(inputIndex));
                 if (inputTensor != nullptr)
                 {
-                    ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
+                    Microsoft::WRL::ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
                         const_cast<onnxruntime::Tensor*>(inputTensor),
                         IsAllocationInterface(inputTensor->Location()),
                         m_winmlProvider.Get(),
@@ -2136,7 +2136,7 @@ namespace Windows::AI::MachineLearning::Adapter
                 auto elemTensor = const_cast<onnxruntime::Tensor*>(&inputTensorSeq->Get(sequenceIndex));
                 if (elemTensor != nullptr)
                 {
-                    ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
+                    Microsoft::WRL::ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
                         elemTensor,
                         IsAllocationInterface(elemTensor->Location()),
                         m_winmlProvider.Get(),
@@ -2236,7 +2236,7 @@ namespace Windows::AI::MachineLearning::Adapter
                 auto elemTensor = const_cast<onnxruntime::Tensor*>(&outputTensorSeq->Get(sequenceIndex));
                 if (elemTensor != nullptr)
                 {
-                    ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
+                    Microsoft::WRL::ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
                         elemTensor,
                         IsAllocationInterface(elemTensor->Location()),
                         m_winmlProvider.Get(),
@@ -2329,7 +2329,7 @@ namespace Windows::AI::MachineLearning::Adapter
                 auto outputTensor = m_impl->Output(outputIndex, shape);
                 if (outputTensor)
                 {
-                    ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
+                    Microsoft::WRL::ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
                         const_cast<onnxruntime::Tensor*>(outputTensor),
                         IsAllocationInterface(outputTensor->Location()),
                         m_winmlProvider.Get(),
@@ -2371,7 +2371,7 @@ namespace Windows::AI::MachineLearning::Adapter
                 return E_FAIL;
             }
 
-            ComPtr<IUnknown> allocation;
+            Microsoft::WRL::ComPtr<IUnknown> allocation;
             allocation.Attach(static_cast<IUnknown*>(alloc->Alloc(size)));
 
             *allocId = m_winmlProvider->TryGetPooledAllocationId(allocation.Get(), 0);
@@ -2404,7 +2404,7 @@ namespace Windows::AI::MachineLearning::Adapter
 
         for (int i = 0; i < m_impl->InputCount(); ++i)
         {
-            ComPtr<IMLOperatorTensor> tensor;
+            Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor;
             ORT_THROW_IF_FAILED(GetInputTensor(i, tensor.GetAddressOf()));
             ret.push_back(m_inputTensors[i][0].Get());
         }
@@ -2421,7 +2421,7 @@ namespace Windows::AI::MachineLearning::Adapter
 
         for (int i = 0; i < m_impl->OutputCount(); ++i)
         {
-            ComPtr<IMLOperatorTensor> tensor;
+            Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor;
             ORT_THROW_IF_FAILED(GetOutputTensor(
                 i,
                 static_cast<uint32_t>(outputShapes.GetShape(i).size()),
@@ -2458,7 +2458,7 @@ namespace Windows::AI::MachineLearning::Adapter
         if (executionHandle)
         {
             // We assume the execution object inherits IUnknown as its first base
-            ComPtr<IUnknown> providerExecutionObject = const_cast<IUnknown*>(static_cast<const IUnknown*>(executionHandle));
+            Microsoft::WRL::ComPtr<IUnknown> providerExecutionObject = const_cast<IUnknown*>(static_cast<const IUnknown*>(executionHandle));
             m_abiExecutionObject = providerExecutionObject;
 
             // Get the WinML-specific execution provider interface from the execution object.
@@ -2513,7 +2513,7 @@ namespace Windows::AI::MachineLearning::Adapter
             }
 
             // Create the kernel while allowing input shape and output shape queries according to options
-            ComPtr<OpKernelInfoWrapper> kernelInfoWrapper = wil::MakeOrThrow<OpKernelInfoWrapper>(
+            Microsoft::WRL::ComPtr<OpKernelInfoWrapper> kernelInfoWrapper = wil::MakeOrThrow<OpKernelInfoWrapper>(
                 &kerneInfo,
                 m_abiExecutionObject.Get(),
                 nullptr,
@@ -2599,7 +2599,7 @@ namespace Windows::AI::MachineLearning::Adapter
             return Microsoft::WRL::ComPtr<IMLOperatorTensor>();
         };
 
-        auto inferShapesAndCreateKernel = [&, context](const EdgeShapes& inputShapes, EdgeShapes& outputShapes) -> ComPtr<IMLOperatorKernel> {
+        auto inferShapesAndCreateKernel = [&, context](const EdgeShapes& inputShapes, EdgeShapes& outputShapes) -> Microsoft::WRL::ComPtr<IMLOperatorKernel> {
             // If the output size is not dynamic, infer it using the kernel. The result of inference is stored in m_inferredOutputShapes.
             if (m_requiresOutputShapesAtCreation)
             {
@@ -2608,7 +2608,7 @@ namespace Windows::AI::MachineLearning::Adapter
             }
 
             // Create the kernel while allowing input shape and output shape queries according to options
-            ComPtr<OpKernelInfoWrapper> kernelInfoWrapper = wil::MakeOrThrow<OpKernelInfoWrapper>(
+            Microsoft::WRL::ComPtr<OpKernelInfoWrapper> kernelInfoWrapper = wil::MakeOrThrow<OpKernelInfoWrapper>(
                 &Info(),
                 m_abiExecutionObject.Get(),
                 &inputShapes,
@@ -2621,7 +2621,7 @@ namespace Windows::AI::MachineLearning::Adapter
                 constantInputGetter,
                 context /*const onnxruntime::OpKernelContext* m_kernelContext*/);
 
-            ComPtr<IMLOperatorKernel> ret;
+            Microsoft::WRL::ComPtr<IMLOperatorKernel> ret;
             ORT_THROW_IF_FAILED(m_operatorFactory->CreateKernel(kernelInfoWrapper.Get(), ret.GetAddressOf()));
             kernelInfoWrapper->Close();
 
@@ -2684,9 +2684,9 @@ namespace Windows::AI::MachineLearning::Adapter
             if (local_input_shapes != m_inputShapesOfKernelInference || requiredCpuInputsChanged)
             {
                 EdgeShapes localInferredOutputShapes;
-                ComPtr<IMLOperatorKernel> localKernel = inferShapesAndCreateKernel(local_input_shapes, localInferredOutputShapes);
+                Microsoft::WRL::ComPtr<IMLOperatorKernel> localKernel = inferShapesAndCreateKernel(local_input_shapes, localInferredOutputShapes);
 
-                ComPtr<OpKernelContextWrapper> kernelContextWrapper = wil::MakeOrThrow<OpKernelContextWrapper>(
+                Microsoft::WRL::ComPtr<OpKernelContextWrapper> kernelContextWrapper = wil::MakeOrThrow<OpKernelContextWrapper>(
                     context,
                     Info().GetExecutionProvider(),
                     m_internalOperator,
@@ -2705,7 +2705,7 @@ namespace Windows::AI::MachineLearning::Adapter
             }
         }
 
-        ComPtr<OpKernelContextWrapper> kernelContextWrapper = wil::MakeOrThrow<OpKernelContextWrapper>(
+        Microsoft::WRL::ComPtr<OpKernelContextWrapper> kernelContextWrapper = wil::MakeOrThrow<OpKernelContextWrapper>(
             context,
             Info().GetExecutionProvider(),
             m_internalOperator,
@@ -2724,7 +2724,7 @@ namespace Windows::AI::MachineLearning::Adapter
         return STATUS_OK;
     }
 
-    bool AbiOpKernel::RequiredCpuInputChanged(const ComPtr<IMLOperatorTensor>& constantTensor, uint32_t index) const
+    bool AbiOpKernel::RequiredCpuInputChanged(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor, uint32_t index) const
     {
         assert(std::holds_alternative<TensorContent>(m_constantInputTensorContentsOfKernel[index]));
 
@@ -2780,7 +2780,7 @@ namespace Windows::AI::MachineLearning::Adapter
         return false;
     }
 
-    void AbiOpKernel::FillConstantInputs(const ComPtr<IMLOperatorTensor>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const
+    void AbiOpKernel::FillConstantInputs(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const
     {
         // Skip optional constant tensors.
         if (constantTensor != nullptr)
@@ -2816,7 +2816,7 @@ namespace Windows::AI::MachineLearning::Adapter
 
         for (uint32_t i = 0; i < constantTensorSequence.size(); ++i)
         {
-            const ComPtr<IMLOperatorTensor>& constantTensor = constantTensorSequence[i];
+            const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor = constantTensorSequence[i];
 
             // Skip optional constant tensors.
             if (constantTensor == nullptr)
@@ -2928,7 +2928,7 @@ namespace Windows::AI::MachineLearning::Adapter
         onnxruntime::ProtoHelperNodeContext protoContext(node);
         onnxruntime::OpNodeProtoHelper<onnxruntime::ProtoHelperNodeContext> info(&protoContext);
 
-        ComPtr<MLKernelInferenceContext> inferenceContext = wil::MakeOrThrow<MLKernelInferenceContext>(&info, inputShapes, outputShapes, defaultAttributes, requiredConstantCpuInputs, constantInputGetter);
+        Microsoft::WRL::ComPtr<MLKernelInferenceContext> inferenceContext = wil::MakeOrThrow<MLKernelInferenceContext>(&info, inputShapes, outputShapes, defaultAttributes, requiredConstantCpuInputs, constantInputGetter);
 
         outputShapes.Reset(info.GetOutputCount());
 
@@ -2974,7 +2974,7 @@ namespace Windows::AI::MachineLearning::Adapter
         }
     }
 
-    ComPtr<MLSchemaInferenceContext> MLSchemaInferenceContext::Create(onnxruntime::OpNodeProtoHelper<onnx::InferenceContext>* info,
+    Microsoft::WRL::ComPtr<MLSchemaInferenceContext> MLSchemaInferenceContext::Create(onnxruntime::OpNodeProtoHelper<onnx::InferenceContext>* info,
         onnx::InferenceContext* ctx,
         gsl::span<const uint32_t> requiredConstantCpuInputs)
     {
@@ -3065,7 +3065,7 @@ namespace Windows::AI::MachineLearning::Adapter
         ORT_CATCH_RETURN
     }
 
-    ComPtr<MLSupportQueryContext> MLSupportQueryContext::Create(onnxruntime::OpNodeProtoHelper<onnxruntime::ProtoHelperNodeContext>* info,
+    Microsoft::WRL::ComPtr<MLSupportQueryContext> MLSupportQueryContext::Create(onnxruntime::OpNodeProtoHelper<onnxruntime::ProtoHelperNodeContext>* info,
         const AttributeMap* defaultAttributes)
     {
         MLOperatorTensorGetter mLOperatorTensorGetter = MLOperatorTensorGetter();

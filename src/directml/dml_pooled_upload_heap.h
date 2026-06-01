@@ -16,9 +16,7 @@
 #include "dml_execution_context.h"
 
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-using Microsoft::WRL::ComPtr;
 
-using Microsoft::WRL::ComPtr;
 
 namespace dml_ep {
 
@@ -66,7 +64,7 @@ namespace dml_ep {
         struct Chunk
         {
             size_t capacityInBytes; // The total size of the upload heap, in bytes
-            ComPtr<ID3D12Resource> resource;
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource;
 
             // Allocations are sorted by ascending fence value - that is, least to most recently allocated
             std::list<Allocation> allocations;
@@ -104,8 +102,8 @@ namespace dml_ep {
         void ReclaimAllocations(); // Frees all allocations which are no longer being used by the GPU.
         void AssertInvariants();
 
-        ComPtr<ID3D12Device> m_device;
-        ComPtr<PluginDmlExecutionContext> m_executionContext;
+        Microsoft::WRL::ComPtr<ID3D12Device> m_device;
+        Microsoft::WRL::ComPtr<PluginDmlExecutionContext> m_executionContext;
 
         std::vector<Chunk> m_chunks; // sorted ascending by capacity (upload heap size)
         size_t m_totalCapacity = 0; // Total size of all chunks, in bytes

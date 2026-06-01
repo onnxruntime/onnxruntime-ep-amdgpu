@@ -5,12 +5,10 @@
 
 #include "dml_execution_provider.h"
 #include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
-#include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
 #include "OperatorAuthorHelper/MLOperatorAuthorPrivate.h"
 #include "dml_plugin_MLOperatorAuthorImpl.h"
 
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-using Microsoft::WRL::ComPtr;
 
 namespace dml_ep {
 class PluginDmlExecutionProviderImpl;
@@ -24,7 +22,6 @@ using Base =
 
 namespace Windows::AI::MachineLearning::Adapter {
 
-using namespace Microsoft::WRL;
 
 class PluginAbiCustomRegistry : public WRL::Base<IMLOperatorRegistry, IMLOperatorRegistryPrivate> {
 public:

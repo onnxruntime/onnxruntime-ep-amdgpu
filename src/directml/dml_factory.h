@@ -16,7 +16,6 @@
 
 #include <wrl/client.h>
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-using Microsoft::WRL::ComPtr;
 
 #include <wil/wrl.h>
 #include <wil/result.h>
@@ -86,13 +85,13 @@ private:
                                                           _Out_ size_t num_domains) noexcept;
 
     void CreateDMLAndD3DResources();
-    ComPtr<ID3D12Device> CreateD3d12Device();
-    ComPtr<ID3D12CommandQueue> CreateCommandQueue(const ComPtr<ID3D12Device>& device);
-    ComPtr<IDMLDevice> CreateDMLDevice(const ComPtr<ID3D12Device>& device);
+    Microsoft::WRL::ComPtr<ID3D12Device> CreateD3d12Device();
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> CreateCommandQueue(const Microsoft::WRL::ComPtr<ID3D12Device>& device);
+    Microsoft::WRL::ComPtr<IDMLDevice> CreateDMLDevice(const Microsoft::WRL::ComPtr<ID3D12Device>& device);
     bool IsCpuAllocator(const OrtMemoryInfo* memory_info);
     bool IsGpuAllocator(const OrtMemoryInfo* memory_info);
-    std::vector<ComPtr<IDXCoreAdapter>> GetAdapters();
-    void CreateD3DDeviceFromAdapter(IDXCoreAdapter* adapter, ComPtr<ID3D12Device>& device);
+    std::vector<Microsoft::WRL::ComPtr<IDXCoreAdapter>> GetAdapters();
+    void CreateD3DDeviceFromAdapter(IDXCoreAdapter* adapter, Microsoft::WRL::ComPtr<ID3D12Device>& device);
 
     std::string ep_name_{};
     const std::string vendor_{amd::Vendor};
@@ -103,9 +102,9 @@ private:
     Ort::MemoryInfo readonly_memory_info_;
     Ort::MemoryInfo cpu_input_allocator_;
 
-    ComPtr<ID3D12Device> d3d12_device;
-    ComPtr<ID3D12CommandQueue> cmd_queue;
-    ComPtr<IDMLDevice> dml_device;
+    Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> cmd_queue;
+    Microsoft::WRL::ComPtr<IDMLDevice> dml_device;
 
     std::unique_ptr<ExecutionProviderPlugin> m_ep;
     ExecutionProviderPlugin* m_ep_raw = nullptr; // non-owning observer pointer

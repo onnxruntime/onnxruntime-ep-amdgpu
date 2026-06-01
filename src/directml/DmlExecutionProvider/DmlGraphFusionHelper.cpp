@@ -251,13 +251,13 @@ namespace DmlGraphFusionHelper
                 if (!isInputsUploadedByDmlEP[i])
                 {
                     // Store the resource to use during execution
-                    ComPtr<ID3D12Resource> defaultBuffer = CreateResource(providerImpl, tensorPtr, tensorByteSize);
+                    Microsoft::WRL::ComPtr<ID3D12Resource> defaultBuffer = CreateResource(providerImpl, tensorPtr, tensorByteSize);
                     nonOwnedGraphInputsFromInitializers[i] = defaultBuffer;
                     initializeResourceRefs.push_back(std::move(defaultBuffer));
                 }
                 else
                 {
-                    ComPtr<ID3D12Resource> initializeInputBuffer;
+                    Microsoft::WRL::ComPtr<ID3D12Resource> initializeInputBuffer;
 
                     if (!providerImpl->CustomHeapsSupported())
                     {
@@ -365,7 +365,7 @@ namespace DmlGraphFusionHelper
             {
                 oldNodeIndexToNewNodeIndexMap[index] = static_cast<uint32_t>(dmlGraphNodes.size());
                 DML_OPERATOR_DESC dmlDesc = SchemaHelpers::ConvertOperatorDesc<AllocatorSize>(std::get<AbstractOperatorDesc>(node.Desc), &allocator);
-                ComPtr<IDMLOperator> op;
+                Microsoft::WRL::ComPtr<IDMLOperator> op;
                 ORT_THROW_IF_FAILED(device->CreateOperator(&dmlDesc, IID_PPV_ARGS(&op)));
                 dmlOperators.push_back(op);
                 DML_OPERATOR_GRAPH_NODE_DESC* dmlOperatorGraphNode = allocator.template Allocate<DML_OPERATOR_GRAPH_NODE_DESC>();
@@ -544,7 +544,7 @@ namespace DmlGraphFusionHelper
         const uint32_t fusedNodeOutputCount = gsl::narrow_cast<uint32_t>(indexedSubGraph.GetMetaDef()->outputs.size());
 
         // convert DML EP GraphDesc into DML_GRAPH_DESC and create IDMLCompiledOperator
-        ComPtr<IDMLDevice> device;
+        Microsoft::WRL::ComPtr<IDMLDevice> device;
         ORT_THROW_IF_FAILED(providerImpl->GetDmlDevice(device.GetAddressOf()));
 
         StackAllocator<1024> allocator;
@@ -582,10 +582,10 @@ namespace DmlGraphFusionHelper
         }
 
 
-        ComPtr<IDMLDevice1> device1;
+        Microsoft::WRL::ComPtr<IDMLDevice1> device1;
         ORT_THROW_IF_FAILED(device.As(&device1));
 
-        ComPtr<IDMLCompiledOperator> compiledExecutionPlanOperator;
+        Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiledExecutionPlanOperator;
         ORT_THROW_IF_FAILED(device1->CompileGraph(
             &dmlGraphDesc,
             executionFlags,
@@ -885,7 +885,7 @@ namespace DmlGraphFusionHelper
     {
         auto commandListState = std::make_unique<DmlReusedCommandListState>();
 
-        ComPtr<IDMLDevice> device;
+        Microsoft::WRL::ComPtr<IDMLDevice> device;
         ORT_THROW_IF_FAILED(provider->GetDmlDevice(device.GetAddressOf()));
 
         DML_BINDING_PROPERTIES execBindingProps = compiledExecutionPlanOperator->GetBindingProperties();
@@ -895,7 +895,7 @@ namespace DmlGraphFusionHelper
         desc.NumDescriptors = execBindingProps.RequiredDescriptorCount;
         desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 
-        ComPtr<ID3D12Device> d3dDevice;
+        Microsoft::WRL::ComPtr<ID3D12Device> d3dDevice;
         ORT_THROW_IF_FAILED(provider->GetD3DDevice(d3dDevice.GetAddressOf()));
 
         ORT_THROW_IF_FAILED(d3dDevice->CreateDescriptorHeap(&desc, IID_GRAPHICS_PPV_ARGS(commandListState->heap.ReleaseAndGetAddressOf())));
@@ -930,7 +930,7 @@ namespace DmlGraphFusionHelper
         ID3D12DescriptorHeap* descriptorHeaps[] = { commandListState->heap.Get() };
         commandListState->graphicsCommandList->SetDescriptorHeaps(ARRAYSIZE(descriptorHeaps), descriptorHeaps);
 
-        ComPtr<IDMLCommandRecorder> recorder;
+        Microsoft::WRL::ComPtr<IDMLCommandRecorder> recorder;
         ORT_THROW_IF_FAILED(device->CreateCommandRecorder(IID_PPV_ARGS(recorder.GetAddressOf())));
 
         recorder->RecordDispatch(commandListState->graphicsCommandList.Get(), compiledExecutionPlanOperator, commandListState->bindingTable.Get());
@@ -947,7 +947,7 @@ namespace DmlGraphFusionHelper
         const onnxruntime::OpKernelInfo& kernelInfo,
         gsl::span<const uint8_t> isInputsUploadedByDmlEP,
         const std::vector<bool>& inputsUsed,
-        gsl::span<const ComPtr<ID3D12Resource>> nonOwnedGraphInputsFromInitializers,
+        gsl::span<const Microsoft::WRL::ComPtr<ID3D12Resource>> nonOwnedGraphInputsFromInitializers,
         const Windows::AI::MachineLearning::Adapter::EdgeShapes& outputShapes,
         IWinmlExecutionProvider* winmlProvider,
         IExecutionProvider* provider,
@@ -1040,15 +1040,15 @@ namespace DmlGraphFusionHelper
         {
             // Allocate temporary data which will automatically be freed when the GPU work
             // which is scheduled up to the point that this method returns has completed.
-            ComPtr<IUnknown> tempAlloc;
+            Microsoft::WRL::ComPtr<IUnknown> tempAlloc;
             uint64_t tempAllocId = 0;
             ORT_THROW_IF_FAILED(contextWrapper.AllocateTemporaryData(static_cast<size_t>(execBindingProps.TemporaryResourceSize), tempAlloc.GetAddressOf(), &tempAllocId));
 
-            ComPtr<IUnknown> tempResourceUnknown;
+            Microsoft::WRL::ComPtr<IUnknown> tempResourceUnknown;
             winmlProvider->GetABIDataInterface(false, tempAlloc.Get(), &tempResourceUnknown);
 
             // Bind the temporary resource.
-            ComPtr<ID3D12Resource> tempResource;
+            Microsoft::WRL::ComPtr<ID3D12Resource> tempResource;
             ORT_THROW_IF_FAILED(tempResourceUnknown->QueryInterface(tempResource.GetAddressOf()));
             DML_BUFFER_BINDING tempBufferBinding = {tempResource.Get(), 0, execBindingProps.TemporaryResourceSize};
             DML_BINDING_DESC tempBindingDesc = { DML_BINDING_TYPE_BUFFER, &tempBufferBinding };
@@ -1068,13 +1068,13 @@ namespace DmlGraphFusionHelper
 
         // Execute the command list and if it succeeds, update the fence value at which this command may be
         // re-used.
-        ComPtr<ID3D12Fence> fence;
+        Microsoft::WRL::ComPtr<ID3D12Fence> fence;
         uint64_t completionValue;
         HRESULT hr = provider->ExecuteCommandList(commandListState.graphicsCommandList.Get(), fence.GetAddressOf(), &completionValue);
 
         if (hr == DXGI_ERROR_DEVICE_REMOVED)
         {
-            ComPtr<ID3D12Device> device;
+            Microsoft::WRL::ComPtr<ID3D12Device> device;
             ORT_THROW_IF_FAILED(provider->GetD3DDevice(&device));
             ORT_THROW_IF_FAILED(device->GetDeviceRemovedReason());
         }
