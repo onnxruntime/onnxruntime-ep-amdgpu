@@ -16,8 +16,7 @@
 #include "dml_ep.h"
 
 
-namespace Windows::AI::MachineLearning::Adapter
-{
+namespace dml_ep {
 
     #define ML_TENSOR_TYPE_CASE(x)                                                                                         \
     if (onnxruntime::utils::IsPrimitiveDataType<x>(type)) {                                                            \
@@ -197,7 +196,7 @@ for (uint32_t i = 0; i < dimensionCount; ++i) {
 }
 
 return S_OK;
-} // namespace Windows::AI::MachineLearning::Adapter
+}  // namespace dml_ep
 ORT_CATCH_RETURN
 }
 
@@ -474,7 +473,7 @@ if (opKernelContextWrapper->m_inputTensors[inputIndex][0] != nullptr) {
     opKernelContextWrapper->m_inputTensors[inputIndex][0].CopyTo(tensor);
 }
 return S_OK;
-} // namespace Windows::AI::MachineLearning::Adapter
+}  // namespace dml_ep
 ORT_CATCH_RETURN
 }
 

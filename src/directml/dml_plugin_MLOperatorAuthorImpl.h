@@ -19,12 +19,8 @@
 #include "core/framework/onnxruntime_sequence_type_info.h"
 
 namespace dml_ep {
+
 class PluginDmlExecutionProviderImpl;
-}
-
-namespace Windows::AI::MachineLearning::Adapter
-{
-
 
 struct LazyPass
 {
@@ -285,4 +281,4 @@ private:
     void FillConstantInputs(const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const;
 };
 
-}    // namespace Windows::AI::MachineLearning::Adapter
+}  // namespace dml_ep

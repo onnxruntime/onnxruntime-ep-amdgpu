@@ -20,7 +20,7 @@ using Base =
     Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, TInterfaces...>;
 }
 
-namespace Windows::AI::MachineLearning::Adapter {
+namespace dml_ep {
 
 
 class PluginAbiCustomRegistry : public WRL::Base<IMLOperatorRegistry, IMLOperatorRegistryPrivate> {
@@ -104,4 +104,4 @@ private:
     const dml_ep::PluginDmlExecutionProviderImpl* m_dmlPluginExecutionProvider = nullptr;
 };
 
-} // namespace Windows::AI::MachineLearning::Adapter
+}  // namespace dml_ep

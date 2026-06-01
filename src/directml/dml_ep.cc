@@ -8,7 +8,6 @@
 #include "core/framework/fuse_nodes_funcs.h"
 #include "dml_abi_kernel.h"
 
-using namespace Windows::AI::MachineLearning::Adapter;
 
 namespace dml_ep {
 
@@ -1088,7 +1087,7 @@ bool ExecutionProviderPlugin::IsNodeSupportedByDml(
 
 bool ExecutionProviderPlugin::DoesNodeContainSupportedDataTypes(
     const OrtNode* node,
-    const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfo* regInfo,
+    const InternalRegistrationInfo* regInfo,
     uint32_t supportedDeviceDataTypeMask, // Each bit corresponds to each DML_TENSOR_DATA_TYPE.
     bool native16BitShaderOpsSupported)
 {

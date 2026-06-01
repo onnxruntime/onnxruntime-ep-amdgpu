@@ -279,4 +279,5 @@ PluginDmlPooledUploadHeap::PluginDmlPooledUploadHeap(ID3D12Device* device, Plugi
 
     #endif // #ifdef _DEBUG
     }
+
 }  // namespace dml_ep

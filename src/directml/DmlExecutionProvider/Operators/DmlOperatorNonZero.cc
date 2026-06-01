@@ -82,7 +82,7 @@ public:
 
         // Create the DML output tensor for the number of nonzero elements
         onnxruntime::Tensor outputCountDml(onnxruntime::DataTypeImpl::GetType<uint32_t>(), m_outputCountShape, gpuAllocator);
-        Microsoft::WRL::ComPtr<IMLOperatorTensor> outputCountDmlWrapper = wil::MakeOrThrow<Windows::AI::MachineLearning::Adapter::TensorWrapper>(
+        Microsoft::WRL::ComPtr<IMLOperatorTensor> outputCountDmlWrapper = wil::MakeOrThrow<TensorWrapper>(
             &outputCountDml,
             true,
             executionProvider,
@@ -90,7 +90,7 @@ public:
 
         // Create the DML output tensor for the coordinates (not cropped)
         onnxruntime::Tensor intermediateCoordinatesDml(onnxruntime::DataTypeImpl::GetType<int64_t>(), m_outputCoordinatesShape, gpuAllocator);
-        Microsoft::WRL::ComPtr<IMLOperatorTensor> intermediateCoordinatesDmlWrapper = wil::MakeOrThrow<Windows::AI::MachineLearning::Adapter::TensorWrapper>(
+        Microsoft::WRL::ComPtr<IMLOperatorTensor> intermediateCoordinatesDmlWrapper = wil::MakeOrThrow<TensorWrapper>(
             &intermediateCoordinatesDml,
             true,
             executionProvider,
@@ -111,7 +111,7 @@ public:
 
             // Copy the number of nonzero elements back to the CPU
             onnxruntime::Tensor outputCountCpu(onnxruntime::DataTypeImpl::GetType<uint32_t>(), {1}, cpuInputAllocator);
-            Microsoft::WRL::ComPtr<IMLOperatorTensor> outputCountCpuWrapper = wil::MakeOrThrow<Windows::AI::MachineLearning::Adapter::TensorWrapper>(
+            Microsoft::WRL::ComPtr<IMLOperatorTensor> outputCountCpuWrapper = wil::MakeOrThrow<TensorWrapper>(
                 &outputCountCpu,
                 false,
                 executionProvider,

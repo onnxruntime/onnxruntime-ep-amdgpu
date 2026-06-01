@@ -11,14 +11,14 @@ namespace dml_ep {
 
     struct GraphNodeProperties
     {
-        std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfo>
+        std::shared_ptr<const InternalRegistrationInfo>
             internalRegInfo;
 
         // These are currently passed from the partitioning step since the only DML operators current
         // supporting graph nodes don't customize the order of edges or shapes, other than coercing
         // dimension count.  This will change as the supported set of operators as graph nodes increases.
-        Windows::AI::MachineLearning::Adapter::EdgeShapes inputShapes;
-        Windows::AI::MachineLearning::Adapter::EdgeShapes outputShapes;
+        EdgeShapes inputShapes;
+        EdgeShapes outputShapes;
     };
 
     namespace GraphDescBuilder
@@ -33,7 +33,7 @@ namespace dml_ep {
         struct GraphDesc : DmlSerializedGraphDesc
         {
             bool reuseCommandList;
-            Windows::AI::MachineLearning::Adapter::EdgeShapes outputShapes;
+            EdgeShapes outputShapes;
         };
 
         GraphDesc BuildGraphDesc(

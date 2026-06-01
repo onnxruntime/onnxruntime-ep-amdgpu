@@ -338,5 +338,6 @@ void RegisterDmlSchemas() {
             *ctx.getOutputType(0)->mutable_tensor_type()->mutable_shape());
       });
 }
+
 }  // namespace dml_ep
 }  // namespace onnxruntime
