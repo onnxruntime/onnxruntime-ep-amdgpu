@@ -8,7 +8,6 @@
 #include "DmlExecutionProvider/DmlGraphFusionHelper.h"
 #include "DmlExecutionProvider/DmlReusedCommandListState.h"
 
-using namespace Windows::AI::MachineLearning::Adapter;
 
 namespace dml_ep {
 
@@ -331,11 +330,11 @@ namespace dml_ep {
         mutable std::vector<bool> m_inputsUsed;
         mutable Microsoft::WRL::ComPtr<ID3D12Resource> m_persistentResource;
         mutable Microsoft::WRL::ComPtr<IUnknown> m_persistentResourceAllocatorUnknown; // Controls when the persistent resource is returned to the allocator
-        mutable Windows::AI::MachineLearning::Adapter::EdgeShapes m_outputShapes;
+        mutable EdgeShapes m_outputShapes;
         mutable std::unordered_map<std::string, onnxruntime::TensorShape> m_inferredInputShapes;
         mutable std::deque<std::unique_ptr<DmlReusedCommandListState>> m_reusedCommandLists;
         mutable std::vector<uint8_t> m_isInputsUploadedByDmlEP;
-        mutable std::vector<ComPtr<ID3D12Resource>> m_nonOwnedGraphInputsFromInitializers;
+        mutable std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_nonOwnedGraphInputsFromInitializers;
     };
 
     onnxruntime::OpKernel* CreateRuntimeFusedGraphKernel(
@@ -361,4 +360,5 @@ namespace dml_ep {
             std::move(ownedInitializers)
         );
     }
+
 }  // namespace dml_ep

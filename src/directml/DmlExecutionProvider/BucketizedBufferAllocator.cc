@@ -218,4 +218,5 @@ namespace dml_ep {
     {
         m_defaultRoundingMode = roundingMode;
     }
+
 }  // namespace dml_ep

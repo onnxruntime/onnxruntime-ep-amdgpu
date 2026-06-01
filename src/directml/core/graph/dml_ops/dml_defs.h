@@ -26,5 +26,6 @@ namespace dml_ep {
       schema_func(ONNX_NAMESPACE::OpSchema(#name, __FILE__, __LINE__))
 
 void RegisterDmlSchemas();
+
 }  // namespace dml_ep
 }  // namespace onnxruntime

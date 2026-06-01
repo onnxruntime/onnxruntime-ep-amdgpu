@@ -25,7 +25,7 @@
 #include "DmlExecutionProvider/DmlEdgeShapes.h"
 
 // Forward declarations
-namespace Windows::AI::MachineLearning::Adapter {
+namespace dml_ep {
     class AttributeValue;
     using AttributeMap = std::map<std::string, AttributeValue>;
 }
@@ -90,7 +90,7 @@ public:
         const std::vector<std::vector<uint32_t>>* inferred_output_shapes = nullptr,
         IMLOperatorShapeInferrer* shape_inferrer = nullptr,
         const std::vector<uint32_t>* required_constant_cpu_inputs = nullptr,
-        const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes = nullptr,
+        const AttributeMap* default_attributes = nullptr,
         const OrtKernelInfo* kernel_info = nullptr);
 
     // IMLOperatorKernelContext methods - implemented using only C API
@@ -122,12 +122,12 @@ private:
     mutable std::vector<Microsoft::WRL::ComPtr<AbiSafeTensor>> tensor_cache_;         // input tensors
     mutable std::vector<Microsoft::WRL::ComPtr<AbiSafeTensor>> output_tensor_cache_;  // output tensors (for post-op transitions)
     mutable Microsoft::WRL::ComPtr<IUnknown> abi_execution_object_;
-    Microsoft::WRL::ComPtr<Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider> winml_provider_;
+    Microsoft::WRL::ComPtr<IWinmlExecutionProvider> winml_provider_;
 
     // For runtime shape inference (e.g., Reshape with constant shape input)
     IMLOperatorShapeInferrer* shape_inferrer_;
     const std::vector<uint32_t>* required_constant_cpu_inputs_;
-    const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes_;
+    const AttributeMap* default_attributes_;
     const OrtKernelInfo* kernel_info_ = nullptr;  // For AbiSafeShapeInferenceContext attribute reads
 };
 
@@ -143,7 +143,7 @@ public:
     AbiSafeShapeInferenceContext(
         OrtKernelContext* kernel_context,
         const OrtApi* ort_api,
-        const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes,
+        const AttributeMap* default_attributes,
         const PluginDmlExecutionProviderImpl* execution_provider,
         const OrtKernelInfo* kernel_info = nullptr);
 
@@ -226,7 +226,7 @@ public:
 private:
     OrtKernelContext* kernel_context_;
     const OrtApi* ort_api_;
-    const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes_;
+    const AttributeMap* default_attributes_;
     const PluginDmlExecutionProviderImpl* execution_provider_;
     const OrtKernelInfo* kernel_info_;  // For accessing actual node attributes
 
@@ -287,7 +287,7 @@ public:
     AbiSafeKernelCreationContext(
         const OrtKernelInfo* kernel_info,
         const OrtApi* ort_api,
-        const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes,
+        const AttributeMap* default_attributes,
         const std::vector<uint32_t>* required_constant_cpu_inputs,
         const PluginDmlExecutionProviderImpl* execution_provider,
         std::unordered_map<uint32_t, Microsoft::WRL::ComPtr<IMLOperatorTensor>>&& constant_tensors = {},
@@ -296,7 +296,7 @@ public:
         bool is_internal_operator = false,  // Controls GetExecutionInterface return value
         bool requires_input_shapes_at_creation = true,  // Mirrors old m_allowInputShapeQuery
         std::unordered_map<std::string, PreFetchedTensorAttr> tensor_attribute_cache = {},  // Pre-fetched tensor attrs
-        const Windows::AI::MachineLearning::Adapter::EdgeShapes* input_shapes_override = nullptr);  // Runtime shapes (lazy-init)
+        const EdgeShapes* input_shapes_override = nullptr);  // Runtime shapes (lazy-init)
 
     // IMLOperatorKernelCreationContext methods
     STDMETHOD_(uint32_t, GetInputCount)() const noexcept override;
@@ -348,7 +348,7 @@ public:
 private:
     const OrtKernelInfo* kernel_info_;
     const OrtApi* ort_api_;
-    const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes_;
+    const AttributeMap* default_attributes_;
     const std::vector<uint32_t>* required_constant_cpu_inputs_;
     const PluginDmlExecutionProviderImpl* execution_provider_;
 
@@ -360,7 +360,7 @@ private:
     const char* operator_name_ = nullptr;
     bool is_internal_operator_ = false;  // Controls GetExecutionInterface (ID3D12GraphicsCommandList* vs provider)
     // Captured runtime input shapes (mirrors old plugin's m_inputShapesOverride passed to PluginOpKernelInfoWrapper)
-    const Windows::AI::MachineLearning::Adapter::EdgeShapes* input_shapes_override_ = nullptr;
+    const EdgeShapes* input_shapes_override_ = nullptr;
     bool requires_input_shapes_at_creation_ = true;  // Mirrors old m_allowInputShapeQuery static flag
 
     // Pre-computed output shapes from shape inferrer (takes precedence over fallback logic)
@@ -384,7 +384,7 @@ private:
 struct DmlKernelCreationState {
     IMLOperatorKernelFactory* kernel_factory = nullptr;
     IMLOperatorShapeInferrer* shape_inferrer = nullptr;
-    const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes = nullptr;
+    const AttributeMap* default_attributes = nullptr;
 
     std::vector<uint32_t> required_constant_cpu_inputs;
     bool requires_input_shapes_at_creation = false;
@@ -487,7 +487,7 @@ struct DmlAbiKernel {
     // For runtime shape inference (e.g., Reshape with constant shape input)
     Microsoft::WRL::ComPtr<IMLOperatorShapeInferrer> shape_inferrer;
     std::vector<uint32_t> required_constant_cpu_inputs;
-    const Windows::AI::MachineLearning::Adapter::AttributeMap* default_attributes = nullptr;
+    const AttributeMap* default_attributes = nullptr;
 
     // For lazy kernel creation when shapes are dynamic
     bool needs_lazy_init = false;  // True if kernel wasn't created yet due to dynamic shapes
@@ -497,13 +497,13 @@ struct DmlAbiKernel {
     const OrtKernelInfo* kernel_info = nullptr;  // Stored for lazy initialization (lifetime managed by ORT)
 
     // For resource state transitions and QueueReference after Compute
-    Microsoft::WRL::ComPtr<Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider> winml_provider;
+    Microsoft::WRL::ComPtr<IWinmlExecutionProvider> winml_provider;
 
     // Names of tensor-typed ONNX attributes (e.g., ConstantOfShape's "value") — for ABI-safe attribute fetch
     std::vector<std::string> tensor_attribute_names;
 
     // For shape-change detection between Compute calls (mirrors m_inputShapesOfKernelInference in unsafe path)
-    Windows::AI::MachineLearning::Adapter::EdgeShapes input_shapes_of_kernel_inference;
+    EdgeShapes input_shapes_of_kernel_inference;
 
     // Snapshots of required constant CPU input values from the last kernel creation. Indexed by input
     // index (sparse — only indices in required_constant_cpu_inputs are populated). Used to detect value

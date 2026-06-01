@@ -27,7 +27,7 @@ namespace onnxruntime
     class Node;
 }
 
-namespace Windows::AI::MachineLearning::Adapter
+ namespace dml_ep
 {
     // Forward declarations for ABI-safe fields
     class AttributeValue;

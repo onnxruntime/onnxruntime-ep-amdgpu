@@ -3,19 +3,7 @@
 
 #pragma once
 
-#include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
 #include "OperatorAuthorHelper/OperatorHelper.h"
-
-
-#include <wrl/client.h>
-#include <wrl/implements.h>
-#include <d3d12.h>
-#include <dxgi1_6.h>
-#include <directx/d3dx12.h>
-#include <DirectML.h>
-
-#include <sstream>
-
 
 namespace Plugin_StockhamFFT_Float32 {
 #include "DmlExecutionProvider/Operators/GeneratedShaders/stockham.h"
@@ -30,6 +18,8 @@ namespace Plugin_BluesteinChirp_Float32 {
 namespace Plugin_BluesteinChirp_Float16 {
 #include "DmlExecutionProvider/Operators/GeneratedShaders/bluestein_chirp_fp16.h"
 }
+
+#include "dml_client.h"
 
 namespace PluginDFTHelpers {
     // Divides and rounds up
@@ -90,7 +80,7 @@ namespace PluginDFTHelpers {
     }
 }
 
-class PluginGpuDFTOperator : public WRL::Base<IMLOperatorKernel>
+class PluginGpuDFTOperator : public dml_ep::Com<IMLOperatorKernel>
 {
 private:
     Microsoft::WRL::ComPtr<ID3D12Device> m_device;
@@ -982,7 +972,7 @@ public:
     }
 };
 
-struct PluginDFTShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
+struct PluginDFTShapeInferrer : public dml_ep::Com<IMLOperatorShapeInferrer>
 {
     STDMETHOD(InferOutputShapes)(IMLOperatorShapeInferenceContext* context) noexcept
     {
@@ -1077,7 +1067,7 @@ struct PluginDFTShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
     }
 };
 
-class PluginGpuDFTOperatorFactory : public WRL::Base<IMLOperatorKernelFactory>
+class PluginGpuDFTOperatorFactory : public dml_ep::Com<IMLOperatorKernelFactory>
 {
 public:
     STDMETHOD(CreateKernel)(

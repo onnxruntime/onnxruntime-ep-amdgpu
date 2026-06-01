@@ -16,10 +16,7 @@
 #include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
 #include "OperatorAuthorHelper/MLOperatorAuthorPrivate.h"
 
-using namespace Microsoft::WRL;
-
-namespace Windows::AI::MachineLearning::Adapter
-{
+namespace dml_ep {
     // Helper functions to handle both TypeProto* and OrtTypeInfo* polymorphically
     namespace {
         // TypeProto* overload
@@ -1280,9 +1277,9 @@ namespace Windows::AI::MachineLearning::Adapter
             ORT_THROW_HR_IF(E_INVALIDARG, !inputRequiredAsConstant);
 
             auto constantInput = m_constantInputGetter(inputIndex);
-            ORT_THROW_HR_IF(E_INVALIDARG, !std::holds_alternative<ComPtr<IMLOperatorTensor>>(constantInput));
+            ORT_THROW_HR_IF(E_INVALIDARG, !std::holds_alternative<Microsoft::WRL::ComPtr<IMLOperatorTensor>>(constantInput));
 
-            auto tensorWrapper = std::get<ComPtr<IMLOperatorTensor>>(constantInput);
+            auto tensorWrapper = std::get<Microsoft::WRL::ComPtr<IMLOperatorTensor>>(constantInput);
             if (tensorWrapper == nullptr)
             {
                 // This shouldn't happen since kernel creation is deferred and repeated when required constant inputs are not present.
@@ -1302,9 +1299,9 @@ namespace Windows::AI::MachineLearning::Adapter
         ORT_TRY
         {
             auto constantInput = m_constantInputGetter(inputIndex);
-            ORT_THROW_HR_IF(E_INVALIDARG, !std::holds_alternative<ComPtr<IMLOperatorTensor>>(constantInput));
+            ORT_THROW_HR_IF(E_INVALIDARG, !std::holds_alternative<Microsoft::WRL::ComPtr<IMLOperatorTensor>>(constantInput));
 
-            auto tensorWrapper = std::get<ComPtr<IMLOperatorTensor>>(constantInput);
+            auto tensorWrapper = std::get<Microsoft::WRL::ComPtr<IMLOperatorTensor>>(constantInput);
             if (tensorWrapper == nullptr)
             {
                 bool inputRequiredAsConstant = std::find(
@@ -2003,8 +2000,8 @@ namespace Windows::AI::MachineLearning::Adapter
         // Pre-size tensor arrays.    Member methods return pointers to these which
         // are stored in these arrays, which would become stale if the vectors reallocate
         // their internal storage.
-        m_inputTensors.resize(context->InputCount(), std::vector<ComPtr<TensorWrapper>>(1));
-        m_outputTensors.resize(context->OutputCount(), std::vector<ComPtr<TensorWrapper>>(1));
+        m_inputTensors.resize(context->InputCount(), std::vector<Microsoft::WRL::ComPtr<TensorWrapper>>(1));
+        m_outputTensors.resize(context->OutputCount(), std::vector<Microsoft::WRL::ComPtr<TensorWrapper>>(1));
 
         const void* executionHandle = m_provider->GetExecutionHandle();
         if (executionHandle)
@@ -2750,7 +2747,7 @@ namespace Windows::AI::MachineLearning::Adapter
         return false;
     }
 
-    bool AbiOpKernel::RequiredCpuInputChanged(const std::vector<ComPtr<IMLOperatorTensor>>& constantTensorSequence, uint32_t index) const
+    bool AbiOpKernel::RequiredCpuInputChanged(const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constantTensorSequence, uint32_t index) const
     {
         assert(std::holds_alternative<std::vector<TensorContent>>(m_constantInputTensorContentsOfKernel[index]));
         auto lastValues = std::get<std::vector<TensorContent>>(m_constantInputTensorContentsOfKernel[index]);
@@ -2810,7 +2807,7 @@ namespace Windows::AI::MachineLearning::Adapter
         }
     }
 
-    void AbiOpKernel::FillConstantInputs(const std::vector<ComPtr<IMLOperatorTensor>>& constantTensorSequence, onnxruntime::OpKernelContext* context, uint32_t index) const
+    void AbiOpKernel::FillConstantInputs(const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constantTensorSequence, onnxruntime::OpKernelContext* context, uint32_t index) const
     {
         std::vector<TensorContent> tensorContent(constantTensorSequence.size());
 
@@ -2905,7 +2902,7 @@ namespace Windows::AI::MachineLearning::Adapter
         EdgeShapes& outputShapes) const
     {
         // call the non member function (below)
-        Windows::AI::MachineLearning::Adapter::InferAndVerifyOutputSizes(
+        PerformInferAndVerifyOutputSizes(
             Node(),
             m_defaultAttributes,
             m_shapeInferrer.Get(),
@@ -2916,7 +2913,7 @@ namespace Windows::AI::MachineLearning::Adapter
         );
     }
 
-    void InferAndVerifyOutputSizes(
+    void PerformInferAndVerifyOutputSizes(
         const onnxruntime::Node& node,
         const AttributeMap* defaultAttributes,
         IMLOperatorShapeInferrer* shapeInferrer,
@@ -3218,7 +3215,7 @@ namespace Windows::AI::MachineLearning::Adapter
 
     template class OpNodeInfoWrapper<
         onnxruntime::AbiSafeProtoHelperNodeContext,
-        WRL::Base<Microsoft::WRL::ChainInterfaces<IMLOperatorSupportQueryContextPrivate, IMLOperatorAttributes,
+        Com<Microsoft::WRL::ChainInterfaces<IMLOperatorSupportQueryContextPrivate, IMLOperatorAttributes,
                                                   IMLOperatorAttributes1>>,
         onnxruntime::null_type>;
 

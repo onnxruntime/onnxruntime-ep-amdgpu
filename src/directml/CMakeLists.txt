@@ -185,6 +185,7 @@ add_library(directml-ep MODULE
     dml_abi_custom_registry.h
     dml_abi_kernel.h
     dml_bucketized_buffer_allocator.h
+    dml_client.h
     dml_common.h
     dml_data_transfer.h
     dml_ep.h

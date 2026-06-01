@@ -253,7 +253,7 @@ namespace GridSampleHelpers
     }
 }
 
-class DmlGridSampleOperator : public WRL::Base<IMLOperatorKernel>
+class DmlGridSampleOperator : public Com<IMLOperatorKernel>
 {
 private:
     Microsoft::WRL::ComPtr<ID3D12Device> m_device;
@@ -713,7 +713,7 @@ public:
     }
 };
 
-struct GridSampleShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
+struct GridSampleShapeInferrer : public Com<IMLOperatorShapeInferrer>
 {
     STDMETHOD(InferOutputShapes)(IMLOperatorShapeInferenceContext* context) noexcept
     {
@@ -740,7 +740,7 @@ struct GridSampleShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
     }
 };
 
-class DmlGridSampleOperatorFactory : public WRL::Base<IMLOperatorKernelFactory>
+class DmlGridSampleOperatorFactory : public Com<IMLOperatorKernelFactory>
 {
 public:
     STDMETHOD(CreateKernel)(

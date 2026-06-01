@@ -5,20 +5,9 @@
 
 #include "dml_plugin_MLOperatorAuthorImpl.h"
 
-namespace WRL
-{
-    template <typename... TInterfaces>
-    using Base = Microsoft::WRL::RuntimeClass<
-        Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
-        TInterfaces...
-        >;
-}
+namespace dml_ep {
 
-namespace Windows::AI::MachineLearning::Adapter
-{
-
-
-class AbiCustomRegistry : public WRL::Base<IMLOperatorRegistry, IMLOperatorRegistryPrivate>
+class AbiCustomRegistry : public Com<IMLOperatorRegistry, IMLOperatorRegistryPrivate>
 {
  public:
     AbiCustomRegistry();
@@ -109,4 +98,4 @@ class AbiCustomRegistry : public WRL::Base<IMLOperatorRegistry, IMLOperatorRegis
 
 };
 
-}    // namespace Windows::AI::MachineLearning::Adapter
+}  //  namespace dml_ep

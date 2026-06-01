@@ -3,8 +3,8 @@
 
 #pragma once
 
-namespace Windows::AI::MachineLearning::Adapter
-{
+namespace dml_ep {
+
     // edges and unused edges have an empty array of dimensions.
     class EdgeShapes
     {
@@ -39,4 +39,5 @@ namespace Windows::AI::MachineLearning::Adapter
     private:
         std::vector<std::vector<uint32_t>> m_shapes;
     };
-}
+
+}  // namespace dml_ep

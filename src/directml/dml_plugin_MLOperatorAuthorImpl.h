@@ -19,12 +19,8 @@
 #include "core/framework/onnxruntime_sequence_type_info.h"
 
 namespace dml_ep {
+
 class PluginDmlExecutionProviderImpl;
-}
-
-namespace Windows::AI::MachineLearning::Adapter
-{
-
 
 struct LazyPass
 {
@@ -42,7 +38,7 @@ struct LazyPass
 // ABI-safe version for plugin that uses AbiSafeProtoHelperNodeContext (NO UNSAFE CASTS)
 class PluginAbiSafeMLSupportQueryContext final : public OpNodeInfoWrapper<
           onnxruntime::AbiSafeProtoHelperNodeContext,
-          WRL::Base<Microsoft::WRL::ChainInterfaces<IMLOperatorSupportQueryContextPrivate,
+          Com<Microsoft::WRL::ChainInterfaces<IMLOperatorSupportQueryContextPrivate,
                                                     IMLOperatorAttributes,
                                                     IMLOperatorAttributes1>>,
           onnxruntime::null_type> 
@@ -66,7 +62,7 @@ public:
 // code is never called from plugin EP entry points. Scheduled for removal.
 class PluginOpKernelInfoWrapper
     : public OpNodeInfoWrapper<onnxruntime::ProtoHelperNodeContext,
-                               WRL::Base<Microsoft::WRL::ChainInterfaces<
+                               Com<Microsoft::WRL::ChainInterfaces<
                                              IMLOperatorKernelCreationContextNodeWrapperPrivate,
                                              IMLOperatorKernelCreationContextPrivate, IMLOperatorKernelCreationContext>,
                                          IMLOperatorTensorShapeDescription, IMLOperatorTensorShapeDescriptionPrivate,
@@ -133,7 +129,7 @@ private:
     Microsoft::WRL::ComPtr<IUnknown> m_abiExecutionObject;
 };
 
-class PluginOpKernelContextWrapper : public WRL::Base<IMLOperatorKernelContext, IMLOperatorKernelContextPrivate>,
+class PluginOpKernelContextWrapper : public Com<IMLOperatorKernelContext, IMLOperatorKernelContextPrivate>,
                                public Closable {
 public:
     ~PluginOpKernelContextWrapper();
@@ -280,9 +276,9 @@ class PluginDmlAbiOpKernel : public onnxruntime::OpKernel
 
 private:
     bool RequiredCpuInputChanged(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor, uint32_t index) const;
-    bool RequiredCpuInputChanged(const std::vector<ComPtr<IMLOperatorTensor>>& constantTensorSequence, uint32_t index) const;
+    bool RequiredCpuInputChanged(const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constantTensorSequence, uint32_t index) const;
     void FillConstantInputs(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const;
     void FillConstantInputs(const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const;
 };
 
-}    // namespace Windows::AI::MachineLearning::Adapter
+}  // namespace dml_ep

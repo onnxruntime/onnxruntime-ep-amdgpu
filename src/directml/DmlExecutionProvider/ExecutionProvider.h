@@ -16,13 +16,6 @@ class IResourceAccountant;
 class GraphOptimizerRegistry;
 }
 
-namespace WRL {
-template <typename... TInterfaces>
-using Base = Microsoft::WRL::RuntimeClass<
-    Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
-    TInterfaces...>;
-}
-
 namespace dml_ep {
 
         class PooledUploadHeap;
@@ -31,8 +24,7 @@ namespace dml_ep {
     class BucketizedBufferAllocator;
     class ExecutionProvider;
 
-    class ExecutionProviderImpl : public WRL::Base<IExecutionProvider,
-                                  Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider>
+    class ExecutionProviderImpl : public Com<IExecutionProvider, IWinmlExecutionProvider>
     {
     public:
         ExecutionProviderImpl(
@@ -172,7 +164,7 @@ namespace dml_ep {
         std::shared_ptr<onnxruntime::IAllocator> GetGpuAllocator();
         std::shared_ptr<onnxruntime::IAllocator> GetCpuInputAllocator();
 
-        std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap>
+        std::shared_ptr<const InternalRegistrationInfoMap>
         GetInternalRegistrationInfoMap() const;
 
         void IncreasePartitionKernelPrefixVal() const
@@ -220,7 +212,7 @@ namespace dml_ep {
         std::shared_ptr<BucketizedBufferAllocator> m_allocator;
         std::shared_ptr<onnxruntime::IAllocator> m_cpuInputAllocator;
         std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;
-        std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap> m_internalRegInfoMap;
+        std::shared_ptr<const InternalRegistrationInfoMap> m_internalRegInfoMap;
         mutable uint64_t m_partitionKernelPrefixVal = 0;
         bool m_closed = false;
         mutable std::chrono::time_point<std::chrono::steady_clock> m_lastUploadFlushTime;

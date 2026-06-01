@@ -3,7 +3,8 @@
 
 #pragma once
 
-#include "common/plugin_ep_utils.h"
+#include "dml_client.h"
+
 #include "cpu_allocator.h"
 #include "dml_readback_heap.h"
 #include "dml_pooled_upload_heap.h"
@@ -29,13 +30,6 @@
 #include "dml_execution_context.h"
 #include "core/framework/data_types.h"
 
-#include <d3d12.h>
-#include <dxgi1_6.h>
-#include <directx/d3dx12.h>
-#include <wrl/client.h>
-#include <DirectML.h>
-#include <wrl/implements.h>
-
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
 
 namespace onnxruntime {
@@ -43,23 +37,16 @@ class IResourceAccountant;
 class GraphOptimizerRegistry;
 }
 
-namespace WRL {
-template <typename... TInterfaces>
-using Base = Microsoft::WRL::RuntimeClass<
-    Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
-    TInterfaces...>;
-}
-
 namespace dml_ep {
 
-        class PooledUploadHeap;
+    class PooledUploadHeap;
     class ReadbackHeap;
     class ExecutionContext;
     class BucketizedBufferAllocator;
     class ExecutionProvider;
 
     class PluginDmlExecutionProviderImpl 
-        : public WRL::Base<IExecutionProvider, Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider>
+        : public Com<IExecutionProvider, IWinmlExecutionProvider>
         , public ApiPtrs
     {
     public:
@@ -204,7 +191,7 @@ namespace dml_ep {
         std::shared_ptr<OrtAllocator> GetGpuAllocator();
         std::shared_ptr<OrtAllocator> GetCpuInputAllocator();
 
-        std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap>
+        std::shared_ptr<const InternalRegistrationInfoMap>
         GetInternalRegistrationInfoMap() const;
 
         // Get the allocation object (IUnknown*) from a data pointer
@@ -263,7 +250,7 @@ namespace dml_ep {
         std::shared_ptr<DmlBucketizedBufferAllocator> m_allocator;
         std::shared_ptr<CpuAllocator> m_cpuInputAllocator;
         std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;
-        std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap> m_internalRegInfoMap;
+        std::shared_ptr<const InternalRegistrationInfoMap> m_internalRegInfoMap;
         mutable uint64_t m_partitionKernelPrefixVal = 0;
         bool m_closed = false;
         mutable std::chrono::time_point<std::chrono::steady_clock> m_lastUploadFlushTime;

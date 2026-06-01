@@ -187,7 +187,7 @@ namespace DmlSTFTHelpers
 // kernel by treating the 1st dimension (frameCount) as the batch size; each frame should be processed
 // independently as a full signal in DFT.
 //
-class DmlSTFTOperator : public WRL::Base<IMLOperatorKernel>
+class DmlSTFTOperator : public Com<IMLOperatorKernel>
 {
 private:
     Microsoft::WRL::ComPtr<ID3D12Device> m_d3dDevice;
@@ -483,7 +483,7 @@ public:
     }
 };
 
-struct STFTShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
+struct STFTShapeInferrer : public Com<IMLOperatorShapeInferrer>
 {
     STDMETHOD(InferOutputShapes)(IMLOperatorShapeInferenceContext* context) noexcept
     {
@@ -510,7 +510,7 @@ struct STFTShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
     }
 };
 
-class DmlSTFTOperatorFactory : public WRL::Base<IMLOperatorKernelFactory>
+class DmlSTFTOperatorFactory : public Com<IMLOperatorKernelFactory>
 {
 public:
     STDMETHOD(CreateKernel)(

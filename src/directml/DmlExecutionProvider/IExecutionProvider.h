@@ -78,4 +78,5 @@ namespace dml_ep {
         STDMETHOD_(bool, CustomHeapsSupported)() const noexcept = 0;
         STDMETHOD_(bool, MetacommandsEnabled)() const noexcept = 0;
     };
+
 }  // namespace dml_ep

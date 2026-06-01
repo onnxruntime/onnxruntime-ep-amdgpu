@@ -7,7 +7,6 @@
 #include "FusedGraphKernel.h"
 #include "DmlGraphFusionHelper.h"
 
-using namespace Windows::AI::MachineLearning::Adapter;
 
 namespace dml_ep {
 
@@ -19,9 +18,9 @@ namespace dml_ep {
         FusedGraphKernel(
             const onnxruntime::OpKernelInfo& kernelInfo,
             Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiledExecutionPlanOperator,
-            Windows::AI::MachineLearning::Adapter::EdgeShapes& outputShapes,
+            EdgeShapes& outputShapes,
             bool reuseCommandList,
-            std::vector<ComPtr<ID3D12Resource>>& nonOwnedGraphInputsFromInitializers,
+            std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& nonOwnedGraphInputsFromInitializers,
             std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& initializeResourceRefs,
             std::vector<DML_BUFFER_BINDING> initInputBindings,
             std::vector<uint8_t>&& isInputsUploadedByDmlEP,
@@ -84,7 +83,7 @@ namespace dml_ep {
             std::for_each(
                 initializeResourceRefs.begin(),
                 initializeResourceRefs.end(),
-                [&](ComPtr<ID3D12Resource>& resource){ m_winmlProvider->QueueReference(WRAP_GRAPHICS_UNKNOWN(resource).Get()); }
+                [&](Microsoft::WRL::ComPtr<ID3D12Resource>& resource){ m_winmlProvider->QueueReference(WRAP_GRAPHICS_UNKNOWN(resource).Get()); }
             );
 
             if (reuseCommandList)
@@ -116,7 +115,7 @@ namespace dml_ep {
 
                 // Get input resources for execution, excluding those which were specified as owned by DML and provided
                 // at initialization instead.
-                std::vector<ComPtr<IMLOperatorTensor>> inputTensors(kernelContext->InputCount());
+                std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> inputTensors(kernelContext->InputCount());
                 std::vector<ID3D12Resource*> inputPtrs(kernelContext->InputCount());
 
                 for (int i = 0; i < kernelContext->InputCount(); ++i)
@@ -258,7 +257,7 @@ namespace dml_ep {
         const void* m_executionHandle = nullptr;
         Microsoft::WRL::ComPtr<IWinmlExecutionProvider> m_winmlProvider;
         Microsoft::WRL::ComPtr<IExecutionProvider> m_provider;
-        Windows::AI::MachineLearning::Adapter::EdgeShapes& m_outputShapes;
+        EdgeShapes& m_outputShapes;
 
         mutable std::deque<std::unique_ptr<DmlReusedCommandListState>> m_reusedCommandLists;
 
@@ -267,15 +266,15 @@ namespace dml_ep {
         Microsoft::WRL::ComPtr<IUnknown> m_persistentResourceAllocatorUnknown; // Controls when the persistent resource is returned to the allocator
 
         std::vector<uint8_t> m_isInputsUploadedByDmlEP;
-        std::vector<ComPtr<ID3D12Resource>> m_nonOwnedGraphInputsFromInitializers;
+        std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_nonOwnedGraphInputsFromInitializers;
     };
 
     onnxruntime::OpKernel* CreateFusedGraphKernel(
         const onnxruntime::OpKernelInfo& info,
         Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiledExecutionPlanOperator,
-        Windows::AI::MachineLearning::Adapter::EdgeShapes& outputShapes,
+        EdgeShapes& outputShapes,
         bool reuseCommandList,
-        std::vector<ComPtr<ID3D12Resource>>& nonOwnedGraphInputsFromInitializers,
+        std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& nonOwnedGraphInputsFromInitializers,
         std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& initializeResourceRefs,
         std::vector<DML_BUFFER_BINDING> initInputBindings,
         std::vector<uint8_t>&& isInputsUploadedByDmlEP,
@@ -294,4 +293,5 @@ namespace dml_ep {
             std::move(inputsUsed)
         );
     }
+
 }  // namespace dml_ep

@@ -7,7 +7,6 @@
 #include "DmlGraphFusionHelper.h"
 #include "DmlRuntimeFusedGraphKernel.h"
 
-using namespace Windows::AI::MachineLearning::Adapter;
 
 namespace dml_ep {
 
@@ -95,7 +94,7 @@ namespace DmlGraphFusionHelper
     }
 
     void UnwrapTensor(
-        Windows::AI::MachineLearning::Adapter::IWinmlExecutionProvider* winmlProvider,
+        IWinmlExecutionProvider* winmlProvider,
         const onnxruntime::Tensor* tensor,
         ID3D12Resource** resource,
         uint64_t* allocId)
@@ -144,7 +143,7 @@ namespace DmlGraphFusionHelper
         }
         else
         {
-            std::tie(unpackedTensor, tensorByteSize) = Windows::AI::MachineLearning::Adapter::UnpackTensor(*initializer, graph.ModelPath());
+            std::tie(unpackedTensor, tensorByteSize) = UnpackTensor(*initializer, graph.ModelPath());
             tensorPtr = unpackedTensor.get();
         }
 
@@ -162,8 +161,8 @@ namespace DmlGraphFusionHelper
         onnxruntime::Graph& graph,
         _Out_ std::vector<bool>& inputsUsed,
         _Inout_ std::vector<DML_BUFFER_BINDING>& initInputBindings,
-        _Inout_ std::vector<ComPtr<ID3D12Resource>>& nonOwnedGraphInputsFromInitializers,
-        _Inout_ std::vector<ComPtr<ID3D12Resource>>& initializeResourceRefs,
+        _Inout_ std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& nonOwnedGraphInputsFromInitializers,
+        _Inout_ std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& initializeResourceRefs,
         _Inout_opt_ std::vector<std::vector<std::byte>>* inputRawData)
     {
 
@@ -351,7 +350,7 @@ namespace DmlGraphFusionHelper
         const std::unordered_map<uint32_t, uint32_t>* serializedGraphInputIndexToSubgraphInputIndex,
         const std::unordered_map<std::string_view, uint32_t>* serializedGraphLargeConstantNameToSubgraphInputIndex,
         _Out_ DML_GRAPH_DESC& dmlGraphDesc,
-        _Inout_ std::vector<ComPtr<IDMLOperator>>& dmlOperators,
+        _Inout_ std::vector<Microsoft::WRL::ComPtr<IDMLOperator>>& dmlOperators,
         _Inout_ std::vector<DML_GRAPH_NODE_DESC>& dmlGraphNodes,
         _Inout_ std::vector<DML_GRAPH_EDGE_DESC>& dmlInputEdges,
         _Inout_ std::vector<DML_GRAPH_EDGE_DESC>& dmlOutputEdges,
@@ -549,7 +548,7 @@ namespace DmlGraphFusionHelper
 
         StackAllocator<1024> allocator;
         DML_GRAPH_DESC dmlGraphDesc = {};
-        std::vector<ComPtr<IDMLOperator>> dmlOperators;
+        std::vector<Microsoft::WRL::ComPtr<IDMLOperator>> dmlOperators;
         std::vector<DML_GRAPH_NODE_DESC> dmlGraphNodes;
         std::vector<DML_GRAPH_EDGE_DESC> dmlInputEdges;
         std::vector<DML_GRAPH_EDGE_DESC> dmlOutputEdges;
@@ -654,7 +653,7 @@ namespace DmlGraphFusionHelper
         // Populate input bindings for operator initialization
         std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> initializeResourceRefs; // For lifetime control
         std::vector<DML_BUFFER_BINDING> initInputBindings(fusedNodeInputCount);
-        std::vector<ComPtr<ID3D12Resource>> nonOwnedGraphInputsFromInitializers(fusedNodeInputCount);
+        std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> nonOwnedGraphInputsFromInitializers(fusedNodeInputCount);
 
         std::vector<bool> inputsUsed;
         ProcessInputData(
@@ -673,7 +672,7 @@ namespace DmlGraphFusionHelper
             nullptr);
 
         // lamda captures for the kernel registration
-        Windows::AI::MachineLearning::Adapter::EdgeShapes outputShapes;
+        EdgeShapes outputShapes;
         ORT_THROW_HR_IF(E_UNEXPECTED, !TryGetStaticOutputShapes(fusedNode, outputShapes));
         bool resuableCommandList = graphDesc.reuseCommandList;
         auto fused_kernel_func = [compiledExecutionPlanOperator,
@@ -948,7 +947,7 @@ namespace DmlGraphFusionHelper
         gsl::span<const uint8_t> isInputsUploadedByDmlEP,
         const std::vector<bool>& inputsUsed,
         gsl::span<const Microsoft::WRL::ComPtr<ID3D12Resource>> nonOwnedGraphInputsFromInitializers,
-        const Windows::AI::MachineLearning::Adapter::EdgeShapes& outputShapes,
+        const EdgeShapes& outputShapes,
         IWinmlExecutionProvider* winmlProvider,
         IExecutionProvider* provider,
         IUnknown* persistentResourceAllocatorUnknown,

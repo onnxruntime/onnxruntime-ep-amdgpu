@@ -16,8 +16,7 @@
 #include "dml_ep.h"
 
 
-namespace Windows::AI::MachineLearning::Adapter
-{
+namespace dml_ep {
 
     #define ML_TENSOR_TYPE_CASE(x)                                                                                         \
     if (onnxruntime::utils::IsPrimitiveDataType<x>(type)) {                                                            \
@@ -197,7 +196,7 @@ for (uint32_t i = 0; i < dimensionCount; ++i) {
 }
 
 return S_OK;
-} // namespace Windows::AI::MachineLearning::Adapter
+}  // namespace dml_ep
 ORT_CATCH_RETURN
 }
 
@@ -390,8 +389,8 @@ PluginOpKernelContextWrapper::PluginOpKernelContextWrapper(
     // Pre-size tensor arrays.    Member methods return pointers to these which
     // are stored in these arrays, which would become stale if the vectors reallocate
     // their internal storage.
-    m_inputTensors.resize(context->InputCount(), std::vector<ComPtr<TensorWrapper>>(1));
-    m_outputTensors.resize(context->OutputCount(), std::vector<ComPtr<TensorWrapper>>(1));
+    m_inputTensors.resize(context->InputCount(), std::vector<Microsoft::WRL::ComPtr<TensorWrapper>>(1));
+    m_outputTensors.resize(context->OutputCount(), std::vector<Microsoft::WRL::ComPtr<TensorWrapper>>(1));
 
     const void* executionHandle = m_provider;
     if (executionHandle) {
@@ -474,7 +473,7 @@ if (opKernelContextWrapper->m_inputTensors[inputIndex][0] != nullptr) {
     opKernelContextWrapper->m_inputTensors[inputIndex][0].CopyTo(tensor);
 }
 return S_OK;
-} // namespace Windows::AI::MachineLearning::Adapter
+}  // namespace dml_ep
 ORT_CATCH_RETURN
 }
 
@@ -1194,7 +1193,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
         return false;
     }
 
-    bool PluginDmlAbiOpKernel::RequiredCpuInputChanged(const std::vector<ComPtr<IMLOperatorTensor>>& constantTensorSequence, uint32_t index) const
+    bool PluginDmlAbiOpKernel::RequiredCpuInputChanged(const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constantTensorSequence, uint32_t index) const
     {
         assert(std::holds_alternative<std::vector<TensorContent>>(m_constantInputTensorContentsOfKernel[index]));
         auto lastValues = std::get<std::vector<TensorContent>>(m_constantInputTensorContentsOfKernel[index]);
@@ -1254,7 +1253,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
         }
     }
 
-    void PluginDmlAbiOpKernel::FillConstantInputs(const std::vector<ComPtr<IMLOperatorTensor>>& constantTensorSequence, onnxruntime::OpKernelContext* context, uint32_t index) const
+    void PluginDmlAbiOpKernel::FillConstantInputs(const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constantTensorSequence, onnxruntime::OpKernelContext* context, uint32_t index) const
     {
         std::vector<TensorContent> tensorContent(constantTensorSequence.size());
 

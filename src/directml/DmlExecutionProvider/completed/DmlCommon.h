@@ -49,4 +49,5 @@ namespace dml_ep {
         default: assert(false);
         }
     }
+
 }  // namespace dml_ep
