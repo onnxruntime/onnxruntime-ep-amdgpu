@@ -3,7 +3,8 @@
 
 #pragma once
 
-#include "common/plugin_ep_utils.h"
+#include "dml_client.h"
+
 #include "cpu_allocator.h"
 #include "dml_readback_heap.h"
 #include "dml_pooled_upload_heap.h"
@@ -29,13 +30,6 @@
 #include "dml_execution_context.h"
 #include "core/framework/data_types.h"
 
-#include <d3d12.h>
-#include <dxgi1_6.h>
-#include <directx/d3dx12.h>
-#include <wrl/client.h>
-#include <DirectML.h>
-#include <wrl/implements.h>
-
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
 
 namespace onnxruntime {
@@ -43,23 +37,16 @@ class IResourceAccountant;
 class GraphOptimizerRegistry;
 }
 
-namespace WRL {
-template <typename... TInterfaces>
-using Base = Microsoft::WRL::RuntimeClass<
-    Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
-    TInterfaces...>;
-}
-
 namespace dml_ep {
 
-        class PooledUploadHeap;
+    class PooledUploadHeap;
     class ReadbackHeap;
     class ExecutionContext;
     class BucketizedBufferAllocator;
     class ExecutionProvider;
 
     class PluginDmlExecutionProviderImpl 
-        : public WRL::Base<IExecutionProvider, IWinmlExecutionProvider>
+        : public Com<IExecutionProvider, IWinmlExecutionProvider>
         , public ApiPtrs
     {
     public:

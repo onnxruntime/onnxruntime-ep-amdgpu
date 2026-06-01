@@ -23,7 +23,7 @@ using Base =
 namespace dml_ep {
 
 
-class PluginAbiCustomRegistry : public WRL::Base<IMLOperatorRegistry, IMLOperatorRegistryPrivate> {
+class PluginAbiCustomRegistry : public Com<IMLOperatorRegistry, IMLOperatorRegistryPrivate> {
 public:
     PluginAbiCustomRegistry();
     PluginAbiCustomRegistry(const dml_ep::PluginDmlExecutionProviderImpl* executionProvider);

@@ -97,7 +97,7 @@ namespace DFTHelpers {
     }
 }
 
-class GpuDFTOperator : public WRL::Base<IMLOperatorKernel>
+class GpuDFTOperator : public Com<IMLOperatorKernel>
 {
 private:
     Microsoft::WRL::ComPtr<ID3D12Device> m_device;
@@ -988,7 +988,7 @@ public:
     }
 };
 
-struct DFTShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
+struct DFTShapeInferrer : public Com<IMLOperatorShapeInferrer>
 {
     STDMETHOD(InferOutputShapes)(IMLOperatorShapeInferenceContext* context) noexcept
     {
@@ -1083,7 +1083,7 @@ struct DFTShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
     }
 };
 
-class GpuDFTOperatorFactory : public WRL::Base<IMLOperatorKernelFactory>
+class GpuDFTOperatorFactory : public Com<IMLOperatorKernelFactory>
 {
 public:
     STDMETHOD(CreateKernel)(

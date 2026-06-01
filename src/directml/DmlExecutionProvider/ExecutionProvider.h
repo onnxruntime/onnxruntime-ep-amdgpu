@@ -16,13 +16,6 @@ class IResourceAccountant;
 class GraphOptimizerRegistry;
 }
 
-namespace WRL {
-template <typename... TInterfaces>
-using Base = Microsoft::WRL::RuntimeClass<
-    Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
-    TInterfaces...>;
-}
-
 namespace dml_ep {
 
         class PooledUploadHeap;
@@ -31,7 +24,7 @@ namespace dml_ep {
     class BucketizedBufferAllocator;
     class ExecutionProvider;
 
-    class ExecutionProviderImpl : public WRL::Base<IExecutionProvider, IWinmlExecutionProvider>
+    class ExecutionProviderImpl : public Com<IExecutionProvider, IWinmlExecutionProvider>
     {
     public:
         ExecutionProviderImpl(
