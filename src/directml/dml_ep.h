@@ -123,6 +123,15 @@ private:
     };
     using UniqueOrtKernelDef = std::unique_ptr<OrtKernelDef, OrtKernelDefDeleter>;
 
+    struct OrtKernelRegistryDeleter {
+        const OrtEpApi* ep_api = nullptr;
+        void operator()(OrtKernelRegistry* r) const {
+            if (r && ep_api)
+                ep_api->ReleaseKernelRegistry(r);
+        }
+    };
+    using UniqueOrtKernelRegistry = std::unique_ptr<OrtKernelRegistry, OrtKernelRegistryDeleter>;
+
 
     static const char* ORT_API_CALL GetNameImpl(const OrtEp* this_ptr) noexcept;
 
@@ -240,7 +249,7 @@ private:
     //std::shared_ptr<OrtAllocator> m_cpuInputAllocator;
     std::unordered_map<int, std::vector<std::unique_ptr<DmlReusedCommandListState>>> m_capturedGraphs;
     std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;
-    OrtKernelRegistry* kernel_registry_;
+    UniqueOrtKernelRegistry kernel_registry_;
     std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap> m_internalRegInfoMap;
 
     KernelCreateFuncState m_kernelCreateFuncStateTemplate;

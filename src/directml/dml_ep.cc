@@ -31,9 +31,6 @@ namespace dml_ep {
     
 ExecutionProviderPlugin::~ExecutionProviderPlugin() {
     m_context->Close();
-    if (kernel_registry_ != nullptr) {
-        ep_api.ReleaseKernelRegistry(kernel_registry_);
-    }
 }
 
 void ExecutionProviderPlugin::Release()
@@ -112,10 +109,12 @@ ONNXTensorElementDataType ExecutionProviderPlugin::GetElementTypeFromMLDataType(
 OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
 {
     if (kernel_registry_ == nullptr) {
-        OrtStatus* st = ep_api.CreateKernelRegistry(&kernel_registry_);
+        OrtKernelRegistry* registry = nullptr;
+        OrtStatus* st = ep_api.CreateKernelRegistry(&registry);
         if (st != nullptr) {
             return st;
         }
+        kernel_registry_ = UniqueOrtKernelRegistry(registry, OrtKernelRegistryDeleter{&ep_api});
 
         // Copy kernel entries from the internal registry into the API-created registry
         const auto& kernel_map = m_kernelRegistry->GetKernelCreateMap();
@@ -137,7 +136,6 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
             OrtKernelDefBuilder* builder = nullptr;
             st = ep_api.CreateKernelDefBuilder(&builder);
             if (st != nullptr) {
-                ep_api.ReleaseKernelRegistry(kernel_registry_);
                 return st;
             }
 
@@ -211,7 +209,6 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
             ep_api.ReleaseKernelDefBuilder(builder);
 
             if (st != nullptr) {
-                ep_api.ReleaseKernelRegistry(kernel_registry_);
                 return st;
             }
 
@@ -272,10 +269,9 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
             // ALWAYS store the lambda as fallback (in case ABI-safe fails)
             func_state->kernel_create_fn = const_cast<onnxruntime::KernelCreateFn*>(&create_info.kernel_create_func);
 
-            st = ep_api.KernelRegistry_AddKernel(kernel_registry_, ort_kernel_def, DmlKernelCreateFuncAdapter, func_state.get());
+            st = ep_api.KernelRegistry_AddKernel(kernel_registry_.get(), ort_kernel_def, DmlKernelCreateFuncAdapter, func_state.get());
 
             if (st != nullptr) {
-                ep_api.ReleaseKernelRegistry(kernel_registry_);
                 return st;
             }
 
@@ -707,7 +703,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetKernelRegistryImpl(
 {
     auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
 
-    *kernel_registry = ep->kernel_registry_;
+    *kernel_registry = ep->kernel_registry_.get();
     return nullptr;
 }
 
