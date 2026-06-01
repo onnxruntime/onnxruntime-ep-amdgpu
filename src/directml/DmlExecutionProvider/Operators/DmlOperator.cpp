@@ -42,10 +42,10 @@ namespace dml_ep {
         }
 
         // Create and compile the operator.
-        ComPtr<IDMLOperator> dmlOperator;
+        Microsoft::WRL::ComPtr<IDMLOperator> dmlOperator;
         ORT_THROW_IF_FAILED(m_dmlDevice->CreateOperator(&operatorDesc, IID_PPV_ARGS(&dmlOperator)));
 
-        ComPtr<IMLOperatorKernelCreationContextPrivate> contextPrivate;
+        Microsoft::WRL::ComPtr<IMLOperatorKernelCreationContextPrivate> contextPrivate;
         ORT_THROW_IF_FAILED(kernelInfo.GetInterface()->QueryInterface(contextPrivate.GetAddressOf()));
 
         if (contextPrivate->IsDmlGraphNode())
@@ -165,7 +165,7 @@ namespace dml_ep {
             assert(m_kernelOutputIndices[idx] == idx);
         }
 
-        ComPtr<IMLOperatorKernelCreationContextPrivate> contextPrivate;
+        Microsoft::WRL::ComPtr<IMLOperatorKernelCreationContextPrivate> contextPrivate;
         ORT_THROW_IF_FAILED(kernelInfo.GetInterface()->QueryInterface(contextPrivate.GetAddressOf()));
         if (contextPrivate->IsDmlGraphNode())
         {
@@ -175,7 +175,7 @@ namespace dml_ep {
         {
             DML_GRAPH_DESC graphDesc = {};
             std::vector<DML_GRAPH_NODE_DESC> dmlGraphNodes(operatorGraphDesc.nodeCount);
-            std::vector<ComPtr<IDMLOperator>> dmlOperators(operatorGraphDesc.nodeCount);
+            std::vector<Microsoft::WRL::ComPtr<IDMLOperator>> dmlOperators(operatorGraphDesc.nodeCount);
             std::vector<DML_OPERATOR_GRAPH_NODE_DESC> dmlOperatorGraphNodes(operatorGraphDesc.nodeCount);
             std::vector<DML_GRAPH_EDGE_DESC> dmlInputEdges(operatorGraphDesc.inputEdgeCount);
             std::vector<DML_GRAPH_EDGE_DESC> dmlOutputEdges(operatorGraphDesc.outputEdgeCount);
@@ -232,7 +232,7 @@ namespace dml_ep {
         // Unlike SetDmlOperatorDesc which takes a MLOperatorKernelCreationContext, it is okay to
         // call this method more than once, since Compute may take different inputs each execution.
         m_compiledOperator.Reset();
-        ComPtr<IDMLOperator> dmlOperator;
+        Microsoft::WRL::ComPtr<IDMLOperator> dmlOperator;
         ORT_THROW_IF_FAILED(m_dmlDevice->CreateOperator(&operatorDesc, IID_PPV_ARGS(&dmlOperator)));
         ORT_THROW_IF_FAILED(m_dmlDevice->CompileOperator(dmlOperator.Get(), GetExecutionFlags(), IID_PPV_ARGS(&m_compiledOperator)));
 
@@ -584,7 +584,7 @@ namespace dml_ep {
         return descs;
     }
 
-    ComPtr<IDMLCompiledOperator> DmlOperator::InitializeZeroInt64Tensor(uint64_t tensorSizeInBytes)
+    Microsoft::WRL::ComPtr<IDMLCompiledOperator> DmlOperator::InitializeZeroInt64Tensor(uint64_t tensorSizeInBytes)
     {
         if (tensorSizeInBytes == 0)
         {
@@ -614,10 +614,10 @@ namespace dml_ep {
 
         DML_OPERATOR_DESC opDesc = { DML_OPERATOR_ELEMENT_WISE_LOGICAL_XOR, &xorDesc };
 
-        ComPtr<IDMLOperator> dmlOperator;
+        Microsoft::WRL::ComPtr<IDMLOperator> dmlOperator;
         ORT_THROW_IF_FAILED(m_dmlDevice->CreateOperator(&opDesc, IID_PPV_ARGS(&dmlOperator)));
 
-        ComPtr<IDMLCompiledOperator> dmlCompiledOperator;
+        Microsoft::WRL::ComPtr<IDMLCompiledOperator> dmlCompiledOperator;
         ORT_THROW_IF_FAILED(m_dmlDevice->CompileOperator(dmlOperator.Get(), GetExecutionFlags(), IID_PPV_ARGS(&dmlCompiledOperator)));
 
         return dmlCompiledOperator;
@@ -781,7 +781,7 @@ namespace dml_ep {
 
     void DmlOperator::ConvertToDmlGraphDesc(const MLOperatorGraphDesc& operatorGraphDesc,
                                             _Out_ DML_GRAPH_DESC& graphDesc,
-                                            _Inout_ std::vector<ComPtr<IDMLOperator>>& dmlOperators,
+                                            _Inout_ std::vector<Microsoft::WRL::ComPtr<IDMLOperator>>& dmlOperators,
                                             _Inout_ std::vector<DML_OPERATOR_GRAPH_NODE_DESC>& dmlOperatorGraphNodes,
                                             _Inout_ std::vector<DML_GRAPH_NODE_DESC>& dmlGraphNodes,
                                             _Inout_ std::vector<DML_GRAPH_EDGE_DESC>& dmlInputEdges,

@@ -25,7 +25,6 @@ class PluginDmlExecutionProviderImpl;
 namespace Windows::AI::MachineLearning::Adapter
 {
 
-using namespace Microsoft::WRL;
 
 struct LazyPass
 {
@@ -55,7 +54,7 @@ public:
                                        const AttributeMap* defaultAttributes,
                                        MLOperatorTensorGetter& mLOperatorTensorGetter);
 
-    static ComPtr<PluginAbiSafeMLSupportQueryContext>
+    static Microsoft::WRL::ComPtr<PluginAbiSafeMLSupportQueryContext>
     Create(onnxruntime::OpNodeProtoHelper<onnxruntime::AbiSafeProtoHelperNodeContext>* info,
            const AttributeMap* defaultAttributes);
 };
@@ -125,13 +124,13 @@ private:
     bool m_allowOutputShapeQuery = false;
 
     bool m_internalOperator = false;
-    ComPtr<IWinmlExecutionProvider> m_winmlProvider;
+    Microsoft::WRL::ComPtr<IWinmlExecutionProvider> m_winmlProvider;
 
     const onnxruntime::OpKernelInfo* m_impl = nullptr;
 
     // The execution object returned through the ABI, which may vary according to kernel
     // registration options.
-    ComPtr<IUnknown> m_abiExecutionObject;
+    Microsoft::WRL::ComPtr<IUnknown> m_abiExecutionObject;
 };
 
 class PluginOpKernelContextWrapper : public WRL::Base<IMLOperatorKernelContext, IMLOperatorKernelContextPrivate>,
@@ -190,21 +189,21 @@ protected:
     onnxruntime::OpKernelContext* m_impl = nullptr;
     const EdgeShapes* m_outputShapes = nullptr;
 
-    std::vector<std::vector<ComPtr<TensorWrapper>>> m_inputTensors;
-    std::vector<std::vector<ComPtr<TensorWrapper>>> m_outputTensors;
+    std::vector<std::vector<Microsoft::WRL::ComPtr<TensorWrapper>>> m_inputTensors;
+    std::vector<std::vector<Microsoft::WRL::ComPtr<TensorWrapper>>> m_outputTensors;
 
     const dml_ep::PluginDmlExecutionProviderImpl* m_provider = nullptr;
-    ComPtr<IWinmlExecutionProvider> m_winmlProvider;
+    Microsoft::WRL::ComPtr<IWinmlExecutionProvider> m_winmlProvider;
     bool m_internalOperator = false;
 
     // The execution object returned to the kernel may vary according to kernel execution options
-    ComPtr<IUnknown> m_providerExecutionObject;
-    ComPtr<IUnknown> m_abiExecutionObject;
+    Microsoft::WRL::ComPtr<IUnknown> m_providerExecutionObject;
+    Microsoft::WRL::ComPtr<IUnknown> m_abiExecutionObject;
 
     // Temporary allocations created by the kernel.  These will be freed to the allocator following
     // Compute being called on the kernel.  This list is used to maintain their lifetime.
-    mutable std::vector<ComPtr<IUnknown>> m_temporaryAllocations;
-    mutable std::vector<ComPtr<IUnknown>> m_temporaryAbiAllocations;
+    mutable std::vector<Microsoft::WRL::ComPtr<IUnknown>> m_temporaryAllocations;
+    mutable std::vector<Microsoft::WRL::ComPtr<IUnknown>> m_temporaryAbiAllocations;
 };
 
 class PluginDmlAbiOpKernel : public onnxruntime::OpKernel
@@ -241,10 +240,10 @@ class PluginDmlAbiOpKernel : public onnxruntime::OpKernel
     mutable Microsoft::WRL::ComPtr<IMLOperatorKernel> m_kernel;
 
     // This is null unless the kernel requires lazy initialization
-    ComPtr<IMLOperatorKernelFactory> m_operatorFactory;
+    Microsoft::WRL::ComPtr<IMLOperatorKernelFactory> m_operatorFactory;
     mutable volatile bool m_lazyInitialized = false;
 
-    ComPtr<IMLOperatorShapeInferrer> m_shapeInferrer;
+    Microsoft::WRL::ComPtr<IMLOperatorShapeInferrer> m_shapeInferrer;
 
     // Used to determine whether anything has changed since creation when shapes or
     // inputs treated as constant by the operator are not inferred / constant.
@@ -263,14 +262,14 @@ class PluginDmlAbiOpKernel : public onnxruntime::OpKernel
     mutable std::mutex m_mutex;
     mutable EdgeShapes m_inferredOutputShapes;
 
-    ComPtr<IWinmlExecutionProvider> m_winmlProvider;
+    Microsoft::WRL::ComPtr<IWinmlExecutionProvider> m_winmlProvider;
     bool m_internalOperator = false;
     std::vector<uint32_t> m_requiredConstantCpuInputs;
 
     // The execution object returned through the ABI may vary according to kernel
     // registration options.
-    ComPtr<IUnknown> m_providerExecutionObject;
-    ComPtr<IUnknown> m_abiExecutionObject;
+    Microsoft::WRL::ComPtr<IUnknown> m_providerExecutionObject;
+    Microsoft::WRL::ComPtr<IUnknown> m_abiExecutionObject;
 
     const AttributeMap* m_defaultAttributes = nullptr;
     const dml_ep::PluginDmlExecutionProviderImpl* m_dmlPluginExecutionProvider = nullptr;
@@ -280,10 +279,10 @@ class PluginDmlAbiOpKernel : public onnxruntime::OpKernel
     std::vector<std::string> m_tensorAttributeNames;  // Tensor-typed ONNX attribute names for FetchAllTensorAttributes
 
 private:
-    bool RequiredCpuInputChanged(const ComPtr<IMLOperatorTensor>& constantTensor, uint32_t index) const;
+    bool RequiredCpuInputChanged(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor, uint32_t index) const;
     bool RequiredCpuInputChanged(const std::vector<ComPtr<IMLOperatorTensor>>& constantTensorSequence, uint32_t index) const;
-    void FillConstantInputs(const ComPtr<IMLOperatorTensor>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const;
-    void FillConstantInputs(const std::vector<ComPtr<IMLOperatorTensor>>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const;
+    void FillConstantInputs(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const;
+    void FillConstantInputs(const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const;
 };
 
 }    // namespace Windows::AI::MachineLearning::Adapter

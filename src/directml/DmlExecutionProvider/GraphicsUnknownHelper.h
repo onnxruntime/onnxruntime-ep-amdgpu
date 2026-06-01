@@ -30,7 +30,7 @@ private:
 #endif
 
 // Convenience macro for functions that take an IUnknown* parameter and are typically
-// called with a D3D-typed ComPtr argument. Example: 
+// called with a D3D-typed Microsoft::WRL::ComPtr argument. Example:
 // m_winmlProvider->QueueReference(WRAP_GRAPHICS_UNKNOWN(resource).Get());
 // The macro is a no-op for PC (arg is convertible to IUnknown), and it will wrap 
 // any IGraphicsUnknown for _GAMING_XBOX platforms.

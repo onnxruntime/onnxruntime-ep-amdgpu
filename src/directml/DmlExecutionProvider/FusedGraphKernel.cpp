@@ -18,7 +18,7 @@ namespace dml_ep {
 
         FusedGraphKernel(
             const onnxruntime::OpKernelInfo& kernelInfo,
-            ComPtr<IDMLCompiledOperator> compiledExecutionPlanOperator,
+            Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiledExecutionPlanOperator,
             Windows::AI::MachineLearning::Adapter::EdgeShapes& outputShapes,
             bool reuseCommandList,
             std::vector<ComPtr<ID3D12Resource>>& nonOwnedGraphInputsFromInitializers,
@@ -38,7 +38,7 @@ namespace dml_ep {
             if (m_executionHandle)
             {
                 // We assume the execution object inherits IUnknown as its first base
-                ComPtr<IUnknown> providerExecutionObject = const_cast<IUnknown*>(static_cast<const IUnknown*>(m_executionHandle));
+                Microsoft::WRL::ComPtr<IUnknown> providerExecutionObject = const_cast<IUnknown*>(static_cast<const IUnknown*>(m_executionHandle));
 
                 // Get the WinML-specific execution provider interface from the execution object.
                 ORT_THROW_IF_FAILED(providerExecutionObject.As(&m_provider));
@@ -253,18 +253,18 @@ namespace dml_ep {
         }
 
     private:
-        ComPtr<IDMLCompiledOperator> m_compiledExecutionPlanOperator;
+        Microsoft::WRL::ComPtr<IDMLCompiledOperator> m_compiledExecutionPlanOperator;
         std::vector<bool> m_inputsUsed;
         const void* m_executionHandle = nullptr;
-        ComPtr<IWinmlExecutionProvider> m_winmlProvider;
-        ComPtr<IExecutionProvider> m_provider;
+        Microsoft::WRL::ComPtr<IWinmlExecutionProvider> m_winmlProvider;
+        Microsoft::WRL::ComPtr<IExecutionProvider> m_provider;
         Windows::AI::MachineLearning::Adapter::EdgeShapes& m_outputShapes;
 
         mutable std::deque<std::unique_ptr<DmlReusedCommandListState>> m_reusedCommandLists;
 
         std::optional<DML_BUFFER_BINDING> m_persistentResourceBinding;
-        ComPtr<ID3D12Resource> m_persistentResource;
-        ComPtr<IUnknown> m_persistentResourceAllocatorUnknown; // Controls when the persistent resource is returned to the allocator
+        Microsoft::WRL::ComPtr<ID3D12Resource> m_persistentResource;
+        Microsoft::WRL::ComPtr<IUnknown> m_persistentResourceAllocatorUnknown; // Controls when the persistent resource is returned to the allocator
 
         std::vector<uint8_t> m_isInputsUploadedByDmlEP;
         std::vector<ComPtr<ID3D12Resource>> m_nonOwnedGraphInputsFromInitializers;
@@ -272,7 +272,7 @@ namespace dml_ep {
 
     onnxruntime::OpKernel* CreateFusedGraphKernel(
         const onnxruntime::OpKernelInfo& info,
-        ComPtr<IDMLCompiledOperator> compiledExecutionPlanOperator,
+        Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiledExecutionPlanOperator,
         Windows::AI::MachineLearning::Adapter::EdgeShapes& outputShapes,
         bool reuseCommandList,
         std::vector<ComPtr<ID3D12Resource>>& nonOwnedGraphInputsFromInitializers,

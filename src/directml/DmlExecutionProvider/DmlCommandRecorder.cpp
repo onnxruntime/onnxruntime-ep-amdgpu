@@ -50,7 +50,7 @@ void DmlCommandRecorder::InitializeOperator(
     bindingTableDesc.GPUDescriptorHandle = descriptorRange.gpuHandle;
     bindingTableDesc.SizeInDescriptors = numDescriptors;
 
-    ComPtr<IDMLBindingTable> bindingTable;
+    Microsoft::WRL::ComPtr<IDMLBindingTable> bindingTable;
     ORT_THROW_IF_FAILED(m_dmlDevice->CreateBindingTable(&bindingTableDesc, IID_PPV_ARGS(&bindingTable)));
 
     // Create a temporary resource for initializing the op, if it's required.
@@ -126,7 +126,7 @@ void DmlCommandRecorder::ExecuteOperator(
     bindingTableDesc.GPUDescriptorHandle = descriptorRange.gpuHandle;
     bindingTableDesc.SizeInDescriptors = numDescriptors;
 
-    ComPtr<IDMLBindingTable> bindingTable;
+    Microsoft::WRL::ComPtr<IDMLBindingTable> bindingTable;
     ORT_THROW_IF_FAILED(m_dmlDevice->CreateBindingTable(&bindingTableDesc, IID_PPV_ARGS(&bindingTable)));
 
     // Create a temporary resource for executing the op, if it's required.

@@ -170,8 +170,8 @@ onnx::OpSchema PluginAbiCustomRegistry::ConvertOpSchema(_In_z_ const char* domai
 
     // Set an inferencing method
     if (shapeInferrer || typeInferrer) {
-        ComPtr<IMLOperatorShapeInferrer> shapeInferrerCapture = shapeInferrer;
-        ComPtr<IMLOperatorTypeInferrer> typeInferrerCapture = typeInferrer;
+        Microsoft::WRL::ComPtr<IMLOperatorShapeInferrer> shapeInferrerCapture = shapeInferrer;
+        Microsoft::WRL::ComPtr<IMLOperatorTypeInferrer> typeInferrerCapture = typeInferrer;
 
         // PROTOBUF ABI NOTE: This lambda is compiled into the plugin DLL and accesses TypeProto*
         // via onnx::InferenceContext. This is an accepted risk: fixing it would require ORT to provide
@@ -183,7 +183,7 @@ onnx::OpSchema PluginAbiCustomRegistry::ConvertOpSchema(_In_z_ const char* domai
             gsl::span<const uint32_t> requiredConstantCpuInputs;
 
             onnxruntime::OpNodeProtoHelper<onnx::InferenceContext> nodeInfo(&ctx);
-            ComPtr<MLSchemaInferenceContext> abiContext =
+            Microsoft::WRL::ComPtr<MLSchemaInferenceContext> abiContext =
                 MLSchemaInferenceContext::Create(&nodeInfo, &ctx, requiredConstantCpuInputs);
 
             // Do type inference
@@ -374,8 +374,8 @@ HRESULT STDMETHODCALLTYPE PluginAbiCustomRegistry::RegisterOperatorKernel(
             builder.TypeConstraint(opKernel->typeConstraints[i].typeLabel, types);
         }
 
-        ComPtr<IMLOperatorKernelFactory> kernelFactoryCapture = operatorKernelFactory;
-        ComPtr<IMLOperatorShapeInferrer> shapeInferrerCapture = shapeInferrer;
+        Microsoft::WRL::ComPtr<IMLOperatorKernelFactory> kernelFactoryCapture = operatorKernelFactory;
+        Microsoft::WRL::ComPtr<IMLOperatorShapeInferrer> shapeInferrerCapture = shapeInferrer;
         AttributeMap defaultAttributesCapture = GetDefaultAttributes(opKernel);
 
         const dml_ep::PluginDmlExecutionProviderImpl* dmlProviderCapture = m_dmlPluginExecutionProvider;
@@ -430,7 +430,7 @@ HRESULT STDMETHODCALLTYPE PluginAbiCustomRegistry::RegisterOperatorKernel(
                                               *outputShapes);
 
                     // Create the kernel while allowing input shape and output shape queries according to options
-                    ComPtr<DmlGraphOpKernelInfoWrapper> kernelInfoWrapper =
+                    Microsoft::WRL::ComPtr<DmlGraphOpKernelInfoWrapper> kernelInfoWrapper =
                         wil::MakeOrThrow<DmlGraphOpKernelInfoWrapper>(&protoHelper, executionHandle, true,
                                                                       inputShapesOverrides, outputShapes,
                                                                       &defaultAttributesCapture, graphNodeCreateInfo,
@@ -450,7 +450,7 @@ HRESULT STDMETHODCALLTYPE PluginAbiCustomRegistry::RegisterOperatorKernel(
             }
 
             if (supportQuery) {
-                ComPtr<IMLOperatorSupportQueryPrivate> supportQueryCapture = supportQuery;
+                Microsoft::WRL::ComPtr<IMLOperatorSupportQueryPrivate> supportQueryCapture = supportQuery;
 
                 regInfo->supportQuery = [supportQueryCapture, defaultAttributesCapture](const OrtNode* node, const OrtApi& ort_api) {
 
@@ -458,7 +458,7 @@ HRESULT STDMETHODCALLTYPE PluginAbiCustomRegistry::RegisterOperatorKernel(
 
                     onnxruntime::OpNodeProtoHelper<onnxruntime::AbiSafeProtoHelperNodeContext> protoHelper(&nodeContext);
 
-                    ComPtr<PluginAbiSafeMLSupportQueryContext> supportContext =
+                    Microsoft::WRL::ComPtr<PluginAbiSafeMLSupportQueryContext> supportContext =
                         PluginAbiSafeMLSupportQueryContext::Create(&protoHelper, &defaultAttributesCapture);
 
                     BOOL bSupported = FALSE;

@@ -5,9 +5,9 @@
 
 namespace dml_ep {
 
-    ComPtr<ID3D12Resource> PluginDmlReadbackHeap::CreateReadbackHeap(ID3D12Device* device, size_t size)
+    Microsoft::WRL::ComPtr<ID3D12Resource> PluginDmlReadbackHeap::CreateReadbackHeap(ID3D12Device* device, size_t size)
     {
-        ComPtr<ID3D12Resource> readbackHeap;
+        Microsoft::WRL::ComPtr<ID3D12Resource> readbackHeap;
         auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
         auto buffer = CD3DX12_RESOURCE_DESC::Buffer(size);
 

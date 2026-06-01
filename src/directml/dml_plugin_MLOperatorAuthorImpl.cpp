@@ -15,7 +15,6 @@
 #include "dml_abi_kernel.h"
 #include "dml_ep.h"
 
-using namespace Microsoft::WRL;
 
 namespace Windows::AI::MachineLearning::Adapter
 {
@@ -164,7 +163,7 @@ PluginOpKernelInfoWrapper::PluginOpKernelInfoWrapper(
     const void* executionHandle = pluginDmlEp; // kerneInfo->GetExecutionProvider()->GetExecutionHandle();
     if (executionHandle) {
         // We assume the execution object inherits IUnknown as its first base
-        ComPtr<IUnknown> providerExecutionObject = const_cast<IUnknown*>(static_cast<const IUnknown*>(executionHandle));
+        Microsoft::WRL::ComPtr<IUnknown> providerExecutionObject = const_cast<IUnknown*>(static_cast<const IUnknown*>(executionHandle));
         providerExecutionObject.As(&m_winmlProvider);
     }
 
@@ -241,7 +240,7 @@ PluginOpKernelInfoWrapper::GetTensorShapeDescription(IMLOperatorTensorShapeDescr
             // return MLStatus::REQUIREMENT_NOT_REGISTERED;
         }
 
-        ComPtr<IMLOperatorTensorShapeDescription> ret = const_cast<PluginOpKernelInfoWrapper*>(this);
+        Microsoft::WRL::ComPtr<IMLOperatorTensorShapeDescription> ret = const_cast<PluginOpKernelInfoWrapper*>(this);
         *shapeInfo = ret.Detach();
         return S_OK;
     }
@@ -345,7 +344,7 @@ void PluginOpKernelContextWrapper::TransitionResourcesForOperatorIfRequired(bool
 
         for (uint32_t i = 0; i < m_inputTensors.size(); ++i) {
             for (uint32_t j = 0; j < m_inputTensors[i].size(); ++j) {
-                ComPtr<IMLOperatorTensor> tensor;
+                Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor;
                 if (m_inputTensors[i].size() == 1) {
                     ORT_THROW_IF_FAILED(GetInputTensor(i, tensor.GetAddressOf()));
                 } else {
@@ -353,7 +352,7 @@ void PluginOpKernelContextWrapper::TransitionResourcesForOperatorIfRequired(bool
                 }
 
                 if (tensor) {
-                    ComPtr<IUnknown> resource;
+                    Microsoft::WRL::ComPtr<IUnknown> resource;
                     tensor->GetDataInterface(resource.GetAddressOf());
                     if (resource) {
                         resourcesToTransition.push_back(resource.Get());
@@ -363,10 +362,10 @@ void PluginOpKernelContextWrapper::TransitionResourcesForOperatorIfRequired(bool
         }
 
         for (uint32_t i = 0; i < m_outputTensors.size(); ++i) {
-            ComPtr<IMLOperatorTensor> tensor;
+            Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor;
             ORT_THROW_IF_FAILED(GetOutputTensor(i, tensor.GetAddressOf()));
 
-            ComPtr<IUnknown> resource;
+            Microsoft::WRL::ComPtr<IUnknown> resource;
             tensor->GetDataInterface(resource.GetAddressOf());
             if (resource) {
                 resourcesToTransition.push_back(resource.Get());
@@ -463,7 +462,7 @@ auto opKernelContextWrapper = const_cast<PluginOpKernelContextWrapper*>(this);
 if (m_inputTensors[inputIndex][0] == nullptr) {
     auto inputTensor = m_impl->Input<onnxruntime::Tensor>(gsl::narrow_cast<int>(inputIndex));
     if (inputTensor != nullptr) {
-        ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
+        Microsoft::WRL::ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
             const_cast<onnxruntime::Tensor*>(inputTensor), IsAllocationInterface(inputTensor->Location()),
             m_winmlProvider.Get(), m_internalOperator);
 
@@ -497,7 +496,7 @@ if (m_inputTensors[inputIndex][sequenceIndex] == nullptr) {
 
     auto elemTensor = const_cast<onnxruntime::Tensor*>(&inputTensorSeq->Get(sequenceIndex));
     if (elemTensor != nullptr) {
-        ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
+        Microsoft::WRL::ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
             elemTensor, IsAllocationInterface(elemTensor->Location()), m_winmlProvider.Get(), m_internalOperator);
 
         opKernelContextWrapper->m_inputTensors[inputIndex][sequenceIndex] = tensorWrapper;
@@ -576,7 +575,7 @@ HRESULT STDMETHODCALLTYPE PluginOpKernelContextWrapper::GetSequenceOutputTensor(
 
             auto elemTensor = const_cast<onnxruntime::Tensor*>(&outputTensorSeq->Get(sequenceIndex));
             if (elemTensor != nullptr) {
-                ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
+                Microsoft::WRL::ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
                     elemTensor, IsAllocationInterface(elemTensor->Location()), m_winmlProvider.Get(), m_internalOperator);
 
                 opKernelContextWrapper->m_outputTensors[outputIndex][sequenceIndex] = tensorWrapper;
@@ -655,7 +654,7 @@ if (m_outputTensors[outputIndex][0] == nullptr) {
     onnxruntime::TensorShape shape(convertedSizes.data(), dimensions);
     auto outputTensor = m_impl->Output(outputIndex, shape);
     if (outputTensor) {
-        ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
+        Microsoft::WRL::ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
             const_cast<onnxruntime::Tensor*>(outputTensor), IsAllocationInterface(outputTensor->Location()),
             m_winmlProvider.Get(), m_internalOperator);
 
@@ -691,7 +690,7 @@ HRESULT STDMETHODCALLTYPE PluginOpKernelContextWrapper::AllocateTemporaryData(si
             return E_FAIL;
         }
 
-        ComPtr<IUnknown> allocation;
+        Microsoft::WRL::ComPtr<IUnknown> allocation;
         allocation.Attach(static_cast<IUnknown*>(alloc->Alloc(size)));
 
         *allocId = m_winmlProvider->TryGetPooledAllocationId(allocation.Get(), 0);
@@ -722,7 +721,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetInputTensors() 
     ret.reserve(m_inputTensors.size());
 
     for (int i = 0; i < m_impl->InputCount(); ++i) {
-        ComPtr<IMLOperatorTensor> tensor;
+        Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor;
         ORT_THROW_IF_FAILED(GetInputTensor(i, tensor.GetAddressOf()));
         ret.push_back(m_inputTensors[i][0].Get());
     }
@@ -737,7 +736,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
     ORT_THROW_HR_IF(E_INVALIDARG, static_cast<size_t>(m_impl->OutputCount()) != outputShapes.EdgeCount());
 
     for (int i = 0; i < m_impl->OutputCount(); ++i) {
-        ComPtr<IMLOperatorTensor> tensor;
+        Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor;
         ORT_THROW_IF_FAILED(GetOutputTensor(i, static_cast<uint32_t>(outputShapes.GetShape(i).size()),
                                             outputShapes.GetShape(i).data(), tensor.GetAddressOf()));
 
@@ -765,7 +764,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
         if (winmlProvider) {
             winmlProvider->GetABIDataInterface(isInternalOperator, allocation, abiAllocation);
         } else {
-            ComPtr<IUnknown> tmp = allocation;
+            Microsoft::WRL::ComPtr<IUnknown> tmp = allocation;
             *abiAllocation = tmp.Detach();
         }
     }
@@ -809,7 +808,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
         if (executionHandle)
         {
             // We assume the execution object inherits IUnknown as its first base
-            ComPtr<IUnknown> providerExecutionObject = const_cast<IUnknown*>(static_cast<const IUnknown*>(executionHandle));
+            Microsoft::WRL::ComPtr<IUnknown> providerExecutionObject = const_cast<IUnknown*>(static_cast<const IUnknown*>(executionHandle));
             m_abiExecutionObject = providerExecutionObject;
 
             // Get the WinML-specific execution provider interface from the execution object.
@@ -989,7 +988,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
             return Microsoft::WRL::ComPtr<IMLOperatorTensor>();
         };
 
-        auto inferShapesAndCreateKernel = [&, context](const EdgeShapes& inputShapes, EdgeShapes& outputShapes) -> ComPtr<IMLOperatorKernel> {
+        auto inferShapesAndCreateKernel = [&, context](const EdgeShapes& inputShapes, EdgeShapes& outputShapes) -> Microsoft::WRL::ComPtr<IMLOperatorKernel> {
             // If the output size is not dynamic, infer it using the kernel. The result of inference is stored in m_inferredOutputShapes.
             if (m_requiresOutputShapesAtCreation)
             {
@@ -1025,7 +1024,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
                     {
                         auto internalOpCapture = m_internalOperator;
                         auto winmlProviderCapture = m_winmlProvider;
-                        ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
+                        Microsoft::WRL::ComPtr<TensorWrapper> tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
                             const_cast<onnxruntime::Tensor*>(tensor),
                             IsAllocationInterface(tensor->Location()),
                             winmlProviderCapture.Get(),
@@ -1065,7 +1064,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
                 kernelCreationContext->SetPrecomputedOutputShapes(outputShapeVecs);
             }
 
-            ComPtr<IMLOperatorKernel> ret;
+            Microsoft::WRL::ComPtr<IMLOperatorKernel> ret;
             ORT_THROW_IF_FAILED(m_operatorFactory->CreateKernel(kernelCreationContext.Get(), ret.GetAddressOf()));
 
             return ret;
@@ -1129,9 +1128,9 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
             if (local_input_shapes != m_inputShapesOfKernelInference || requiredCpuInputsChanged)
             {
                 EdgeShapes localInferredOutputShapes;
-                ComPtr<IMLOperatorKernel> localKernel = inferShapesAndCreateKernel(local_input_shapes, localInferredOutputShapes);
+                Microsoft::WRL::ComPtr<IMLOperatorKernel> localKernel = inferShapesAndCreateKernel(local_input_shapes, localInferredOutputShapes);
 
-                ComPtr<PluginOpKernelContextWrapper> kernelContextWrapper = wil::MakeOrThrow<PluginOpKernelContextWrapper>(
+                Microsoft::WRL::ComPtr<PluginOpKernelContextWrapper> kernelContextWrapper = wil::MakeOrThrow<PluginOpKernelContextWrapper>(
                     context,
                     m_dmlPluginExecutionProvider,
                     m_internalOperator,
@@ -1150,7 +1149,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
             }
         }
 
-        ComPtr<PluginOpKernelContextWrapper> kernelContextWrapper = wil::MakeOrThrow<PluginOpKernelContextWrapper>(
+        Microsoft::WRL::ComPtr<PluginOpKernelContextWrapper> kernelContextWrapper = wil::MakeOrThrow<PluginOpKernelContextWrapper>(
             context,
             m_dmlPluginExecutionProvider,
             m_internalOperator,
@@ -1169,7 +1168,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
         return STATUS_OK;
     }
 
-    bool PluginDmlAbiOpKernel::RequiredCpuInputChanged(const ComPtr<IMLOperatorTensor>& constantTensor, uint32_t index) const
+    bool PluginDmlAbiOpKernel::RequiredCpuInputChanged(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor, uint32_t index) const
     {
         assert(std::holds_alternative<TensorContent>(m_constantInputTensorContentsOfKernel[index]));
 
@@ -1225,7 +1224,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
         return false;
     }
 
-    void PluginDmlAbiOpKernel::FillConstantInputs(const ComPtr<IMLOperatorTensor>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const
+    void PluginDmlAbiOpKernel::FillConstantInputs(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const
     {
         // Skip optional constant tensors.
         if (constantTensor != nullptr)
@@ -1261,7 +1260,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
 
         for (uint32_t i = 0; i < constantTensorSequence.size(); ++i)
         {
-            const ComPtr<IMLOperatorTensor>& constantTensor = constantTensorSequence[i];
+            const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor = constantTensorSequence[i];
 
             // Skip optional constant tensors.
             if (constantTensor == nullptr)
@@ -1528,7 +1527,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
     // PluginAbiSafeMLSupportQueryContext Implementation (NO UNSAFE CASTS)
     //==============================================================================
 
-    ComPtr<PluginAbiSafeMLSupportQueryContext> PluginAbiSafeMLSupportQueryContext::Create(
+    Microsoft::WRL::ComPtr<PluginAbiSafeMLSupportQueryContext> PluginAbiSafeMLSupportQueryContext::Create(
         onnxruntime::OpNodeProtoHelper<onnxruntime::AbiSafeProtoHelperNodeContext>* info,
         const AttributeMap* defaultAttributes)
     {

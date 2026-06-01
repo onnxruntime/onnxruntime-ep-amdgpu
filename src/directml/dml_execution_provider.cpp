@@ -38,12 +38,12 @@ namespace dml_ep {
     {
         ORT_TRY
         {
-        ComPtr<IUnknown> allocation;
+        Microsoft::WRL::ComPtr<IUnknown> allocation;
         allocation.Attach(static_cast<IUnknown* >(m_allocator->AllocImpl(size, roundingMode)));
 
         const auto* allocInfo = m_allocator->DecodeDataHandle(allocation.Get());
 
-        ComPtr<ID3D12Resource> resource = allocInfo->GetResource();
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource = allocInfo->GetResource();
         resource.CopyTo(d3dResource);
         *pooledResource = allocation.Detach();
         return S_OK;
@@ -308,7 +308,7 @@ namespace dml_ep {
                 {
                     ORT_THROW_HR_IF(E_INVALIDARG, !tensor->IsDataInterface());
 
-                    ComPtr<IUnknown> dataInterface = MLOperatorTensor(tensor).GetDataInterface();
+                    Microsoft::WRL::ComPtr<IUnknown> dataInterface = MLOperatorTensor(tensor).GetDataInterface();
                     ORT_THROW_HR_IF(E_INVALIDARG, !dataInterface);
 
                     const PluginDmlAllocationInfo* allocInfo = m_allocator->DecodeDataHandle(dataInterface.Get());
@@ -756,10 +756,10 @@ namespace dml_ep {
         else
         {
 #ifdef _GAMING_XBOX
-            ComPtr<GraphicsUnknownWrapper> wrappedResource = Microsoft::WRL::Make<GraphicsUnknownWrapper>(m_allocator->DecodeDataHandle(data)->GetResource());
+            Microsoft::WRL::ComPtr<GraphicsUnknownWrapper> wrappedResource = Microsoft::WRL::Make<GraphicsUnknownWrapper>(m_allocator->DecodeDataHandle(data)->GetResource());
             *abiData = wrappedResource.Detach();
 #else
-            ComPtr<ID3D12Resource> resource = m_allocator->DecodeDataHandle(data)->GetResource();
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource = m_allocator->DecodeDataHandle(data)->GetResource();
             *abiData = resource.Detach();
 #endif
         }
@@ -781,15 +781,15 @@ namespace dml_ep {
 
         if (isInternalOperator)
         {
-            ComPtr<IUnknown> thisPtr = const_cast<IExecutionProvider*>(static_cast<const IExecutionProvider*>(this));
+            Microsoft::WRL::ComPtr<IUnknown> thisPtr = const_cast<IExecutionProvider*>(static_cast<const IExecutionProvider*>(this));
             *abiExecutionObject = thisPtr.Detach();
         }
         else
         {
-            ComPtr<ID3D12GraphicsCommandList> commandList;
+            Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
             m_context->GetCommandListForRecordingAndInvalidateState(commandList.GetAddressOf());
 #ifdef _GAMING_XBOX
-            ComPtr<GraphicsUnknownWrapper> wrappedCommandList = Microsoft::WRL::Make<GraphicsUnknownWrapper>(commandList.Get());
+            Microsoft::WRL::ComPtr<GraphicsUnknownWrapper> wrappedCommandList = Microsoft::WRL::Make<GraphicsUnknownWrapper>(commandList.Get());
             *abiExecutionObject = wrappedCommandList.Detach();
 #else
             *abiExecutionObject = commandList.Detach();
@@ -817,7 +817,7 @@ namespace dml_ep {
 
         for (uint32_t i = 0; i < resourceCount; ++i)
         {
-            ComPtr<ID3D12Resource> resource;
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource;
             ORT_THROW_IF_FAILED(resources[i]->QueryInterface(resource.GetAddressOf()));
 
             // Custom operators receive resources in Common state and must return them to Common

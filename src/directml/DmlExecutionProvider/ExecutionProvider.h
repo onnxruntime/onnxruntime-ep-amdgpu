@@ -25,8 +25,7 @@ using Base = Microsoft::WRL::RuntimeClass<
 
 namespace dml_ep {
 
-    using Microsoft::WRL::ComPtr;
-    class PooledUploadHeap;
+        class PooledUploadHeap;
     class ReadbackHeap;
     class ExecutionContext;
     class BucketizedBufferAllocator;
@@ -200,8 +199,8 @@ namespace dml_ep {
 
         void FlushUploadsIfReady() const;
 
-        ComPtr<ID3D12Device> m_d3d12Device;
-        ComPtr<IDMLDevice> m_dmlDevice;
+        Microsoft::WRL::ComPtr<ID3D12Device> m_d3d12Device;
+        Microsoft::WRL::ComPtr<IDMLDevice> m_dmlDevice;
         bool m_isMcdmDevice = false;
         bool m_areCustomHeapsSupported = false;
         bool m_areMetacommandsEnabled = true;
@@ -215,7 +214,7 @@ namespace dml_ep {
         bool m_sessionInitialized = false;
         bool m_cpuSyncSpinningEnabled = false;
         bool m_memoryArenaDisabled = false;
-        ComPtr<ExecutionContext> m_context;
+        Microsoft::WRL::ComPtr<ExecutionContext> m_context;
         std::unique_ptr<PooledUploadHeap> m_uploadHeap;
         std::unique_ptr<ReadbackHeap> m_readbackHeap;
         std::shared_ptr<BucketizedBufferAllocator> m_allocator;
@@ -254,7 +253,7 @@ namespace dml_ep {
         }
 
     private:
-        ComPtr<ExecutionProviderImpl> m_impl;
+        Microsoft::WRL::ComPtr<ExecutionProviderImpl> m_impl;
     };
 
     class ExecutionProvider : public onnxruntime::IExecutionProvider
@@ -357,7 +356,7 @@ namespace dml_ep {
         }
 
     private:
-        ComPtr<ExecutionProviderImpl> m_impl;
+        Microsoft::WRL::ComPtr<ExecutionProviderImpl> m_impl;
     };
 
 }  // namespace dml_ep

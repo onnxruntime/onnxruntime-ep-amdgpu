@@ -47,7 +47,7 @@ namespace dml_ep {
             if (executionHandle)
             {
                 // We assume the execution object inherits IUnknown as its first base
-                ComPtr<IUnknown> providerExecutionObject = const_cast<IUnknown*>(static_cast<const IUnknown*>(executionHandle));
+                Microsoft::WRL::ComPtr<IUnknown> providerExecutionObject = const_cast<IUnknown*>(static_cast<const IUnknown*>(executionHandle));
 
                 // Get the WinML-specific execution provider interface from the execution object.
                 ORT_THROW_IF_FAILED(providerExecutionObject.As(&m_provider));
@@ -173,7 +173,7 @@ namespace dml_ep {
                 const PluginDmlExecutionProviderImpl* cProviderImpl = static_cast<const PluginDmlExecutionProviderImpl*>(m_provider.Get());
 
                 // Convert partitionONNXGraph into DML EP GraphDesc
-                ComPtr<IDMLDevice> device;
+                Microsoft::WRL::ComPtr<IDMLDevice> device;
                 ORT_THROW_IF_FAILED(cProviderImpl->GetDmlDevice(device.GetAddressOf()));
                 // This map will be used to transfer the initializer to D3D12 system heap memory.
                 // 'serializedDmlGraphDesc' will have constant input as intermediate edges, that's why
@@ -309,8 +309,8 @@ namespace dml_ep {
         }
 
     private:
-        ComPtr<IWinmlExecutionProvider> m_winmlProvider;
-        ComPtr<IExecutionProvider> m_provider;
+        Microsoft::WRL::ComPtr<IWinmlExecutionProvider> m_winmlProvider;
+        Microsoft::WRL::ComPtr<IExecutionProvider> m_provider;
 
         mutable std::optional<DML_BUFFER_BINDING> m_persistentResourceBinding;
         std::shared_ptr<const onnxruntime::IndexedSubGraph> m_indexedSubGraph;
@@ -327,10 +327,10 @@ namespace dml_ep {
 
         // Bindings from previous executions of a re-used command list
         mutable std::vector<std::unique_ptr<ONNX_NAMESPACE::TensorProto>> m_ownedCpuInputs;
-        mutable ComPtr<IDMLCompiledOperator> m_compiledExecutionPlanOperator;
+        mutable Microsoft::WRL::ComPtr<IDMLCompiledOperator> m_compiledExecutionPlanOperator;
         mutable std::vector<bool> m_inputsUsed;
-        mutable ComPtr<ID3D12Resource> m_persistentResource;
-        mutable ComPtr<IUnknown> m_persistentResourceAllocatorUnknown; // Controls when the persistent resource is returned to the allocator
+        mutable Microsoft::WRL::ComPtr<ID3D12Resource> m_persistentResource;
+        mutable Microsoft::WRL::ComPtr<IUnknown> m_persistentResourceAllocatorUnknown; // Controls when the persistent resource is returned to the allocator
         mutable Windows::AI::MachineLearning::Adapter::EdgeShapes m_outputShapes;
         mutable std::unordered_map<std::string, onnxruntime::TensorShape> m_inferredInputShapes;
         mutable std::deque<std::unique_ptr<DmlReusedCommandListState>> m_reusedCommandLists;

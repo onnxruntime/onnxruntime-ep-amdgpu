@@ -61,7 +61,7 @@ namespace DmlGraphFusionHelper
         const std::unordered_map<uint32_t, uint32_t>* serializedGraphInputIndexToSubgraphInputIndex,
         const std::unordered_map<std::string_view, uint32_t>* serializedGraphLargeConstantNameToSubgraphInputIndex,
         _Out_ DML_GRAPH_DESC& dmlGraphDesc,
-        _Inout_ std::vector<ComPtr<IDMLOperator>>& dmlOperators,
+        _Inout_ std::vector<Microsoft::WRL::ComPtr<IDMLOperator>>& dmlOperators,
         _Inout_ std::vector<DML_GRAPH_NODE_DESC>& dmlGraphNodes,
         _Inout_ std::vector<DML_GRAPH_EDGE_DESC>& dmlInputEdges,
         _Inout_ std::vector<DML_GRAPH_EDGE_DESC>& dmlOutputEdges,

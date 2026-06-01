@@ -129,15 +129,15 @@ public:
     }
 };
 
-ComPtr<IDMLCompiledOperator> CreateSecondaryOperator(
+Microsoft::WRL::ComPtr<IDMLCompiledOperator> CreateSecondaryOperator(
     IDMLDevice* dmlDevice,
     DML_EXECUTION_FLAGS executionFlags,
     const DML_OPERATOR_DESC& operatorDesc,
     const MLOperatorKernelCreationContext& kernelInfo
     )
 {
-    ComPtr<IDMLOperator> dmlOperator;
-    ComPtr<IDMLCompiledOperator> compiledOperator;
+    Microsoft::WRL::ComPtr<IDMLOperator> dmlOperator;
+    Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiledOperator;
     ORT_THROW_IF_FAILED(dmlDevice->CreateOperator(&operatorDesc, IID_PPV_ARGS(&dmlOperator)));
     ORT_THROW_IF_FAILED(dmlDevice->CompileOperator(dmlOperator.Get(), executionFlags, IID_PPV_ARGS(&compiledOperator)));
     return compiledOperator;
@@ -259,13 +259,13 @@ public:
     // The size of the vector will either be empty if all tensor pairs have identical properties,
     // or it will equal inputCount - 2, with the first operator in this vector corresponding to the
     // 3rd input tensor combined with the output of the previous 2 input tensors.
-    std::vector<ComPtr<IDMLCompiledOperator>> m_compiledOperators;
+    std::vector<Microsoft::WRL::ComPtr<IDMLCompiledOperator>> m_compiledOperators;
 };
 
 class DmlOperatorElementwiseMean : public DmlOperator
 {
     // Used with 3+ inputs to divide each element by the number of input tensors.
-    ComPtr<IDMLCompiledOperator> m_compiledIdentityOp;
+    Microsoft::WRL::ComPtr<IDMLCompiledOperator> m_compiledIdentityOp;
 
 public:
     DmlOperatorElementwiseMean(const MLOperatorKernelCreationContext& kernelInfo) : DmlOperator(kernelInfo)
@@ -337,7 +337,7 @@ public:
 
             DML_OPERATOR_DESC identityDescDesc = { DML_OPERATOR_ELEMENT_WISE_IDENTITY, &identityDesc };
 
-            ComPtr<IDMLOperator> identityOp;
+            Microsoft::WRL::ComPtr<IDMLOperator> identityOp;
             ORT_THROW_IF_FAILED(m_dmlDevice->CreateOperator(&identityDescDesc, IID_PPV_ARGS(&identityOp)));
 
             ORT_THROW_IF_FAILED(m_dmlDevice->CompileOperator(identityOp.Get(), GetExecutionFlags(), IID_PPV_ARGS(&m_compiledIdentityOp)));
@@ -401,7 +401,7 @@ public:
     }
 
     // If multiple compiled operators are needed, beyond m_compiledOperator, they are appended here.
-    std::vector<ComPtr<IDMLCompiledOperator>> m_compiledOperators;
+    std::vector<Microsoft::WRL::ComPtr<IDMLCompiledOperator>> m_compiledOperators;
 };
 
 class DmlOperatorElementwiseClip7 : public DmlOperator

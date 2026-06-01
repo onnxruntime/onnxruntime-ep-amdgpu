@@ -61,7 +61,6 @@
 #include "external/DirectMLHelpers/DmlGraphDeserialization.h"
 #include "external/DirectMLHelpers/DmlGraphHelper.h"
 
-using Microsoft::WRL::ComPtr;
 
 // Windows pollutes the macro space, causing a build break in schema.h.
 #undef OPTIONAL

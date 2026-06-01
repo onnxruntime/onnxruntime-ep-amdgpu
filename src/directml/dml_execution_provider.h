@@ -37,7 +37,6 @@
 #include <wrl/implements.h>
 
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-using Microsoft::WRL::ComPtr;
 
 namespace onnxruntime {
 class IResourceAccountant;
@@ -53,8 +52,7 @@ using Base = Microsoft::WRL::RuntimeClass<
 
 namespace dml_ep {
 
-    using Microsoft::WRL::ComPtr;
-    class PooledUploadHeap;
+        class PooledUploadHeap;
     class ReadbackHeap;
     class ExecutionContext;
     class BucketizedBufferAllocator;
@@ -242,8 +240,8 @@ namespace dml_ep {
         void GpuToCpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst);
         bool IsGpuTensor(const onnxruntime::Tensor& tensor);
 
-        ComPtr<ID3D12Device> m_d3d12Device;
-        ComPtr<IDMLDevice> m_dmlDevice;
+        Microsoft::WRL::ComPtr<ID3D12Device> m_d3d12Device;
+        Microsoft::WRL::ComPtr<IDMLDevice> m_dmlDevice;
         bool m_isMcdmDevice = false;
         bool m_areCustomHeapsSupported = false;
         bool m_areMetacommandsEnabled = true;
@@ -258,7 +256,7 @@ namespace dml_ep {
         bool m_cpuSyncSpinningEnabled = false;
         bool m_memoryArenaDisabled = false;
 
-        ComPtr<PluginDmlExecutionContext> m_context;
+        Microsoft::WRL::ComPtr<PluginDmlExecutionContext> m_context;
         std::unique_ptr<OrtMemoryInfo> m_cpuMemInfo;
         std::unique_ptr<PluginDmlPooledUploadHeap> m_uploadHeap;
         std::unique_ptr<PluginDmlReadbackHeap> m_readbackHeap;

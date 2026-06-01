@@ -5,7 +5,6 @@
 #include "plugin_ep_utils.h"
 #include "DmlExecutionProvider/AllocationInfo.h"
 #include "OperatorAuthorHelper/MLOperatorAuthorHelper.h"
-#include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
 #include "dml_ep.h"
 //#include "DmlExecutionProvider/DmlCommon.h"
 #include "dml_common.h"

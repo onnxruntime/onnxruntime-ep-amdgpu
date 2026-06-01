@@ -34,10 +34,10 @@ namespace dml_ep {
 
         static constexpr size_t c_initialCapacity = 1024 * 1024; // 1MB
 
-        ComPtr<ID3D12Device> m_device;
-        ComPtr<ExecutionContext> m_executionContext;
+        Microsoft::WRL::ComPtr<ID3D12Device> m_device;
+        Microsoft::WRL::ComPtr<ExecutionContext> m_executionContext;
 
-        ComPtr<ID3D12Resource> m_readbackHeap;
+        Microsoft::WRL::ComPtr<ID3D12Resource> m_readbackHeap;
         size_t m_capacity = 0;
     };
 

@@ -26,7 +26,7 @@ public:
         // same as the input dimensions.
         m_outputTensorDescs.front() = m_inputTensorDescs.front();
 
-        ComPtr<IMLOperatorKernelCreationContextPrivate> contextPrivate;
+        Microsoft::WRL::ComPtr<IMLOperatorKernelCreationContextPrivate> contextPrivate;
         ORT_THROW_IF_FAILED(kernelInfo.GetInterface()->QueryInterface(contextPrivate.GetAddressOf()));
 
         if (contextPrivate->IsDmlGraphNode())

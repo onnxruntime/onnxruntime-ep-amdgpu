@@ -60,11 +60,11 @@ static DeviceType FilterAdapterTypeQuery(IDXCoreAdapter* adapter, OrtDmlDeviceFi
 // Struct for holding each adapter
 struct AdapterInfo
 {
-    ComPtr<IDXCoreAdapter> Adapter;
+    Microsoft::WRL::ComPtr<IDXCoreAdapter> Adapter;
     DeviceType Type; // GPU or NPU
 };
-static ComPtr<IDXCoreAdapterList> EnumerateDXCoreAdapters(IDXCoreAdapterFactory* adapter_factory) {
-    ComPtr<IDXCoreAdapterList> adapter_list;
+static Microsoft::WRL::ComPtr<IDXCoreAdapterList> EnumerateDXCoreAdapters(IDXCoreAdapterFactory* adapter_factory) {
+    Microsoft::WRL::ComPtr<IDXCoreAdapterList> adapter_list;
 
     // TODO: use_dxcore_workload_enumeration should be determined by QI
     // When DXCore APIs are available QI for relevant enumeration interfaces
@@ -107,7 +107,7 @@ static std::vector<AdapterInfo> FilterDXCoreAdapters(IDXCoreAdapterList* adapter
     auto adapter_infos = std::vector<AdapterInfo>();
     const uint32_t count = adapter_list->GetAdapterCount();
     for (uint32_t i = 0; i < count; ++i) {
-        ComPtr<IDXCoreAdapter> candidate_adapter;
+        Microsoft::WRL::ComPtr<IDXCoreAdapter> candidate_adapter;
         THROW_IF_FAILED(adapter_list->GetAdapter(i, candidate_adapter.GetAddressOf()));
 
         // Add the adapters that are valid based on the device filter (GPU, NPU, or Both)
@@ -305,9 +305,9 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
     }
 
     // Create DML device and execution context for the selected adapter
-    ComPtr<ID3D12Device> d3d12_device = factory->CreateD3d12Device();
-    ComPtr<ID3D12CommandQueue> cmd_queue = factory->CreateCommandQueue(d3d12_device);
-    ComPtr<IDMLDevice> dml_device = factory->CreateDMLDevice(d3d12_device);
+    Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device = factory->CreateD3d12Device();
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> cmd_queue = factory->CreateCommandQueue(d3d12_device);
+    Microsoft::WRL::ComPtr<IDMLDevice> dml_device = factory->CreateDMLDevice(d3d12_device);
 
     auto context = wil::MakeOrThrow<PluginDmlExecutionContext>(
         d3d12_device.Get(), 
@@ -426,7 +426,7 @@ OrtStatus* ORT_API_CALL ProviderFactory::GetCustomOpDomainsImpl(
 
 typedef HRESULT(WINAPI* PFN_DXCoreCreateAdapterFactory)(REFIID riid, void** ppvFactory);
 
-std::vector<ComPtr<IDXCoreAdapter>> ProviderFactory::GetAdapters()
+std::vector<Microsoft::WRL::ComPtr<IDXCoreAdapter>> ProviderFactory::GetAdapters()
 {
     // For now assume preference is always perfer max performance and filter for gpu only
     OrtDmlPerformancePreference preference = OrtDmlPerformancePreference::HighPerformance;
@@ -447,13 +447,13 @@ std::vector<ComPtr<IDXCoreAdapter>> ProviderFactory::GetAdapters()
     }
 
     // Create DXCore Adapter Factory
-    ComPtr<IDXCoreAdapterFactory> adapter_factory;
+    Microsoft::WRL::ComPtr<IDXCoreAdapterFactory> adapter_factory;
     if (FAILED(pfnDXCoreCreateAdapterFactory(IID_PPV_ARGS(&adapter_factory)))) {
         THROW("DXCore is not available on this platform. This is expected on older versions of Windows.");
     }
 
     // Get all DML compatible DXCore adapters
-    ComPtr<IDXCoreAdapterList> adapter_list;
+    Microsoft::WRL::ComPtr<IDXCoreAdapterList> adapter_list;
     adapter_list = EnumerateDXCoreAdapters(adapter_factory.Get());
 
     if (adapter_list->GetAdapterCount() == 0) {
@@ -480,13 +480,13 @@ std::vector<ComPtr<IDXCoreAdapter>> ProviderFactory::GetAdapters()
     SortHeterogenousDXCoreAdapterList(adapter_infos, filter, preference);
 
     // Extract just the adapters
-    auto adapters = std::vector<ComPtr<IDXCoreAdapter>>(adapter_infos.size());
+    auto adapters = std::vector<Microsoft::WRL::ComPtr<IDXCoreAdapter>>(adapter_infos.size());
     std::transform(adapter_infos.begin(), adapter_infos.end(), adapters.begin(), [](auto& a) { return a.Adapter; });
 
     return adapters;
 }
 
-void ProviderFactory::CreateD3DDeviceFromAdapter(IDXCoreAdapter* adapter, ComPtr<ID3D12Device>& device)
+void ProviderFactory::CreateD3DDeviceFromAdapter(IDXCoreAdapter* adapter, Microsoft::WRL::ComPtr<ID3D12Device>& device)
 {
     auto feature_level = D3D_FEATURE_LEVEL_11_0;
     if (IsNPU(adapter)) {
@@ -507,7 +507,7 @@ void ProviderFactory::CreateD3DDeviceFromAdapter(IDXCoreAdapter* adapter, ComPtr
 
 void ProviderFactory::CreateDMLAndD3DResources()
 {
-    std::vector<ComPtr<IDXCoreAdapter>> rankedAdapters = GetAdapters();
+    std::vector<Microsoft::WRL::ComPtr<IDXCoreAdapter>> rankedAdapters = GetAdapters();
 
     // choose first adapter
     auto adapter = rankedAdapters[0];
@@ -523,32 +523,32 @@ void ProviderFactory::CreateDMLAndD3DResources()
     dml_device = CreateDMLDevice(d3d12_device);
 }
 
-ComPtr<ID3D12Device> ProviderFactory::CreateD3d12Device()
+Microsoft::WRL::ComPtr<ID3D12Device> ProviderFactory::CreateD3d12Device()
 {
-    std::vector<ComPtr<IDXCoreAdapter>> rankedAdapters = GetAdapters();
+    std::vector<Microsoft::WRL::ComPtr<IDXCoreAdapter>> rankedAdapters = GetAdapters();
 
     // choose first adapter
     auto adapter = rankedAdapters[0];
-    ComPtr<ID3D12Device> d3d12_device;
+    Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;
     CreateD3DDeviceFromAdapter(adapter.Get(), d3d12_device);
     return d3d12_device;
 }
 
-ComPtr<ID3D12CommandQueue> ProviderFactory::CreateCommandQueue(const ComPtr<ID3D12Device>& device)
+Microsoft::WRL::ComPtr<ID3D12CommandQueue> ProviderFactory::CreateCommandQueue(const Microsoft::WRL::ComPtr<ID3D12Device>& device)
 {
     D3D12_COMMAND_QUEUE_DESC cmd_queue_desc = {};
     cmd_queue_desc.Type = CalculateCommandListType(device.Get());
     cmd_queue_desc.Flags = D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT;
 
-    ComPtr<ID3D12CommandQueue> cmd_queue;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> cmd_queue;
     THROW_IF_FAILED(device->CreateCommandQueue(&cmd_queue_desc, IID_GRAPHICS_PPV_ARGS(cmd_queue.ReleaseAndGetAddressOf())));
 
     return cmd_queue;
 }
 
-ComPtr<IDMLDevice> ProviderFactory::CreateDMLDevice(const ComPtr<ID3D12Device>& d3d12_device) {
+Microsoft::WRL::ComPtr<IDMLDevice> ProviderFactory::CreateDMLDevice(const Microsoft::WRL::ComPtr<ID3D12Device>& d3d12_device) {
     DML_CREATE_DEVICE_FLAGS flags = DML_CREATE_DEVICE_FLAG_NONE;
-    ComPtr<IDMLDevice> dml_device;
+    Microsoft::WRL::ComPtr<IDMLDevice> dml_device;
     // In debug builds, enable the DML debug layer if the D3D12 debug layer is also enabled
 #if _DEBUG
     Microsoft::WRL::ComPtr<ID3D12DebugDevice> debug_device;

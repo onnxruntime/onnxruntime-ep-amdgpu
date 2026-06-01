@@ -135,13 +135,13 @@ public:
             return;
         }
 
-        ComPtr<IMLOperatorKernelContextPrivate> operatorKernelContext;
+        Microsoft::WRL::ComPtr<IMLOperatorKernelContextPrivate> operatorKernelContext;
         kernelContext.GetInterface().As(&operatorKernelContext);
         auto inputTensors = std::vector<IMLOperatorTensor*>(m_inputIndices.size());
         for (uint32_t i = 0; i < inputTensors.size(); i++)
         {
             assert(m_inputTensorDescs[i].IsValid());
-            ComPtr<IMLOperatorTensor> inputTensor;
+            Microsoft::WRL::ComPtr<IMLOperatorTensor> inputTensor;
             ORT_THROW_IF_FAILED(operatorKernelContext->GetSequenceInputTensor(0, m_inputIndices[i], &inputTensor));
             inputTensors[i] = inputTensor.Get();
         }

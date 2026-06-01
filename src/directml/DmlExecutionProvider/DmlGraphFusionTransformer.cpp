@@ -235,7 +235,7 @@ namespace dml_ep {
                         subgraphOutputs.push_back(graph.GetNodeArg(graphOutputName));
                     }
 
-                    ComPtr<IDMLDevice> device;
+                    Microsoft::WRL::ComPtr<IDMLDevice> device;
                     ORT_THROW_IF_FAILED(m_providerImpl->GetDmlDevice(device.GetAddressOf()));
                     // This map will be used to transfer the initializer to D3D12 system heap memory.
                     // 'serializedDmlGraphDesc' will have constant input as intermediate edges, that's why

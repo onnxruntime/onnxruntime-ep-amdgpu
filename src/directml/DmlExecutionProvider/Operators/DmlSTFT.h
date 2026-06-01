@@ -109,9 +109,9 @@ struct DmlSTFTParameters
 
 namespace DmlSTFTHelpers
 {
-    ComPtr<ID3D12Resource> GetResourceFromKernelContext(IMLOperatorKernelContext* context, uint32_t index, bool isInput)
+    Microsoft::WRL::ComPtr<ID3D12Resource> GetResourceFromKernelContext(IMLOperatorKernelContext* context, uint32_t index, bool isInput)
     {
-        ComPtr<IMLOperatorTensor> tensor;
+        Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor;
         if (isInput)
         {
             ORT_THROW_IF_FAILED(context->GetInputTensor(index, &tensor));
@@ -121,21 +121,21 @@ namespace DmlSTFTHelpers
             ORT_THROW_IF_FAILED(context->GetOutputTensor(index, &tensor));
         }
 
-        ComPtr<IUnknown> dataInterface;
+        Microsoft::WRL::ComPtr<IUnknown> dataInterface;
         tensor->GetDataInterface(&dataInterface);
 
-        ComPtr<ID3D12Resource> resource;
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
         ORT_THROW_IF_FAILED(dataInterface.As(&resource));
 
         return resource;
     }
 
-    ComPtr<ID3D12Resource> GetInputResourceFromKernelContext(IMLOperatorKernelContext* context, uint32_t index)
+    Microsoft::WRL::ComPtr<ID3D12Resource> GetInputResourceFromKernelContext(IMLOperatorKernelContext* context, uint32_t index)
     {
         return GetResourceFromKernelContext(context, index, true);
     }
 
-    ComPtr<ID3D12Resource> GetOutputResourceFromKernelContext(IMLOperatorKernelContext* context, uint32_t index)
+    Microsoft::WRL::ComPtr<ID3D12Resource> GetOutputResourceFromKernelContext(IMLOperatorKernelContext* context, uint32_t index)
     {
         return GetResourceFromKernelContext(context, index, false);
     }
@@ -190,18 +190,18 @@ namespace DmlSTFTHelpers
 class DmlSTFTOperator : public WRL::Base<IMLOperatorKernel>
 {
 private:
-    ComPtr<ID3D12Device> m_d3dDevice;
-    ComPtr<IDMLDevice> m_dmlDevice;
-    ComPtr<dml_ep::IExecutionProvider> m_dmlProvider;
+    Microsoft::WRL::ComPtr<ID3D12Device> m_d3dDevice;
+    Microsoft::WRL::ComPtr<IDMLDevice> m_dmlDevice;
+    Microsoft::WRL::ComPtr<dml_ep::IExecutionProvider> m_dmlProvider;
 
     struct
     {
-        ComPtr<IDMLCompiledOperator> op;
-        ComPtr<ID3D12DescriptorHeap> descriptorHeap;
-        ComPtr<IDMLBindingTable> bindingTable;
-        ComPtr<IDMLCommandRecorder> commandRecorder;
-        ComPtr<ID3D12Resource> persistentResource;
-        ComPtr<IUnknown> persistentResourcePoolingUnk;
+        Microsoft::WRL::ComPtr<IDMLCompiledOperator> op;
+        Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> descriptorHeap;
+        Microsoft::WRL::ComPtr<IDMLBindingTable> bindingTable;
+        Microsoft::WRL::ComPtr<IDMLCommandRecorder> commandRecorder;
+        Microsoft::WRL::ComPtr<ID3D12Resource> persistentResource;
+        Microsoft::WRL::ComPtr<IUnknown> persistentResourcePoolingUnk;
         std::optional<DML_BUFFER_BINDING> persistentResourceBinding;
         bool hasWindowTensor = false;
         uint64_t signalBufferSizeInBytes = 0;
@@ -211,7 +211,7 @@ private:
 
     struct
     {
-        ComPtr<GpuDFTOperator> op;
+        Microsoft::WRL::ComPtr<GpuDFTOperator> op;
         std::array<uint32_t, 3> inputDims;
         std::array<uint32_t, 3> outputDims;
         uint32_t dftLength = 0;
@@ -220,16 +220,16 @@ private:
 public:
     DmlSTFTOperator(IMLOperatorKernelCreationContext* context)
     {
-        ComPtr<IMLOperatorKernelCreationContextNodeWrapperPrivate> contextPrivate;
+        Microsoft::WRL::ComPtr<IMLOperatorKernelCreationContextNodeWrapperPrivate> contextPrivate;
         ORT_THROW_IF_FAILED(context->QueryInterface(IID_PPV_ARGS(&contextPrivate)));
 
-        ComPtr<IUnknown> provider;
+        Microsoft::WRL::ComPtr<IUnknown> provider;
         ORT_THROW_IF_FAILED(contextPrivate->GetExecutionProvider(&provider));
         ORT_THROW_IF_FAILED(provider.As(&m_dmlProvider));
         ORT_THROW_IF_FAILED(m_dmlProvider->GetDmlDevice(&m_dmlDevice));
         ORT_THROW_IF_FAILED(m_dmlProvider->GetD3DDevice(&m_d3dDevice));
 
-        ComPtr<IMLOperatorTensorShapeDescription> shapeDescInfo;
+        Microsoft::WRL::ComPtr<IMLOperatorTensorShapeDescription> shapeDescInfo;
         ORT_THROW_IF_FAILED(context->GetTensorShapeDescription(&shapeDescInfo));
 
         MLOperatorKernelCreationContext creationContext(context);
@@ -285,7 +285,7 @@ public:
         DML_TENSOR_DESC outputDesc = {};
         FillTensorDesc(&outputDesc, &m_framingOperator.outputBufferSizeInBytes);
 
-        ComPtr<IDMLOperator> framingOp;
+        Microsoft::WRL::ComPtr<IDMLOperator> framingOp;
 
         if (params.hasWindowTensor)
         {
@@ -371,17 +371,17 @@ public:
     {
         try
         {
-            ComPtr<IUnknown> executionObject;
+            Microsoft::WRL::ComPtr<IUnknown> executionObject;
             context->GetExecutionInterface(executionObject.GetAddressOf());
 
-            ComPtr<ID3D12GraphicsCommandList> commandList;
+            Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
             ORT_THROW_IF_FAILED(executionObject.As(&commandList));
 
-            ComPtr<ID3D12Resource> framingOutputResource;
+            Microsoft::WRL::ComPtr<ID3D12Resource> framingOutputResource;
             ORT_THROW_IF_FAILED(context->AllocateTemporaryData(gsl::narrow<size_t>(m_framingOperator.outputBufferSizeInBytes), &framingOutputResource));
             DispatchFramingOperator(commandList.Get(), context, framingOutputResource.Get());
 
-            ComPtr<ID3D12Resource> outputResource = DmlSTFTHelpers::GetOutputResourceFromKernelContext(context, 0);
+            Microsoft::WRL::ComPtr<ID3D12Resource> outputResource = DmlSTFTHelpers::GetOutputResourceFromKernelContext(context, 0);
 
             D3D12_RESOURCE_BARRIER uavBarrier = { CD3DX12_RESOURCE_BARRIER::UAV(nullptr) };
             commandList->ResourceBarrier(1, &uavBarrier);
@@ -420,12 +420,12 @@ public:
         D3D12_RESOURCE_BARRIER barriers[3];
         uint32_t barrierCount = 0;
 
-        ComPtr<ID3D12Resource> signalResource = DmlSTFTHelpers::GetInputResourceFromKernelContext(context, DmlSTFTKernelInputIndex::Signal);
+        Microsoft::WRL::ComPtr<ID3D12Resource> signalResource = DmlSTFTHelpers::GetInputResourceFromKernelContext(context, DmlSTFTKernelInputIndex::Signal);
         inputBuffers[0] = { signalResource.Get(), 0, m_framingOperator.signalBufferSizeInBytes };
         inputBindings[0] = { DML_BINDING_TYPE_BUFFER, &inputBuffers[0] };
         barriers[barrierCount++] = CD3DX12_RESOURCE_BARRIER::Transition(signalResource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        ComPtr<ID3D12Resource> windowResource;
+        Microsoft::WRL::ComPtr<ID3D12Resource> windowResource;
         if (m_framingOperator.hasWindowTensor)
         {
             windowResource = DmlSTFTHelpers::GetInputResourceFromKernelContext(context, DmlSTFTKernelInputIndex::Window);
@@ -445,7 +445,7 @@ public:
 
         m_framingOperator.bindingTable->BindOutputs(1, &outputBinding);
 
-        ComPtr<ID3D12Resource> tempBuffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> tempBuffer;
         auto tempBufferSize = bindingProps.TemporaryResourceSize;
         if (tempBufferSize > 0)
         {
@@ -489,7 +489,7 @@ struct STFTShapeInferrer : public WRL::Base<IMLOperatorShapeInferrer>
     {
         try
         {
-            ComPtr<IMLOperatorShapeInferenceContextPrivate> contextPrivate;
+            Microsoft::WRL::ComPtr<IMLOperatorShapeInferenceContextPrivate> contextPrivate;
             ORT_THROW_IF_FAILED(context->QueryInterface(IID_PPV_ARGS(&contextPrivate)));
 
             MLShapeInferenceContext inferenceContext(context);
@@ -582,7 +582,7 @@ public:
 
         std::array<uint32_t, 2> requiredConstantCpuInputs = { /*frame_step*/1, /*frame_length*/3 };
 
-        ComPtr<IMLOperatorRegistryPrivate> registryPrivate;
+        Microsoft::WRL::ComPtr<IMLOperatorRegistryPrivate> registryPrivate;
         ORT_THROW_IF_FAILED(registry->QueryInterface(IID_PPV_ARGS(&registryPrivate)));
 
         ORT_THROW_IF_FAILED(registryPrivate->RegisterOperatorKernel(

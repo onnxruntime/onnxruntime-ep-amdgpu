@@ -71,7 +71,7 @@ public:
     }
 
 private:
-    ComPtr<IDMLCompiledOperator> m_zeroOperator;
+    Microsoft::WRL::ComPtr<IDMLCompiledOperator> m_zeroOperator;
 };
 
 DML_OP_DEFINE_CREATION_FUNCTION(TopK7,  VersionedKernel<DmlOperatorTopK, 7 >);
