@@ -240,7 +240,7 @@ private:
     //std::shared_ptr<OrtAllocator> m_cpuInputAllocator;
     std::unordered_map<int, std::vector<std::unique_ptr<DmlReusedCommandListState>>> m_capturedGraphs;
     std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;
-    std::shared_ptr<OrtKernelRegistry> m_ortKernelRegistry;
+    OrtKernelRegistry* kernel_registry_;
     std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap> m_internalRegInfoMap;
 
     KernelCreateFuncState m_kernelCreateFuncStateTemplate;
