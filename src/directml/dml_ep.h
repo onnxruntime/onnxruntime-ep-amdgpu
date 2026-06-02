@@ -37,7 +37,7 @@ public:
 
     void ReleaseCompletedReferences();
 
-    std::shared_ptr<PluginDmlExecutionProviderImpl> GetInternetalExecutionProvider();
+    std::shared_ptr<PluginDmlExecutionProviderImpl> GetInternalExecutionProvider();
     bool IsGetCapabilityCompleted();
 
     DMLDataTransfer* GetDataTransfer();

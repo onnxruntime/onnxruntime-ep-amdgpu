@@ -1314,7 +1314,7 @@ void ExecutionProviderPlugin::Flush() const
     m_context->Flush();
 }
 
-std::shared_ptr<PluginDmlExecutionProviderImpl> ExecutionProviderPlugin::GetInternetalExecutionProvider() {
+std::shared_ptr<PluginDmlExecutionProviderImpl> ExecutionProviderPlugin::GetInternalExecutionProvider() {
     return m_executionProvider;
 }
 

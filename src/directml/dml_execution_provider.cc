@@ -1,17 +1,14 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "dml_execution_provider.h"
 #include "common/parse_string.h"
+
+#include "dml_execution_provider.h"
+#include "DmlExecutionProvider/DmlCommittedResourceAllocator.h"
 
 #define ENABLE_GRAPH_COMPILATION
 
 namespace dml_ep {
-
-    PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl()
-    {
-        //Close();
-    }
 
     void PluginDmlExecutionProviderImpl::Close()
     {
@@ -21,7 +18,7 @@ namespace dml_ep {
         m_context->Close();
     }
 
-    void PluginDmlExecutionProviderImpl::WaitForOutstandingWork()
+    void PluginDmlExecutionProviderImpl::WaitForOutstandingWork() const
     {
         Flush();
         m_context->GetCurrentCompletionEvent().WaitForSignal(m_cpuSyncSpinningEnabled);

@@ -12,23 +12,13 @@
 #include "dml_common.h"
 #include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
 #include "DmlExecutionProvider/inc/DmlExecutionProvider.h"
-#include "DmlExecutionProvider/DmlCommittedResourceAllocator.h"
 #include "DmlExecutionProvider/IExecutionProvider.h"
 #include "iallocator_to_ort_allocator_adapter.h"
-#include "core/common/inlined_containers.h"
 #include "core/graph/ep_api_types.h"
 #include "dml_abi_custom_registry.h"
-#include "DmlExecutionProvider/ErrorHandling.h"
-#include <wil/wrl.h>
-#include <wil/result.h>
-#include "OperatorAuthorHelper/OperatorHelper.h"
-#include "DmlExecutionProvider/AllocationInfo.h"
-#include "DmlExecutionProvider/DmlCommittedResourceWrapper.h"
 #include "DmlExecutionProvider/precomp.h"
 #include "DmlExecutionProvider/DmlReusedCommandListState.h"
-#include "DmlExecutionProvider/ExecutionContext.h"
 #include "dml_execution_context.h"
-#include "core/framework/data_types.h"
 
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
 
@@ -50,7 +40,7 @@ namespace dml_ep {
         , public ApiPtrs
     {
     public:
-        virtual ~PluginDmlExecutionProviderImpl();
+        ~PluginDmlExecutionProviderImpl() override = default;
 
         PluginDmlExecutionProviderImpl(
             IDMLDevice* dmlDevice,
@@ -68,7 +58,7 @@ namespace dml_ep {
                                     OrtValue** dst_tensors_ptr, OrtSyncStream** streams_ptr,
                                     size_t num_tensors);
 
-    public: // implements IExecutionProvider
+        // IExecutionProvider methods
         STDMETHOD(GetD3DDevice)(_COM_Outptr_ ID3D12Device** d3dDevice) const noexcept final;
 
         STDMETHOD(GetDmlDevice)(_COM_Outptr_ IDMLDevice** dmlDevice) const noexcept final;
@@ -111,14 +101,6 @@ namespace dml_ep {
 
         STDMETHOD(UploadToResource)(ID3D12Resource* dstData, const void* srcData, uint64_t srcDataSize) const noexcept final;
 
-        //std::vector<std::unique_ptr<onnxruntime::ComputeCapability>>
-        //GetCapability(
-        //    const onnxruntime::GraphViewer& graph,
-        //    const onnxruntime::IExecutionProvider::IKernelLookup& kernel_lookup,
-        //    const onnxruntime::GraphOptimizerRegistry& graph_optimizer_registry,
-        //    onnxruntime::IResourceAccountant* resource_accountant,
-        //    const onnxruntime::Ort::Logger& logger) const;
-
         uint32_t GetSupportedDeviceDataTypeMask() const;
 
         // IWinmlExecutionProvider methods
@@ -159,7 +141,7 @@ namespace dml_ep {
         // prevent circular references.  Must be the last call on the object before destruction.
         void Close() override;
 
-        void WaitForOutstandingWork();
+        void WaitForOutstandingWork() const;
 
         // Allocate a resource from pools.  Releasing pooledResource returns it to the pool.
         STDMETHOD(AllocatePooledResource)(
@@ -212,14 +194,6 @@ namespace dml_ep {
         std::vector<OrtAllocator*> CreatePreferredAllocators();
 
     private:
-        void Initialize(ID3D12CommandQueue* queue, ExecutionProvider& executionProvider);
-
-        //bool IsNodeSupportedByDml(
-        //    const onnxruntime::Node& node,
-        //    const onnxruntime::IExecutionProvider::IKernelLookup& kernel_lookup,
-        //    uint32_t supportedDeviceDataTypeMask // Each bit corresponds to each DML_TENSOR_DATA_TYPE.
-        //) const;
-
         void FlushUploadsIfReady() const;
 
         void CpuToGpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst);

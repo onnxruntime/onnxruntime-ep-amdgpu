@@ -329,7 +329,7 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
     // Attach the new EP to the factory-owned data transfer so copies can be serviced.
     if (factory->dml_data_transfer_implementation) {
         factory->dml_data_transfer_implementation->AttachExecutionProvider(
-            factory->m_ep_raw->GetInternetalExecutionProvider());
+            factory->m_ep_raw->GetInternalExecutionProvider());
         factory->dml_data_transfer_implementation->AttachFactoryEpRef(&factory->m_ep_raw);
     }
 

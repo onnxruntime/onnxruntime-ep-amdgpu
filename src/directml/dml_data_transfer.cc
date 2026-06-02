@@ -3,6 +3,9 @@
 
 #include "dml_data_transfer.h"
 
+#include "dml_ep.h"
+#include "dml_execution_provider.h"
+
 namespace dml_ep {
 
 DMLDataTransfer::DMLDataTransfer(ApiPtrs api_ptrs) : ApiPtrs(api_ptrs)
@@ -55,7 +58,7 @@ OrtStatus* ORT_API_CALL DMLDataTransfer::CopyTensorsImpl(OrtDataTransferImpl* th
     // Lazy attach: if the EP was not attached at construction time (factory-level transfer
     // created before the EP instance), resolve it now via the pointer to the factory's m_ep_raw.
     if (!impl.m_executionProvider && impl.m_ep_raw_ref && *impl.m_ep_raw_ref) {
-        impl.m_executionProvider = (*impl.m_ep_raw_ref)->GetInternetalExecutionProvider();
+        impl.m_executionProvider = (*impl.m_ep_raw_ref)->GetInternalExecutionProvider();
     }
 
     if (!impl.m_executionProvider) {

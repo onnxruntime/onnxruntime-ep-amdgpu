@@ -2,22 +2,12 @@
 // SPDX-License-Identifier: MIT
 
 #pragma once
-#include "plugin_ep_utils.h"
-#include "DmlExecutionProvider/AllocationInfo.h"
-#include "OperatorAuthorHelper/MLOperatorAuthorHelper.h"
-#include "dml_ep.h"
-//#include "DmlExecutionProvider/DmlCommon.h"
-#include "dml_common.h"
-#include "dml_bucketized_buffer_allocator.h"
-#include "dml_execution_context.h"
-#include "dml_execution_provider.h"
-#include "dml_pooled_upload_heap.h"
-#include "dml_readback_heap.h"
-#include "DmlExecutionProvider/DmlCommittedResourceAllocator.h"
-#include <memory>
+
+#include "common/plugin_ep_utils.h"
 
 namespace dml_ep {
 
+class PluginDmlExecutionProviderImpl;
 class ExecutionProviderPlugin;
 
 class DMLDataTransfer : public OrtDataTransferImpl, public ApiPtrs
@@ -42,8 +32,6 @@ public:
     void AttachFactoryEpRef(ExecutionProviderPlugin** ep_raw_ref);
 
 private:
-    static bool IsGpuTensor(const onnxruntime::Tensor& tensor);
-
     std::shared_ptr<PluginDmlExecutionProviderImpl> m_executionProvider;
     ExecutionProviderPlugin** m_ep_raw_ref = nullptr; // non-owning ptr to factory's m_ep_raw
 };
