@@ -551,7 +551,7 @@ void DmlPerfWriteLogImpl(std::string_view msg) noexcept;
 
 inline std::string Hex(uint32_t v) { return fmt::format("0x{:08X}", v); }
 
-#define DML_PERF_LOG(...) DmlPerfWriteLogImpl(MakeString(__VA_ARGS__))
+#define DML_PERF_LOG(...) ::dml_ep::DmlPerfWriteLogImpl(MakeString(__VA_ARGS__))
 
 void PrintKernelPerfCounters(const DmlAbiKernel& kernel) noexcept;
 #else

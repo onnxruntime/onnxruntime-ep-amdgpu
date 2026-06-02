@@ -1738,8 +1738,8 @@ HRESULT AbiSafeShapeInferenceContext::GetConstantInputTensor(
     // Try runtime context first (if available)
     if (kernel_context_ != nullptr) {
         Ort::Status status{ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value)};
-        DML_PERF_LOG("[ABI_SAFE] ShapeCtx::GetConstantInput[", inputIndex, "]: ctx_status=",
-            status.IsOK() ? "OK" : "ERR", "  value=", (void*)input_value, "\n");
+        //DML_PERF_LOG("[ABI_SAFE] ShapeCtx::GetConstantInput[", inputIndex, "]: ctx_status=",
+        //    status.IsOK() ? "OK" : "ERR", "  value=", (void*)input_value, "\n");
         if (!status.IsOK() || input_value == nullptr) {
             input_value = nullptr;
         }
@@ -2836,12 +2836,37 @@ HRESULT AbiSafeKernelCreationContext::GetExecutionProvider(IUnknown** executionP
 // Kernel Creation and Execution - Pure C API, NO UNSAFE CASTS!
 // ============================================================================
 
-// Equivalent to old-version InputTensorShapesDefinedOnNode: returns true only when every
-// input tensor has fully concrete (non-symbolic, non-dynamic) dimensions in the ONNX TypeProto
-// as seen by OrtKernelInfo. This is the conservative gate that matches the old version's
-// deferral behavior for operators whose ONNX proto dims are symbolic (e.g. batch=?).
-// Unlike HasTensorShapeDescription, this does NOT return true just because ORT graph inference
-// propagated concrete shapes into KernelInfo at session-init time.
+// Returns true if all dimensions of an OrtValue's shape are concrete (>= 0).
+static bool TensorValueHasConcreteDims(const OrtApi* api, const OrtValue* value) {
+    OrtTensorTypeAndShapeInfo* tsi = nullptr;
+    OrtStatus* s = api->GetTensorTypeAndShape(const_cast<OrtValue*>(value), &tsi);
+    if (s || !tsi) { if (s) api->ReleaseStatus(s); return false; }
+
+    size_t dim_count = 0;
+    s = api->GetDimensionsCount(tsi, &dim_count);
+    if (s) { api->ReleaseTensorTypeAndShapeInfo(tsi); api->ReleaseStatus(s); return false; }
+
+    std::vector<int64_t> dims(dim_count);
+    if (dim_count > 0) {
+        s = api->GetDimensions(tsi, dims.data(), dim_count);
+        if (s) { api->ReleaseTensorTypeAndShapeInfo(tsi); api->ReleaseStatus(s); return false; }
+        for (int64_t d : dims) {
+            if (d < 0) { api->ReleaseTensorTypeAndShapeInfo(tsi); return false; }
+        }
+    }
+
+    api->ReleaseTensorTypeAndShapeInfo(tsi);
+    return true;
+}
+
+// Returns true when all input tensor shapes are known concretely at session-init time.
+// For each input, first checks the proto-level shape via KernelInfo_GetInputTypeInfo.
+// If that reports a dynamic/symbolic dim, falls back to KernelInfoGetConstantInput_tensor:
+// constant/initializer-backed inputs have a materialized OrtValue whose shape is always
+// concrete, even when the proto shape is symbolic (e.g. batch=?). Only returns false when
+// an input is genuinely non-constant with an unresolved shape — meaning it must be deferred
+// to compute time. This matches the effective behavior of the unsafe path's
+// InputTensorShapesDefined(), which sees ORT's internally resolved shapes via OpKernelInfo.
 static bool AllInputShapesConcreteInProto(const OrtApi* api, const OrtKernelInfo* kernel_info) {
     size_t input_count = 0;
     OrtStatus* s = api->KernelInfo_GetInputCount(kernel_info, &input_count);
@@ -2852,42 +2877,63 @@ static bool AllInputShapesConcreteInProto(const OrtApi* api, const OrtKernelInfo
         s = api->KernelInfo_GetInputTypeInfo(kernel_info, i, &type_info);
         if (s) { api->ReleaseStatus(s); return false; }
 
-        const OrtTensorTypeAndShapeInfo* tsi = nullptr;
-        s = api->CastTypeInfoToTensorInfo(type_info, &tsi);
-        if (s || !tsi) {
-            api->ReleaseTypeInfo(type_info);
-            if (s) api->ReleaseStatus(s);
-            continue;  // Non-tensor input — skip
-        }
+        bool proto_shape_concrete = true;
 
-        size_t dim_count = 0;
-        s = api->GetDimensionsCount(tsi, &dim_count);
-        if (s) { api->ReleaseTypeInfo(type_info); api->ReleaseStatus(s); return false; }
-
-        std::vector<int64_t> dims(dim_count);
-        if (dim_count > 0) {
-            s = api->GetDimensions(tsi, dims.data(), dim_count);
+        if (type_info) {
+            const OrtTensorTypeAndShapeInfo* tsi = nullptr;
+            s = api->CastTypeInfoToTensorInfo(type_info, &tsi);
             if (s) { api->ReleaseTypeInfo(type_info); api->ReleaseStatus(s); return false; }
-            for (int64_t d : dims) {
-                if (d < 0) { api->ReleaseTypeInfo(type_info); return false; }  // Dynamic dim
-            }
-        }
 
-        // Also reject named symbolic dims (e.g. "batch_size") even when the numeric value is 0+
-        std::vector<const char*> sym_dims(dim_count, nullptr);
-        s = api->GetSymbolicDimensions(tsi, sym_dims.data(), dim_count);
-        if (!s) {
-            for (size_t d = 0; d < dim_count; ++d) {
-                if (sym_dims[d] && sym_dims[d][0] != '\0') {
-                    api->ReleaseTypeInfo(type_info);
-                    return false;  // Named symbolic dim — not truly concrete
+            if (tsi) {
+                size_t dim_count = 0;
+                s = api->GetDimensionsCount(tsi, &dim_count);
+                if (s) { api->ReleaseTypeInfo(type_info); api->ReleaseStatus(s); return false; }
+
+                if (dim_count > 0) {
+                    std::vector<int64_t> dims(dim_count);
+                    s = api->GetDimensions(tsi, dims.data(), dim_count);
+                    if (s) { api->ReleaseTypeInfo(type_info); api->ReleaseStatus(s); return false; }
+                    for (int64_t d : dims) {
+                        if (d < 0) { proto_shape_concrete = false; break; }
+                    }
+                }
+
+                if (proto_shape_concrete) {
+                    // Also reject named symbolic dims (e.g. "batch_size")
+                    std::vector<const char*> sym_dims(dim_count, nullptr);
+                    s = api->GetSymbolicDimensions(tsi, sym_dims.data(), dim_count);
+                    if (!s) {
+                        for (size_t d = 0; d < dim_count; ++d) {
+                            if (sym_dims[d] && sym_dims[d][0] != '\0') {
+                                proto_shape_concrete = false;
+                                break;
+                            }
+                        }
+                    } else {
+                        api->ReleaseStatus(s);
+                    }
                 }
             }
-        } else {
-            api->ReleaseStatus(s);  // GetSymbolicDimensions not supported — ignore
+
+            api->ReleaseTypeInfo(type_info);
         }
 
-        api->ReleaseTypeInfo(type_info);
+        if (proto_shape_concrete) continue;
+
+        // Proto shape is dynamic/symbolic — check if input is a constant initializer.
+        // If so, read the concrete shape from the materialized OrtValue instead.
+        int is_constant = 0;
+        const OrtValue* constant_value = nullptr;
+        s = api->KernelInfoGetConstantInput_tensor(kernel_info, i, &is_constant, &constant_value);
+        if (s) { api->ReleaseStatus(s); return false; }
+
+        bool concrete_via_constant = is_constant && constant_value && TensorValueHasConcreteDims(api, constant_value);
+
+        if (concrete_via_constant) {
+            continue;  // Shape is concrete via the materialized constant tensor
+        }
+
+        return false;  // Genuinely dynamic — must defer to compute time
     }
     return true;
 }
