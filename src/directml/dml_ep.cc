@@ -238,15 +238,14 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
                 func_state->kernel_factory = reg_info->kernelFactory;
                 func_state->shape_inferrer = reg_info->shapeInferrer;
                 func_state->default_attributes = &reg_info->defaultAttributes;
-                // Derive required_constant_cpu_inputs from the versioned KernelDef rather than
-                // reg_info, which may reflect a different version's constants. KernelDef is
-                // per-registration and authoritative for the specific version being registered.
-                for (const auto& [input_index, mem_type] : def->InputMemoryTypeArgs()) {
-                    if (mem_type == OrtMemTypeCPUInput) {
-                        func_state->required_constant_cpu_inputs.push_back(
-                            static_cast<uint32_t>(input_index));
-                    }
-                }
+                // Use reg_info->requiredConstantCpuInputs rather than deriving from KernelDef
+                // InputMemoryTypeArgs. The KernelDef conflates device placement flags (e.g.
+                // OrtMemTypeCPUInput on MemcpyFromHost input 0) with required constants, causing
+                // the safe path to incorrectly treat placement-only inputs as required constants.
+                // reg_info->requiredConstantCpuInputs is populated only from the explicit
+                // requiredConstantCpuInputs arg in RegisterOperatorKernel, matching the unsafe
+                // path's constantCpuInputCapture exactly.
+                func_state->required_constant_cpu_inputs = reg_info->requiredConstantCpuInputs;
                 func_state->requires_input_shapes_at_creation = reg_info->requiresInputShapesAtCreation;
                 func_state->requires_output_shapes_at_creation = reg_info->requiresOutputShapesAtCreation;
                 func_state->is_internal_operator = reg_info->isInternalOperator;
