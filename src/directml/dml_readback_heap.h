@@ -2,21 +2,8 @@
 // Licensed under the MIT License.
 
 #pragma once
-#define INITGUID
-#include <guiddef.h>
-#include <dxcore.h>
-#undef INITGUID
 
-#include <d3d12.h>
-#include <dxgi1_6.h>
-#include <directx/d3dx12.h>
-#include <DirectML.h>
-#include <gsl/span>
-
-#include <assert.h>
-#include <wil/wrl.h>
-#include <wil/result.h>
-#include <wrl/client.h>
+#include "dml_client.h"
 
 #define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
 

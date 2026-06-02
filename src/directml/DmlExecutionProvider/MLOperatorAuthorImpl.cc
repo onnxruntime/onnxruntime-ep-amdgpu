@@ -17,6 +17,7 @@
 #include "OperatorAuthorHelper/MLOperatorAuthorPrivate.h"
 
 namespace dml_ep {
+
     // Helper functions to handle both TypeProto* and OrtTypeInfo* polymorphically
     namespace {
         // TypeProto* overload

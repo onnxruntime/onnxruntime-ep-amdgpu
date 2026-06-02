@@ -3,9 +3,6 @@
 
 #pragma once
 
-#include <wrl/client.h>
-#include <wrl/implements.h>
-#include "d3d12.h"
 #include "DmlResourceWrapper.h"
 
 namespace dml_ep {

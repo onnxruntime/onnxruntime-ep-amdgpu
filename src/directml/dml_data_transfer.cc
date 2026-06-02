@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 #include "dml_data_transfer.h"
-#include <gsl/span>
 
 namespace dml_ep {
 
@@ -11,7 +10,6 @@ DMLDataTransfer::DMLDataTransfer(ApiPtrs api_ptrs) : ApiPtrs(api_ptrs)
     CanCopy = CanCopyImpl;
     CopyTensors = CopyTensorsImpl;
     Release = ReleaseImpl;
-
 }
 
 void DMLDataTransfer::AttachExecutionProvider(std::shared_ptr<PluginDmlExecutionProviderImpl> ep)
@@ -24,7 +22,6 @@ void DMLDataTransfer::AttachFactoryEpRef(ExecutionProviderPlugin** ep_raw_ref)
     m_ep_raw_ref = ep_raw_ref;
 }
 
-/*static*/
 bool ORT_API_CALL DMLDataTransfer::CanCopyImpl(const OrtDataTransferImpl* this_ptr,
                                                const OrtMemoryDevice* src_memory_device,
                                                const OrtMemoryDevice* dst_memory_device) noexcept

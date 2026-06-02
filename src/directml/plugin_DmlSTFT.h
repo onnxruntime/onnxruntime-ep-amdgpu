@@ -4,7 +4,6 @@
 #pragma once
 
 #include "plugin_DmlDFT.h"
-//#include "DmlExecutionProvider/DmlCommon.h"
 #include "dml_common.h"
 #include "DmlExecutionProvider/IExecutionProvider.h"
 #include "External/DirectMLHelpers/ApiHelpers.h"

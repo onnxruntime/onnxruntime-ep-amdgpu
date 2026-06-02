@@ -2,29 +2,17 @@
 // SPDX-License-Identifier: MIT
 
 #pragma once
-#include <windows.h>
-#include "plugin_ep_utils.h"
-//#include <winrt/windows.foundation.h>
-//#include <winrt/windows.ai.machinelearning.h>
-//
-//
-//
-//
-//
-#include "dml_factory.h"
-#include <stdlib.h>
 
-//
+#include "common/plugin_ep_utils.h"
+#include "dml_factory.h"
 
 namespace dml_ep {
-
 
 static void ThrowIfFailed(HRESULT hr) {
     if (FAILED(hr)) {
         throw std::runtime_error("HRESULT failed");
     }
 }
-
 
 class D3DResourceHelper
 {

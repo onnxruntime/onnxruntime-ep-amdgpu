@@ -5,15 +5,11 @@
 
 #include "precomp.h"
 #include "GraphDescBuilder.h"
-//#include "ExecutionProvider.h"
-#include "dml_execution_context.h"
 #include "DmlGraphFusionTransformer.h"
 #include "GraphPartitioner.h"
 #include "core/framework/kernel_type_str_resolver.h"
 #include "core/framework/kernel_lookup.h"
 #include "core/optimizer/constant_sharing.h"
-#include "FusedGraphKernel.h"
-#include "MLOperatorAuthorImpl.h"
 #include "DmlGraphFusionHelper.h"
 
 

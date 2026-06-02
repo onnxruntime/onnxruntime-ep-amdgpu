@@ -3,8 +3,6 @@
 
 #include "dml_bucketized_buffer_allocator.h"
 
-// #define PRINT_OUTSTANDING_ALLOCATIONS
-
 namespace dml_ep {
 
 PluginDmlAllocationInfo::~PluginDmlAllocationInfo() {

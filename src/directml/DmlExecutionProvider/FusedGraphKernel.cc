@@ -7,7 +7,6 @@
 #include "FusedGraphKernel.h"
 #include "DmlGraphFusionHelper.h"
 
-
 namespace dml_ep {
 
     class FusedGraphKernel : public onnxruntime::OpKernel

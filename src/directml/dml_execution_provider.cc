@@ -6,7 +6,6 @@
 
 #define ENABLE_GRAPH_COMPILATION
 
-
 namespace dml_ep {
 
     PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl()

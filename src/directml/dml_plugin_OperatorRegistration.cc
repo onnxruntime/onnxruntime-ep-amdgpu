@@ -1,23 +1,20 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <mutex>
+
+#include "dml_client.h"
+
 #include "DmlExecutionProvider/precomp.h"
 #include "dml_plugin_OperatorRegistration.h"
 #include "OperatorAuthorHelper/MLOperatorAuthorHelper.h"
 #include "OperatorAuthorHelper/OperatorVersions.h"
-#include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
-#include "core/framework/customregistry.h"
-#include "onnx/defs/operator_sets.h"
-#include <wrl/client.h>
-#include <wrl/implements.h>
-#include <mutex>
 #include "dml_ep.h"
 #include "OperatorAuthorHelper/OperatorHelper.h"
 #include "DmlExecutionProvider/Operators/OperatorUtility.h"
 #include "plugin_DmlDFT.h"
 #include "plugin_DmlSTFT.h"
 #include "plugin_DmlGridSample.h"
-
 
 using namespace OperatorHelper;
 

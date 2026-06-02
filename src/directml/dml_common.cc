@@ -6,7 +6,6 @@
 
 namespace dml_ep {
 
-
 DML_TENSOR_DATA_TYPE GetDmlDataTypeFromMlDataTypeNoThrow(MLOperatorTensorDataType tensorDataType) noexcept
 {
     switch (tensorDataType)

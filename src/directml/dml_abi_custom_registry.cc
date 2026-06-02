@@ -4,6 +4,7 @@
 #include "dml_abi_custom_registry.h"
 #include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
 #include "DmlExecutionProvider/precomp.h"
+
 namespace dml_ep {
 
 PluginAbiCustomRegistry::PluginAbiCustomRegistry() :

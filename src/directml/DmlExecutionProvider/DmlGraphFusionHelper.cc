@@ -7,7 +7,6 @@
 #include "DmlGraphFusionHelper.h"
 #include "DmlRuntimeFusedGraphKernel.h"
 
-
 namespace dml_ep {
 
 namespace DmlGraphFusionHelper

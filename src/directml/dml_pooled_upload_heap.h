@@ -3,15 +3,10 @@
 
 #pragma once
 
-#include <gsl/span>
-#include <d3d12.h>
-#include <dxgi1_6.h>
-#include <directx/d3dx12.h>
-#include <wrl/client.h>
-#include <wil/wrl.h>
-#include <wil/result.h>
 #include <optional>
-#include <assert.h>
+
+#include "dml_client.h"
+
 #include "DmlExecutionProvider/GpuEvent.h"
 #include "dml_execution_context.h"
 

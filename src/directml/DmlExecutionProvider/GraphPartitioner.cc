@@ -3,21 +3,12 @@
 
 #include "precomp.h"
 
-#include "IExecutionProvider.h"
 #include "ExecutionProvider.h"
 #include "OperatorAuthorHelper/MLOperatorAuthorHelper.h"
 #include "FusedGraphKernel.h"
 #include "GraphDescBuilder.h"
-#include "core/graph/indexed_sub_graph.h"
 #include "core/framework/compute_capability.h"
-#include <wil/wrl.h>
-#ifndef _GAMING_XBOX
-#include <dxgi1_6.h>
-#endif
 #include "GraphPartitioner.h"
-
-//#define PRINT_PARTITON_INFO
-
 
 namespace dml_ep {
 

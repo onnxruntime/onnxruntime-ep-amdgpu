@@ -2,12 +2,11 @@
 // Licensed under the MIT License.
 
 #pragma once
-#include <cstdint>
-#include <wrl/client.h>
-#include <wrl/implements.h>
-#include "d3d12.h"
-#include "DmlExecutionProvider/DmlResourceWrapper.h"
+
 #include <utility>
+
+#include "dml_client.h"
+#include "DmlExecutionProvider/DmlResourceWrapper.h"
 
 namespace dml_ep {
 

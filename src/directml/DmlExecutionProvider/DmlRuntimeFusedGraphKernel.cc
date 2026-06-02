@@ -8,7 +8,6 @@
 #include "DmlExecutionProvider/DmlGraphFusionHelper.h"
 #include "DmlExecutionProvider/DmlReusedCommandListState.h"
 
-
 namespace dml_ep {
 
     class DmlRuntimeFusedGraphKernel : public onnxruntime::OpKernel

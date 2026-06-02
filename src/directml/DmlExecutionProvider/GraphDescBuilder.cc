@@ -5,9 +5,7 @@
 #include "DmlExecutionProvider/GraphDescBuilder.h"
 #include <stack>
 
-
-namespace dml_ep::GraphDescBuilder
-{
+namespace dml_ep::GraphDescBuilder {
 
     #pragma warning(push)
     #pragma warning(disable:4702)

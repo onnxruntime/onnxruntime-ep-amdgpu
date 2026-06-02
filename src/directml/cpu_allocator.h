@@ -3,10 +3,10 @@
 
 #pragma once
 
-#include "plugin_ep_utils.h"
-
 #include <functional>
 #include <memory>
+
+#include "plugin_ep_utils.h"
 
 namespace dml_ep {
 
