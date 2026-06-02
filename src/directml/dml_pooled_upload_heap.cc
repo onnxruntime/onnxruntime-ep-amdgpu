@@ -104,7 +104,7 @@ PluginDmlPooledUploadHeap::PluginDmlPooledUploadHeap(ID3D12Device* device, Plugi
             &buffer,
             D3D12_RESOURCE_STATE_GENERIC_READ,
             nullptr,
-            IID_GRAPHICS_PPV_ARGS(uploadBuffer.ReleaseAndGetAddressOf())));
+            IID_PPV_ARGS(uploadBuffer.ReleaseAndGetAddressOf())));
 
         return Chunk{ sizeInBytes, std::move(uploadBuffer) };
     }

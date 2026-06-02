@@ -42,7 +42,7 @@ namespace DmlGraphFusionHelper
             &resourceDesc,
             D3D12_RESOURCE_STATE_COMMON,
             nullptr,
-            IID_GRAPHICS_PPV_ARGS(buffer.GetAddressOf())));
+            IID_PPV_ARGS(buffer.GetAddressOf())));
 
         ORT_THROW_IF_FAILED(provider->UploadToResource(buffer.Get(), tensorPtr, tensorByteSize));
 
@@ -80,7 +80,7 @@ namespace DmlGraphFusionHelper
             &resourceDesc,
             D3D12_RESOURCE_STATE_COMMON,
             nullptr,
-            IID_GRAPHICS_PPV_ARGS(buffer.GetAddressOf())));
+            IID_PPV_ARGS(buffer.GetAddressOf())));
 
         // Map the buffer and copy the data
         void* bufferData = nullptr;
@@ -896,7 +896,7 @@ namespace DmlGraphFusionHelper
         Microsoft::WRL::ComPtr<ID3D12Device> d3dDevice;
         ORT_THROW_IF_FAILED(provider->GetD3DDevice(d3dDevice.GetAddressOf()));
 
-        ORT_THROW_IF_FAILED(d3dDevice->CreateDescriptorHeap(&desc, IID_GRAPHICS_PPV_ARGS(commandListState->heap.ReleaseAndGetAddressOf())));
+        ORT_THROW_IF_FAILED(d3dDevice->CreateDescriptorHeap(&desc, IID_PPV_ARGS(commandListState->heap.ReleaseAndGetAddressOf())));
 
         // Create a binding table for execution.
         DML_BINDING_TABLE_DESC bindingTableDesc = {};
@@ -909,14 +909,14 @@ namespace DmlGraphFusionHelper
 
         ORT_THROW_IF_FAILED(d3dDevice->CreateCommandAllocator(
             provider->GetCommandListTypeForQueue(),
-            IID_GRAPHICS_PPV_ARGS(commandListState->commandAllocator.ReleaseAndGetAddressOf())));
+            IID_PPV_ARGS(commandListState->commandAllocator.ReleaseAndGetAddressOf())));
 
         ORT_THROW_IF_FAILED(d3dDevice->CreateCommandList(
             0,
             provider->GetCommandListTypeForQueue(),
             commandListState->commandAllocator.Get(),
             nullptr,
-            IID_GRAPHICS_PPV_ARGS(commandListState->graphicsCommandList.ReleaseAndGetAddressOf())));
+            IID_PPV_ARGS(commandListState->graphicsCommandList.ReleaseAndGetAddressOf())));
 
         if (persistentResource)
         {
@@ -1082,8 +1082,8 @@ namespace DmlGraphFusionHelper
         commandListState.completionValue = completionValue;
 
         // Queue references to objects which must be kept alive until resulting GPU work completes
-        winmlProvider->QueueReference(WRAP_GRAPHICS_UNKNOWN(commandListState.graphicsCommandList).Get());
-        winmlProvider->QueueReference(WRAP_GRAPHICS_UNKNOWN(commandListState.heap).Get());
+        winmlProvider->QueueReference(commandListState.graphicsCommandList.Get());
+        winmlProvider->QueueReference(commandListState.heap.Get());
         winmlProvider->QueueReference(commandListState.bindingTable.Get());
         winmlProvider->QueueReference(persistentResourceAllocatorUnknown);
     }

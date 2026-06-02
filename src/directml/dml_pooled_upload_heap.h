@@ -10,9 +10,6 @@
 #include "DmlExecutionProvider/GpuEvent.h"
 #include "dml_execution_context.h"
 
-#define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-
-
 namespace dml_ep {
 
     class PluginDmlExecutionContext;

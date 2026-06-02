@@ -15,7 +15,7 @@ PluginDmlExecutionContext::PluginDmlExecutionContext(
     , m_cpuSyncSpinningEnabled(cpuSyncSpinningEnabled)
     , m_keepOpen(keepOpen)
 {
-    THROW_IF_FAILED(dmlDevice->GetParentDevice(IID_GRAPHICS_PPV_ARGS(m_d3dDevice.GetAddressOf())));
+    THROW_IF_FAILED(dmlDevice->GetParentDevice(IID_PPV_ARGS(m_d3dDevice.GetAddressOf())));
 }
 
 void PluginDmlExecutionContext::SetAllocator(std::weak_ptr<DmlBucketizedBufferAllocator> allocator)

@@ -15,9 +15,6 @@
 #include "dml_plugin_command_recorder.h"
 #include "dml_bucketized_buffer_allocator.h"
 
-
-#define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-
 namespace dml_ep {
 class CommandQueue;
 class DmlBucketizedBufferAllocator;

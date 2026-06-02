@@ -34,8 +34,6 @@
 
 #include "core/common/flatbuffers.h"
 
-#include "GraphicsUnknownHelper.h"
-
 #include <DirectML.h>
 #include "core/common/common.h"
 #include "ErrorHandling.h"

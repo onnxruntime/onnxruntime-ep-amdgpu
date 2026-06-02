@@ -17,7 +17,7 @@ namespace dml_ep {
             &buffer,
             D3D12_RESOURCE_STATE_COPY_DEST,
             nullptr,
-            IID_GRAPHICS_PPV_ARGS(readbackHeap.ReleaseAndGetAddressOf())));
+            IID_PPV_ARGS(readbackHeap.ReleaseAndGetAddressOf())));
 
         return readbackHeap;
     }

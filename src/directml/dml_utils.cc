@@ -19,7 +19,7 @@ namespace dml_ep {
         // Create a fence and event to wait for the command list to finish executing
         // note: In a real application, reuse fences and events to remove creation overhead. Fix later.
         Microsoft::WRL::ComPtr<ID3D12Fence> d3D12Fence;
-        ThrowIfFailed(d3d12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_GRAPHICS_PPV_ARGS(d3D12Fence.GetAddressOf())));
+        ThrowIfFailed(d3d12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(d3D12Fence.GetAddressOf())));
 
         wil::unique_handle fenceEventHandle(::CreateEvent(nullptr, true, false, nullptr));
         THROW_LAST_ERROR_IF_NULL(fenceEventHandle);
@@ -66,7 +66,7 @@ namespace dml_ep {
             &uploadBufferDesc,
             D3D12_RESOURCE_STATE_GENERIC_READ,
             nullptr,
-            IID_GRAPHICS_PPV_ARGS(uploadBuffer.GetAddressOf())));
+            IID_PPV_ARGS(uploadBuffer.GetAddressOf())));
 
         // Upload  to the GPU.
         ::UpdateSubresources(commandList, destination.Get(), uploadBuffer.Get(), 0, 0, 1, &bufferSubresourceData);
@@ -86,7 +86,7 @@ namespace dml_ep {
             &buffer,
             D3D12_RESOURCE_STATE_COMMON,
             nullptr,
-            IID_GRAPHICS_PPV_ARGS(resource.GetAddressOf())));
+            IID_PPV_ARGS(resource.GetAddressOf())));
 
         return resource;
     }

@@ -497,11 +497,11 @@ void ProviderFactory::CreateD3DDeviceFromAdapter(IDXCoreAdapter* adapter, Micros
     if (feature_level == D3D_FEATURE_LEVEL_1_0_GENERIC) {
         // Attempt to create a D3D_FEATURE_LEVEL_1_0_CORE device first, in case the device supports this
         // feature level and the D3D runtime does not support D3D_FEATURE_LEVEL_1_0_GENERIC
-        HRESULT hrUnused = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_1_0_CORE, IID_GRAPHICS_PPV_ARGS(device.ReleaseAndGetAddressOf()));
+        HRESULT hrUnused = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_1_0_CORE, IID_PPV_ARGS(device.ReleaseAndGetAddressOf()));
     }
 
     if (!device) {
-        THROW_IF_FAILED(D3D12CreateDevice(adapter, feature_level, IID_GRAPHICS_PPV_ARGS(device.ReleaseAndGetAddressOf())));
+        THROW_IF_FAILED(D3D12CreateDevice(adapter, feature_level, IID_PPV_ARGS(device.ReleaseAndGetAddressOf())));
     }
 }
 
@@ -518,7 +518,7 @@ void ProviderFactory::CreateDMLAndD3DResources()
     cmd_queue_desc.Type = CalculateCommandListType(d3d12_device.Get());
     cmd_queue_desc.Flags = D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT;
 
-    THROW_IF_FAILED(d3d12_device->CreateCommandQueue(&cmd_queue_desc, IID_GRAPHICS_PPV_ARGS(cmd_queue.ReleaseAndGetAddressOf())));
+    THROW_IF_FAILED(d3d12_device->CreateCommandQueue(&cmd_queue_desc, IID_PPV_ARGS(cmd_queue.ReleaseAndGetAddressOf())));
 
     dml_device = CreateDMLDevice(d3d12_device);
 }
@@ -541,7 +541,7 @@ Microsoft::WRL::ComPtr<ID3D12CommandQueue> ProviderFactory::CreateCommandQueue(c
     cmd_queue_desc.Flags = D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT;
 
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> cmd_queue;
-    THROW_IF_FAILED(device->CreateCommandQueue(&cmd_queue_desc, IID_GRAPHICS_PPV_ARGS(cmd_queue.ReleaseAndGetAddressOf())));
+    THROW_IF_FAILED(device->CreateCommandQueue(&cmd_queue_desc, IID_PPV_ARGS(cmd_queue.ReleaseAndGetAddressOf())));
 
     return cmd_queue;
 }

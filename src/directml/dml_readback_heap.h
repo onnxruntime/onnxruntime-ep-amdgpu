@@ -4,9 +4,6 @@
 #pragma once
 
 #include "dml_client.h"
-
-#define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-
 #include "dml_execution_context.h"
 
 namespace dml_ep {

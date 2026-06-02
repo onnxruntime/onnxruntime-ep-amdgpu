@@ -12,8 +12,8 @@ namespace dml_ep {
         , m_cpuSyncSpinningEnabled(cpuSyncSpinningEnabled)
     {
         Microsoft::WRL::ComPtr<ID3D12Device> device;
-        GRAPHICS_THROW_IF_FAILED(m_queue->GetDevice(IID_GRAPHICS_PPV_ARGS(device.GetAddressOf())));
-        ORT_THROW_IF_FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_GRAPHICS_PPV_ARGS(m_fence.ReleaseAndGetAddressOf())));
+        ORT_THROW_IF_FAILED(m_queue->GetDevice(IID_PPV_ARGS(device.GetAddressOf())));
+        ORT_THROW_IF_FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(m_fence.ReleaseAndGetAddressOf())));
     }
 
     void CommandQueue::ExecuteCommandList(ID3D12CommandList* commandList)

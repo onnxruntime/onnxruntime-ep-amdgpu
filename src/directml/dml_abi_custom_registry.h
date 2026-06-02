@@ -8,8 +8,6 @@
 #include "OperatorAuthorHelper/MLOperatorAuthorPrivate.h"
 #include "dml_plugin_MLOperatorAuthorImpl.h"
 
-#define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-
 namespace dml_ep {
 class PluginDmlExecutionProviderImpl;
 }

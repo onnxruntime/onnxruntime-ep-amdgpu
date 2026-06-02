@@ -4,10 +4,7 @@
 #pragma once
 
 #include "DmlExecutionProvider/GpuEvent.h"
-#include <deque>
-#include <gsl/span>
 
-#define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
 
 namespace dml_ep {
 
@@ -37,16 +34,6 @@ namespace dml_ep {
         GpuEvent GetNextCompletionEvent() const;
 
         void QueueReference(IUnknown* object, bool waitForUnsubmittedWork);
-
-#ifdef _GAMING_XBOX
-        void QueueReference(IGraphicsUnknown* object, bool waitForUnsubmittedWork)
-        {
-            // TODO(justoeck): consider changing QueuedReference to hold a variant of
-            // Microsoft::WRL::ComPtr<IUnknown>, Microsoft::WRL::ComPtr<IGraphicsUnknown>.
-            auto wrapper = Microsoft::WRL::Make<GraphicsUnknownWrapper>(object);
-            QueueReference(wrapper.Get(), waitForUnsubmittedWork);
-        }
-#endif
 
         void Close();
         void ReleaseCompletedReferences();

@@ -4,10 +4,6 @@
 #pragma once
 
 #include "DmlExecutionProvider/GpuEvent.h"
-#include <assert.h>
-
-#include <d3d12.h>
-#define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
 
 namespace dml_ep {
 
@@ -26,7 +22,7 @@ namespace dml_ep {
             {
                 ORT_THROW_IF_FAILED(device->CreateCommandAllocator(
                     commandListType,
-                    IID_GRAPHICS_PPV_ARGS(info.allocator.ReleaseAndGetAddressOf())));
+                    IID_PPV_ARGS(info.allocator.ReleaseAndGetAddressOf())));
 
                 info.completionEvent = initialEvent;
             }
@@ -35,9 +31,6 @@ namespace dml_ep {
         ID3D12CommandAllocator* GetNextAllocator(GpuEvent nextCompletionEvent)
         {
             size_t earliestOtherAllocator = (m_currentCommandAllocator + 1) % AllocatorCount;
-
-            assert(!m_commandAllocators[m_currentCommandAllocator].completionEvent.IsSignaled() ||
-                    m_commandAllocators[earliestOtherAllocator].completionEvent.IsSignaled());
 
             if (m_commandAllocators[earliestOtherAllocator].completionEvent.IsSignaled())
             {

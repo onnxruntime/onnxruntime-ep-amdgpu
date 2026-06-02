@@ -321,7 +321,7 @@ void PluginDmlCommandRecorder::Open()
             m_queue->GetType(),
             allocator,
             nullptr,
-            IID_GRAPHICS_PPV_ARGS(m_currentCommandList.ReleaseAndGetAddressOf())));
+            IID_PPV_ARGS(m_currentCommandList.ReleaseAndGetAddressOf())));
     }
     else
     {

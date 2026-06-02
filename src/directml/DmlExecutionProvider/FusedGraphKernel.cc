@@ -82,7 +82,7 @@ namespace dml_ep {
             std::for_each(
                 initializeResourceRefs.begin(),
                 initializeResourceRefs.end(),
-                [&](Microsoft::WRL::ComPtr<ID3D12Resource>& resource){ m_winmlProvider->QueueReference(WRAP_GRAPHICS_UNKNOWN(resource).Get()); }
+                [&](Microsoft::WRL::ComPtr<ID3D12Resource>& resource){ m_winmlProvider->QueueReference(resource.Get()); }
             );
 
             if (reuseCommandList)

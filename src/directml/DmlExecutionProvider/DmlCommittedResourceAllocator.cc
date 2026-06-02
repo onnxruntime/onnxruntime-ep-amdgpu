@@ -18,7 +18,7 @@ namespace dml_ep {
             &buffer,
             D3D12_RESOURCE_STATE_COMMON,
             nullptr,
-            IID_GRAPHICS_PPV_ARGS(resource.GetAddressOf())
+            IID_PPV_ARGS(resource.GetAddressOf())
         ));
 
         Microsoft::WRL::ComPtr<DmlResourceWrapper> resourceWrapper;
