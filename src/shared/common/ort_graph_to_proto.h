@@ -6,7 +6,7 @@
 #include <functional>
 #include <gsl/gsl>
 
-#include "plugin_ep_utils.h"
+#include "common/plugin_ep_utils.h"
 #include "onnx/onnx_pb.h"
 
 using HandleInitializerDataFunc = std::function<Ort::Status(const Ort::ConstValueInfo& value_info,

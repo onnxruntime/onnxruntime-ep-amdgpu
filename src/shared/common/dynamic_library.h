@@ -6,7 +6,7 @@
 #include <string_view>
 
 #include "path_string.h"
-#include "plugin_ep_utils.h"
+#include "common/plugin_ep_utils.h"
 
 #ifdef _WIN32
 #define LIBRARY_PREFIX

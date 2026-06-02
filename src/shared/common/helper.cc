@@ -9,7 +9,7 @@
 
 #include <windows.h>
 
-#include "plugin_ep_utils.h"
+#include "common/plugin_ep_utils.h"
 
 std::string ToUTF8String(std::wstring_view sv) {
     if (sv.size() >= static_cast<size_t>(std::numeric_limits<int>::max()))

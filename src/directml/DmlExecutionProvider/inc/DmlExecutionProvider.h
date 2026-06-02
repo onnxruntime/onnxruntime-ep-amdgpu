@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #pragma once
+
 interface IMLOperatorRegistry;
 interface IDMLDevice;
 interface ID3D12CommandQueue;
