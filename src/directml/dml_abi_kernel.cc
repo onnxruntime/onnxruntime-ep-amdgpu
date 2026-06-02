@@ -1738,8 +1738,8 @@ HRESULT AbiSafeShapeInferenceContext::GetConstantInputTensor(
     // Try runtime context first (if available)
     if (kernel_context_ != nullptr) {
         Ort::Status status{ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value)};
-        //DML_PERF_LOG("[ABI_SAFE] ShapeCtx::GetConstantInput[", inputIndex, "]: ctx_status=",
-        //    status.IsOK() ? "OK" : "ERR", "  value=", (void*)input_value, "\n");
+        DML_PERF_LOG("[ABI_SAFE] ShapeCtx::GetConstantInput[", inputIndex, "]: ctx_status=",
+            status.IsOK() ? "OK" : "ERR", "  value=", (void*)input_value, "\n");
         if (!status.IsOK() || input_value == nullptr) {
             input_value = nullptr;
         }
