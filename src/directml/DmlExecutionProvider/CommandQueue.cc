@@ -37,12 +37,12 @@ namespace dml_ep {
         ORT_THROW_IF_FAILED(m_queue->Signal(m_fence.Get(), m_lastFenceValue));
     }
 
-    GpuEvent CommandQueue::GetCurrentCompletionEvent()
+    GpuEvent CommandQueue::GetCurrentCompletionEvent() const
     {
         return GpuEvent{ m_lastFenceValue, m_fence };
     }
 
-    GpuEvent CommandQueue::GetNextCompletionEvent()
+    GpuEvent CommandQueue::GetNextCompletionEvent() const
     {
         return GpuEvent{ m_lastFenceValue + 1, m_fence };
     }

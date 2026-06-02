@@ -4,7 +4,6 @@
 #pragma once
 
 #include "precomp.h"
-#include "GraphDescBuilder.h"
 #include "DmlRuntimeGraphFusionTransformer.h"
 #include "GraphPartitioner.h"
 #include "core/framework/kernel_type_str_resolver.h"

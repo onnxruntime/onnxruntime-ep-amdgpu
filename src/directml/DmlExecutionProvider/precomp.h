@@ -28,17 +28,10 @@
 
 #include <gsl/gsl>
 
-#ifdef _GAMING_XBOX_SCARLETT
-#include <d3d12_xs.h>
-#include <d3dx12_xs.h>
-#elif defined(_GAMING_XBOX_XBOXONE)
-#include <d3d12_x.h>
-#include <d3dx12_x.h>
-#else // Desktop
 #include "d3d12.h"
 #include <d3d12sdklayers.h>
 #include <directx/d3dx12.h>
-#endif
+
 #include "core/common/flatbuffers.h"
 
 #include "GraphicsUnknownHelper.h"

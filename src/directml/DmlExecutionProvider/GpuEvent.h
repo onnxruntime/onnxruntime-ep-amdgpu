@@ -3,12 +3,9 @@
 
 #pragma once
 
-#include <d3d12.h>
-#include <dxgi1_6.h>
-#include <directx/d3dx12.h>
-#include <wil/wrl.h>
-#include "DmlExecutionProvider/ErrorHandling.h"
+#include "dml_client.h"
 #include "core/common/spin_pause.h"
+#include "DmlExecutionProvider/ErrorHandling.h"
 
 namespace dml_ep {
 

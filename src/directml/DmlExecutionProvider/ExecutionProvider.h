@@ -9,7 +9,6 @@
 #include "DmlExecutionProvider/DmlReusedCommandListState.h"
 
 #include <wrl/client.h>
-#include <wrl/implements.h>
 
 namespace onnxruntime {
 class IResourceAccountant;
@@ -18,7 +17,7 @@ class GraphOptimizerRegistry;
 
 namespace dml_ep {
 
-        class PooledUploadHeap;
+    class PooledUploadHeap;
     class ReadbackHeap;
     class ExecutionContext;
     class BucketizedBufferAllocator;

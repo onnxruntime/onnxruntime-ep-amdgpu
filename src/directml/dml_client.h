@@ -12,6 +12,7 @@
 #include <d3dx12/d3dx12.h>
 #include <DirectML.h>
 
+#include <wil/wrl.h>
 #include <wrl/implements.h>
 
 namespace dml_ep {

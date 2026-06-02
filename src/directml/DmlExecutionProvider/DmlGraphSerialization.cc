@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 
 #pragma once
+
 #include "precomp.h"
 
 template <typename T>

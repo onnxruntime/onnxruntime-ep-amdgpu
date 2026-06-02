@@ -6,7 +6,6 @@
 #include "ExecutionProvider.h"
 #include "OperatorAuthorHelper/MLOperatorAuthorHelper.h"
 #include "FusedGraphKernel.h"
-#include "GraphDescBuilder.h"
 #include "core/framework/compute_capability.h"
 #include "GraphPartitioner.h"
 

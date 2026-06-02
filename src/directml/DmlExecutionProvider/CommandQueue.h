@@ -31,10 +31,10 @@ namespace dml_ep {
 
         // Returns an event that will become signaled when everything submitted to the queue thus far has
         // completed execution on the GPU.
-        GpuEvent GetCurrentCompletionEvent();
+        GpuEvent GetCurrentCompletionEvent() const;
 
         // Returns an event that will become signaled after the next ExecuteCommandLists call.
-        GpuEvent GetNextCompletionEvent();
+        GpuEvent GetNextCompletionEvent() const;
 
         void QueueReference(IUnknown* object, bool waitForUnsubmittedWork);
 

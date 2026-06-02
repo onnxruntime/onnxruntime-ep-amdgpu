@@ -32,10 +32,7 @@ public:
         IDMLDevice* dml_device,
         Microsoft::WRL::ComPtr<PluginDmlExecutionContext> executionContext);
 
-            //const OrtSessionOptions *session_options, const OrtLogger *logger,
     ~ExecutionProviderPlugin();
-
-    void ReleaseCompletedReferences();
 
     std::shared_ptr<PluginDmlExecutionProviderImpl> GetInternalExecutionProvider();
     bool IsGetCapabilityCompleted();
@@ -43,10 +40,6 @@ public:
     DMLDataTransfer* GetDataTransfer();
 
     void Flush() const;
-
-    static gsl::span<const std::byte> AsByteSpan(const void* data, size_t sizeInBytes);
-
-    static gsl::span<std::byte> AsByteSpan(void* data, size_t sizeInBytes);
 
     bool GraphCaptureEnabled() const noexcept;
 
@@ -219,7 +212,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;
     Microsoft::WRL::ComPtr<IDMLDevice> m_dmlDevice;
     Microsoft::WRL::ComPtr<PluginDmlExecutionContext> m_context;
-    //std::shared_ptr<OrtAllocator> m_cpuInputAllocator;
+
     std::unordered_map<int, std::vector<std::unique_ptr<DmlReusedCommandListState>>> m_capturedGraphs;
     std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;
     UniqueOrtKernelRegistry kernel_registry_;

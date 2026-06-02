@@ -6,7 +6,6 @@
 #include "DmlExecutionProvider/GpuEvent.h"
 #include "DmlExecutionProvider/ICommandRecorder.h"
 #include "DmlExecutionProvider/DmlCommandRecorder.h"
-#include <gsl/gsl>
 
 namespace dml_ep {
 

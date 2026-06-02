@@ -3,21 +3,16 @@
 
 #pragma once
 
-#include <wil/wrl.h>
-#include <wil/result.h>
-#include <d3d12.h>
-#include <dxgi1_6.h>
-#include <directx/d3dx12.h>
-#include <wrl/client.h>
+#include "dml_client.h"
+
 #include "dml_execution_context.h"
 #include "plugin_dml_AllocationInfo.h"
 #include "DmlExecutionProvider/DmlSubAllocator.h"
-#include "core/framework/allocator.h"
-//#include "flatbuffers/allocator.h"
 #include "DmlExecutionProvider/inc/DmlExecutionProvider.h"
 
 
 namespace dml_ep {
+
 class DmlSubAllocator;
 class PluginDmlExecutionContext;
 
@@ -44,11 +39,6 @@ public:
     const PluginDmlAllocationInfo* DecodeDataHandle(const void* opaqueHandle);
 
     void SetDefaultRoundingMode(AllocatorRoundingMode roundingMode);
-
-public: // onnxruntime::IAllocator
-    //void* Alloc(size_t size, AllocatorRoundingMode roundingMode);
-    //void* Alloc(size_t size) final;
-    //void Free(void* p) final;
 
     void* AllocImpl(size_t size);
     void* AllocImpl(size_t size, AllocatorRoundingMode roundingMode);
