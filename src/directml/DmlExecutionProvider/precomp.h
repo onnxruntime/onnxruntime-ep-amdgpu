@@ -56,7 +56,6 @@
 // Windows pollutes the macro space, causing a build break in schema.h.
 #undef OPTIONAL
 
-#include "DmlExecutionProvider/inc/DmlExecutionProvider.h"
 #include "OperatorAuthorHelper/MLOperatorAuthorHelper.h"
 #include "OperatorAuthorHelper/operator_helper_common.h"
 #include "dml_execution_provider.h"

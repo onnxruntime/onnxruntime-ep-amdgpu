@@ -70,7 +70,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorEinSum : public DmlOperator, public EinSumHelper
+class DmlOperatorEinSum : public DmlOperator, public OperatorHelper::EinSumHelper
 {
 public:
     DmlOperatorEinSum(const MLOperatorKernelCreationContext& kernelCreationContext, uint32_t opsetVersion)
@@ -368,7 +368,7 @@ public:
             }
         }
         tensorDesc.SetDimensionsAndStrides(newSizes, newStrides);
-        tensorDesc.EnsureDimensionCount(1, TensorAxis::RightAligned);
+        tensorDesc.EnsureDimensionCount(1, OperatorHelper::TensorAxis::RightAligned);
     }
 
     // Reproject a tensor to the given axis arrangement.
@@ -387,7 +387,7 @@ public:
     {
         // First, reproject the original dimensions up to the product tensor.
         ReprojectTensorDescToProductTensor(/*inout*/ tensorDesc, axisLabels, /*isReduced*/ false);
-        tensorDesc.PermuteDimensions(newAxes, TensorAxis::LeftAligned);
+        tensorDesc.PermuteDimensions(newAxes, OperatorHelper::TensorAxis::LeftAligned);
     }
 
     std::vector<uint32_t> GetReductionAxes() const
@@ -398,7 +398,7 @@ public:
 
         auto outputSizes = m_outputTensorDescs.front().GetSizes();
         std::vector<uint32_t> reducedAxes;
-        FindValueIndices<uint32_t>(outputSizes, 1u, /*out*/ reducedAxes);
+        OperatorHelper::FindValueIndices<uint32_t>(outputSizes, 1u, /*out*/ reducedAxes);
         return reducedAxes;
     }
 };
@@ -408,11 +408,11 @@ void CALLBACK QueryEinSum(IMLOperatorSupportQueryContextPrivate* context, bool* 
     *isSupported = false;
 
     MLOperatorAttributes attributes(context);
-    EinSumHelper helper(attributes);
+    OperatorHelper::EinSumHelper helper(attributes);
     auto recognizedOperatorType = helper.GetRecognizedOperatorType();
 
-    static_assert(EinSumHelper::RecognizedOperatorType::Total == static_cast<EinSumHelper::RecognizedOperatorType>(6), "Verify if this function needs updating.");
-    *isSupported = (recognizedOperatorType != EinSumHelper::RecognizedOperatorType::None);
+    static_assert(OperatorHelper::EinSumHelper::RecognizedOperatorType::Total == static_cast<OperatorHelper::EinSumHelper::RecognizedOperatorType>(6), "Verify if this function needs updating.");
+    *isSupported = (recognizedOperatorType != OperatorHelper::EinSumHelper::RecognizedOperatorType::None);
 }
 
 DML_OP_DEFINE_CREATION_FUNCTION(Einsum12, VersionedKernel<DmlOperatorEinSum, 12>);

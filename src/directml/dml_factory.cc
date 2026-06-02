@@ -174,9 +174,7 @@ D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* d3d12_device)
     D3D12_FEATURE_DATA_FEATURE_LEVELS feature_levels = {};
 
     D3D_FEATURE_LEVEL feature_levels_list[] = {
-#ifndef _GAMING_XBOX
         D3D_FEATURE_LEVEL_1_0_GENERIC,
-#endif
         D3D_FEATURE_LEVEL_1_0_CORE,
         D3D_FEATURE_LEVEL_11_0,
         D3D_FEATURE_LEVEL_11_1,
@@ -240,7 +238,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, std::string_view ep_na
     bucketized_buffer_memory_info_ = Ort::MemoryInfo{
                                 "directML_ep_gpu",
                                 OrtMemoryInfoDeviceType_GPU,
-                                vendor_id_,
+                                amd::VendorId,
                                 0,
                                 OrtDeviceMemoryType_DEFAULT,
                                 0,
@@ -249,7 +247,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, std::string_view ep_na
     cpu_input_allocator_ = Ort::MemoryInfo{
                                 "directML_ep_cpu",
                                 OrtMemoryInfoDeviceType_CPU,
-                                vendor_id_,
+                                amd::VendorId,
                                 0,
                                 OrtDeviceMemoryType_DEFAULT,
                                 0,
@@ -262,14 +260,12 @@ const char* ORT_API_CALL ProviderFactory::GetNameImpl(const OrtEpFactory* this_p
     return factory->ep_name_.c_str();
 }
 
-const char* ORT_API_CALL ProviderFactory::GetVendorImpl(const OrtEpFactory* this_ptr) noexcept {
-    const auto* factory = static_cast<const ProviderFactory*>(this_ptr);
-    return factory->vendor_.c_str();
+const char* ORT_API_CALL ProviderFactory::GetVendorImpl(const OrtEpFactory* /* this_ptr */) noexcept {
+    return amd::Vendor;
 }
 
-uint32_t ORT_API_CALL ProviderFactory::GetVendorIdImpl(const OrtEpFactory* this_ptr) noexcept {
-    const auto* factory = static_cast<const ProviderFactory*>(this_ptr);
-    return factory->vendor_id_;
+uint32_t ORT_API_CALL ProviderFactory::GetVendorIdImpl(const OrtEpFactory* /* this_ptr */) noexcept {
+    return amd::VendorId;
 }
 
 const char* ORT_API_CALL ProviderFactory::GetVersionImpl(const OrtEpFactory* this_ptr) noexcept {
@@ -325,7 +321,7 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> cmd_queue = factory->CreateCommandQueue(d3d12_device);
     Microsoft::WRL::ComPtr<IDMLDevice> dml_device = factory->CreateDMLDevice(d3d12_device);
 
-    auto context = wil::MakeOrThrow<PluginDmlExecutionContext>(
+    auto context = wil::MakeOrThrow<ExecutionContext>(
         d3d12_device.Get(), 
         dml_device.Get(),
         cmd_queue.Get(),

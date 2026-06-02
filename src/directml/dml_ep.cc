@@ -32,18 +32,12 @@ ExecutionProviderPlugin::~ExecutionProviderPlugin() {
     m_context->Close();
 }
 
-void ExecutionProviderPlugin::Release()
-{
-    // Match the AddRef() in CreateEpImpl().
-    //delete this;
-}
-
 ExecutionProviderPlugin::ExecutionProviderPlugin(
     const ApiPtrs& api_ptrs,
     std::string_view name, 
     ID3D12Device* d3d12_device_,
     IDMLDevice* dml_device_,
-    Microsoft::WRL::ComPtr<PluginDmlExecutionContext> executionContext)
+    Microsoft::WRL::ComPtr<ExecutionContext> executionContext)
     : OrtEp{ORT_API_VERSION}
     , ApiPtrs{api_ptrs}
     , name_{name}

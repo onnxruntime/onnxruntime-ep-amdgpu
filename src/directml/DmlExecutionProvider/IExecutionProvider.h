@@ -4,7 +4,6 @@
 #pragma once
 
 #include "d3d12.h"
-#include "DmlExecutionProvider/inc/DmlExecutionProvider.h"
 
 interface IDMLCompiledOperator;
 struct DML_BUFFER_BINDING;
@@ -23,9 +22,9 @@ namespace dml_ep {
     // DML specific interface into the execution provider, which avoids any dependencies with
     // internal Lotus data types.
     interface __declspec(uuid("b2488edb-fad2-4704-a6d2-5b5b129d4b8e"))
-    IExecutionProvider : public IUnknown
+    IExecutionProvider : IUnknown
     {
-    public:
+        virtual ~IExecutionProvider() = default;
         STDMETHOD(GetD3DDevice)(_COM_Outptr_ ID3D12Device** d3dDevice) const noexcept = 0;
 
         STDMETHOD(GetDmlDevice)(_COM_Outptr_ IDMLDevice** dmlDevice) const noexcept = 0;

@@ -5,7 +5,7 @@
 
 namespace dml_ep {
 
-class DmlOperatorGroupQueryAttention : public DmlOperator, public GroupQueryAttentionHelper
+class DmlOperatorGroupQueryAttention : public DmlOperator, public OperatorHelper::GroupQueryAttentionHelper
 {
 public:
     DmlOperatorGroupQueryAttention(const MLOperatorKernelCreationContext& kernelCreationContext)

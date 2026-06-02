@@ -290,7 +290,7 @@ void TensorDesc::ForceUnsignedDataType()
 }
 
 // Add additional padding 1's to ensure the count is at least that large.
-void TensorDesc::EnsureDimensionCount(uint32_t newDimensionCount, TensorAxis alignment)
+void TensorDesc::EnsureDimensionCount(uint32_t newDimensionCount, OperatorHelper::TensorAxis alignment)
 {
     if (m_bufferTensorDesc.DimensionCount < newDimensionCount)
     {
@@ -298,10 +298,10 @@ void TensorDesc::EnsureDimensionCount(uint32_t newDimensionCount, TensorAxis ali
     }
 }
 
-void TensorDesc::SetDimensionCount(uint32_t newDimensionCount, TensorAxis alignment)
+void TensorDesc::SetDimensionCount(uint32_t newDimensionCount, OperatorHelper::TensorAxis alignment)
 {
     ML_CHECK_VALID_ARGUMENT(newDimensionCount <= MaximumDimensionCount);
-    ML_CHECK_VALID_ARGUMENT(alignment == TensorAxis::RightAligned || alignment == TensorAxis::LeftAligned);
+    ML_CHECK_VALID_ARGUMENT(alignment == OperatorHelper::TensorAxis::RightAligned || alignment == OperatorHelper::TensorAxis::LeftAligned);
 
     const uint32_t oldDimensionCount = m_bufferTensorDesc.DimensionCount;
     const int32_t difference = static_cast<int32_t>(newDimensionCount - oldDimensionCount);
@@ -315,7 +315,7 @@ void TensorDesc::SetDimensionCount(uint32_t newDimensionCount, TensorAxis alignm
 
     // alignment == TensorAxis::LeftAligned is the easy case.
     // Right alignment needs more work, shifting values over.
-    if (alignment == TensorAxis::RightAligned)
+    if (alignment == OperatorHelper::TensorAxis::RightAligned)
     {
         fillOffset = 0; // Fill leading dimensions with 1's starting at the front.
         uint32_t moveCount = std::min(newDimensionCount, oldDimensionCount);
@@ -341,7 +341,7 @@ void TensorDesc::SetDimensionsAndStrides(gsl::span<const uint32_t> sizes, gsl::s
     SetStrides(strides);
 }
 
-void TensorDesc::PermuteDimensions(gsl::span<const uint32_t> dimensionMapping, const TensorAxis alignment)
+void TensorDesc::PermuteDimensions(gsl::span<const uint32_t> dimensionMapping, const OperatorHelper::TensorAxis alignment)
 {
     const uint32_t oldRank = m_bufferTensorDesc.DimensionCount;
     EnsureStridesExist();

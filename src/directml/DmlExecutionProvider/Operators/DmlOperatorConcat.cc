@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorConcat : public DmlOperator, public ConcatHelper
+class DmlOperatorConcat : public DmlOperator, public OperatorHelper::ConcatHelper
 {
 public:
     using Self = DmlOperatorConcat;
@@ -18,7 +18,7 @@ public:
         auto tensorShapeDescription = kernelInfo.GetTensorShapeDescription();
         std::vector<std::optional<uint32_t>> kernelInputIndices;
 
-        std::vector<DimensionType> tensorShape;
+        std::vector<OperatorHelper::DimensionType> tensorShape;
 
         for (uint32_t i = 0; i < kernelInfo.GetInputCount(); i++)
         {

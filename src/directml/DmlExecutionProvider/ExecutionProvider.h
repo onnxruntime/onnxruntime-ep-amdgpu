@@ -8,8 +8,6 @@
 #include "DmlExecutionProvider/IExecutionProvider.h"
 #include "DmlExecutionProvider/DmlReusedCommandListState.h"
 
-#include <wrl/client.h>
-
 namespace onnxruntime {
 class IResourceAccountant;
 class GraphOptimizerRegistry;

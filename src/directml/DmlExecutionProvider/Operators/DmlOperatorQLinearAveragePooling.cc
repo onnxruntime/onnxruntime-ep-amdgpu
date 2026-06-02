@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorQLinearAveragePooling : public DmlOperator, public PoolingHelperBase
+class DmlOperatorQLinearAveragePooling : public DmlOperator, public OperatorHelper::PoolingHelperBase
 {
     // For QLinear Avg Pool ORT and DML have same indexing order
     enum OrtInputTensors : uint32_t
@@ -32,8 +32,8 @@ public:
         DmlOperator::Initialize(kernelInfo);
 
         bool isNhwc = m_kernel.channelsLast;
-        std::vector<DimensionType> inputShape = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(OrtInputTensors::ortInput);
-        std::vector<DimensionType> outputShape = kernelInfo.GetTensorShapeDescription().GetOutputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> inputShape = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(OrtInputTensors::ortInput);
+        std::vector<OperatorHelper::DimensionType> outputShape = kernelInfo.GetTensorShapeDescription().GetOutputTensorShape(0);
 
         uint32_t dmlDimSize = m_inputTensorDescs[OrtInputTensors::ortInput].GetDimensionCount();
         ML_CHECK_VALID_ARGUMENT(dmlDimSize >= 2);
@@ -81,32 +81,32 @@ public:
             // Use NCHW {0,1,2,3} format with increasing order of indexs 
             std::iota(dimensionMapping.begin() + 1, dimensionMapping.end(), 1u);
         }
-        m_inputTensorDescs[OrtInputTensors::ortInput].PermuteDimensions(dimensionMapping, TensorAxis::LeftAligned);
+        m_inputTensorDescs[OrtInputTensors::ortInput].PermuteDimensions(dimensionMapping, OperatorHelper::TensorAxis::LeftAligned);
 
         // Reshape the Input Scale to be the same dimension as the input tensor.
         // The 1D tensor needs to be moved to the H channel.
-        m_inputTensorDescs[OrtInputTensors::ortInputScale].PermuteDimensions(dimensionMapping, TensorAxis::LeftAligned);
+        m_inputTensorDescs[OrtInputTensors::ortInputScale].PermuteDimensions(dimensionMapping, OperatorHelper::TensorAxis::LeftAligned);
 
         // Reshape the Input ZeroPoint to be the same dimension as the input tensor.
         // The 1D tensor needs to be moved to the H channel.
         if (kernelInfo.IsInputValid(OrtInputTensors::ortInputZeroPoint))
         {
-            m_inputTensorDescs[OrtInputTensors::ortInputZeroPoint].PermuteDimensions(dimensionMapping, TensorAxis::LeftAligned);
+            m_inputTensorDescs[OrtInputTensors::ortInputZeroPoint].PermuteDimensions(dimensionMapping, OperatorHelper::TensorAxis::LeftAligned);
         }
 
         // Reshape the Output Scale to be the same dimension as the input tensor.
         // The 1D tensor needs to be moved to the H channel.
-        m_inputTensorDescs[OrtInputTensors::ortOutputScale].PermuteDimensions(dimensionMapping, TensorAxis::LeftAligned);
+        m_inputTensorDescs[OrtInputTensors::ortOutputScale].PermuteDimensions(dimensionMapping, OperatorHelper::TensorAxis::LeftAligned);
 
         // Reshape the Input ZeroPoint to be the same dimension as the input tensor.
         // The 1D tensor needs to be moved to the H channel.
         if (kernelInfo.IsInputValid(OrtInputTensors::ortOutputZeroPoint))
         {
-            m_inputTensorDescs[OrtInputTensors::ortOutputZeroPoint].PermuteDimensions(dimensionMapping, TensorAxis::LeftAligned);
+            m_inputTensorDescs[OrtInputTensors::ortOutputZeroPoint].PermuteDimensions(dimensionMapping, OperatorHelper::TensorAxis::LeftAligned);
         }
 
         // Initialize the output description while overriding the shape
-        m_outputTensorDescs[0].PermuteDimensions(dimensionMapping, TensorAxis::LeftAligned);
+        m_outputTensorDescs[0].PermuteDimensions(dimensionMapping, OperatorHelper::TensorAxis::LeftAligned);
 
         assert(m_kernel.spatialDimensionCount <= ARRAYSIZE(m_kernel.windowSize));
 

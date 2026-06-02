@@ -18,9 +18,9 @@ public:
 
         // Need these shapes to apply transpose and
         // numpy MatMul's behavior https://docs.scipy.org/doc/numpy-1.13.0/reference/generated/numpy.matmul.html
-        std::vector<DimensionType> inputShape0 = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(0);
-        std::vector<DimensionType> inputShape1 = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(1);
-        std::vector<DimensionType> outputShape = kernelInfo.GetTensorShapeDescription().GetOutputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> inputShape0 = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> inputShape1 = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(1);
+        std::vector<OperatorHelper::DimensionType> outputShape = kernelInfo.GetTensorShapeDescription().GetOutputTensorShape(0);
 
         const int32_t transBatchA = kernelInfo.GetOptionalAttribute<int32_t>(AttrName::TransBatchA, 0);
         const int32_t transA = kernelInfo.GetOptionalAttribute<int32_t>(AttrName::TransA, 0);

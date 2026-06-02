@@ -7,7 +7,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorRange : public DmlOperator, RangeHelper
+class DmlOperatorRange : public DmlOperator, OperatorHelper::RangeHelper
 {
 public:
     using Self = DmlOperatorRange;

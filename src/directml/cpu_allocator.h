@@ -17,7 +17,7 @@ struct BaseAllocator : OrtAllocator {
 using AllocatorUniquePtr = std::unique_ptr<BaseAllocator>;
 
 struct CpuAllocator : BaseAllocator {
-    CpuAllocator(const OrtMemoryInfo* mem_info) : memory_info{mem_info} {
+    explicit CpuAllocator(const OrtMemoryInfo* mem_info) : memory_info{mem_info} {
         version = ORT_API_VERSION;
         Alloc = AllocImpl;
         Free = FreeImpl;

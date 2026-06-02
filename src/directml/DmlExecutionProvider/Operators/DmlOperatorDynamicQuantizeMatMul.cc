@@ -34,9 +34,9 @@ public:
             m_inputTensorDescs[OnnxInputIndex::Bias] = CreateTensorDescFromInput(
                 kernelCreationContext,
                 OnnxInputIndex::Bias,
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
                 kernelCreationContext.GetTensorShapeDescription().GetOutputTensorShape(0)
             );
         }
@@ -67,10 +67,10 @@ public:
                 BDatatype,
                 gsl::make_span(AShapeBroadcasted),
                 gsl::make_span(ATensorShape),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
-                NchwDimensionCount,  // minDimensionCount
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
+                OperatorHelper::NchwDimensionCount,  // minDimensionCount
                 0  // guaranteedBaseOffsetAlignment
             );
 
@@ -78,10 +78,10 @@ public:
                 MLOperatorTensorDataType::Float,
                 gsl::make_span(ExpectedAScaleTensorShape),
                 gsl::make_span(ExpectedAScaleTensorShape),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
-                NchwDimensionCount,  // minDimensionCount
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
+                OperatorHelper::NchwDimensionCount,  // minDimensionCount
                 0  // guaranteedBaseOffsetAlignment
             );
 
@@ -89,10 +89,10 @@ public:
                 BDatatype,
                 gsl::make_span(ExpectedAZeroPointTensorShape),
                 gsl::make_span(ExpectedAZeroPointTensorShape),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
-                NchwDimensionCount,  // minDimensionCount
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
+                OperatorHelper::NchwDimensionCount,  // minDimensionCount
                 0  // guaranteedBaseOffsetAlignment
             );
 
@@ -100,10 +100,10 @@ public:
             ADatatype,
             AShapeBroadcasted, // Desired dimensions of tensor (after any broadcasting).
             ATensorShape, // Original dimensions (before any broadcasting). Usually same as 'dimensions'.
-            TensorAxis::DoNotCoerce,
-            TensorAxis::W,
-            TensorAxis::RightAligned,
-            NchwDimensionCount,  // minDimensionCount
+            OperatorHelper::TensorAxis::DoNotCoerce,
+            OperatorHelper::TensorAxis::W,
+            OperatorHelper::TensorAxis::RightAligned,
+            OperatorHelper::NchwDimensionCount,  // minDimensionCount
             0  // guaranteedBaseOffsetAlignment
             );
 
@@ -111,10 +111,10 @@ public:
             BDatatype,
             BShapeBroadcasted, // Desired dimensions of tensor (after any broadcasting).
             BTensorShape, // Original dimensions (before any broadcasting). Usually same as 'dimensions'.
-            TensorAxis::DoNotCoerce,
-            TensorAxis::W,
-            TensorAxis::RightAligned,
-            NchwDimensionCount,  // minDimensionCount
+            OperatorHelper::TensorAxis::DoNotCoerce,
+            OperatorHelper::TensorAxis::W,
+            OperatorHelper::TensorAxis::RightAligned,
+            OperatorHelper::NchwDimensionCount,  // minDimensionCount
             0  // guaranteedBaseOffsetAlignment
             );
 

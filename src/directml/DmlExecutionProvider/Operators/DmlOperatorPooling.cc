@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorPooling : public DmlOperator, public PoolingHelperBase
+class DmlOperatorPooling : public DmlOperator, public OperatorHelper::PoolingHelperBase
 {
 public:
     using Self = DmlOperatorPooling;

@@ -38,7 +38,7 @@ using ranges::views::zip;
 
 namespace amd {
 constexpr uint32_t VendorId{0x1002};
-constexpr std::string_view Vendor{"AMD"};
+constexpr auto Vendor{"AMD"};
 }
 
 #define MAKE_STATUS(code, ...)                                                  \

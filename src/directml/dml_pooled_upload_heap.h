@@ -12,13 +12,13 @@
 
 namespace dml_ep {
 
-    class PluginDmlExecutionContext;
+    class ExecutionContext;
 
     // Implements a non-blocking, ring-buffer style upload heap for copying CPU data to GPU resources.
     class PluginDmlPooledUploadHeap
     {
     public:
-        PluginDmlPooledUploadHeap(ID3D12Device* device, PluginDmlExecutionContext* executionContext);
+        PluginDmlPooledUploadHeap(ID3D12Device* device, ExecutionContext* executionContext);
 
         // Makes a copy of the source data and begins copying it into the destination resource, and returns a GpuEvent
         // which will become signaled when the copy is complete. The destination resource must be a default or readback
@@ -62,25 +62,6 @@ namespace dml_ep {
             std::list<Allocation> allocations;
         };
 
-        // Calls AssertInvariants on construction and again on destruction
-        class InvariantChecker
-        {
-        public:
-            InvariantChecker(PluginDmlPooledUploadHeap* parent)
-                : m_parent(parent)
-            {
-                m_parent->AssertInvariants();
-            }
-
-            ~InvariantChecker()
-            {
-                m_parent->AssertInvariants();
-            }
-
-        private:
-            PluginDmlPooledUploadHeap* m_parent;
-        };
-
         // Attempts to find enough unused space in the supplied chunk to accommodate the given allocation size.
         // Returns the offset of that memory if successful, null if there wasn't enough space.
         static std::optional<size_t> FindOffsetForAllocation(const Chunk& chunk, size_t sizeInBytes);
@@ -92,10 +73,9 @@ namespace dml_ep {
         std::pair<Chunk*, size_t> Reserve(size_t sizeInBytes);
 
         void ReclaimAllocations(); // Frees all allocations which are no longer being used by the GPU.
-        void AssertInvariants();
 
         Microsoft::WRL::ComPtr<ID3D12Device> m_device;
-        Microsoft::WRL::ComPtr<PluginDmlExecutionContext> m_executionContext;
+        Microsoft::WRL::ComPtr<ExecutionContext> m_executionContext;
 
         std::vector<Chunk> m_chunks; // sorted ascending by capacity (upload heap size)
         size_t m_totalCapacity = 0; // Total size of all chunks, in bytes

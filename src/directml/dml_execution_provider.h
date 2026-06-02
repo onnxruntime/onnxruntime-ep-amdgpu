@@ -11,7 +11,6 @@
 #include "dml_bucketized_buffer_allocator.h"
 #include "dml_common.h"
 #include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
-#include "DmlExecutionProvider/inc/DmlExecutionProvider.h"
 #include "DmlExecutionProvider/IExecutionProvider.h"
 #include "iallocator_to_ort_allocator_adapter.h"
 #include "core/graph/ep_api_types.h"
@@ -38,12 +37,12 @@ namespace dml_ep {
         , public ApiPtrs
     {
     public:
-        ~PluginDmlExecutionProviderImpl() override = default;
+        ~PluginDmlExecutionProviderImpl() override;
 
         PluginDmlExecutionProviderImpl(
             IDMLDevice* dmlDevice,
             ID3D12Device* d3d12Device,
-            PluginDmlExecutionContext* executionContext,
+            ExecutionContext* executionContext,
             const ApiPtrs& api_ptrs,
             bool enableMetacommands,
             bool enableGraphCapture,
@@ -215,8 +214,8 @@ namespace dml_ep {
         bool m_cpuSyncSpinningEnabled = false;
         bool m_memoryArenaDisabled = false;
 
-        Microsoft::WRL::ComPtr<PluginDmlExecutionContext> m_context;
-        std::unique_ptr<OrtMemoryInfo> m_cpuMemInfo;
+        Microsoft::WRL::ComPtr<ExecutionContext> m_context;
+        OrtMemoryInfo* m_cpuMemInfo;
         std::unique_ptr<PluginDmlPooledUploadHeap> m_uploadHeap;
         std::unique_ptr<PluginDmlReadbackHeap> m_readbackHeap;
         std::shared_ptr<DmlBucketizedBufferAllocator> m_allocator;
@@ -228,6 +227,7 @@ namespace dml_ep {
         mutable std::chrono::time_point<std::chrono::steady_clock> m_lastUploadFlushTime;
 
         static constexpr std::chrono::milliseconds m_batchFlushInterval = std::chrono::milliseconds(10);
+        OrtMemoryInfo* m_gpuMemInfo{};
     };
 
 }  // namespace dml_ep

@@ -6,9 +6,16 @@
 #include "dml_execution_provider.h"
 #include "DmlExecutionProvider/DmlCommittedResourceAllocator.h"
 
-#define ENABLE_GRAPH_COMPILATION
-
 namespace dml_ep {
+
+PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
+    if (m_cpuMemInfo != nullptr) {
+        ort_api.ReleaseMemoryInfo(m_cpuMemInfo);
+    }
+    if (m_gpuMemInfo != nullptr) {
+        ort_api.ReleaseMemoryInfo(m_gpuMemInfo);
+    }
+}
 
     void PluginDmlExecutionProviderImpl::Close()
     {
@@ -62,15 +69,15 @@ namespace dml_ep {
     PluginDmlExecutionProviderImpl::PluginDmlExecutionProviderImpl(
         IDMLDevice* dmlDevice,
         ID3D12Device* d3d12Device,
-        PluginDmlExecutionContext* executionContext,
+        ExecutionContext* executionContext,
         const ApiPtrs& api_ptrs,
         bool enableMetacommands,
         bool enableGraphCapture,
         bool enableCpuSyncSpinning,
         bool disableMemoryArena)
-        : m_d3d12Device(d3d12Device),
+        : ApiPtrs{api_ptrs},
+          m_d3d12Device(d3d12Device),
           m_dmlDevice(dmlDevice),
-          ApiPtrs{api_ptrs},
           m_areMetacommandsEnabled(enableMetacommands),
           m_graphCaptureEnabled(enableGraphCapture),
           m_cpuSyncSpinningEnabled(enableCpuSyncSpinning),
@@ -81,9 +88,7 @@ namespace dml_ep {
         D3D12_FEATURE_DATA_FEATURE_LEVELS featureLevels = {};
 
         D3D_FEATURE_LEVEL featureLevelsList[] = {
-  #ifndef _GAMING_XBOX
             D3D_FEATURE_LEVEL_1_0_GENERIC,
-  #endif
             D3D_FEATURE_LEVEL_1_0_CORE,
             D3D_FEATURE_LEVEL_11_0,
             D3D_FEATURE_LEVEL_11_1,
@@ -141,9 +146,9 @@ namespace dml_ep {
 
         m_lastUploadFlushTime = std::chrono::steady_clock::now();
 
-        m_cpuMemInfo = std::make_unique<OrtMemoryInfo>(
-            "CPU", OrtAllocatorType::OrtDeviceAllocator,
-            OrtDevice(OrtDevice::CPU, OrtDevice::MemType::DEFAULT, OrtDevice::VendorIds::AMD, 0));
+        THROW_IF_ERROR(ort_api.CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeCPU, &m_cpuMemInfo));
+        THROW_IF_ERROR(ort_api.CreateMemoryInfo_V2("GPU", OrtMemoryInfoDeviceType_GPU, amd::VendorId,
+            0, OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator, &m_gpuMemInfo));
     }
 
     std::vector<OrtAllocator*> PluginDmlExecutionProviderImpl::CreatePreferredAllocators() {
@@ -151,7 +156,9 @@ namespace dml_ep {
         {
             // Create an allocator for D3D12 buffers used to hold tensor data. The returned buffers from the allocator
             // should be DEFAULT heap buffers which can be used as UAVs, and which start in UAV state.
-            m_allocator = std::make_shared<DmlBucketizedBufferAllocator>(m_d3d12Device.Get(),
+            m_allocator = std::make_shared<DmlBucketizedBufferAllocator>(
+                m_gpuMemInfo,
+                m_d3d12Device.Get(),
                 m_context.Get(),  // TODO(leca): REVIEW: Will it cause memory issue when m_context is released in EP while alloc is released in sessionState?
                 CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
                 D3D12_HEAP_FLAG_NONE,
@@ -159,7 +166,7 @@ namespace dml_ep {
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 std::make_unique<DmlCommittedResourceAllocator>(m_d3d12Device.Get()));
             m_context->SetAllocator(m_allocator);
-            m_cpuInputAllocator = std::make_shared<CpuAllocator>(m_cpuMemInfo.get());
+            m_cpuInputAllocator = std::make_shared<CpuAllocator>(m_cpuMemInfo);
         }
 
         return std::vector<OrtAllocator*>{m_allocator.get(), m_cpuInputAllocator.get()};
@@ -488,10 +495,7 @@ namespace dml_ep {
                 IsGpuTensor(src_tensors[i]->Get<onnxruntime::Tensor>()),
                 this, true);
 
-            const size_t sourceSizeInBytes = ComputeByteSizeFromTensor(srcInternal);
             const size_t dataSizeInBytes = ComputeByteSizeFromTensor(destInternal);
-
-            assert(dataSizeInBytes == sourceSizeInBytes); // Tensors must be the same size
 
             if (dataSizeInBytes == 0) {
                 continue;
@@ -599,9 +603,6 @@ namespace dml_ep {
         std::vector<ID3D12Resource*> srcDatas;
         std::vector<void*> dstDatas;
         std::vector<uint32_t> dataSizesInBytes;
-
-        assert(!m_closed);
-        auto provider = const_cast<PluginDmlExecutionProviderImpl*>(this);
 
         for (uint32_t i = 0; i < dst.size(); ++i)
         {
@@ -750,13 +751,8 @@ namespace dml_ep {
         }
         else
         {
-#ifdef _GAMING_XBOX
-            Microsoft::WRL::ComPtr<GraphicsUnknownWrapper> wrappedResource = Microsoft::WRL::Make<GraphicsUnknownWrapper>(m_allocator->DecodeDataHandle(data)->GetResource());
-            *abiData = wrappedResource.Detach();
-#else
             Microsoft::WRL::ComPtr<ID3D12Resource> resource = m_allocator->DecodeDataHandle(data)->GetResource();
             *abiData = resource.Detach();
-#endif
         }
     }
 
@@ -783,12 +779,7 @@ namespace dml_ep {
         {
             Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
             m_context->GetCommandListForRecordingAndInvalidateState(commandList.GetAddressOf());
-#ifdef _GAMING_XBOX
-            Microsoft::WRL::ComPtr<GraphicsUnknownWrapper> wrappedCommandList = Microsoft::WRL::Make<GraphicsUnknownWrapper>(commandList.Get());
-            *abiExecutionObject = wrappedCommandList.Detach();
-#else
             *abiExecutionObject = commandList.Detach();
-#endif
         }
     }
 

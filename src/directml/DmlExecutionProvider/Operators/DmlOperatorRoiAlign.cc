@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorRegionOfInterestAlign : public DmlOperator, public RoiAlignHelper
+class DmlOperatorRegionOfInterestAlign : public DmlOperator, public OperatorHelper::RoiAlignHelper
 {
 public:
     using Self = DmlOperatorRegionOfInterestAlign;

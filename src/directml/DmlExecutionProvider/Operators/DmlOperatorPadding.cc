@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorPadding : public DmlOperator, public PaddingHelper
+class DmlOperatorPadding : public DmlOperator, public OperatorHelper::PaddingHelper
 {
 public:
     DmlOperatorPadding(const MLOperatorKernelCreationContext& kernelInfo, uint32_t opsetVersion)
@@ -86,7 +86,7 @@ public:
             if (kernelInfo.IsInputValid(2))
             {
                 MLOperatorTensor constantPaddingValueTensor = kernelInfo.GetConstantInputTensor(2);
-                ReadScalarTensorData(constantPaddingValueTensor, /*out*/ &paddingDesc.PaddingValue.Bytes, sizeof(paddingDesc.PaddingValue.Bytes));
+                OperatorHelper::ReadScalarTensorData(constantPaddingValueTensor, /*out*/ &paddingDesc.PaddingValue.Bytes, sizeof(paddingDesc.PaddingValue.Bytes));
             }
         }
         else

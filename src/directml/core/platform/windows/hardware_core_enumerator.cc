@@ -6,7 +6,6 @@
 #include "core/platform/check_intel.h"
 #include <memory>
 #include <Windows.h>
-#include <assert.h>
 
 namespace onnxruntime {
 

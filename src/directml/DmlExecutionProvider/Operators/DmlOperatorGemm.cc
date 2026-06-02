@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorGemm : public DmlOperator, public GemmHelper
+class DmlOperatorGemm : public DmlOperator, public OperatorHelper::GemmHelper
 {
 public:
     DmlOperatorGemm(const MLOperatorKernelCreationContext& kernelInfo)
@@ -26,9 +26,9 @@ public:
             m_inputTensorDescs[2] = CreateTensorDescFromInput(
                 kernelInfo,
                 2,
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
                 kernelInfo.GetTensorShapeDescription().GetOutputTensorShape(0)
             );
         }

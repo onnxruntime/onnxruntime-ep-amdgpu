@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorSlice : public DmlOperator, public SliceHelper
+class DmlOperatorSlice : public DmlOperator, public OperatorHelper::SliceHelper
 {
 public:
     DmlOperatorSlice(const MLOperatorKernelCreationContext& kernelInfo, uint32_t opsetVersion)

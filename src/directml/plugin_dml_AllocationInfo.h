@@ -5,7 +5,6 @@
 
 #include <utility>
 
-#include "dml_client.h"
 #include "DmlExecutionProvider/DmlResourceWrapper.h"
 
 namespace dml_ep {

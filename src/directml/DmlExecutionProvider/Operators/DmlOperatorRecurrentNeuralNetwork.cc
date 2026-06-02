@@ -8,7 +8,7 @@ namespace dml_ep {
 
 // Base class for RNN ops (simple RNN, GRU, and LSTM).
 //
-class DmlOperatorRecurrentBase: public DmlOperator, public RecurrentHelper
+class DmlOperatorRecurrentBase: public DmlOperator, public OperatorHelper::RecurrentHelper
 {
 public:
     using Self = DmlOperatorRecurrentBase;

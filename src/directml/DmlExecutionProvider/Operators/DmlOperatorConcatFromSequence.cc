@@ -9,7 +9,7 @@ namespace dml_ep {
 class DmlOperatorConcatFromSequence : public DmlOperator
 {
 public:
-    using Shape = std::vector<DimensionType>;
+    using Shape = std::vector<OperatorHelper::DimensionType>;
     using Self = DmlOperatorConcatFromSequence;
 
 private:
@@ -63,7 +63,7 @@ public:
                 }
 
                 const int32_t signedAxis = gsl::narrow_cast<int32_t>(kernelInfo.GetAttribute<int64_t>(AttrName::Axis));
-                axis = static_cast<uint32_t>(HandleNegativeAxis(signedAxis, r + new_axis, !is_scalar));
+                axis = static_cast<uint32_t>(OperatorHelper::HandleNegativeAxis(signedAxis, r + new_axis, !is_scalar));
                 if (new_axis)
                 {
                     ML_CHECK_VALID_ARGUMENT(axis < r + 1);

@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorSpaceToDepth : public DmlOperator, public SpaceToDepthHelper
+class DmlOperatorSpaceToDepth : public DmlOperator, public OperatorHelper::SpaceToDepthHelper
 {
 public:
     DmlOperatorSpaceToDepth(const MLOperatorKernelCreationContext& kernelCreationContext)

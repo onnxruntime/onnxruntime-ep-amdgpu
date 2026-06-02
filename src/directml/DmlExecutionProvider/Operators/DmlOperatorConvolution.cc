@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorConvolution : public DmlOperator, public ConvolutionHelperBase
+class DmlOperatorConvolution : public DmlOperator, public OperatorHelper::ConvolutionHelperBase
 {
 public:
     using Self = DmlOperatorConvolution;
@@ -32,9 +32,9 @@ public:
         // massage the tensor descriptions. By default, the TensorDesc simply right aligns all the values up to 4D
         // (padding the leading dimensions with 1's), but 1D tensors actually need to insert the 1 between C and W.
         // e.g. [2,3,4] becomes [2,3,1,4]
-        m_inputTensorDescs[0] = CreateTensorDescFromInput(kernelInfo, 0, TensorAxis::DoNotCoerce, TensorAxis::NoPlacementAdjustment, NonspatialDimensionCount, std::nullopt);
-        m_inputTensorDescs[1] = CreateTensorDescFromInput(kernelInfo, 1, TensorAxis::DoNotCoerce, TensorAxis::NoPlacementAdjustment, NonspatialDimensionCount, std::nullopt);
-        m_outputTensorDescs[0] = CreateTensorDescFromOutput(kernelInfo, 0, TensorAxis::DoNotCoerce, TensorAxis::NoPlacementAdjustment, NonspatialDimensionCount, std::nullopt);
+        m_inputTensorDescs[0] = CreateTensorDescFromInput(kernelInfo, 0, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::NoPlacementAdjustment, OperatorHelper::NonspatialDimensionCount, std::nullopt);
+        m_inputTensorDescs[1] = CreateTensorDescFromInput(kernelInfo, 1, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::NoPlacementAdjustment, OperatorHelper::NonspatialDimensionCount, std::nullopt);
+        m_outputTensorDescs[0] = CreateTensorDescFromOutput(kernelInfo, 0, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::NoPlacementAdjustment, OperatorHelper::NonspatialDimensionCount, std::nullopt);
 
         if (isNhwc)
         {
@@ -87,9 +87,9 @@ public:
             m_inputTensorDescs[biasIndex] = CreateTensorDescFromInput(
                 kernelInfo,
                 biasIndex,
-                TensorAxis::DoNotCoerce,
-                TensorAxis::C,
-                TensorAxis::LeftAligned,
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::C,
+                OperatorHelper::TensorAxis::LeftAligned,
                 std::nullopt,
                 dmlDimSize
                 );
@@ -103,7 +103,7 @@ public:
         // Form transient kernel arguments with spatial dimensions padded up to at least 2,
         // since the DirectML API rejects 1D convolution. Leave the base m_kernel alone
         // so that all output tensor size computations are correct.
-        KernelArgs kernelArgs(m_kernel, NchwSpatialDimensionCount);
+        OperatorHelper::KernelArgs kernelArgs(m_kernel, OperatorHelper::NchwSpatialDimensionCount);
 
         // Zero the output padding before sending to DirectML. Although it was needed to compute
         // the output size, we don't want DML to see the values, which should just be ignored.

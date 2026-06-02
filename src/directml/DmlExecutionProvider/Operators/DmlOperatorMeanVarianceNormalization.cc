@@ -30,7 +30,7 @@ public:
         }
 
         std::vector<uint32_t> dmlAxes;
-        const std::vector<DimensionType> inputDimensions = kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(0);
+        const std::vector<OperatorHelper::DimensionType> inputDimensions = kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(0);
         const int32_t inputDimCount = gsl::narrow_cast<int32_t>(inputDimensions.size());
         GetDmlAdjustedAxes(onnxAxes, inputDimCount, m_inputTensorDescs.front().GetDimensionCount(), /*out*/ dmlAxes);
 

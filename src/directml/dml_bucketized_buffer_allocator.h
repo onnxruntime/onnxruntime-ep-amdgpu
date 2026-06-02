@@ -8,13 +8,11 @@
 #include "dml_execution_context.h"
 #include "plugin_dml_AllocationInfo.h"
 #include "DmlExecutionProvider/DmlSubAllocator.h"
-#include "DmlExecutionProvider/inc/DmlExecutionProvider.h"
-
 
 namespace dml_ep {
 
 class DmlSubAllocator;
-class PluginDmlExecutionContext;
+class ExecutionContext;
 
 // Implements a Lotus allocator for D3D12 heap buffers, using a bucket allocation strategy. The allocator
 // maintains a set of fixed-size buckets, with each bucket containing one or more D3D12 buffers of that fixed size.
@@ -27,8 +25,9 @@ public:
     // Constructs a BucketizedBufferAllocator which allocates D3D12 committed resources with the specified heap
     // properties, resource flags, and initial resource state.
     DmlBucketizedBufferAllocator(
+        const OrtMemoryInfo* memory_info,
         ID3D12Device* device,
-        PluginDmlExecutionContext* context,
+        ExecutionContext* context,
         const D3D12_HEAP_PROPERTIES& heapProps,
         D3D12_HEAP_FLAGS heapFlags,
         D3D12_RESOURCE_FLAGS resourceFlags,
@@ -81,9 +80,9 @@ private:
     // initialization.
     AllocatorRoundingMode m_defaultRoundingMode = AllocatorRoundingMode::Disabled;
 
-    Microsoft::WRL::ComPtr<PluginDmlExecutionContext> m_context;
+    Microsoft::WRL::ComPtr<ExecutionContext> m_context;
     std::unique_ptr<DmlSubAllocator> m_subAllocator;
-    OrtMemoryInfo m_memoryInfo;
+    const OrtMemoryInfo* m_memoryInfo{};
 
 #ifndef NDEBUG
     // Useful for debugging; keeps track of all allocations that haven't been freed yet

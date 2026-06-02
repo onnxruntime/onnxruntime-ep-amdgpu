@@ -19,7 +19,7 @@ public:
         ML_CHECK_VALID_ARGUMENT(kernelCreationContext.GetInputCount() == 1);
         ML_CHECK_VALID_ARGUMENT(kernelCreationContext.GetOutputCount() == 1);
 
-        std::vector<DimensionType> inputShape = kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> inputShape = kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(0);
 
         // Scalars have a rank of 0, but DML only supports 1 and more, which is the same
         if (inputShape.empty())
@@ -32,13 +32,13 @@ public:
         gsl::span<const uint32_t> inputShapes[1] = {inputShape};
         DmlOperator::InitializeWithShapes(kernelCreationContext, std::nullopt, std::nullopt, inputShapes, std::nullopt, 1);
 
-        m_rank = static_cast<DimensionType>(inputShape.size());
-        std::vector<DimensionType> outputCountShape = {1};
-        std::vector<DimensionType> outputCoordinatesShape = {numElements, m_rank};
+        m_rank = static_cast<OperatorHelper::DimensionType>(inputShape.size());
+        std::vector<OperatorHelper::DimensionType> outputCountShape = {1};
+        std::vector<OperatorHelper::DimensionType> outputCoordinatesShape = {numElements, m_rank};
 
         // TODO: Remove the doubled strides when DML supports native int64 for NonZero
         // TensorFlow outputs {rank, numElements}, but DML outputs {numElements, rank}
-        std::vector<DimensionType> outputCoordinatesStrides = {2, numElements * 2};
+        std::vector<OperatorHelper::DimensionType> outputCoordinatesStrides = {2, numElements * 2};
         m_intermediateTensorDescs = {
             TensorDesc(DML_TENSOR_DATA_TYPE_UINT32, outputCountShape),
             TensorDesc(DML_TENSOR_DATA_TYPE_UINT32, outputCoordinatesShape, outputCoordinatesStrides),

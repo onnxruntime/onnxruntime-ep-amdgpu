@@ -144,60 +144,60 @@ namespace dml_ep {
 
         static const OperatorInfo c_fusableOps[] =
         {
-            OperatorInfo{ "Conv",                      onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Conv, {}, true, {"Relu", "LeakyRelu"} },
-            OperatorInfo{ "Conv",                      onnxruntime::kOnnxDomain, OnnxOperatorSet11::sc_sinceVer_Conv, {}, true, {"Relu", "LeakyRelu"} },
-            OperatorInfo{ "ConvTranspose",             onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_ConvTranspose, {}, true, {"Relu", "LeakyRelu"} },
-            OperatorInfo{ "ConvTranspose",             onnxruntime::kOnnxDomain, OnnxOperatorSet11::sc_sinceVer_ConvTranspose, {}, true, {"Relu", "LeakyRelu"} },
-            OperatorInfo{ "BatchNormalization",        onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_BatchNormalization },
-            OperatorInfo{ "BatchNormalization",        onnxruntime::kOnnxDomain, OnnxOperatorSet9::sc_sinceVer_BatchNormalization },
-            OperatorInfo{ "BatchNormalization",        onnxruntime::kOnnxDomain, OnnxOperatorSet14::sc_sinceVer_BatchNormalization },
-            OperatorInfo{ "BatchNormalization",        onnxruntime::kOnnxDomain, OnnxOperatorSet15::sc_sinceVer_BatchNormalization },
-            OperatorInfo{ "InstanceNormalization",     onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_InstanceNormalization },
-            OperatorInfo{ "MeanVarianceNormalization", onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_MeanVarianceNormalization },
-            OperatorInfo{ "MeanVarianceNormalization", onnxruntime::kOnnxDomain, OnnxOperatorSet9::sc_sinceVer_MeanVarianceNormalization },
-            OperatorInfo{ "MeanVarianceNormalization", onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_MeanVarianceNormalization },
-            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Gemm, {}, true, {"Relu", "LeakyRelu"}  },
-            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OnnxOperatorSet9::sc_sinceVer_Gemm, {}, true, {"Relu", "LeakyRelu"}  },
-            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OnnxOperatorSet11::sc_sinceVer_Gemm, {}, true, {"Relu", "LeakyRelu"}  },
-            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_Gemm, {}, true, {"Relu", "LeakyRelu"}  },
-            OperatorInfo{ "MatMul",                    onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_MatMul, {}, true, {"Relu", "LeakyRelu"}  },
-            OperatorInfo{ "MatMul",                    onnxruntime::kOnnxDomain, OnnxOperatorSet9::sc_sinceVer_MatMul, {}, true, {"Relu", "LeakyRelu"}  },
-            OperatorInfo{ "MatMul",                    onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_MatMul, {}, true, {"Relu", "LeakyRelu"}  },
+            OperatorInfo{ "Conv",                      onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_Conv, {}, true, {"Relu", "LeakyRelu"} },
+            OperatorInfo{ "Conv",                      onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet11::sc_sinceVer_Conv, {}, true, {"Relu", "LeakyRelu"} },
+            OperatorInfo{ "ConvTranspose",             onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_ConvTranspose, {}, true, {"Relu", "LeakyRelu"} },
+            OperatorInfo{ "ConvTranspose",             onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet11::sc_sinceVer_ConvTranspose, {}, true, {"Relu", "LeakyRelu"} },
+            OperatorInfo{ "BatchNormalization",        onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_BatchNormalization },
+            OperatorInfo{ "BatchNormalization",        onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet9::sc_sinceVer_BatchNormalization },
+            OperatorInfo{ "BatchNormalization",        onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet14::sc_sinceVer_BatchNormalization },
+            OperatorInfo{ "BatchNormalization",        onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet15::sc_sinceVer_BatchNormalization },
+            OperatorInfo{ "InstanceNormalization",     onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_InstanceNormalization },
+            OperatorInfo{ "MeanVarianceNormalization", onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_MeanVarianceNormalization },
+            OperatorInfo{ "MeanVarianceNormalization", onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet9::sc_sinceVer_MeanVarianceNormalization },
+            OperatorInfo{ "MeanVarianceNormalization", onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet13::sc_sinceVer_MeanVarianceNormalization },
+            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_Gemm, {}, true, {"Relu", "LeakyRelu"}  },
+            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet9::sc_sinceVer_Gemm, {}, true, {"Relu", "LeakyRelu"}  },
+            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet11::sc_sinceVer_Gemm, {}, true, {"Relu", "LeakyRelu"}  },
+            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet13::sc_sinceVer_Gemm, {}, true, {"Relu", "LeakyRelu"}  },
+            OperatorInfo{ "MatMul",                    onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_MatMul, {}, true, {"Relu", "LeakyRelu"}  },
+            OperatorInfo{ "MatMul",                    onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet9::sc_sinceVer_MatMul, {}, true, {"Relu", "LeakyRelu"}  },
+            OperatorInfo{ "MatMul",                    onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet13::sc_sinceVer_MatMul, {}, true, {"Relu", "LeakyRelu"}  },
 
             // The filter for activation functions maps to what DML's fused op internally fuses at the shader level.
-            OperatorInfo{ "Add",                       onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Add, {"Relu", "LeakyRelu"}, true },
-            OperatorInfo{ "Add",                       onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_Add, {"Relu", "LeakyRelu"}, true },
-            OperatorInfo{ "Add",                       onnxruntime::kOnnxDomain, OnnxOperatorSet14::sc_sinceVer_Add, {"Relu", "LeakyRelu"}, true },
-            OperatorInfo{ "Sum",                       onnxruntime::kOnnxDomain, OnnxOperatorSet8::sc_sinceVer_Sum, {"Relu", "LeakyRelu"}, true, {} , 2 },
-            OperatorInfo{ "Sum",                       onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_Sum, {"Relu", "LeakyRelu"}, true, {} , 2 },
+            OperatorInfo{ "Add",                       onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_Add, {"Relu", "LeakyRelu"}, true },
+            OperatorInfo{ "Add",                       onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet13::sc_sinceVer_Add, {"Relu", "LeakyRelu"}, true },
+            OperatorInfo{ "Add",                       onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet14::sc_sinceVer_Add, {"Relu", "LeakyRelu"}, true },
+            OperatorInfo{ "Sum",                       onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet8::sc_sinceVer_Sum, {"Relu", "LeakyRelu"}, true, {} , 2 },
+            OperatorInfo{ "Sum",                       onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet13::sc_sinceVer_Sum, {"Relu", "LeakyRelu"}, true, {} , 2 },
         };
 
         // Not all activations can be fused - only simple elementwise activations (i.e. activation functions which
         // don't require a reduction pass) can be fused.
         static const OperatorInfo c_activationOps[] =
         {
-            OperatorInfo{ "Sigmoid",            onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Sigmoid },
-            OperatorInfo{ "Sigmoid",            onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_Sigmoid },
-            OperatorInfo{ "HardSigmoid",        onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_HardSigmoid },
-            OperatorInfo{ "Tanh",               onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Tanh },
-            OperatorInfo{ "Tanh",               onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_Tanh },
-            OperatorInfo{ "ScaledTanh",         onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_ScaledTanh },
-            OperatorInfo{ "Relu",               onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Relu },
-            OperatorInfo{ "Relu",               onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_Relu },
-            OperatorInfo{ "Relu",               onnxruntime::kOnnxDomain, OnnxOperatorSet14::sc_sinceVer_Relu },
-            OperatorInfo{ "LeakyRelu",          onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_LeakyRelu },
-            OperatorInfo{ "LeakyRelu",          onnxruntime::kOnnxDomain, OnnxOperatorSet16::sc_sinceVer_LeakyRelu },
-            OperatorInfo{ "PRelu",              onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_PRelu },
-            OperatorInfo{ "PRelu",              onnxruntime::kOnnxDomain, OnnxOperatorSet9::sc_sinceVer_PRelu },
-            OperatorInfo{ "PRelu",              onnxruntime::kOnnxDomain, OnnxOperatorSet16::sc_sinceVer_PRelu },
-            OperatorInfo{ "ThresholdedRelu",    onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_ThresholdedRelu },
-            OperatorInfo{ "ThresholdedRelu",    onnxruntime::kOnnxDomain, OnnxOperatorSet10::sc_sinceVer_ThresholdedRelu },
-            OperatorInfo{ "Elu",                onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Elu },
-            OperatorInfo{ "Selu",               onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Selu },
-            OperatorInfo{ "Softsign",           onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Softsign },
-            OperatorInfo{ "Softplus",           onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Softplus },
-            OperatorInfo{ "ParametricSoftplus", onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_ParametricSoftplus },
-            OperatorInfo{ "Dropout",            onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Dropout },
+            OperatorInfo{ "Sigmoid",            onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_Sigmoid },
+            OperatorInfo{ "Sigmoid",            onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet13::sc_sinceVer_Sigmoid },
+            OperatorInfo{ "HardSigmoid",        onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_HardSigmoid },
+            OperatorInfo{ "Tanh",               onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_Tanh },
+            OperatorInfo{ "Tanh",               onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet13::sc_sinceVer_Tanh },
+            OperatorInfo{ "ScaledTanh",         onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_ScaledTanh },
+            OperatorInfo{ "Relu",               onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_Relu },
+            OperatorInfo{ "Relu",               onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet13::sc_sinceVer_Relu },
+            OperatorInfo{ "Relu",               onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet14::sc_sinceVer_Relu },
+            OperatorInfo{ "LeakyRelu",          onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_LeakyRelu },
+            OperatorInfo{ "LeakyRelu",          onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet16::sc_sinceVer_LeakyRelu },
+            OperatorInfo{ "PRelu",              onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_PRelu },
+            OperatorInfo{ "PRelu",              onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet9::sc_sinceVer_PRelu },
+            OperatorInfo{ "PRelu",              onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet16::sc_sinceVer_PRelu },
+            OperatorInfo{ "ThresholdedRelu",    onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_ThresholdedRelu },
+            OperatorInfo{ "ThresholdedRelu",    onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet10::sc_sinceVer_ThresholdedRelu },
+            OperatorInfo{ "Elu",                onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_Elu },
+            OperatorInfo{ "Selu",               onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_Selu },
+            OperatorInfo{ "Softsign",           onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_Softsign },
+            OperatorInfo{ "Softplus",           onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_Softplus },
+            OperatorInfo{ "ParametricSoftplus", onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_ParametricSoftplus },
+            OperatorInfo{ "Dropout",            onnxruntime::kOnnxDomain, OperatorHelper::OnnxOperatorSet7::sc_sinceVer_Dropout },
         };
 
         std::optional<FusedOpProperties> TryGetFusedOp(
@@ -378,7 +378,7 @@ namespace dml_ep {
             if (activationName == "Softmax")
             {
                 const uint32_t onnxDimCount = gsl::narrow_cast<uint32_t>(kernelInfo.GetTensorShapeDescription().GetInputTensorShape(0).size());
-                int onnxAxis = HandleNegativeAxis(kernelInfo.GetOptionalAttribute<int>(AttrName::GraphFusedAxis, -1), onnxDimCount);
+                int onnxAxis = OperatorHelper::HandleNegativeAxis(kernelInfo.GetOptionalAttribute<int>(AttrName::GraphFusedAxis, -1), onnxDimCount);
 
                 auto dmlAdjustedAxis = GetDmlAdjustedAxis(onnxAxis, onnxDimCount, kernelInfo.GetTensorShapeDescription().GetInputTensorDimensionCount(0));
                 activation.desc.activationType = DML_OPERATOR_ACTIVATION_SOFTMAX1;
@@ -438,9 +438,9 @@ namespace dml_ep {
 
     uint32_t GetDmlAdjustedAxis(int32_t onnxAxis, const MLOperatorKernelCreationContext& kernelCreationContext, uint32_t dmlDimCount, uint32_t firstInputIndex)
     {
-        const std::vector<DimensionType> inputDimensions = kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(firstInputIndex);
+        const std::vector<OperatorHelper::DimensionType> inputDimensions = kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(firstInputIndex);
         uint32_t onnxDimCount = gsl::narrow_cast<uint32_t>(inputDimensions.size());
-        onnxAxis = HandleNegativeAxis(onnxAxis, onnxDimCount);
+        onnxAxis = OperatorHelper::HandleNegativeAxis(onnxAxis, onnxDimCount);
         return GetDmlAdjustedAxis(onnxAxis, onnxDimCount, dmlDimCount);
     }
 
@@ -448,7 +448,7 @@ namespace dml_ep {
     uint32_t GetDmlAdjustedAxis(int32_t onnxAxis, uint32_t onnxDimCount, uint32_t dmlDimCount)
     {
         ML_CHECK_VALID_ARGUMENT(dmlDimCount >= onnxDimCount);
-        onnxAxis = HandleNegativeAxis(onnxAxis, onnxDimCount);
+        onnxAxis = OperatorHelper::HandleNegativeAxis(onnxAxis, onnxDimCount);
         uint32_t dmlAxis = onnxAxis + dmlDimCount - onnxDimCount;
         return dmlAxis;
     }

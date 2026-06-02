@@ -30,7 +30,7 @@ public:
         std::string_view name,
         ID3D12Device* d3d12_device,
         IDMLDevice* dml_device,
-        Microsoft::WRL::ComPtr<PluginDmlExecutionContext> executionContext);
+        Microsoft::WRL::ComPtr<ExecutionContext> executionContext);
 
     ~ExecutionProviderPlugin();
 
@@ -42,8 +42,6 @@ public:
     void Flush() const;
 
     bool GraphCaptureEnabled() const noexcept;
-
-    void Release();
 
 private:
     // State passed as kernel_create_func_state — holds information needed for kernel creation
@@ -211,7 +209,7 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;
     Microsoft::WRL::ComPtr<IDMLDevice> m_dmlDevice;
-    Microsoft::WRL::ComPtr<PluginDmlExecutionContext> m_context;
+    Microsoft::WRL::ComPtr<ExecutionContext> m_context;
 
     std::unordered_map<int, std::vector<std::unique_ptr<DmlReusedCommandListState>>> m_capturedGraphs;
     std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;

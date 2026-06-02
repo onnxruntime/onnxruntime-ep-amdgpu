@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorCrop : public DmlOperator, public CropHelper
+class DmlOperatorCrop : public DmlOperator, public OperatorHelper::CropHelper
 {
 public:
     DmlOperatorCrop(const MLOperatorKernelCreationContext& kernelInfo)
@@ -20,7 +20,6 @@ public:
 
         // CropHelper coerces the input into 4D by this point.
         auto outputShape = kernelInfo.GetTensorShapeDescription().GetOutputTensorShape(0);
-        assert(outputShape.size() == NchwDimensionCount);
 
         std::vector<DML_TENSOR_DESC> inputDescs = GetDmlInputDescs();
         std::vector<DML_TENSOR_DESC> outputDescs = GetDmlOutputDescs();
@@ -28,7 +27,7 @@ public:
         DML_SLICE_OPERATOR_DESC opDesc = {};
         opDesc.InputTensor = inputDescs.data();
         opDesc.OutputTensor = outputDescs.data();
-        opDesc.DimensionCount = NchwDimensionCount;
+        opDesc.DimensionCount = OperatorHelper::NchwDimensionCount;
         opDesc.Offsets = m_offsets;
         opDesc.Sizes = outputShape.data();
         opDesc.Strides = c_strides;
@@ -36,10 +35,10 @@ public:
         SetDmlOperatorDesc({ DML_OPERATOR_SLICE, &opDesc}, kernelInfo);
     }
 
-    static const uint32_t c_strides[NchwDimensionCount];
+    static const uint32_t c_strides[OperatorHelper::NchwDimensionCount];
 };
 
-/*static*/ const uint32_t DmlOperatorCrop::c_strides[NchwDimensionCount] = {1, 1, 1, 1};
+const uint32_t DmlOperatorCrop::c_strides[OperatorHelper::NchwDimensionCount] = {1, 1, 1, 1};
 
 DML_OP_DEFINE_CREATION_FUNCTION(Crop, DmlOperatorCrop);
 

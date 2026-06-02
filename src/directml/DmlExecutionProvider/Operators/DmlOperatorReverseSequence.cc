@@ -24,8 +24,8 @@ public:
         const uint32_t inputRank = static_cast<uint32_t>(inputDimensions.size());
 
         // Read axis.
-        const int32_t batchAxis = HandleNegativeAxis(kernelCreationContext.GetOptionalAttribute<int32_t>(AttrName::BatchAxis, 0), inputRank);
-        const int32_t timeAxis = HandleNegativeAxis(kernelCreationContext.GetOptionalAttribute<int32_t>(AttrName::TimeAxis, 0), inputRank);
+        const int32_t batchAxis = OperatorHelper::HandleNegativeAxis(kernelCreationContext.GetOptionalAttribute<int32_t>(AttrName::BatchAxis, 0), inputRank);
+        const int32_t timeAxis = OperatorHelper::HandleNegativeAxis(kernelCreationContext.GetOptionalAttribute<int32_t>(AttrName::TimeAxis, 0), inputRank);
         const uint32_t dmlTimeAxis = GetDmlAdjustedAxis(timeAxis, inputRank, m_inputTensorDescs.front().GetDimensionCount());
         ML_CHECK_VALID_ARGUMENT(timeAxis != batchAxis);
 
@@ -40,10 +40,10 @@ public:
                 m_inputTensorDescs[1].GetMlOperatorDataType(),
                 gsl::make_span(adjustedSequenceLengthDimensions),
                 gsl::make_span(adjustedSequenceLengthDimensions),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
-                NchwDimensionCount, // minDimensionCount
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
+                OperatorHelper::NchwDimensionCount, // minDimensionCount
                 0
             );
 

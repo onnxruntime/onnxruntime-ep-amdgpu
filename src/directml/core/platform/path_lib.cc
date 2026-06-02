@@ -8,27 +8,8 @@
 #include <algorithm>
 
 #include "core/common/common.h"
-#ifdef _WIN32
-
-#if _GAMING_XBOX
-// Hacky, but the PathCch* APIs work on Xbox. Presumably PathCch.h needs to be updated to include the
-// GAMES partition. It would be worthwhile to investigate this a bit more (or just use std::filesystem).
-#pragma push_macro("WINAPI_FAMILY")
-#undef WINAPI_FAMILY
-#define WINAPI_FAMILY WINAPI_FAMILY_DESKTOP_APP
-#include <PathCch.h>
-#pragma pop_macro("WINAPI_FAMILY")
-#pragma comment(lib, "PathCch.lib")
-#else
 #include <PathCch.h>
 #pragma comment(lib, "PathCch.lib")
-#endif
-#else
-#include <libgen.h>
-#include <stdlib.h>
-#include <sys/stat.h>
-#include <string.h>
-#endif
 
 #ifdef _WIN32
 namespace onnxruntime {

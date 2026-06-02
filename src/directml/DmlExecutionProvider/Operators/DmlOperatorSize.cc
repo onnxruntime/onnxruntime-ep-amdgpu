@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorSize : public DmlOperator, SizeHelper
+class DmlOperatorSize : public DmlOperator, OperatorHelper::SizeHelper
 {
 public:
     DmlOperatorSize(const MLOperatorKernelCreationContext& kernelCreationContext)

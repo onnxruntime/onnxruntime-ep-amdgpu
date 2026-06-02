@@ -3,11 +3,7 @@
 
 #pragma once
 
-#include <gsl/gsl>
-#include <assert.h>
-#include <wil/wrl.h>
-#include <wil/result.h>
-#include <wrl/client.h>
+#include "dml_client.h"
 
 #include "DmlExecutionProvider/GpuEvent.h"
 #include "DmlExecutionProvider/ICommandRecorder.h"
@@ -22,13 +18,11 @@ class DmlBucketizedBufferAllocator;
 // Work submitted to the ExecutionContext is typically recorded onto a command list and may not immediately begin
 // execution on the GPU. Call Flush() to force all recorded work to be submitted to the command queue for execution
 // on the GPU.
-class PluginDmlExecutionContext
-    : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IUnknown>
-    
+class ExecutionContext : public Com<IUnknown>
 {
 public:
     // Constructs an ExecutionContext that executes on the supplied queue.
-    PluginDmlExecutionContext(ID3D12Device* d3d12Device, IDMLDevice* dmlDevice, ID3D12CommandQueue* queue,
+    ExecutionContext(ID3D12Device* d3d12Device, IDMLDevice* dmlDevice, ID3D12CommandQueue* queue,
                      bool cpuSyncSpinningEnabled, bool keepOpen);
 
     void SetAllocator(std::weak_ptr<DmlBucketizedBufferAllocator> allocator);

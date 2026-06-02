@@ -3,12 +3,9 @@
 
 #pragma once
 
-#include <assert.h>
 #include <string>
 #include <tuple>
 #include <vector>
-
-#include "core/common/common.h"
 
 namespace onnxruntime {
 namespace common {

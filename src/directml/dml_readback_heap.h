@@ -8,14 +8,14 @@
 
 namespace dml_ep {
 
-    class PluginDmlExecutionContext;
+    class ExecutionContext;
 
     // Because we never perform more than one readback at a time, we don't need anything fancy for managing the
     // readback heap - just maintain a single resource and reallocate it if it's not big enough.
     class PluginDmlReadbackHeap
     {
     public:
-        PluginDmlReadbackHeap(ID3D12Device* device, PluginDmlExecutionContext* executionContext);
+        PluginDmlReadbackHeap(ID3D12Device* device, ExecutionContext* executionContext);
 
         // Copies data from the specified GPU resource into CPU memory pointed-to by the span. This method will block
         // until the copy is complete.
@@ -39,7 +39,7 @@ namespace dml_ep {
         static constexpr size_t c_initialCapacity = 1024 * 1024; // 1MB
 
         Microsoft::WRL::ComPtr<ID3D12Device> m_device;
-        Microsoft::WRL::ComPtr<PluginDmlExecutionContext> m_executionContext;
+        Microsoft::WRL::ComPtr<ExecutionContext> m_executionContext;
 
         Microsoft::WRL::ComPtr<ID3D12Resource> m_readbackHeap;
         size_t m_capacity = 0;

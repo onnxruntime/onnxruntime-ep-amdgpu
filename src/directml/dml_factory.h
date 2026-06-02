@@ -79,8 +79,6 @@ private:
     void CreateD3DDeviceFromAdapter(IDXCoreAdapter* adapter, Microsoft::WRL::ComPtr<ID3D12Device>& device);
 
     std::string ep_name_{};
-    const std::string vendor_{amd::Vendor};
-    static constexpr uint32_t vendor_id_{amd::VendorId};
     const std::string ep_version_{"0.1.0"};
 
     Ort::MemoryInfo bucketized_buffer_memory_info_;

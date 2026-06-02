@@ -22,7 +22,7 @@ namespace dml_ep {
         return readbackHeap;
     }
 
-    PluginDmlReadbackHeap::PluginDmlReadbackHeap(ID3D12Device* device, PluginDmlExecutionContext* executionContext)
+    PluginDmlReadbackHeap::PluginDmlReadbackHeap(ID3D12Device* device, ExecutionContext* executionContext)
         : m_device(device)
         , m_executionContext(executionContext)
     {
@@ -51,7 +51,6 @@ namespace dml_ep {
         if (!m_readbackHeap)
         {
             // Initialize the readback heap for the first time
-            assert(m_capacity == 0);
             m_capacity = ComputeNewCapacity(c_initialCapacity, size);
             m_readbackHeap = CreateReadbackHeap(m_device.Get(), m_capacity);
         }
@@ -63,8 +62,6 @@ namespace dml_ep {
             m_readbackHeap = nullptr;
             m_readbackHeap = CreateReadbackHeap(m_device.Get(), m_capacity);
         }
-
-        assert(m_readbackHeap->GetDesc().Width >= size);
     }
 
     void PluginDmlReadbackHeap::ReadbackFromGpu(
@@ -73,8 +70,6 @@ namespace dml_ep {
         uint64_t srcOffset,
         D3D12_RESOURCE_STATES srcState)
     {
-        assert(!dst.empty());
-
         EnsureReadbackHeap(dst.size());
 
         // Copy from the source resource into the readback heap
@@ -105,9 +100,6 @@ namespace dml_ep {
         gsl::span<ID3D12Resource*> src,
         D3D12_RESOURCE_STATES srcState)
     {
-        assert(dst.size() == src.size());
-        assert(dstSizes.size() == src.size());
-
         if (dst.empty())
         {
             return;

@@ -97,14 +97,12 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const char* ep_name, c
     data_transfer_ = std::make_unique<hip::DataTransfer>(*this);
 }
 
-
-
 const char* ProviderFactory::GetName() const {
     return ep_name_.c_str();
 }
 
 const char* ProviderFactory::GetVendor() const {
-    return amd::Vendor.data();
+    return amd::Vendor;
 }
 
 Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHardwareDevice>& devices,

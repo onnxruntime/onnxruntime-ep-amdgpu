@@ -40,7 +40,7 @@ namespace dml_ep {
             const std::optional<const std::vector<std::optional<uint32_t>>>& kernelOutputIndices = std::nullopt,
             const std::optional<gsl::span<const uint32_t>> inputShape = std::nullopt,
             const std::optional<gsl::span<const uint32_t>> outputShape = std::nullopt,
-            uint32_t minDimensionCount = NchwDimensionCount
+            uint32_t minDimensionCount = OperatorHelper::NchwDimensionCount
             );
 
         // This first tries to create TensorDesc with the given input and output shapes, no broadcasting.
@@ -52,21 +52,21 @@ namespace dml_ep {
             const std::optional<const std::vector<std::optional<uint32_t>>>& kernelOutputIndices = std::nullopt,
             const std::optional<gsl::span<gsl::span<const uint32_t>>> inputShapes = std::nullopt,
             const std::optional<gsl::span<gsl::span<const uint32_t>>> outputShapes = std::nullopt,
-            uint32_t minDimensionCount = NchwDimensionCount
+            uint32_t minDimensionCount = OperatorHelper::NchwDimensionCount
             );
 
         void InitializeInputsWithShapes(
             const MLOperatorKernelCreationContext& kernelInfo,
             const std::optional<const std::vector<std::optional<uint32_t>>>& kernelInputIndices = std::nullopt,
             const std::optional<gsl::span<gsl::span<const uint32_t>>> inputShapes = std::nullopt,
-            uint32_t minDimensionCount = NchwDimensionCount
+            uint32_t minDimensionCount = OperatorHelper::NchwDimensionCount
             );
 
         void InitializeOutputsWithShapes(
             const MLOperatorKernelCreationContext& kernelInfo,
             const std::optional<const std::vector<std::optional<uint32_t>>>& kernelOutputIndices = std::nullopt,
             const std::optional<gsl::span<gsl::span<const uint32_t>>> outputShapes = std::nullopt,
-            uint32_t minDimensionCount = NchwDimensionCount
+            uint32_t minDimensionCount = OperatorHelper::NchwDimensionCount
             );
 
         bool AllowHalfPrecisionComputation() const;
@@ -122,31 +122,31 @@ namespace dml_ep {
         TensorDesc CreateTensorDescFromInput(
             const MLOperatorKernelCreationContext& kernelInfo,
             uint32_t index,
-            int32_t coerceAxis = TensorAxis::DoNotCoerce,
-            int32_t placement = TensorAxis::W,
-            int32_t leftAlignedDimensionCount = TensorAxis::RightAligned,
+            int32_t coerceAxis = OperatorHelper::TensorAxis::DoNotCoerce,
+            int32_t placement = OperatorHelper::TensorAxis::W,
+            int32_t leftAlignedDimensionCount = OperatorHelper::TensorAxis::RightAligned,
             std::optional<gsl::span<const uint32_t>> tensorShape = std::nullopt,
-            uint32_t minDimensionCount = NchwDimensionCount
+            uint32_t minDimensionCount = OperatorHelper::NchwDimensionCount
             ) const;
 
         TensorSequenceDesc CreateTensorSequenceDescFromInput(
             const MLOperatorKernelCreationContext& kernelInfo,
             uint32_t index,
-            int32_t coerceAxis = TensorAxis::DoNotCoerce,
-            int32_t placement = TensorAxis::W,
-            int32_t leftAlignedDimensionCount = TensorAxis::RightAligned,
+            int32_t coerceAxis = OperatorHelper::TensorAxis::DoNotCoerce,
+            int32_t placement = OperatorHelper::TensorAxis::W,
+            int32_t leftAlignedDimensionCount = OperatorHelper::TensorAxis::RightAligned,
             std::optional<gsl::span<const uint32_t>> tensorShape = std::nullopt,
-            uint32_t minDimensionCount = NchwDimensionCount
+            uint32_t minDimensionCount = OperatorHelper::NchwDimensionCount
             ) const;
 
         TensorDesc CreateTensorDescFromOutput(
             const MLOperatorKernelCreationContext& kernelInfo,
             uint32_t index,
-            int32_t coerceAxis = TensorAxis::DoNotCoerce,
-            int32_t placement = TensorAxis::W,
-            int32_t leftAlignedDimensionCount = TensorAxis::RightAligned,
+            int32_t coerceAxis = OperatorHelper::TensorAxis::DoNotCoerce,
+            int32_t placement = OperatorHelper::TensorAxis::W,
+            int32_t leftAlignedDimensionCount = OperatorHelper::TensorAxis::RightAligned,
             std::optional<gsl::span<const uint32_t>> tensorShape = std::nullopt,
-            uint32_t minDimensionCount = NchwDimensionCount
+            uint32_t minDimensionCount = OperatorHelper::NchwDimensionCount
             ) const;
 
         static void TryConvertTensorToBroadcastScalar(

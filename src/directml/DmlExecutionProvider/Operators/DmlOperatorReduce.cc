@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorReduce : public DmlOperator, public ReduceHelperBase
+class DmlOperatorReduce : public DmlOperator, public OperatorHelper::ReduceHelperBase
 {
 public:
     DmlOperatorReduce(
@@ -27,7 +27,7 @@ public:
         DmlOperator::Initialize(kernelInfo, inputIndices, outputIndices, std::nullopt, std::nullopt, 1u);
 
         std::vector<uint32_t> dmlAxes;
-        std::vector<DimensionType> reducedDims = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> reducedDims = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(0);
         for (auto& dim : m_axes)
         {
             // Replace all reduced axes with 1 for their size.
@@ -53,9 +53,9 @@ public:
             m_outputTensorDescs[0] = CreateTensorDescFromOutput(
                 kernelInfo,
                 0,
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
                 reducedDims,
                 1 // minimumDimensionCount
             );

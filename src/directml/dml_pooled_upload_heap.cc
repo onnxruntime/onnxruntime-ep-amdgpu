@@ -5,7 +5,7 @@
 
 namespace dml_ep {
 
-PluginDmlPooledUploadHeap::PluginDmlPooledUploadHeap(ID3D12Device* device, PluginDmlExecutionContext* executionContext)
+PluginDmlPooledUploadHeap::PluginDmlPooledUploadHeap(ID3D12Device* device, ExecutionContext* executionContext)
         : m_device(device)
         , m_executionContext(executionContext)
     {
@@ -13,14 +13,11 @@ PluginDmlPooledUploadHeap::PluginDmlPooledUploadHeap(ID3D12Device* device, Plugi
 
     static size_t Align(size_t offset, size_t alignment)
     {
-        assert(alignment != 0);
         return (offset + alignment - 1) & ~(alignment - 1);
     }
 
     std::optional<size_t> PluginDmlPooledUploadHeap::FindOffsetForAllocation(const Chunk& chunk, size_t sizeInBytes)
     {
-        assert(sizeInBytes != 0);
-
         if (chunk.capacityInBytes < sizeInBytes)
         {
             // This chunk isn't even big enough to accommodate this allocation
@@ -155,20 +152,12 @@ PluginDmlPooledUploadHeap::PluginDmlPooledUploadHeap(ID3D12Device* device, Plugi
         D3D12_RESOURCE_STATES dstState,
         gsl::span<const std::byte> src)
     {
-        assert(!src.empty());
-        assert(dst->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER);
-
-        InvariantChecker checker(this);
-
         ReclaimAllocations();
 
         // Allocate space from the upload heap
         Chunk* chunk = nullptr;
         size_t offsetInChunk = 0;
         std::tie(chunk, offsetInChunk) = Reserve(src.size());
-
-        assert(chunk != nullptr);
-        assert(offsetInChunk + src.size() <= chunk->capacityInBytes);
 
         // Map the upload heap and copy the source data into it at the specified offset
         void* uploadHeapData = nullptr;
@@ -196,8 +185,6 @@ PluginDmlPooledUploadHeap::PluginDmlPooledUploadHeap(ID3D12Device* device, Plugi
 
     void PluginDmlPooledUploadHeap::Trim()
     {
-        InvariantChecker checker(this);
-
         ReclaimAllocations();
 
         // Release any chunks which have no allocations
@@ -212,72 +199,6 @@ PluginDmlPooledUploadHeap::PluginDmlPooledUploadHeap(ID3D12Device* device, Plugi
         {
             m_totalCapacity += chunk.capacityInBytes;
         }
-    }
-
-    void PluginDmlPooledUploadHeap::AssertInvariants()
-    {
-    #ifdef _DEBUG
-
-        auto chunkCapacityComparer = [](const Chunk& lhs, const Chunk& rhs) {
-            return lhs.capacityInBytes < rhs.capacityInBytes;
-        };
-
-        // Chunks should be sorted by ascending capacity
-        assert(std::is_sorted(m_chunks.begin(), m_chunks.end(), chunkCapacityComparer));
-
-        // Allocations in a chunk should be sorted by ascending fence value
-        for (const auto& chunk : m_chunks)
-        {
-            auto allocFenceValueComparer = [](const Allocation& lhs, const Allocation& rhs) {
-                return lhs.doneEvent.fenceValue < rhs.doneEvent.fenceValue;
-            };
-            assert(std::is_sorted(chunk.allocations.begin(), chunk.allocations.end(), allocFenceValueComparer));
-        }
-
-        // Validate chunk properties
-        for (const auto& chunk : m_chunks)
-        {
-            assert(chunk.resource != nullptr);
-            assert(chunk.capacityInBytes == chunk.resource->GetDesc().Width);
-        }
-
-        // Validate allocation properties
-        for (const auto& chunk : m_chunks)
-        {
-            for (const auto& alloc : chunk.allocations)
-            {
-                assert(alloc.offsetInChunk + alloc.sizeInBytes <= chunk.capacityInBytes);
-                assert(alloc.offsetInChunk % c_allocationAlignment == 0); // Validate alignment
-            }
-        }
-
-        // Validate no overlapping allocations
-        for (const auto& chunk : m_chunks)
-        {
-            auto allocOffsetComparer = [](const Allocation& lhs, const Allocation& rhs) {
-                return lhs.offsetInChunk < rhs.offsetInChunk;
-            };
-
-            std::vector<Allocation> allocationsSortedByOffset(chunk.allocations.begin(), chunk.allocations.end());
-            std::sort(allocationsSortedByOffset.begin(), allocationsSortedByOffset.end(), allocOffsetComparer);
-
-            for (size_t i = 1; i < allocationsSortedByOffset.size(); ++i)
-            {
-                const auto& alloc = allocationsSortedByOffset[i - 1];
-                const auto& nextAlloc = allocationsSortedByOffset[i];
-                assert(alloc.offsetInChunk + alloc.sizeInBytes <= nextAlloc.offsetInChunk);
-            }
-        }
-
-        // Validate total capacity of pool
-        size_t calculatedCapacity = 0;
-        for (const auto& chunk : m_chunks)
-        {
-            calculatedCapacity += chunk.capacityInBytes;
-        }
-        assert(calculatedCapacity == m_totalCapacity);
-
-    #endif // #ifdef _DEBUG
     }
 
 }  // namespace dml_ep
