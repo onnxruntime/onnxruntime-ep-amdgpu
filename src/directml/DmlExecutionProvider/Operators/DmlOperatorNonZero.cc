@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #include "precomp.h"
-#include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
+#include "dml_plugin_MLOperatorAuthorImpl.h"
 //#include "DmlExecutionProvider/ExecutionProvider.h"
 #include "dml_execution_provider.h"
 #include "iallocator_to_ort_allocator_adapter.h"

@@ -3,7 +3,7 @@
 
 #include "precomp.h"
 
-#include "MLOperatorAuthorImpl.h"
+#include "dml_plugin_MLOperatorAuthorImpl.h"
 #include "FusedGraphKernel.h"
 #include "DmlGraphFusionHelper.h"
 

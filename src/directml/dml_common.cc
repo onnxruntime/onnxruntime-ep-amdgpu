@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #include "dml_common.h"
-#include "precomp.h"
+#include "DmlExecutionProvider/precomp.h"
 
 namespace dml_ep {
 

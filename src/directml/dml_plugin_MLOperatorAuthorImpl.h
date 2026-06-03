@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 #pragma once
-#include <filesystem>
 
 #include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
 #include "OperatorAuthorHelper/MLOperatorAuthorHelper.h"
@@ -13,8 +12,6 @@
 #include <wrl/client.h>
 #include <wrl/implements.h>
 #include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
-#include "dml_execution_provider.h"
-#include "core/framework/onnxruntime_typeinfo.h"
 #include "core/framework/tensor_type_and_shape.h"
 #include "core/framework/onnxruntime_sequence_type_info.h"
 

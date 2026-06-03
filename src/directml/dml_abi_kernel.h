@@ -3,23 +3,12 @@
 
 #pragma once
 
-// Only use public C API headers for ABI safety
-#include <onnxruntime_c_api.h>
-
+#include "dml_client.h"
 #include "OperatorAuthorHelper/MLOperatorAuthorHelper.h"
-#include <wrl/client.h>
-#include <wrl/implements.h>
-#include <memory>
-#include <vector>
-#include <string>
-#include <unordered_map>
-#include <cstddef>
-#include <cstring>
+
 #ifdef DML_PERF_PROFILE
 #include <atomic>
 #include <chrono>
-#include <string_view>
-#include "common/make_string.h"
 #endif
 
 #include "DmlExecutionProvider/DmlEdgeShapes.h"

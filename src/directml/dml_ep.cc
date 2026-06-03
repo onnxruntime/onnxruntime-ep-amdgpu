@@ -8,7 +8,6 @@
 #include "core/framework/fuse_nodes_funcs.h"
 #include "dml_abi_kernel.h"
 
-
 namespace dml_ep {
 
     static void CreateDmlKernelRegistry(

@@ -11,7 +11,7 @@
 
 #include "dml_execution_provider.h"
 #include "dml_abi_kernel.h"
-#include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
+#include "dml_plugin_MLOperatorAuthorImpl.h"
 
 namespace dml_ep {
 
