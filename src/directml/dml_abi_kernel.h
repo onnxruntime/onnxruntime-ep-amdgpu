@@ -4,7 +4,6 @@
 #pragma once
 
 #include "dml_client.h"
-#include "OperatorAuthorHelper/MLOperatorAuthorHelper.h"
 
 #ifdef DML_PERF_PROFILE
 #include <atomic>
@@ -65,10 +64,7 @@ private:
 // ABI-Safe Kernel Context - implements IMLOperatorKernelContext using C API
 // ============================================================================
 
-class AbiSafeKernelContext : public Microsoft::WRL::RuntimeClass<
-    Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
-    IMLOperatorKernelContext,
-    IMLOperatorKernelContextPrivate>
+class AbiSafeKernelContext : public Com<IMLOperatorKernelContext, IMLOperatorKernelContextPrivate>
 {
 public:
     AbiSafeKernelContext(

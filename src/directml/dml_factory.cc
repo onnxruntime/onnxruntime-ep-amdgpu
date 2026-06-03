@@ -201,9 +201,10 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, std::string_view ep_na
       ApiPtrs{api_ptrs},
       default_logger_{default_logger},
       ep_name_{ep_name},
-      bucketized_buffer_memory_info_{nullptr},
-      readonly_memory_info_{nullptr},
-      cpu_input_allocator_{nullptr},
+      bucketized_buffer_memory_info_{"directML_ep_gpu", OrtMemoryInfoDeviceType_GPU, amd::VendorId,
+          0, OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator},
+      cpu_input_allocator_{"directML_ep_cpu", OrtMemoryInfoDeviceType_CPU, amd::VendorId, 0,
+          OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator},
       dml_data_transfer_implementation{std::make_unique<DMLDataTransfer>(api_ptrs)}
 {
     GetName = GetNameImpl;
@@ -234,25 +235,6 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, std::string_view ep_na
 
     GetNumCustomOpDomains = GetNumCustomOpDomainsImpl;
     GetCustomOpDomains = GetCustomOpDomainsImpl;
-
-    bucketized_buffer_memory_info_ = Ort::MemoryInfo{
-                                "directML_ep_gpu",
-                                OrtMemoryInfoDeviceType_GPU,
-                                amd::VendorId,
-                                0,
-                                OrtDeviceMemoryType_DEFAULT,
-                                0,
-                                OrtDeviceAllocator};
-
-    cpu_input_allocator_ = Ort::MemoryInfo{
-                                "directML_ep_cpu",
-                                OrtMemoryInfoDeviceType_CPU,
-                                amd::VendorId,
-                                0,
-                                OrtDeviceMemoryType_DEFAULT,
-                                0,
-                                OrtDeviceAllocator};\
-
 }
 
 const char* ORT_API_CALL ProviderFactory::GetNameImpl(const OrtEpFactory* this_ptr) noexcept {

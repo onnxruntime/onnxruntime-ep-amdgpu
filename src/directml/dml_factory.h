@@ -82,7 +82,6 @@ private:
     const std::string ep_version_{"0.1.0"};
 
     Ort::MemoryInfo bucketized_buffer_memory_info_;
-    Ort::MemoryInfo readonly_memory_info_;
     Ort::MemoryInfo cpu_input_allocator_;
 
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;
