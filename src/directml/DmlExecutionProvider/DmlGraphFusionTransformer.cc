@@ -11,7 +11,6 @@
 #include "core/optimizer/constant_sharing.h"
 #include "DmlGraphFusionHelper.h"
 
-
 namespace dml_ep {
 
     namespace

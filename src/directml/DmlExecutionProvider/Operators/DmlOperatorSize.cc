@@ -5,7 +5,6 @@
 
 namespace dml_ep {
 
-
 class DmlOperatorSize : public DmlOperator, OperatorHelper::SizeHelper
 {
 public:

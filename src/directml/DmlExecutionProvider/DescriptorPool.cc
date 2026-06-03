@@ -56,7 +56,6 @@ namespace dml_ep {
         return range;
     }
 
-
     DescriptorPool::DescriptorPool(ID3D12Device* device, uint32_t initialCapacity) : 
         m_device(device),
         m_initialHeapCapacity(initialCapacity)

@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include "DmlGraphFusionTransformer.h"
 #include "core/framework/op_kernel.h"
 
 namespace dml_ep {

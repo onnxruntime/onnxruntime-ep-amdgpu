@@ -4,7 +4,6 @@
 #include "precomp.h"
 #include "GraphTransformer.h"
 #include "Operators/OperatorUtility.h"
-#include "ExecutionProvider.h"
 #include "GraphPartitioner.h"
 #include "OperatorAuthorHelper/Attributes.h"
 #include "core/framework/kernel_lookup.h"

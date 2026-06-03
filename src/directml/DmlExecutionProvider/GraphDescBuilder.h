@@ -4,7 +4,6 @@
 #pragma once
 
 #include <filesystem>
-
 #include "DmlExecutionProvider/ExecutionProvider.h"
 
 namespace dml_ep {

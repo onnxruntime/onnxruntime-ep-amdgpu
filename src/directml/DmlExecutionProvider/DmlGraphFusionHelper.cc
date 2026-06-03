@@ -5,6 +5,8 @@
 #pragma once
 
 #include "DmlGraphFusionHelper.h"
+
+#include "DmlGraphFusionTransformer.h"
 #include "DmlRuntimeFusedGraphKernel.h"
 
 namespace dml_ep {

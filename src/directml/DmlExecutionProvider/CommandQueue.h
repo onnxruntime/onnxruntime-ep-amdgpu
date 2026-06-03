@@ -5,7 +5,6 @@
 
 #include "DmlExecutionProvider/GpuEvent.h"
 
-
 namespace dml_ep {
 
     // Manages a D3D12 command queue and provides a waitable fence which is signaled with a monotonically increasing

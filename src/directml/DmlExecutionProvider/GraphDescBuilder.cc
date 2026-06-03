@@ -1,9 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <stack>
+
 #include "DmlExecutionProvider/precomp.h"
 #include "DmlExecutionProvider/GraphDescBuilder.h"
-#include <stack>
 
 namespace dml_ep::GraphDescBuilder {
 
