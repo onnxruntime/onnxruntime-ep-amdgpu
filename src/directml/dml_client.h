@@ -12,10 +12,20 @@
 #include <d3dx12/d3dx12.h>
 #include <DirectML.h>
 
+#include <wil/wrl.h>
 #include <wrl/implements.h>
 
 namespace dml_ep {
 template <typename... T>
 using Com = ::Microsoft::WRL::RuntimeClass<::Microsoft::WRL::RuntimeClassFlags<::Microsoft::WRL::ClassicCom>, T...>;
+
+enum class AllocatorRoundingMode {
+    Disabled = 0, Enabled = 1
+};
+
+template <typename T>
+auto unmove_ptr(T&& t) {
+    return &static_cast<T&>(t);
+}
 
 }  // namespace dml_ep

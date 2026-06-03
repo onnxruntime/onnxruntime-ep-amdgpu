@@ -29,7 +29,7 @@ class DmlOperatorInstanceNormalization : public DmlOperator
             TensorDesc& tensorDesc = m_inputTensorDescs[i];
             gsl::span<const uint32_t> sizes = tensorDesc.GetSizes();
             gsl::span<const uint32_t> lastDimension = sizes.last(1);
-            m_inputTensorDescs[i] = CreateTensorDescFromInput(kernelCreationContext, i, TensorAxis::DoNotCoerce, TensorAxis::C, TensorAxis::LeftAligned, lastDimension, minimumDimensionCount);
+            m_inputTensorDescs[i] = CreateTensorDescFromInput(kernelCreationContext, i, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::C, OperatorHelper::TensorAxis::LeftAligned, lastDimension, minimumDimensionCount);
         }
     }
 

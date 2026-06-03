@@ -5,18 +5,15 @@
 // IWinmlExecutionProvider is fully defined when dml_abi_kernel.h's
 // AbiSafeKernelContext class (which has Microsoft::WRL::ComPtr<IWinmlExecutionProvider>)
 // is parsed by the compiler.
+
+#include <filesystem>
+#include "common/plugin_ep_utils.h"
+
 #include "dml_execution_provider.h"
 #include "dml_abi_kernel.h"
-#include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
-#include "core/framework/op_kernel_info.h"
-#include <filesystem>
-#include <new>
-#ifdef DML_PERF_PROFILE
-#include <fmt/format.h>
-#endif
+#include "dml_plugin_MLOperatorAuthorImpl.h"
 
 namespace dml_ep {
-
 
 // Forward declarations for file-local helpers defined later in this file.
 static TensorContent SnapshotConstantInput(IMLOperatorTensor* tensor);

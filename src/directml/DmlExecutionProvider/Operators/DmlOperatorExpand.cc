@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorExpand : public DmlOperator, public ExpandHelper
+class DmlOperatorExpand : public DmlOperator, public OperatorHelper::ExpandHelper
 {
 public:
     using Self = DmlOperatorExpand;
@@ -27,10 +27,10 @@ public:
                 kernelCreationContext.GetInputEdgeDescription(0).tensorDataType,
                 m_outputTensorDescs[0].GetSizes(),
                 m_inputTensorDescs[0].GetSizes(),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
-                NchwDimensionCount, // minDimensionCount
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
+                OperatorHelper::NchwDimensionCount, // minDimensionCount
                 0);
         
         TensorDesc outputTensorDesc = 
@@ -38,10 +38,10 @@ public:
                 kernelCreationContext.GetOutputEdgeDescription(0).tensorDataType,
                 m_outputTensorDescs[0].GetSizes(),
                 m_outputTensorDescs[0].GetSizes(),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
-                NchwDimensionCount, // minDimensionCount
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
+                OperatorHelper::NchwDimensionCount, // minDimensionCount
                 0
             );
 

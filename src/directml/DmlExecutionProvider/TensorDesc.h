@@ -40,8 +40,8 @@ namespace dml_ep {
 
         inline bool IsValid() const noexcept { return m_tensorType != DML_TENSOR_TYPE_INVALID; }
         inline uint32_t GetDimensionCount() const { return m_bufferTensorDesc.DimensionCount; }
-        void SetDimensionCount(uint32_t newDimensionCount, TensorAxis alignment);
-        void EnsureDimensionCount(uint32_t newDimensionCount, TensorAxis alignment);
+        void SetDimensionCount(uint32_t newDimensionCount, OperatorHelper::TensorAxis alignment);
+        void EnsureDimensionCount(uint32_t newDimensionCount, OperatorHelper::TensorAxis alignment);
 
         gsl::span<const uint32_t> GetSizes() const noexcept { return { m_sizes, m_sizes + m_bufferTensorDesc.DimensionCount }; }
         gsl::span<const uint32_t> GetStrides() const noexcept;
@@ -54,7 +54,7 @@ namespace dml_ep {
         // It IS legal to change the number of dimensions by adding filler, dropping entire dimensions for a new view,
         // and even duplicating logical dimensions. Axes beyond the original rank will be filled by size 1 and stride 0.
         // e.g. Existing sizes [2,3,4] with [2,0] yields [4,2].
-        void PermuteDimensions(gsl::span<const uint32_t> dimensionMapping, const TensorAxis alignment);
+        void PermuteDimensions(gsl::span<const uint32_t> dimensionMapping, const OperatorHelper::TensorAxis alignment);
 
         inline uint64_t GetBufferSizeInBytes() const
         {
@@ -70,9 +70,9 @@ namespace dml_ep {
                         dataType,
                         tensorShape, // desired
                         tensorShape, // actual
-                        TensorAxis::DoNotCoerce,
-                        TensorAxis::W,
-                        TensorAxis::RightAligned,
+                        OperatorHelper::TensorAxis::DoNotCoerce,
+                        OperatorHelper::TensorAxis::W,
+                        OperatorHelper::TensorAxis::RightAligned,
                         1, // minDimensionCount
                         0
                     );
@@ -87,9 +87,9 @@ namespace dml_ep {
                         dataType,
                         desiredTensorShape,
                         actualTensorShape,
-                        TensorAxis::DoNotCoerce,
-                        TensorAxis::W,
-                        TensorAxis::RightAligned,
+                        OperatorHelper::TensorAxis::DoNotCoerce,
+                        OperatorHelper::TensorAxis::W,
+                        OperatorHelper::TensorAxis::RightAligned,
                         1, // minDimensionCount
                         0
                     );
@@ -124,13 +124,13 @@ namespace dml_ep {
             return *this;
         }
 
-        inline TensorDescBuilder& SetCoerceAxis(TensorAxis coerceAxis)
+        inline TensorDescBuilder& SetCoerceAxis(OperatorHelper::TensorAxis coerceAxis)
         {
             m_coerceAxis = coerceAxis;
             return *this;
         }
 
-        inline TensorDescBuilder& SetPlacement(TensorAxis placement)
+        inline TensorDescBuilder& SetPlacement(OperatorHelper::TensorAxis placement)
         {
             m_placement = placement;
             return *this;
@@ -172,10 +172,10 @@ namespace dml_ep {
         MLOperatorTensorDataType m_dataType = MLOperatorTensorDataType::Undefined;
         gsl::span<const uint32_t> m_dimensions = {};
         gsl::span<const uint32_t> m_nonBroadcastDimensions = {};
-        TensorAxis m_coerceAxis = TensorAxis::DoNotCoerce;
-        TensorAxis m_placement = TensorAxis::NoPlacementAdjustment;
-        int32_t m_leftAlignedDimensionCount = TensorAxis::RightAligned;
-        uint32_t m_minDimensionCount = NchwDimensionCount;
+        OperatorHelper::TensorAxis m_coerceAxis = OperatorHelper::TensorAxis::DoNotCoerce;
+        OperatorHelper::TensorAxis m_placement = OperatorHelper::TensorAxis::NoPlacementAdjustment;
+        int32_t m_leftAlignedDimensionCount = OperatorHelper::TensorAxis::RightAligned;
+        uint32_t m_minDimensionCount = OperatorHelper::NchwDimensionCount;
         uint32_t m_guaranteedBaseOffsetAlignment = 0;
     };
 

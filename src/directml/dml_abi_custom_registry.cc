@@ -4,13 +4,14 @@
 #include "dml_abi_custom_registry.h"
 #include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
 #include "DmlExecutionProvider/precomp.h"
+
 namespace dml_ep {
 
 PluginAbiCustomRegistry::PluginAbiCustomRegistry() :
     m_kernelRegistry(std::make_shared<onnxruntime::CustomRegistry>()),
     m_internalRegInfoMap(std::make_shared<InternalRegistrationInfoMap>()) {}
 
-PluginAbiCustomRegistry::PluginAbiCustomRegistry(const dml_ep::PluginDmlExecutionProviderImpl* executionProvider) :
+PluginAbiCustomRegistry::PluginAbiCustomRegistry(const PluginDmlExecutionProviderImpl* executionProvider) :
     m_kernelRegistry(std::make_shared<onnxruntime::CustomRegistry>()),
     m_internalRegInfoMap(std::make_shared<InternalRegistrationInfoMap>()),
     m_dmlPluginExecutionProvider(executionProvider) {}

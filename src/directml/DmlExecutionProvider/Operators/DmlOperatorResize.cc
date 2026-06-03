@@ -185,7 +185,7 @@ void ComputePixelOffsetsAndScales(
     }
 }
 
-class DmlOperatorResize : public DmlOperator, public ResizeHelper
+class DmlOperatorResize : public DmlOperator, public OperatorHelper::ResizeHelper
 {
 public:
     // Resample a multidimensional image to a new size.
@@ -235,16 +235,16 @@ public:
             }
         }
 
-        RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ squeezedInputShape);
-        RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ paddedScales);
-        RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ inputPixelOffsets);
-        RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ outputPixelOffsets);
-        RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ squeezedOutputShape);
+        OperatorHelper::RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ squeezedInputShape);
+        OperatorHelper::RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ paddedScales);
+        OperatorHelper::RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ inputPixelOffsets);
+        OperatorHelper::RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ outputPixelOffsets);
+        OperatorHelper::RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ squeezedOutputShape);
 
         // Update the tensor descriptions.
         MLOperatorTensorDataType inputTensorDataType = kernelCreationContext.GetInputEdgeDescription(0).tensorDataType;
-        auto inputTensorDesc = TensorDesc(inputTensorDataType, squeezedInputShape, squeezedInputShape, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, NchwDimensionCount, 0);
-        auto outputTensorDesc = TensorDesc(inputTensorDataType, squeezedOutputShape, squeezedOutputShape, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, NchwDimensionCount, 0);
+        auto inputTensorDesc = TensorDesc(inputTensorDataType, squeezedInputShape, squeezedInputShape, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, OperatorHelper::NchwDimensionCount, 0);
+        auto outputTensorDesc = TensorDesc(inputTensorDataType, squeezedOutputShape, squeezedOutputShape, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, OperatorHelper::NchwDimensionCount, 0);
         m_inputTensorDescs[0] = inputTensorDesc;
         m_outputTensorDescs[0] = outputTensorDesc;
 

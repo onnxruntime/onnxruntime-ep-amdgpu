@@ -3,11 +3,10 @@
 
 #include "precomp.h"
 
-#include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
+#include "dml_plugin_MLOperatorAuthorImpl.h"
 #include "DmlExecutionProvider/DmlRuntimeFusedGraphKernel.h"
 #include "DmlExecutionProvider/DmlGraphFusionHelper.h"
 #include "DmlExecutionProvider/DmlReusedCommandListState.h"
-
 
 namespace dml_ep {
 

@@ -2,9 +2,8 @@
 // Licensed under the MIT License.
 
 #pragma once
-#include <filesystem>
 
-#include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
+#include <filesystem>
 #include "DmlExecutionProvider/ExecutionProvider.h"
 
 namespace dml_ep {

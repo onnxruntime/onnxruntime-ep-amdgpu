@@ -3,10 +3,9 @@
 
 #include "precomp.h"
 
-#include "MLOperatorAuthorImpl.h"
+#include "dml_plugin_MLOperatorAuthorImpl.h"
 #include "FusedGraphKernel.h"
 #include "DmlGraphFusionHelper.h"
-
 
 namespace dml_ep {
 
@@ -83,7 +82,7 @@ namespace dml_ep {
             std::for_each(
                 initializeResourceRefs.begin(),
                 initializeResourceRefs.end(),
-                [&](Microsoft::WRL::ComPtr<ID3D12Resource>& resource){ m_winmlProvider->QueueReference(WRAP_GRAPHICS_UNKNOWN(resource).Get()); }
+                [&](Microsoft::WRL::ComPtr<ID3D12Resource>& resource){ m_winmlProvider->QueueReference(resource.Get()); }
             );
 
             if (reuseCommandList)

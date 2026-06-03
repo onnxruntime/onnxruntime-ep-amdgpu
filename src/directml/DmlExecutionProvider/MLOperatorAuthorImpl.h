@@ -11,8 +11,6 @@
 #include "OperatorAuthorHelper/OperatorHelper.h"
 #include "DmlExecutionProvider/DmlEdgeShapes.h"
 #include "core/framework/op_kernel.h"
-#include "core/framework/customregistry.h"
-#include "core/framework/tensorprotoutils.h"
 #include "core/framework/onnxruntime_typeinfo.h"
 #include "core/framework/tensor_type_and_shape.h"
 

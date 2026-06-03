@@ -3,49 +3,22 @@
 
 #pragma once
 
-#include "plugin_ep_utils.h"
-#include "cpu_allocator.h"
-#include "dml_bucketized_buffer_allocator.h"
+#include "dml_client.h"
+
 #include "ort_node_adapter.h"
-//#include "DmlExecutionProvider/DmlCommon.h"
 #include "dml_common.h"
 #include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
-#include "DmlExecutionProvider/AbiCustomRegistry.h"
-#include "DmlExecutionProvider/inc/DmlExecutionProvider.h"
-#include "DmlExecutionProvider/DmlCommittedResourceAllocator.h"
 #include "dml_execution_provider.h"
-//#include "iallocator_to_ort_allocator_adapter.h"
-#include "core/common/inlined_containers.h"
 #include "core/graph/ep_api_types.h"
-#include "dml_abi_custom_registry.h"
 #include "dml_abi_kernel.h"
-#include "DmlExecutionProvider/ErrorHandling.h"
-#include <wil/wrl.h>
-#include <wil/result.h>
-#include "OperatorAuthorHelper/OperatorHelper.h"
 #include "DmlExecutionProvider/DmlReusedCommandListState.h"
-#include "DmlExecutionProvider/AllocationInfo.h"
 #include "dml_data_transfer.h"
-#include "core/graph/graph.h"
-//#include "core/graph/abi_graph_types.h"
 #include "core/graph/node_arg.h"
 #include "core/framework/kernel_registry.h"
-//#include "DmlExecutionProvider/DmlCommon.h"
-//#include "dml_common.h"
-
-
-#include <d3d12.h>
-#include <dxgi1_6.h>
-#include <directx/d3dx12.h>
-#include <wrl/client.h>
-#include <DirectML.h>
-
-#include <queue>
-
-
-class DMLDataTransfer;
 
 namespace dml_ep {
+
+class DMLDataTransfer;
 
 class ExecutionProviderPlugin 
     : public OrtEp
@@ -57,27 +30,18 @@ public:
         std::string_view name,
         ID3D12Device* d3d12_device,
         IDMLDevice* dml_device,
-        Microsoft::WRL::ComPtr<PluginDmlExecutionContext> executionContext);
+        Microsoft::WRL::ComPtr<ExecutionContext> executionContext);
 
-            //const OrtSessionOptions *session_options, const OrtLogger *logger,
     ~ExecutionProviderPlugin();
 
-    void ReleaseCompletedReferences();
-
-    std::shared_ptr<PluginDmlExecutionProviderImpl> GetInternetalExecutionProvider();
+    std::shared_ptr<PluginDmlExecutionProviderImpl> GetInternalExecutionProvider();
     bool IsGetCapabilityCompleted();
 
     DMLDataTransfer* GetDataTransfer();
 
     void Flush() const;
 
-    static gsl::span<const std::byte> AsByteSpan(const void* data, size_t sizeInBytes);
-
-    static gsl::span<std::byte> AsByteSpan(void* data, size_t sizeInBytes);
-
     bool GraphCaptureEnabled() const noexcept;
-
-    void Release();
 
 private:
     // State passed as kernel_create_func_state — holds information needed for kernel creation
@@ -245,8 +209,8 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;
     Microsoft::WRL::ComPtr<IDMLDevice> m_dmlDevice;
-    Microsoft::WRL::ComPtr<PluginDmlExecutionContext> m_context;
-    //std::shared_ptr<OrtAllocator> m_cpuInputAllocator;
+    Microsoft::WRL::ComPtr<ExecutionContext> m_context;
+
     std::unordered_map<int, std::vector<std::unique_ptr<DmlReusedCommandListState>>> m_capturedGraphs;
     std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;
     UniqueOrtKernelRegistry kernel_registry_;

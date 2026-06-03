@@ -4,12 +4,10 @@
 #pragma once
 
 #include "precomp.h"
-#include "GraphDescBuilder.h"
-//#include "ExecutionProvider.h"
 #include "dml_execution_provider.h"
 #include "GraphPartitioner.h"
 #include "FusedGraphKernel.h"
-#include "MLOperatorAuthorImpl.h"
+#include "dml_plugin_MLOperatorAuthorImpl.h"
 #include "DmlReusedCommandListState.h"
 
 namespace dml_ep {

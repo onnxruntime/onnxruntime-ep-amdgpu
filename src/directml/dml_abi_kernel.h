@@ -3,23 +3,11 @@
 
 #pragma once
 
-// Only use public C API headers for ABI safety
-#include <onnxruntime_c_api.h>
+#include "dml_client.h"
 
-#include "OperatorAuthorHelper/MLOperatorAuthorHelper.h"
-#include <wrl/client.h>
-#include <wrl/implements.h>
-#include <memory>
-#include <vector>
-#include <string>
-#include <unordered_map>
-#include <cstddef>
-#include <cstring>
 #ifdef DML_PERF_PROFILE
 #include <atomic>
 #include <chrono>
-#include <string_view>
-#include "common/make_string.h"
 #endif
 
 #include "DmlExecutionProvider/DmlEdgeShapes.h"
@@ -76,10 +64,7 @@ private:
 // ABI-Safe Kernel Context - implements IMLOperatorKernelContext using C API
 // ============================================================================
 
-class AbiSafeKernelContext : public Microsoft::WRL::RuntimeClass<
-    Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
-    IMLOperatorKernelContext,
-    IMLOperatorKernelContextPrivate>
+class AbiSafeKernelContext : public Com<IMLOperatorKernelContext, IMLOperatorKernelContextPrivate>
 {
 public:
     AbiSafeKernelContext(

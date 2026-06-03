@@ -12,17 +12,6 @@
 
 #include "precomp.h"
 
-template <typename T>
-T ApiTraits::StringifyHelpers::FromString(std::string_view value)
-{
-#ifndef WAI_BUILD_LINUX
-    // Clang will instantiate this template even if it isn't used,
-    // so this static_assert will always fire and break the build.
-    static_assert(false, "Not implemented for this type");
-#endif
-}
-
-
 template <>
 DML_TENSOR_DATA_TYPE ApiTraits::StringifyHelpers::FromString(std::string_view value)
 {

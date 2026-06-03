@@ -29,11 +29,11 @@ public:
         if (kernelCreationContext.IsInputValid(1))
         {
             MLOperatorTensor kTensor = kernelCreationContext.GetConstantInputTensor(1);
-            k = gsl::narrow_cast<int32_t>(ReadScalarTensorCastToInt64(kTensor));
+            k = gsl::narrow_cast<int32_t>(OperatorHelper::ReadScalarTensorCastToInt64(kTensor));
         }
 
         auto outputTensorShapeDescription = kernelCreationContext.GetTensorShapeDescription();
-        std::vector<DimensionType> outputDimensions = outputTensorShapeDescription.GetOutputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> outputDimensions = outputTensorShapeDescription.GetOutputTensorShape(0);
         ML_CHECK_VALID_ARGUMENT(outputDimensions.size() <= OperatorHelper::NchwDimensionCount);
 
         const bool keepUpperDiagonal = kernelCreationContext.GetOptionalAttribute<bool>(AttrName::Upper, 0);

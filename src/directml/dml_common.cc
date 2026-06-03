@@ -2,10 +2,9 @@
 // Licensed under the MIT License.
 
 #include "dml_common.h"
-#include "precomp.h"
+#include "DmlExecutionProvider/precomp.h"
 
 namespace dml_ep {
-
 
 DML_TENSOR_DATA_TYPE GetDmlDataTypeFromMlDataTypeNoThrow(MLOperatorTensorDataType tensorDataType) noexcept
 {

@@ -310,9 +310,9 @@ namespace dml_ep {
                 m_inputTensorDescs.push_back(CreateTensorDescFromInput(
                     kernelInfo,
                     *m_kernelInputIndices[i],
-                    TensorAxis::DoNotCoerce,
-                    TensorAxis::W,
-                    TensorAxis::RightAligned,
+                    OperatorHelper::TensorAxis::DoNotCoerce,
+                    OperatorHelper::TensorAxis::W,
+                    OperatorHelper::TensorAxis::RightAligned,
                     inputShape,
                     minDimensionCount));
             }
@@ -332,9 +332,9 @@ namespace dml_ep {
                 m_outputTensorDescs.push_back(CreateTensorDescFromOutput(
                     kernelInfo,
                     *m_kernelOutputIndices[i],
-                    TensorAxis::DoNotCoerce,
-                    TensorAxis::W,
-                    TensorAxis::RightAligned,
+                    OperatorHelper::TensorAxis::DoNotCoerce,
+                    OperatorHelper::TensorAxis::W,
+                    OperatorHelper::TensorAxis::RightAligned,
                     outputShape,
                     minDimensionCount));
             }
@@ -380,9 +380,9 @@ namespace dml_ep {
                         edgeDesc.tensorDataType,
                         (*inputShapes)[i], // desired
                         (*inputShapes)[i], // original
-                        TensorAxis::DoNotCoerce,
-                        TensorAxis::W,
-                        TensorAxis::RightAligned,
+                        OperatorHelper::TensorAxis::DoNotCoerce,
+                        OperatorHelper::TensorAxis::W,
+                        OperatorHelper::TensorAxis::RightAligned,
                         minDimensionCount,
                         0
                     );
@@ -394,9 +394,9 @@ namespace dml_ep {
                         edgeDesc.tensorDataType,
                         actualTensorShape, // desired
                         actualTensorShape, // original
-                        TensorAxis::DoNotCoerce,
-                        TensorAxis::W,
-                        TensorAxis::RightAligned,
+                        OperatorHelper::TensorAxis::DoNotCoerce,
+                        OperatorHelper::TensorAxis::W,
+                        OperatorHelper::TensorAxis::RightAligned,
                         minDimensionCount,
                         0
                     );
@@ -442,9 +442,9 @@ namespace dml_ep {
                 m_outputTensorDescs.push_back(CreateTensorDescFromOutput(
                     kernelInfo,
                     *m_kernelOutputIndices[i],
-                    TensorAxis::DoNotCoerce,
-                    TensorAxis::W,
-                    TensorAxis::RightAligned,
+                    OperatorHelper::TensorAxis::DoNotCoerce,
+                    OperatorHelper::TensorAxis::W,
+                    OperatorHelper::TensorAxis::RightAligned,
                     outputShape,
                     minDimensionCount
                 ));

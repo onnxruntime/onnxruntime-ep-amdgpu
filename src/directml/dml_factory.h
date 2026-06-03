@@ -2,25 +2,10 @@
 // SPDX-License-Identifier: MIT
 
 #pragma once
-#include <mutex>
-#include "plugin_ep_utils.h"
-#define INITGUID
-#include <guiddef.h>
-#include <dxcore.h>
-#undef INITGUID
 
-#include <d3d12.h>
-#include <dxgi1_6.h>
-#include <directx/d3dx12.h>
-#include <DirectML.h>
+#include "dml_client.h"
 
-#include <wrl/client.h>
-#define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-
-#include <wil/wrl.h>
-#include <wil/result.h>
 #include "dml_data_transfer.h"
-#include "cpu_allocator.h"
 #include "dml_ep.h"
 
 namespace dml_ep {
@@ -94,12 +79,9 @@ private:
     void CreateD3DDeviceFromAdapter(IDXCoreAdapter* adapter, Microsoft::WRL::ComPtr<ID3D12Device>& device);
 
     std::string ep_name_{};
-    const std::string vendor_{amd::Vendor};
-    static constexpr uint32_t vendor_id_{amd::VendorId};
     const std::string ep_version_{"0.1.0"};
 
     Ort::MemoryInfo bucketized_buffer_memory_info_;
-    Ort::MemoryInfo readonly_memory_info_;
     Ort::MemoryInfo cpu_input_allocator_;
 
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;

@@ -3,13 +3,13 @@
 
 #pragma once
 
+#include "dml_client.h"
 #include "plugin_DmlDFT.h"
-//#include "DmlExecutionProvider/DmlCommon.h"
 #include "dml_common.h"
 #include "DmlExecutionProvider/IExecutionProvider.h"
-#include "External/DirectMLHelpers/ApiHelpers.h"
-#include "External/DirectMLHelpers/DirectMLX.h"
-#include "External/DirectMLHelpers/SchemaHelpers.h"
+#include "external/DirectMLHelpers/ApiHelpers.h"
+#include "external/DirectMLHelpers/DirectMLX.h"
+#include "external/DirectMLHelpers/SchemaHelpers.h"
 #include <DirectML.h>
 
 // NOTE: When this operator's implementation is moved into DML, the associated FP16 fallback
@@ -335,7 +335,7 @@ public:
             {
                 ORT_THROW_IF_FAILED(m_dmlProvider->AllocatePooledResource(
                     static_cast<size_t>(persistentResourceSize),
-                    AllocatorRoundingMode::Enabled,
+                    dml_ep::AllocatorRoundingMode::Enabled,
                     m_framingOperator.persistentResource.GetAddressOf(),
                     m_framingOperator.persistentResourcePoolingUnk.GetAddressOf()));
 
@@ -361,7 +361,7 @@ public:
         descriptorHeapDesc.NumDescriptors = execBindingProps.RequiredDescriptorCount;
         descriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 
-        ORT_THROW_IF_FAILED(m_d3dDevice->CreateDescriptorHeap(&descriptorHeapDesc, IID_GRAPHICS_PPV_ARGS(&m_framingOperator.descriptorHeap)));
+        ORT_THROW_IF_FAILED(m_d3dDevice->CreateDescriptorHeap(&descriptorHeapDesc, IID_PPV_ARGS(&m_framingOperator.descriptorHeap)));
 
         DML_BINDING_TABLE_DESC bindingTableDesc = {};
         bindingTableDesc.Dispatchable = m_framingOperator.op.Get();

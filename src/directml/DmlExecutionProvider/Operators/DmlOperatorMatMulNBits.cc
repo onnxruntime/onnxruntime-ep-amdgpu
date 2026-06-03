@@ -27,28 +27,28 @@ public:
         ML_CHECK_VALID_ARGUMENT(bitCount == 4 || bitCount == 8);
         const DML_TENSOR_DATA_TYPE quantizedDataType = bitCount == 4 ? DML_TENSOR_DATA_TYPE_UINT4 : DML_TENSOR_DATA_TYPE_UINT8;
 
-        std::vector<DimensionType> aShape = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> aShape = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(0);
         ML_CHECK_VALID_ARGUMENT(aShape.size() >= 2);
 
         // The quantized input to MatMulNBits always comes as uint8, but the real shape is provided through the N and K attributes
-        std::vector<DimensionType> bBroadcastedShape = aShape;
+        std::vector<OperatorHelper::DimensionType> bBroadcastedShape = aShape;
         bBroadcastedShape[bBroadcastedShape.size() - 2] = bRowCount;
         bBroadcastedShape[bBroadcastedShape.size() - 1] = bColCount;
 
         // The B tensor always has a batch size and channel of 1 since it's a weight, but DML requires it to have the same channels
         // and channel count as the A tensor so we need to broadcast it
-        std::vector<DimensionType> bShape(aShape.size(), 1);
+        std::vector<OperatorHelper::DimensionType> bShape(aShape.size(), 1);
         bShape[bShape.size() - 2] = bRowCount;
         bShape[bShape.size() - 1] = bColCount;
 
-        std::vector<DimensionType> outputShape = kernelInfo.GetTensorShapeDescription().GetOutputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> outputShape = kernelInfo.GetTensorShapeDescription().GetOutputTensorShape(0);
 
-        std::vector<DimensionType> scaleShape = bShape;
+        std::vector<OperatorHelper::DimensionType> scaleShape = bShape;
 
         uint32_t scaleElementCount = ComputeElementCountFromDimensions(m_inputTensorDescs[2].GetSizes());
         scaleShape[scaleShape.size() - 1] = scaleElementCount / bRowCount;
 
-        std::vector<DimensionType> scaleBroadcastedShape = bBroadcastedShape;
+        std::vector<OperatorHelper::DimensionType> scaleBroadcastedShape = bBroadcastedShape;
         scaleBroadcastedShape.back() = scaleShape.back();
 
         // The quantized input and zero point to MatMulNBits always comes as uint8, but DML will expect the real data type (int4 or int8)

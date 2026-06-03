@@ -4,15 +4,11 @@
 #pragma once
 
 #include "precomp.h"
-#include "GraphDescBuilder.h"
-#include "ExecutionProvider.h"
 #include "DmlRuntimeGraphFusionTransformer.h"
 #include "GraphPartitioner.h"
 #include "core/framework/kernel_type_str_resolver.h"
 #include "core/framework/kernel_lookup.h"
 #include "core/optimizer/constant_sharing.h"
-#include "DmlRuntimeFusedGraphKernel.h"
-#include "MLOperatorAuthorImpl.h"
 #include "DmlGraphFusionHelper.h"
 
 namespace dml_ep {
@@ -30,8 +26,8 @@ namespace dml_ep {
         const std::string& name,
         const PluginDmlExecutionProviderImpl* provider
     )
-        :onnxruntime::GraphTransformer(name),
-         m_providerImpl(provider)
+        : GraphTransformer(name),
+          m_providerImpl(provider)
     {
     }
 

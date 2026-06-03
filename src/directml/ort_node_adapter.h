@@ -3,13 +3,13 @@
 
 #pragma once
 
-#include "core/graph/abi_graph_types.h"
-#include <onnxruntime_c_api.h>
-#include <onnx/onnx_pb.h>
 #include <string>
 #include <vector>
 #include <memory>
 #include <unordered_map>
+
+#include "common/plugin_ep_utils.h"
+#include "core/graph/abi_graph_types.h"
 
 namespace dml_ep {
 

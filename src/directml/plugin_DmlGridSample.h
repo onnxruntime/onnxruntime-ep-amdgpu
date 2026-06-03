@@ -3,18 +3,8 @@
 
 #pragma once
 
+#include "dml_client.h"
 #include "OperatorAuthorHelper/OperatorHelper.h"
-#include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
-#include "External/DirectMLHelpers/ApiHelpers.h"
-#include "External/DirectMLHelpers/DirectMLX.h"
-#include "External/DirectMLHelpers/SchemaHelpers.h"
-
-#include <wrl/client.h>
-#include <wrl/implements.h>
-#include <d3d12.h>
-#include <dxgi1_6.h>
-#include <directx/d3dx12.h>
-#include <DirectML.h>
 
 // NOTE: When this operator's implementation is moved into DML, the associated FP16 fallback
 //       should be removed from IsCustomOpShader(...) in

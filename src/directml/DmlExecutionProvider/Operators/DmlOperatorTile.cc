@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorTile : public DmlOperator, TileHelper
+class DmlOperatorTile : public DmlOperator, OperatorHelper::TileHelper
 {
 public:
     using Self = DmlOperatorTile;
@@ -31,16 +31,16 @@ public:
         std::vector<uint32_t> squeezedOutputShape = m_outputDimensions;
         std::vector<uint32_t> squeezableDimensionIndices;
         std::vector<uint32_t> paddedRepeatsData = m_repeatsData;
-        FindValueIndices<uint32_t>(gsl::make_span(squeezedOutputShape), 1u, /*out*/ squeezableDimensionIndices);
+        OperatorHelper::FindValueIndices<uint32_t>(gsl::make_span(squeezedOutputShape), 1u, /*out*/ squeezableDimensionIndices);
 
-        RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ squeezedInputShape);
-        RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ paddedRepeatsData);
-        RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ squeezedOutputShape);
+        OperatorHelper::RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ squeezedInputShape);
+        OperatorHelper::RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ paddedRepeatsData);
+        OperatorHelper::RemoveValuesByIndex(squeezableDimensionIndices, /*keepOneValue*/ true, /*inout*/ squeezedOutputShape);
 
         // Update the tensor descriptions.
         MLOperatorTensorDataType inputTensorDataType = kernelCreationContext.GetInputEdgeDescription(0).tensorDataType;
-        auto inputTensorDesc = TensorDesc(inputTensorDataType, squeezedInputShape, squeezedInputShape, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, NchwDimensionCount, 0);
-        auto outputTensorDesc = TensorDesc(inputTensorDataType, squeezedOutputShape, squeezedOutputShape, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, NchwDimensionCount, 0);
+        auto inputTensorDesc = TensorDesc(inputTensorDataType, squeezedInputShape, squeezedInputShape, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, OperatorHelper::NchwDimensionCount, 0);
+        auto outputTensorDesc = TensorDesc(inputTensorDataType, squeezedOutputShape, squeezedOutputShape, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, OperatorHelper::NchwDimensionCount, 0);
         m_inputTensorDescs[0] = inputTensorDesc;
         m_outputTensorDescs[0] = outputTensorDesc;
 

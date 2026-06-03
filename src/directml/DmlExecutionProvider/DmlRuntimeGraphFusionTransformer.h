@@ -1,11 +1,13 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+
 #pragma once
 
 #include <string>
 #include <unordered_map>
-#include "core/optimizer/graph_transformer.h"
+
 #include "core/framework/execution_providers.h"
+#include "core/optimizer/graph_transformer.h"
 
 namespace dml_ep {
 

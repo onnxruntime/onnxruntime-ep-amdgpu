@@ -11,7 +11,7 @@
 #include <cctype>
 #endif
 
-#include "plugin_ep_utils.h"
+#include "common/plugin_ep_utils.h"
 
 using PathChar = ORTCHAR_T;
 using PathString = std::basic_string<PathChar>;

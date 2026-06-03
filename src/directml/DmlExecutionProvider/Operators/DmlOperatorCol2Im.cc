@@ -8,7 +8,7 @@ namespace dml_ep {
 
 #if DML_TARGET_VERSION >= 0x6400
 
-class DmlOperatorCol2Im : public DmlOperator, public Col2ImHelper
+class DmlOperatorCol2Im : public DmlOperator, public OperatorHelper::Col2ImHelper
 {
 public:
     explicit DmlOperatorCol2Im(const MLOperatorKernelCreationContext& kernelCreationContext)

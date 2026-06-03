@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorTranspose : public DmlOperator, public TransposeHelper
+class DmlOperatorTranspose : public DmlOperator, public OperatorHelper::TransposeHelper
 {
 public:
     using Self = DmlOperatorTranspose;

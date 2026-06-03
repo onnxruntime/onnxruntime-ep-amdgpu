@@ -58,10 +58,10 @@ public:
                 edgeDesc.tensorDataType,
                 gsl::make_span(outputShape),
                 gsl::make_span(inputTensorShape),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
-                NchwDimensionCount, // minDimensionCount
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
+                OperatorHelper::NchwDimensionCount, // minDimensionCount
                 0 // guaranteedBaseOffsetAlignment
             );
         }
@@ -72,10 +72,10 @@ public:
                 MLOperatorTensorDataType::Float,
                 gsl::make_span(outputShape),
                 gsl::make_span(outputShape),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
-                NchwDimensionCount, // minDimensionCount
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
+                OperatorHelper::NchwDimensionCount, // minDimensionCount
                 0 // guaranteedBaseOffsetAlignment
             );
         DML_TENSOR_DESC namedIntermediateOutputTensorDesc = intermediateOutputTensorDesc.GetDmlDesc();

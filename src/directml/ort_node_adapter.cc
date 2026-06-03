@@ -1,13 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // SPDX-License-Identifier: MIT
 
+#include <gsl/gsl>
+#include <stdexcept>
+#include <sstream>
+
 #include "ort_node_adapter.h"
 #include "core/framework/onnxruntime_typeinfo.h"
 #include "core/framework/tensor_type_and_shape.h"
 #include "core/framework/abi_safe_attr_utils.h"
-#include <gsl/gsl>
-#include <stdexcept>
-#include <sstream>
 
 namespace dml_ep {
 

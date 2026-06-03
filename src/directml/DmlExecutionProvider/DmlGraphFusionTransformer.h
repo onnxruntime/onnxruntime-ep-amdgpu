@@ -5,7 +5,6 @@
 #include <string>
 #include <unordered_map>
 #include "core/optimizer/graph_transformer.h"
-#include "core/framework/execution_providers.h"
 
 namespace dml_ep {
 

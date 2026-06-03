@@ -3,8 +3,6 @@
 
 #include "dml_bucketized_buffer_allocator.h"
 
-// #define PRINT_OUTSTANDING_ALLOCATIONS
-
 namespace dml_ep {
 
 PluginDmlAllocationInfo::~PluginDmlAllocationInfo() {
@@ -26,8 +24,9 @@ DmlBucketizedBufferAllocator::~DmlBucketizedBufferAllocator() {
 }
 
 DmlBucketizedBufferAllocator::DmlBucketizedBufferAllocator(
+    const OrtMemoryInfo* memory_info,
     ID3D12Device* device,
-    PluginDmlExecutionContext* context,
+    ExecutionContext* context,
     const D3D12_HEAP_PROPERTIES& heapProps,
     D3D12_HEAP_FLAGS heapFlags,
     D3D12_RESOURCE_FLAGS resourceFlags,
@@ -35,8 +34,6 @@ DmlBucketizedBufferAllocator::DmlBucketizedBufferAllocator(
     std::unique_ptr<DmlSubAllocator>&& subAllocator) 
     :
     OrtAllocator{ORT_API_VERSION}
-    /*onnxruntime::IAllocator( OrtMemoryInfo("GPU", OrtAllocatorType::OrtDeviceAllocator, OrtDevice(OrtDevice::GPU,
-       OrtDevice::MemType::DEFAULT, OrtDevice::VendorIds::AMD, 0)))*/
     , m_device(device)
     , m_heapProperties(heapProps)
     , m_heapFlags(heapFlags)
@@ -44,24 +41,23 @@ DmlBucketizedBufferAllocator::DmlBucketizedBufferAllocator(
     , m_initialState(initialState)
     , m_context(context)
     , m_subAllocator(std::move(subAllocator))
-    , m_memoryInfo("GPU", OrtAllocatorType::OrtDeviceAllocator,
-                  OrtDevice(OrtDevice::GPU, OrtDevice::MemType::DEFAULT, OrtDevice::VendorIds::AMD, 0))
+    , m_memoryInfo{memory_info}
 {
     OrtAllocator::Alloc = [](OrtAllocator* this_, size_t size) -> void* {
-        return static_cast<DmlBucketizedBufferAllocator*>(this_)->AllocImpl(size);
+        return reinterpret_cast<DmlBucketizedBufferAllocator*>(this_)->AllocImpl(size);
     };
 
     OrtAllocator::Free = [](OrtAllocator* this_, void* p) {
-        static_cast<DmlBucketizedBufferAllocator*>(this_)->FreeImpl(p);
+        reinterpret_cast<DmlBucketizedBufferAllocator*>(this_)->FreeImpl(p);
     };
 
     OrtAllocator::Info = [](const OrtAllocator* this_) -> const OrtMemoryInfo* {
-        return &static_cast<const DmlBucketizedBufferAllocator*>(this_)->m_memoryInfo;
+        return reinterpret_cast<const DmlBucketizedBufferAllocator*>(this_)->m_memoryInfo;
     };
 
     OrtAllocator::Reserve = [](OrtAllocator* this_, size_t size) -> void* {
         // Reserve bypasses rounding/pooling if desired; here we just forward to AllocImpl.
-        return static_cast<DmlBucketizedBufferAllocator*>(this_)->AllocImpl(size);
+        return reinterpret_cast<DmlBucketizedBufferAllocator*>(this_)->AllocImpl(size);
     };
 
     OrtAllocator::GetStats = nullptr;
@@ -69,11 +65,8 @@ DmlBucketizedBufferAllocator::DmlBucketizedBufferAllocator(
 }
 
 /*static*/ gsl::index DmlBucketizedBufferAllocator::GetBucketIndexFromSize(uint64_t size) {
-    assert(size != 0);
-
     // Each bucket is twice as large as the previous one, in ascending order
     gsl::index index = static_cast<gsl::index>(ceil(log2(size)));
-    assert((1ull << index) >= size); // This must be true unless there were some strange rounding issues
 
     // The smallest bucket is 2^n bytes large, where n = c_minResourceSizeExponent
     index = std::max<gsl::index>(index, c_minResourceSizeExponent);
@@ -129,9 +122,6 @@ void* DmlBucketizedBufferAllocator::AllocImpl(size_t size, AllocatorRoundingMode
         resourceId = ++m_currentResourceId;
     }
 
-    assert(resourceWrapper->GetD3D12Resource()->GetDesc().Width == bucketSize);
-    assert(resourceWrapper != nullptr);
-
     Microsoft::WRL::ComPtr<PluginDmlAllocationInfo> allocInfo =
         wil::MakeOrThrow<PluginDmlAllocationInfo>(this, ++m_currentAllocationId, resourceId, resourceWrapper.Get(), size);
 
@@ -153,8 +143,6 @@ void DmlBucketizedBufferAllocator::FreeImpl(void* p) {
 void DmlBucketizedBufferAllocator::FreeResource(void* p, uint64_t pooledResourceId) {
     PluginDmlAllocationInfo* allocInfo = static_cast<PluginDmlAllocationInfo*>(p);
 
-    assert(allocInfo != nullptr); // Can't free nullptr
-
     if (allocInfo->GetOwner() != this) {
         // This allocation doesn't belong to this allocator!
         ORT_THROW_HR(E_INVALIDARG);
@@ -163,8 +151,6 @@ void DmlBucketizedBufferAllocator::FreeResource(void* p, uint64_t pooledResource
     // Free the resource to the pool if its size matches a bucket size
     gsl::index bucketIndex = GetBucketIndexFromSize(allocInfo->GetRequestedSize());
     if (GetBucketSizeFromIndex(bucketIndex) == allocInfo->GetResource()->GetDesc().Width) {
-        assert(gsl::narrow_cast<gsl::index>(m_pool.size()) > bucketIndex);
-
         // Return the resource to the bucket
         Bucket* bucket = &m_pool[bucketIndex];
 
@@ -173,18 +159,13 @@ void DmlBucketizedBufferAllocator::FreeResource(void* p, uint64_t pooledResource
     } else {
         if (!m_context->IsClosed()) {
             // Free the underlying allocation once queued work has completed.
-#ifdef _GAMING_XBOX
-            m_context->QueueReference(WRAP_GRAPHICS_UNKNOWN(allocInfo->GetResource()).Get());
-#else
             m_context->QueueReference(allocInfo->GetResource());
-#endif
         }
 
         allocInfo->DetachResourceWrapper();
     }
 
 #if _DEBUG
-    assert(m_outstandingAllocationsById[allocInfo->GetId()] == allocInfo);
     m_outstandingAllocationsById.erase(allocInfo->GetId());
 #endif
 

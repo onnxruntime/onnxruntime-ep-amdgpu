@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "plugin_ep_utils.h"
+#include "common/plugin_ep_utils.h"
 
 namespace dml_ep {
 

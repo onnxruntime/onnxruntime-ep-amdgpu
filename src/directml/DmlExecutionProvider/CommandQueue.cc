@@ -12,8 +12,8 @@ namespace dml_ep {
         , m_cpuSyncSpinningEnabled(cpuSyncSpinningEnabled)
     {
         Microsoft::WRL::ComPtr<ID3D12Device> device;
-        GRAPHICS_THROW_IF_FAILED(m_queue->GetDevice(IID_GRAPHICS_PPV_ARGS(device.GetAddressOf())));
-        ORT_THROW_IF_FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_GRAPHICS_PPV_ARGS(m_fence.ReleaseAndGetAddressOf())));
+        ORT_THROW_IF_FAILED(m_queue->GetDevice(IID_PPV_ARGS(device.GetAddressOf())));
+        ORT_THROW_IF_FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(m_fence.ReleaseAndGetAddressOf())));
     }
 
     void CommandQueue::ExecuteCommandList(ID3D12CommandList* commandList)
@@ -37,12 +37,12 @@ namespace dml_ep {
         ORT_THROW_IF_FAILED(m_queue->Signal(m_fence.Get(), m_lastFenceValue));
     }
 
-    GpuEvent CommandQueue::GetCurrentCompletionEvent()
+    GpuEvent CommandQueue::GetCurrentCompletionEvent() const
     {
         return GpuEvent{ m_lastFenceValue, m_fence };
     }
 
-    GpuEvent CommandQueue::GetNextCompletionEvent()
+    GpuEvent CommandQueue::GetNextCompletionEvent() const
     {
         return GpuEvent{ m_lastFenceValue + 1, m_fence };
     }

@@ -39,7 +39,7 @@ public:
         case DML_OPERATOR_ACTIVATION_HARDMAX:
             {
                 const uint32_t onnxDimCount = gsl::narrow_cast<uint32_t>(kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(0).size());
-                int axis = HandleNegativeAxis(kernelCreationContext.GetOptionalAttribute<int>(AttrName::Axis, 1), onnxDimCount);
+                int axis = OperatorHelper::HandleNegativeAxis(kernelCreationContext.GetOptionalAttribute<int>(AttrName::Axis, 1), onnxDimCount);
                 std::vector<int32_t> onnxAxes(static_cast<uint64_t>(onnxDimCount) - axis);
                 std::iota(onnxAxes.begin(), onnxAxes.end(), static_cast<int32_t>(axis));
 
@@ -56,7 +56,7 @@ public:
         case DML_OPERATOR_ACTIVATION_HARDMAX1:
             {
                 const uint32_t onnxDimCount = gsl::narrow_cast<uint32_t>(kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(0).size());
-                int onnxAxis = HandleNegativeAxis(kernelCreationContext.GetOptionalAttribute<int>(AttrName::Axis, -1), onnxDimCount);
+                int onnxAxis = OperatorHelper::HandleNegativeAxis(kernelCreationContext.GetOptionalAttribute<int>(AttrName::Axis, -1), onnxDimCount);
 
                 dmlAxes.push_back(GetDmlAdjustedAxis(onnxAxis, onnxDimCount, m_inputTensorDescs.front().GetDimensionCount()));
 
@@ -131,7 +131,7 @@ public:
             // PRelu is unique and accepts its parameters as a second input tensor.
 
             // The slope tensor is unidirectionally broadcastable. Reshape it based on the desired output sizes.
-            m_inputTensorDescs[1] = CreateTensorDescFromInput(kernelCreationContext, 1, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, outputSizes);
+            m_inputTensorDescs[1] = CreateTensorDescFromInput(kernelCreationContext, 1, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, outputSizes);
 
             inputDescs = GetDmlInputDescs();
             outputDescs = GetDmlOutputDescs();

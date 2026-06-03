@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorMaxUnpool : public DmlOperator, public UnpoolingHelper
+class DmlOperatorMaxUnpool : public DmlOperator, public OperatorHelper::UnpoolingHelper
 {
 public:
     using Self = DmlOperatorMaxUnpool;

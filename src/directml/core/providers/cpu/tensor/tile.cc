@@ -56,7 +56,7 @@ ONNX_CPU_OPERATOR_KERNEL(
         .TypeConstraint("T1", DataTypeImpl::GetTensorType<int64_t>()),
     Tile);
 
-Ort::Status TileCoreForFixedSizeTypes(const Tensor& input_tensor, Tensor& output_tensor, const int64_t* repeats, TensorAxisCounters& input_counters, const TensorPitches& output_pitches, size_t element_size) {
+Ort::Status TileCoreForFixedSizeTypes(const Tensor& input_tensor, Tensor& output_tensor, const int64_t* repeats, OperatorHelper::TensorAxisCounters& input_counters, const TensorPitches& output_pitches, size_t element_size) {
   const auto& input_shape = input_tensor.Shape().GetDims();
   const size_t dimension_count = input_shape.size();
 
@@ -99,7 +99,7 @@ Ort::Status TileCoreForFixedSizeTypes(const Tensor& input_tensor, Tensor& output
   return STATUS_OK;
 }
 
-Ort::Status TileCoreForStringType(const Tensor& input_tensor, Tensor& output_tensor, const int64_t* repeats, TensorAxisCounters& input_counters, const TensorPitches& output_pitches) {
+Ort::Status TileCoreForStringType(const Tensor& input_tensor, Tensor& output_tensor, const int64_t* repeats, OperatorHelper::TensorAxisCounters& input_counters, const TensorPitches& output_pitches) {
   const auto& input_shape = input_tensor.Shape().GetDims();
   const size_t dimension_count = input_shape.size();
 

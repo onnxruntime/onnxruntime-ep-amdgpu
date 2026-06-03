@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorRegionOfInterestPooling : public DmlOperator, public RoiPoolingHelper
+class DmlOperatorRegionOfInterestPooling : public DmlOperator, public OperatorHelper::RoiPoolingHelper
 {
 public:
     using Self = DmlOperatorRegionOfInterestPooling;
@@ -16,7 +16,7 @@ public:
         RoiPoolingHelper(kernelInfo, kernelInfo.GetTensorShapeDescription()),
         m_spatialScale(kernelInfo.GetOptionalAttribute<float>(AttrName::SpatialScale, 1.0f))
     {
-        DmlOperator::Initialize(kernelInfo);
+        Initialize(kernelInfo);
 
         std::vector<DML_TENSOR_DESC> inputDescs = GetDmlInputDescs();
         std::vector<DML_TENSOR_DESC> outputDescs = GetDmlOutputDescs();

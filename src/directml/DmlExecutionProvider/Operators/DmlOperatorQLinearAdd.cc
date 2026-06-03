@@ -25,25 +25,25 @@ public:
     {
         DmlOperator::Initialize(kernelInfo);
 
-        std::vector<DimensionType> outputShape = kernelInfo.GetTensorShapeDescription().GetOutputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> outputShape = kernelInfo.GetTensorShapeDescription().GetOutputTensorShape(0);
 
         uint32_t dmlDimSize = m_inputTensorDescs[0].GetDimensionCount();
 
         // Initialize the input descriptions with broadcasting
-        m_inputTensorDescs[IN_A] = CreateTensorDescFromInput(kernelInfo, 0/*A OnnxIndex*/, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, outputShape);
-        m_inputTensorDescs[IN_B] = CreateTensorDescFromInput(kernelInfo, 3/*B OnnxIndex*/, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, outputShape);
+        m_inputTensorDescs[IN_A] = CreateTensorDescFromInput(kernelInfo, 0/*A OnnxIndex*/, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, outputShape);
+        m_inputTensorDescs[IN_B] = CreateTensorDescFromInput(kernelInfo, 3/*B OnnxIndex*/, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, outputShape);
 
-        m_inputTensorDescs[IN_A_SCALE] = CreateTensorDescFromInput(kernelInfo, 1/*A Scale OnnxIndex*/, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, std::nullopt, dmlDimSize);
-        m_inputTensorDescs[IN_A_ZERO_POINT] = CreateTensorDescFromInput(kernelInfo, 2/*A Zero point OnnxIndex*/, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, std::nullopt, dmlDimSize);
+        m_inputTensorDescs[IN_A_SCALE] = CreateTensorDescFromInput(kernelInfo, 1/*A Scale OnnxIndex*/, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, std::nullopt, dmlDimSize);
+        m_inputTensorDescs[IN_A_ZERO_POINT] = CreateTensorDescFromInput(kernelInfo, 2/*A Zero point OnnxIndex*/, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, std::nullopt, dmlDimSize);
 
-        m_inputTensorDescs[IN_B_SCALE] = CreateTensorDescFromInput(kernelInfo, 4/*B Scale OnnxIndex*/, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, std::nullopt, dmlDimSize);
-        m_inputTensorDescs[IN_B_ZERO_POINT] = CreateTensorDescFromInput(kernelInfo, 5/*B Zero point OnnxIndex*/, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, std::nullopt, dmlDimSize);
+        m_inputTensorDescs[IN_B_SCALE] = CreateTensorDescFromInput(kernelInfo, 4/*B Scale OnnxIndex*/, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, std::nullopt, dmlDimSize);
+        m_inputTensorDescs[IN_B_ZERO_POINT] = CreateTensorDescFromInput(kernelInfo, 5/*B Zero point OnnxIndex*/, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, std::nullopt, dmlDimSize);
 
-        m_inputTensorDescs[IN_C_SCALE] = CreateTensorDescFromInput(kernelInfo, 6/*C Zero point OnnxIndex*/, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, std::nullopt, dmlDimSize);
-        m_inputTensorDescs[IN_C_ZERO_POINT] = CreateTensorDescFromInput(kernelInfo, 7/*C Zero point OnnxIndex*/, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, std::nullopt, dmlDimSize);
+        m_inputTensorDescs[IN_C_SCALE] = CreateTensorDescFromInput(kernelInfo, 6/*C Zero point OnnxIndex*/, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, std::nullopt, dmlDimSize);
+        m_inputTensorDescs[IN_C_ZERO_POINT] = CreateTensorDescFromInput(kernelInfo, 7/*C Zero point OnnxIndex*/, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, std::nullopt, dmlDimSize);
 
         // Initialize the output description while overriding the shape
-        m_outputTensorDescs[0] = CreateTensorDescFromOutput(kernelInfo, 0, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, outputShape);
+        m_outputTensorDescs[0] = CreateTensorDescFromOutput(kernelInfo, 0, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, outputShape);
 
         std::vector<DML_TENSOR_DESC> inputDescs = GetDmlInputDescs();
         std::vector<DML_TENSOR_DESC> outputDescs = GetDmlOutputDescs();

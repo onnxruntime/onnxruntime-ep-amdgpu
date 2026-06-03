@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorSplit : public DmlOperator, public SplitHelper
+class DmlOperatorSplit : public DmlOperator, public OperatorHelper::SplitHelper
 {
 public:
     using Self = DmlOperatorSplit;

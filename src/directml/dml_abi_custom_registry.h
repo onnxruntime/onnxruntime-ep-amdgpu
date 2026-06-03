@@ -8,20 +8,7 @@
 #include "OperatorAuthorHelper/MLOperatorAuthorPrivate.h"
 #include "dml_plugin_MLOperatorAuthorImpl.h"
 
-#define IID_GRAPHICS_PPV_ARGS IID_PPV_ARGS
-
 namespace dml_ep {
-class PluginDmlExecutionProviderImpl;
-}
-
-namespace WRL {
-template <typename... TInterfaces>
-using Base =
-    Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, TInterfaces...>;
-}
-
-namespace dml_ep {
-
 
 class PluginAbiCustomRegistry : public Com<IMLOperatorRegistry, IMLOperatorRegistryPrivate> {
 public:

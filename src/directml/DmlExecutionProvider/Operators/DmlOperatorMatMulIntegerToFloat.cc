@@ -39,20 +39,20 @@ public:
         std::vector<std::optional<uint32_t>> inputIndices = { OrtInputTensors::ortA, OrtInputTensors::ortAScale, OrtInputTensors::ortAZeroPoint, OrtInputTensors::ortB, OrtInputTensors::ortBScale, OrtInputTensors::ortBZeroPoint, OrtInputTensors::ortBias };
         DmlOperator::Initialize(kernelInfo, inputIndices);
 
-        std::vector<DimensionType> inputShape0 = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(OrtInputTensors::ortA);
-        std::vector<DimensionType> inputShape1 = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(OrtInputTensors::ortB);
-        std::vector<DimensionType> outputShape = kernelInfo.GetTensorShapeDescription().GetOutputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> inputShape0 = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(OrtInputTensors::ortA);
+        std::vector<OperatorHelper::DimensionType> inputShape1 = kernelInfo.GetTensorShapeDescription().GetInputTensorShape(OrtInputTensors::ortB);
+        std::vector<OperatorHelper::DimensionType> outputShape = kernelInfo.GetTensorShapeDescription().GetOutputTensorShape(0);
 
         OperatorHelper::MatMulShapeMapping(inputShape0, inputShape1, outputShape);
 
         // Initialize the input descriptions with broadcasting
-        m_inputTensorDescs[DmlInputIndex::dmlA] = CreateTensorDescFromInput(kernelInfo, OrtInputTensors::ortA, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, inputShape0);
-        m_inputTensorDescs[DmlInputIndex::dmlB] = CreateTensorDescFromInput(kernelInfo, OrtInputTensors::ortB, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, inputShape1);
+        m_inputTensorDescs[DmlInputIndex::dmlA] = CreateTensorDescFromInput(kernelInfo, OrtInputTensors::ortA, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, inputShape0);
+        m_inputTensorDescs[DmlInputIndex::dmlB] = CreateTensorDescFromInput(kernelInfo, OrtInputTensors::ortB, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, inputShape1);
 
         // Broadcast Bias tensor to the shape of the output tensor.
         if(kernelInfo.IsInputValid(OrtInputTensors::ortBias)) {
-            m_inputTensorDescs[DmlInputIndex::dmlBias] = CreateTensorDescFromInput(kernelInfo, OrtInputTensors::ortBias, TensorAxis::DoNotCoerce,
-                TensorAxis::W, TensorAxis::RightAligned, outputShape);
+            m_inputTensorDescs[DmlInputIndex::dmlBias] = CreateTensorDescFromInput(kernelInfo, OrtInputTensors::ortBias, OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, outputShape);
         }
 
         uint32_t dmlDimSize = m_inputTensorDescs[DmlInputIndex::dmlA].GetDimensionCount();
@@ -61,9 +61,9 @@ public:
         m_inputTensorDescs[DmlInputIndex::dmlAScale] = CreateTensorDescFromInput(
             kernelInfo,
             OrtInputTensors::ortAScale,
-            TensorAxis::DoNotCoerce,
-            TensorAxis::H,
-            TensorAxis::LeftAligned,
+            OperatorHelper::TensorAxis::DoNotCoerce,
+            OperatorHelper::TensorAxis::H,
+            OperatorHelper::TensorAxis::LeftAligned,
             std::nullopt,
             dmlDimSize
             );
@@ -75,9 +75,9 @@ public:
             m_inputTensorDescs[DmlInputIndex::dmlAZeroPoint] = CreateTensorDescFromInput(
                 kernelInfo,
                 OrtInputTensors::ortAZeroPoint,
-                TensorAxis::DoNotCoerce,
-                TensorAxis::H,
-                TensorAxis::LeftAligned,
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::H,
+                OperatorHelper::TensorAxis::LeftAligned,
                 std::nullopt,
                 dmlDimSize
                 );
@@ -86,7 +86,7 @@ public:
         // B Zeropoint and BScale are already aligned in the W dimension so no need to align them
 
         // Initialize the output description while overriding the shape
-        m_outputTensorDescs[0] = CreateTensorDescFromOutput(kernelInfo, 0, TensorAxis::DoNotCoerce, TensorAxis::W, TensorAxis::RightAligned, outputShape);
+        m_outputTensorDescs[0] = CreateTensorDescFromOutput(kernelInfo, 0, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::W, OperatorHelper::TensorAxis::RightAligned, outputShape);
 
         std::vector<DML_TENSOR_DESC> inputDescs = GetDmlInputDescs();
         std::vector<DML_TENSOR_DESC> outputDescs = GetDmlOutputDescs();

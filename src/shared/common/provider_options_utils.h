@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "parse_string.h"
-#include "plugin_ep_utils.h"
+#include "common/plugin_ep_utils.h"
 
 template <typename TEnum>
 using EnumNameMapping = std::vector<std::pair<TEnum, std::string>>;

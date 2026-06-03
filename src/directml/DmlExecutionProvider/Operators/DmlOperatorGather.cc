@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorGather : public DmlOperator, public GatherHelper
+class DmlOperatorGather : public DmlOperator, public OperatorHelper::GatherHelper
 {
 public:
     DmlOperatorGather(const MLOperatorKernelCreationContext& kernelCreationContext)
@@ -17,9 +17,9 @@ public:
         ML_CHECK_VALID_ARGUMENT(kernelCreationContext.GetOutputCount() == 1, "Gather expects 1 output.");
 
         auto tensorShapeDescription = kernelCreationContext.GetTensorShapeDescription();
-        std::vector<DimensionType> dataDimensions = tensorShapeDescription.GetInputTensorShape(0);
-        std::vector<DimensionType> indicesDimensions = tensorShapeDescription.GetInputTensorShape(1);
-        std::vector<DimensionType> outputDimensions = tensorShapeDescription.GetOutputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> dataDimensions = tensorShapeDescription.GetInputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> indicesDimensions = tensorShapeDescription.GetInputTensorShape(1);
+        std::vector<OperatorHelper::DimensionType> outputDimensions = tensorShapeDescription.GetOutputTensorShape(0);
 
         size_t dimensionCountMax = std::max({dataDimensions.size(), indicesDimensions.size(), outputDimensions.size()});
         DmlOperator::Initialize(kernelCreationContext, gsl::narrow_cast<uint32_t>(dimensionCountMax));
@@ -53,9 +53,9 @@ public:
         ML_CHECK_VALID_ARGUMENT(kernelCreationContext.GetOutputCount() == 1, "GatherElements expects 1 output.");
 
         auto tensorShapeDescription = kernelCreationContext.GetTensorShapeDescription();
-        std::vector<DimensionType> dataDimensions = tensorShapeDescription.GetInputTensorShape(0);
-        std::vector<DimensionType> indicesDimensions = tensorShapeDescription.GetInputTensorShape(1);
-        std::vector<DimensionType> outputDimensions = tensorShapeDescription.GetOutputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> dataDimensions = tensorShapeDescription.GetInputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> indicesDimensions = tensorShapeDescription.GetInputTensorShape(1);
+        std::vector<OperatorHelper::DimensionType> outputDimensions = tensorShapeDescription.GetOutputTensorShape(0);
 
         size_t dimensionCountMax = std::max({dataDimensions.size(), indicesDimensions.size(), outputDimensions.size()});
         DmlOperator::Initialize(kernelCreationContext, gsl::narrow_cast<uint32_t>(dimensionCountMax));
@@ -79,7 +79,7 @@ public:
     }
 };
 
-class DmlOperatorGatherNd : public DmlOperator, public GatherNdHelper
+class DmlOperatorGatherNd : public DmlOperator, public OperatorHelper::GatherNdHelper
 {
 public:
     DmlOperatorGatherNd(const MLOperatorKernelCreationContext& kernelCreationContext)
@@ -90,9 +90,9 @@ public:
         ML_CHECK_VALID_ARGUMENT(kernelCreationContext.GetOutputCount() == 1, "GatherND expects 1 output.");
 
         auto tensorShapeDescription = kernelCreationContext.GetTensorShapeDescription();
-        std::vector<DimensionType> dataDimensions = tensorShapeDescription.GetInputTensorShape(0);
-        std::vector<DimensionType> indicesDimensions = tensorShapeDescription.GetInputTensorShape(1);
-        std::vector<DimensionType> outputDimensions = tensorShapeDescription.GetOutputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> dataDimensions = tensorShapeDescription.GetInputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> indicesDimensions = tensorShapeDescription.GetInputTensorShape(1);
+        std::vector<OperatorHelper::DimensionType> outputDimensions = tensorShapeDescription.GetOutputTensorShape(0);
 
         size_t dimensionCountMax = std::max({dataDimensions.size(), indicesDimensions.size(), outputDimensions.size()});
         DmlOperator::Initialize(kernelCreationContext, gsl::narrow_cast<uint32_t>(dimensionCountMax));

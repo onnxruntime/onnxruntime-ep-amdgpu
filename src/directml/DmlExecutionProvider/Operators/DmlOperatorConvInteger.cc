@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorConvInteger : public DmlOperator, public ConvolutionHelperBase
+class DmlOperatorConvInteger : public DmlOperator, public OperatorHelper::ConvolutionHelperBase
 {
 private:
     enum InputTensors
@@ -34,8 +34,8 @@ public:
         // DirectML is limited to handle only 2D. So for 1D tensors, massage the tensor descriptions. By default, the
         // TensorDesc simply right aligns all the values up to 4D (padding the leading dimensions with 1's),
         // but 1D tensors actually need to insert the 1 between C and W. e.g. [2,3,4] becomes [2,3,1,4]
-        m_inputTensorDescs[IN_X] = CreateTensorDescFromInput(kernelInfo, 0/*Onnx Index*/, TensorAxis::DoNotCoerce, TensorAxis::NoPlacementAdjustment, NonspatialDimensionCount, std::nullopt);
-        m_inputTensorDescs[IN_F] = CreateTensorDescFromInput(kernelInfo, 1/*Onnx Index*/, TensorAxis::DoNotCoerce, TensorAxis::NoPlacementAdjustment, NonspatialDimensionCount, std::nullopt);
+        m_inputTensorDescs[IN_X] = CreateTensorDescFromInput(kernelInfo, 0/*Onnx Index*/, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::NoPlacementAdjustment, OperatorHelper::NonspatialDimensionCount, std::nullopt);
+        m_inputTensorDescs[IN_F] = CreateTensorDescFromInput(kernelInfo, 1/*Onnx Index*/, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::NoPlacementAdjustment, OperatorHelper::NonspatialDimensionCount, std::nullopt);
 
         uint32_t dmlDimSize = m_inputTensorDescs[0].GetDimensionCount();
 
@@ -44,14 +44,14 @@ public:
         m_inputTensorDescs[IN_F_ZERO_POINT] = CreateTensorDescFromInput(
             kernelInfo,
             3/*Onnx Index*/,
-            TensorAxis::DoNotCoerce,
-            TensorAxis::C,
-            TensorAxis::LeftAligned,
+            OperatorHelper::TensorAxis::DoNotCoerce,
+            OperatorHelper::TensorAxis::C,
+            OperatorHelper::TensorAxis::LeftAligned,
             std::nullopt,
             dmlDimSize
             );
 
-        m_outputTensorDescs[0] = CreateTensorDescFromOutput(kernelInfo, 0, TensorAxis::DoNotCoerce, TensorAxis::NoPlacementAdjustment, NonspatialDimensionCount, std::nullopt);
+        m_outputTensorDescs[0] = CreateTensorDescFromOutput(kernelInfo, 0, OperatorHelper::TensorAxis::DoNotCoerce, OperatorHelper::TensorAxis::NoPlacementAdjustment, OperatorHelper::NonspatialDimensionCount, std::nullopt);
 
         std::vector<DML_TENSOR_DESC> inputDescs = GetDmlInputDescs();
         std::vector<DML_TENSOR_DESC> outputDescs = GetDmlOutputDescs();
@@ -59,7 +59,7 @@ public:
         // Form transient kernel arguments with spatial dimensions padded up to at least 2,
         // since the DirectML API rejects 1D convolution. Leave the base m_kernel alone
         // so that all output tensor size computations are correct.
-        KernelArgs kernelArgs(m_kernel, NchwSpatialDimensionCount);
+        OperatorHelper::KernelArgs kernelArgs(m_kernel, OperatorHelper::NchwSpatialDimensionCount);
 
         DML_CONVOLUTION_INTEGER_OPERATOR_DESC convDesc = {};
         convDesc.InputTensor = &inputDescs[IN_X];

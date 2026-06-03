@@ -3,15 +3,10 @@
 
 #include "precomp.h"
 #include "GraphTransformer.h"
-#include "Operators/OperatorRegistration.h"
 #include "Operators/OperatorUtility.h"
-#include "ExecutionProvider.h"
 #include "GraphPartitioner.h"
 #include "OperatorAuthorHelper/Attributes.h"
-#include "OperatorAuthorHelper/OperatorHelper.h"
-#include "OperatorAuthorHelper/OperatorVersions.h"
 #include "core/framework/kernel_lookup.h"
-#include "core/framework/kernel_registry.h"
 #include "core/framework/kernel_type_str_resolver.h"
 #include "core/graph/graph_utils.h"
 

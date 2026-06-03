@@ -467,11 +467,11 @@ public:
 
         if (kernelInfo.IsInputValid(1))
         {
-            ReadScalarTensorData(kernelInfo.GetConstantInputTensor(1), /*out*/ &opDesc.Min.Bytes, sizeof(opDesc.Min.Bytes));
+            OperatorHelper::ReadScalarTensorData(kernelInfo.GetConstantInputTensor(1), /*out*/ &opDesc.Min.Bytes, sizeof(opDesc.Min.Bytes));
         }
         if (kernelInfo.IsInputValid(2))
         {
-            ReadScalarTensorData(kernelInfo.GetConstantInputTensor(2), /*out*/ &opDesc.Max.Bytes, sizeof(opDesc.Max.Bytes));
+            OperatorHelper::ReadScalarTensorData(kernelInfo.GetConstantInputTensor(2), /*out*/ &opDesc.Max.Bytes, sizeof(opDesc.Max.Bytes));
         }
 
         SetDmlOperatorDesc({ DML_OPERATOR_ELEMENT_WISE_CLIP1, &opDesc}, kernelInfo);
@@ -503,7 +503,7 @@ public:
             DML_ELEMENT_WISE_CONSTANT_POW_OPERATOR_DESC opDesc = {};
             opDesc.InputTensor = &inputDescs[0];
             opDesc.OutputTensor = &outputDescs[0];
-            opDesc.Exponent = static_cast<float>(ReadScalarTensorCastToFloat64(*constExpTensor));
+            opDesc.Exponent = static_cast<float>(OperatorHelper::ReadScalarTensorCastToFloat64(*constExpTensor));
 
             SetDmlOperatorDesc({ DML_OPERATOR_ELEMENT_WISE_CONSTANT_POW, &opDesc}, kernelInfo);
         }
@@ -553,7 +553,7 @@ public:
             // "axis" attribute even when the attribute doesn't actually exist in the model, which
             // would cause a validation failure here.
             const int32_t signedAxis = gsl::narrow_cast<int32_t>(kernelInfo.GetAttribute<int64_t>(AttrName::Axis));
-            axis = HandleNegativeAxis(signedAxis, outputShapeDimCount, /*validateAxis*/ false);
+            axis = OperatorHelper::HandleNegativeAxis(signedAxis, outputShapeDimCount, /*validateAxis*/ false);
         }
 
         // Explicitly reshape each of the inputs after the first input (scale tensor and optional zero point tensor).
@@ -593,10 +593,10 @@ public:
                 edgeDesc.tensorDataType,
                 gsl::make_span(outputShape),
                 gsl::make_span(inputTensorShape),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
-                NchwDimensionCount, // minDimensionCount
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
+                OperatorHelper::NchwDimensionCount, // minDimensionCount
                 0 // guaranteedBaseOffsetAlignment
             );
         }

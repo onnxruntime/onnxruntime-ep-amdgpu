@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 // QLinearConcat = Dequantize + Join + Quantize
-class DmlOperatorQLinearConcat : public DmlOperator, public QLinearConcatHelper
+class DmlOperatorQLinearConcat : public DmlOperator, public OperatorHelper::QLinearConcatHelper
 {
     // This order matches the ONNX schema.
     enum OnnxInputIndex
@@ -40,10 +40,10 @@ public:
             yScaleDataType,
             outputShape,
             kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(OnnxInputIndex::YScale),
-            TensorAxis::DoNotCoerce,
-            TensorAxis::W,
-            TensorAxis::RightAligned,
-            NchwDimensionCount, // minDimensionCount
+            OperatorHelper::TensorAxis::DoNotCoerce,
+            OperatorHelper::TensorAxis::W,
+            OperatorHelper::TensorAxis::RightAligned,
+            OperatorHelper::NchwDimensionCount, // minDimensionCount
             0 // guaranteedBaseOffsetAlignment
         );
 
@@ -51,10 +51,10 @@ public:
             yZeroPointDataType,
             outputShape,
             kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(OnnxInputIndex::YZeroPoint),
-            TensorAxis::DoNotCoerce,
-            TensorAxis::W,
-            TensorAxis::RightAligned,
-            NchwDimensionCount, // minDimensionCount
+            OperatorHelper::TensorAxis::DoNotCoerce,
+            OperatorHelper::TensorAxis::W,
+            OperatorHelper::TensorAxis::RightAligned,
+            OperatorHelper::NchwDimensionCount, // minDimensionCount
             0 // guaranteedBaseOffsetAlignment
         );
 
@@ -73,10 +73,10 @@ public:
                 xScaleDataType,
                 kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(tupleStartIndex),
                 kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(tupleStartIndex + 1),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
-                NchwDimensionCount, // minDimensionCount
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
+                OperatorHelper::NchwDimensionCount, // minDimensionCount
                 0 // guaranteedBaseOffsetAlignment
             );
 
@@ -84,10 +84,10 @@ public:
                 xZeroPointDataType,
                 kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(tupleStartIndex),
                 kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(tupleStartIndex + 2),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
-                NchwDimensionCount, // minDimensionCount
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
+                OperatorHelper::NchwDimensionCount, // minDimensionCount
                 0 // guaranteedBaseOffsetAlignment
             );
         }
@@ -111,10 +111,10 @@ public:
                 MLOperatorTensorDataType::Float,
                 kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(tupleStartIndex),
                 kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(tupleStartIndex),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
-                NchwDimensionCount, // minDimensionCount
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
+                OperatorHelper::NchwDimensionCount, // minDimensionCount
                 0 // guaranteedBaseOffsetAlignment)
             );
             namedDequantizeOperatorDescs[inputIndex] = intermediateOutputTensorDescs[inputIndex].GetDmlDesc();
@@ -135,10 +135,10 @@ public:
             MLOperatorTensorDataType::Float,
             outputShape,
             outputShape,
-            TensorAxis::DoNotCoerce,
-            TensorAxis::W,
-            TensorAxis::RightAligned,
-            NchwDimensionCount, // minDimensionCount
+            OperatorHelper::TensorAxis::DoNotCoerce,
+            OperatorHelper::TensorAxis::W,
+            OperatorHelper::TensorAxis::RightAligned,
+            OperatorHelper::NchwDimensionCount, // minDimensionCount
             0 // guaranteedBaseOffsetAlignment
             );
         DML_TENSOR_DESC namedJoinOutputTensorDesc = joinOutputTensorDesc.GetDmlDesc();

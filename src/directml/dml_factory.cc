@@ -4,21 +4,38 @@
 #include <string>
 #include <DirectML.h>
 
-#include "dml_provider_factory.h"
-
 #include "dml_ep.h"
 #include "dml_factory.h"
 
 namespace dml_ep {
 
-static bool IsHardwareAdapter(IDXCoreAdapter* adapter)
+namespace {
+
+enum class DeviceFilter : uint32_t {
+    Any [[maybe_unused]] = 0xffffffff,
+    Gpu = 1 << 0,
+    Npu = 1 << 1,
+};
+
+DeviceFilter operator & (DeviceFilter a, DeviceFilter b) {
+    return static_cast<DeviceFilter>(static_cast<unsigned int>(a) & static_cast<unsigned int>(b));
+}
+
+enum class PerformancePreference {
+    Default [[maybe_unused]] = 0,
+    HighPerformance [[maybe_unused]] = 1,
+    MinimumPower = 2
+};
+
+
+bool IsHardwareAdapter(IDXCoreAdapter* adapter)
 {
     bool is_hardware = false;
     THROW_IF_FAILED(adapter->GetProperty(DXCoreAdapterProperty::IsHardware, &is_hardware));
     return is_hardware;
 }
 
-static bool IsGPU(IDXCoreAdapter* compute_adapter)
+bool IsGPU(IDXCoreAdapter* compute_adapter)
 {
     // Only considering hardware adapters
     if (!IsHardwareAdapter(compute_adapter))
@@ -28,7 +45,7 @@ static bool IsGPU(IDXCoreAdapter* compute_adapter)
     return compute_adapter->IsAttributeSupported(DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS);
 }
 
-static bool IsNPU(IDXCoreAdapter* compute_adapter)
+bool IsNPU(IDXCoreAdapter* compute_adapter)
 {
     // Only considering hardware adapters
     if (!IsHardwareAdapter(compute_adapter))
@@ -40,19 +57,17 @@ static bool IsNPU(IDXCoreAdapter* compute_adapter)
 
 enum class DeviceType { GPU, NPU, BadDevice };
 
-static DeviceType FilterAdapterTypeQuery(IDXCoreAdapter* adapter, OrtDmlDeviceFilter filter)
+DeviceType FilterAdapterTypeQuery(IDXCoreAdapter* adapter, DeviceFilter filter)
 {
-    auto allow_gpus = (filter & OrtDmlDeviceFilter::Gpu) == OrtDmlDeviceFilter::Gpu;
+    auto allow_gpus = (filter & DeviceFilter::Gpu) == DeviceFilter::Gpu;
     if (IsGPU(adapter) && allow_gpus) {
         return DeviceType::GPU;
     }
 
-#ifdef ENABLE_NPU_ADAPTER_ENUMERATION
-    auto allow_npus = (filter & OrtDmlDeviceFilter::Npu) == OrtDmlDeviceFilter::Npu;
+    auto allow_npus = (filter & DeviceFilter::Npu) == DeviceFilter::Npu;
     if (IsNPU(adapter) && allow_npus) {
         return DeviceType::NPU;
     }
-#endif
 
     return DeviceType::BadDevice;
 }
@@ -63,7 +78,8 @@ struct AdapterInfo
     Microsoft::WRL::ComPtr<IDXCoreAdapter> Adapter;
     DeviceType Type; // GPU or NPU
 };
-static Microsoft::WRL::ComPtr<IDXCoreAdapterList> EnumerateDXCoreAdapters(IDXCoreAdapterFactory* adapter_factory) {
+
+Microsoft::WRL::ComPtr<IDXCoreAdapterList> EnumerateDXCoreAdapters(IDXCoreAdapterFactory* adapter_factory) {
     Microsoft::WRL::ComPtr<IDXCoreAdapterList> adapter_list;
 
     // TODO: use_dxcore_workload_enumeration should be determined by QI
@@ -82,7 +98,7 @@ static Microsoft::WRL::ComPtr<IDXCoreAdapterList> EnumerateDXCoreAdapters(IDXCor
     return adapter_list;
 }
 
-static void SortDXCoreAdaptersByPreference(IDXCoreAdapterList* adapter_list, OrtDmlPerformancePreference preference)
+void SortDXCoreAdaptersByPreference(IDXCoreAdapterList* adapter_list, PerformancePreference preference)
 {
     if (adapter_list->GetAdapterCount() <= 1)
     {
@@ -94,7 +110,7 @@ static void SortDXCoreAdaptersByPreference(IDXCoreAdapterList* adapter_list, Ort
 
     // If callers specify minimum power change the DXCore sort policy
     // NOTE DXCoreAdapterPrefernce does not apply to mixed adapter lists - only to GPU lists
-    if (preference == OrtDmlPerformancePreference::MinimumPower)
+    if (preference == PerformancePreference::MinimumPower)
     {
         adapter_list_preferences[0] = DXCoreAdapterPreference::MinimumPower;
     }
@@ -102,7 +118,7 @@ static void SortDXCoreAdaptersByPreference(IDXCoreAdapterList* adapter_list, Ort
     THROW_IF_FAILED(adapter_list->Sort(static_cast<uint32_t>(adapter_list_preferences.size()), adapter_list_preferences.data()));
 }
 
-static std::vector<AdapterInfo> FilterDXCoreAdapters(IDXCoreAdapterList* adapter_list, OrtDmlDeviceFilter filter)
+std::vector<AdapterInfo> FilterDXCoreAdapters(IDXCoreAdapterList* adapter_list, DeviceFilter filter)
 {
     auto adapter_infos = std::vector<AdapterInfo>();
     const uint32_t count = adapter_list->GetAdapterCount();
@@ -120,23 +136,21 @@ static std::vector<AdapterInfo> FilterDXCoreAdapters(IDXCoreAdapterList* adapter
     return adapter_infos;
 }
 
-static void SortHeterogenousDXCoreAdapterList(std::vector<AdapterInfo>& adapter_infos, OrtDmlDeviceFilter filter,
-                                              OrtDmlPerformancePreference preference)
+void SortHeterogenousDXCoreAdapterList(std::vector<AdapterInfo>& adapter_infos, DeviceFilter filter,
+                                              PerformancePreference preference)
 {
     if (adapter_infos.size() <= 1)
     {
         return;
     }
 
-#ifdef ENABLE_NPU_ADAPTER_ENUMERATION
     // When considering both GPUs and NPUs sort them by performance preference
     // of Default (Gpus first), HighPerformance (GPUs first), or LowPower (NPUs first)
-    auto keep_npus = (filter & OrtDmlDeviceFilter::Npu) == OrtDmlDeviceFilter::Npu;
-    auto only_npus = filter == OrtDmlDeviceFilter::Npu;
+    auto keep_npus = (filter & DeviceFilter::Npu) == DeviceFilter::Npu;
+    auto only_npus = filter == DeviceFilter::Npu;
     if (!keep_npus || only_npus) {
         return;
     }
-#endif
 
     struct SortingPolicy {
         // default is false because GPUs are considered higher priority in
@@ -150,19 +164,17 @@ static void SortHeterogenousDXCoreAdapterList(std::vector<AdapterInfo>& adapter_
         }
     };
 
-    auto npus_first = (preference == OrtDmlPerformancePreference::MinimumPower);
+    auto npus_first = (preference == PerformancePreference::MinimumPower);
     auto policy = SortingPolicy(npus_first);
     std::sort(adapter_infos.begin(), adapter_infos.end(), policy);
 }
 
-static D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* d3d12_device)
+D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* d3d12_device)
 {
     D3D12_FEATURE_DATA_FEATURE_LEVELS feature_levels = {};
 
     D3D_FEATURE_LEVEL feature_levels_list[] = {
-#ifndef _GAMING_XBOX
         D3D_FEATURE_LEVEL_1_0_GENERIC,
-#endif
         D3D_FEATURE_LEVEL_1_0_CORE,
         D3D_FEATURE_LEVEL_11_0,
         D3D_FEATURE_LEVEL_11_1,
@@ -182,14 +194,17 @@ static D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* d3d12_devi
     return D3D12_COMMAND_LIST_TYPE_DIRECT;
 }
 
+}  // namespace
+
 ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, std::string_view ep_name, const Ort::Logger& default_logger)
     : OrtEpFactory{ORT_API_VERSION},
       ApiPtrs{api_ptrs},
       default_logger_{default_logger},
       ep_name_{ep_name},
-      bucketized_buffer_memory_info_{nullptr},
-      readonly_memory_info_{nullptr},
-      cpu_input_allocator_{nullptr},
+      bucketized_buffer_memory_info_{"directML_ep_gpu", OrtMemoryInfoDeviceType_GPU, amd::VendorId,
+          0, OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator},
+      cpu_input_allocator_{"directML_ep_cpu", OrtMemoryInfoDeviceType_CPU, amd::VendorId, 0,
+          OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator},
       dml_data_transfer_implementation{std::make_unique<DMLDataTransfer>(api_ptrs)}
 {
     GetName = GetNameImpl;
@@ -220,25 +235,6 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, std::string_view ep_na
 
     GetNumCustomOpDomains = GetNumCustomOpDomainsImpl;
     GetCustomOpDomains = GetCustomOpDomainsImpl;
-
-    bucketized_buffer_memory_info_ = Ort::MemoryInfo{
-                                "directML_ep_gpu",
-                                OrtMemoryInfoDeviceType_GPU,
-                                vendor_id_,
-                                0,
-                                OrtDeviceMemoryType_DEFAULT,
-                                0,
-                                OrtDeviceAllocator};
-
-    cpu_input_allocator_ = Ort::MemoryInfo{
-                                "directML_ep_cpu",
-                                OrtMemoryInfoDeviceType_CPU,
-                                vendor_id_,
-                                0,
-                                OrtDeviceMemoryType_DEFAULT,
-                                0,
-                                OrtDeviceAllocator};\
-
 }
 
 const char* ORT_API_CALL ProviderFactory::GetNameImpl(const OrtEpFactory* this_ptr) noexcept {
@@ -246,14 +242,12 @@ const char* ORT_API_CALL ProviderFactory::GetNameImpl(const OrtEpFactory* this_p
     return factory->ep_name_.c_str();
 }
 
-const char* ORT_API_CALL ProviderFactory::GetVendorImpl(const OrtEpFactory* this_ptr) noexcept {
-    const auto* factory = static_cast<const ProviderFactory*>(this_ptr);
-    return factory->vendor_.c_str();
+const char* ORT_API_CALL ProviderFactory::GetVendorImpl(const OrtEpFactory* /* this_ptr */) noexcept {
+    return amd::Vendor;
 }
 
-uint32_t ORT_API_CALL ProviderFactory::GetVendorIdImpl(const OrtEpFactory* this_ptr) noexcept {
-    const auto* factory = static_cast<const ProviderFactory*>(this_ptr);
-    return factory->vendor_id_;
+uint32_t ORT_API_CALL ProviderFactory::GetVendorIdImpl(const OrtEpFactory* /* this_ptr */) noexcept {
+    return amd::VendorId;
 }
 
 const char* ORT_API_CALL ProviderFactory::GetVersionImpl(const OrtEpFactory* this_ptr) noexcept {
@@ -309,7 +303,7 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> cmd_queue = factory->CreateCommandQueue(d3d12_device);
     Microsoft::WRL::ComPtr<IDMLDevice> dml_device = factory->CreateDMLDevice(d3d12_device);
 
-    auto context = wil::MakeOrThrow<PluginDmlExecutionContext>(
+    auto context = wil::MakeOrThrow<ExecutionContext>(
         d3d12_device.Get(), 
         dml_device.Get(),
         cmd_queue.Get(),
@@ -329,7 +323,7 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
     // Attach the new EP to the factory-owned data transfer so copies can be serviced.
     if (factory->dml_data_transfer_implementation) {
         factory->dml_data_transfer_implementation->AttachExecutionProvider(
-            factory->m_ep_raw->GetInternetalExecutionProvider());
+            factory->m_ep_raw->GetInternalExecutionProvider());
         factory->dml_data_transfer_implementation->AttachFactoryEpRef(&factory->m_ep_raw);
     }
 
@@ -428,9 +422,9 @@ typedef HRESULT(WINAPI* PFN_DXCoreCreateAdapterFactory)(REFIID riid, void** ppvF
 
 std::vector<Microsoft::WRL::ComPtr<IDXCoreAdapter>> ProviderFactory::GetAdapters()
 {
-    // For now assume preference is always perfer max performance and filter for gpu only
-    OrtDmlPerformancePreference preference = OrtDmlPerformancePreference::HighPerformance;
-    OrtDmlDeviceFilter filter = OrtDmlDeviceFilter::Gpu;
+    // For now assume preference is always prefer max performance and filter for gpu only
+    PerformancePreference preference = PerformancePreference::HighPerformance;
+    DeviceFilter filter = DeviceFilter::Gpu;
 
     // Load dxcore.dll. We do this manually so there's not a hard dependency on dxcore which is newer.
     wil::unique_hmodule dxcore_lib{LoadLibraryExW(L"dxcore.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
@@ -497,11 +491,11 @@ void ProviderFactory::CreateD3DDeviceFromAdapter(IDXCoreAdapter* adapter, Micros
     if (feature_level == D3D_FEATURE_LEVEL_1_0_GENERIC) {
         // Attempt to create a D3D_FEATURE_LEVEL_1_0_CORE device first, in case the device supports this
         // feature level and the D3D runtime does not support D3D_FEATURE_LEVEL_1_0_GENERIC
-        HRESULT hrUnused = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_1_0_CORE, IID_GRAPHICS_PPV_ARGS(device.ReleaseAndGetAddressOf()));
+        HRESULT hrUnused = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_1_0_CORE, IID_PPV_ARGS(device.ReleaseAndGetAddressOf()));
     }
 
     if (!device) {
-        THROW_IF_FAILED(D3D12CreateDevice(adapter, feature_level, IID_GRAPHICS_PPV_ARGS(device.ReleaseAndGetAddressOf())));
+        THROW_IF_FAILED(D3D12CreateDevice(adapter, feature_level, IID_PPV_ARGS(device.ReleaseAndGetAddressOf())));
     }
 }
 
@@ -518,7 +512,7 @@ void ProviderFactory::CreateDMLAndD3DResources()
     cmd_queue_desc.Type = CalculateCommandListType(d3d12_device.Get());
     cmd_queue_desc.Flags = D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT;
 
-    THROW_IF_FAILED(d3d12_device->CreateCommandQueue(&cmd_queue_desc, IID_GRAPHICS_PPV_ARGS(cmd_queue.ReleaseAndGetAddressOf())));
+    THROW_IF_FAILED(d3d12_device->CreateCommandQueue(&cmd_queue_desc, IID_PPV_ARGS(cmd_queue.ReleaseAndGetAddressOf())));
 
     dml_device = CreateDMLDevice(d3d12_device);
 }
@@ -541,7 +535,7 @@ Microsoft::WRL::ComPtr<ID3D12CommandQueue> ProviderFactory::CreateCommandQueue(c
     cmd_queue_desc.Flags = D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT;
 
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> cmd_queue;
-    THROW_IF_FAILED(device->CreateCommandQueue(&cmd_queue_desc, IID_GRAPHICS_PPV_ARGS(cmd_queue.ReleaseAndGetAddressOf())));
+    THROW_IF_FAILED(device->CreateCommandQueue(&cmd_queue_desc, IID_PPV_ARGS(cmd_queue.ReleaseAndGetAddressOf())));
 
     return cmd_queue;
 }

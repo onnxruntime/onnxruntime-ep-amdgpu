@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorConstantOfShape : public DmlOperator, public ConstantOfShapeHelper
+class DmlOperatorConstantOfShape : public DmlOperator, public OperatorHelper::ConstantOfShapeHelper
 {
 public:
     using Self = DmlOperatorConstantOfShape;

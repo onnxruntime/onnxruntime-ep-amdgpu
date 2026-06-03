@@ -158,7 +158,7 @@ const char* ProviderFactory::GetName() const {
 }
 
 const char* ProviderFactory::GetVendor() const {
-    return amd::Vendor.data();
+    return amd::Vendor;
 }
 
 Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHardwareDevice>& devices,

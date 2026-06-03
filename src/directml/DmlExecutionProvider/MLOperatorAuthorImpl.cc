@@ -10,13 +10,13 @@
 #include "core/framework/tensor_type_and_shape.h"
 #include "core/framework/onnxruntime_sequence_type_info.h"
 
-#include <onnxruntime_c_api.h>
 #include "DmlExecutionProvider/inc/MLOperatorAuthor.h"
 
 #include "DmlExecutionProvider/MLOperatorAuthorImpl.h"
 #include "OperatorAuthorHelper/MLOperatorAuthorPrivate.h"
 
 namespace dml_ep {
+
     // Helper functions to handle both TypeProto* and OrtTypeInfo* polymorphically
     namespace {
         // TypeProto* overload

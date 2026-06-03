@@ -79,7 +79,6 @@ void PluginDmlCommandRecorder::InitializeOperator(
     if (inputArrayBinding.Type != DML_BINDING_TYPE_NONE)
     {
         // An operator with inputs to bind MUST use a BUFFER_ARRAY.
-        assert(inputArrayBinding.Type == DML_BINDING_TYPE_BUFFER_ARRAY);
         bindingTable->BindInputs(1, &inputArrayBinding);
     }
 
@@ -87,7 +86,6 @@ void PluginDmlCommandRecorder::InitializeOperator(
     if (persistentResourceBinding.Type != DML_BINDING_TYPE_NONE)
     {
         // Persistent resources MUST be bound as buffers.
-        assert(persistentResourceBinding.Type == DML_BINDING_TYPE_BUFFER);
         bindingTable->BindOutputs(1, &persistentResourceBinding);
     }
 
@@ -194,13 +192,8 @@ void PluginDmlCommandRecorder::FillBufferWithPattern(
         std::byte bytes[16];
     } fillPattern = {};
 
-    assert(ARRAYSIZE(fillPattern.bytes) == 16);
-    assert(value.size() <= ARRAYSIZE(fillPattern.bytes)); // No element is expected larger than 128 bits (e.g. complex128).
-
     if (!value.empty())
     {
-        assert(ARRAYSIZE(fillPattern.bytes) % value.size() == 0); // Should fit evenly into 16 bytes (e.g. uint8, float16, uint32, float64...).
-
         // Repeat the value multiple times into the pattern buffer.
         size_t valueIndex = 0;
         for (std::byte& p : fillPattern.bytes)
@@ -310,8 +303,6 @@ void PluginDmlCommandRecorder::AddUAVBarrier()
 
 void PluginDmlCommandRecorder::Open()
 {
-    assert(m_currentDescriptorHeap == nullptr);
-
     ID3D12CommandAllocator* allocator = m_commandAllocatorRing.GetNextAllocator(m_queue->GetNextCompletionEvent());
 
     if (!m_cachedCommandList)
@@ -321,7 +312,7 @@ void PluginDmlCommandRecorder::Open()
             m_queue->GetType(),
             allocator,
             nullptr,
-            IID_GRAPHICS_PPV_ARGS(m_currentCommandList.ReleaseAndGetAddressOf())));
+            IID_PPV_ARGS(m_currentCommandList.ReleaseAndGetAddressOf())));
     }
     else
     {

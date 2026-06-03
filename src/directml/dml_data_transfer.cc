@@ -2,7 +2,9 @@
 // Licensed under the MIT License.
 
 #include "dml_data_transfer.h"
-#include <gsl/span>
+
+#include "dml_ep.h"
+#include "dml_execution_provider.h"
 
 namespace dml_ep {
 
@@ -11,7 +13,6 @@ DMLDataTransfer::DMLDataTransfer(ApiPtrs api_ptrs) : ApiPtrs(api_ptrs)
     CanCopy = CanCopyImpl;
     CopyTensors = CopyTensorsImpl;
     Release = ReleaseImpl;
-
 }
 
 void DMLDataTransfer::AttachExecutionProvider(std::shared_ptr<PluginDmlExecutionProviderImpl> ep)
@@ -24,7 +25,6 @@ void DMLDataTransfer::AttachFactoryEpRef(ExecutionProviderPlugin** ep_raw_ref)
     m_ep_raw_ref = ep_raw_ref;
 }
 
-/*static*/
 bool ORT_API_CALL DMLDataTransfer::CanCopyImpl(const OrtDataTransferImpl* this_ptr,
                                                const OrtMemoryDevice* src_memory_device,
                                                const OrtMemoryDevice* dst_memory_device) noexcept
@@ -58,7 +58,7 @@ OrtStatus* ORT_API_CALL DMLDataTransfer::CopyTensorsImpl(OrtDataTransferImpl* th
     // Lazy attach: if the EP was not attached at construction time (factory-level transfer
     // created before the EP instance), resolve it now via the pointer to the factory's m_ep_raw.
     if (!impl.m_executionProvider && impl.m_ep_raw_ref && *impl.m_ep_raw_ref) {
-        impl.m_executionProvider = (*impl.m_ep_raw_ref)->GetInternetalExecutionProvider();
+        impl.m_executionProvider = (*impl.m_ep_raw_ref)->GetInternalExecutionProvider();
     }
 
     if (!impl.m_executionProvider) {

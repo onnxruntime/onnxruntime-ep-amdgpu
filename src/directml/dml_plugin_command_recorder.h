@@ -7,7 +7,6 @@
 #include "DmlExecutionProvider/ICommandRecorder.h"
 #include "DmlExecutionProvider/CommandAllocatorRing.h"
 #include "DmlExecutionProvider/DescriptorPool.h"
-#include <gsl/span>
 
 namespace dml_ep {
 

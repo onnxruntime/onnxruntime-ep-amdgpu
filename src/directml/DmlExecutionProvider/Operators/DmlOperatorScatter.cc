@@ -16,10 +16,10 @@ public:
         ML_CHECK_VALID_ARGUMENT(kernelCreationContext.GetOutputCount() == 1, "Scatter expects 1 output.");
 
         auto tensorShapeDescription = kernelCreationContext.GetTensorShapeDescription();
-        std::vector<DimensionType> dataDimensions = tensorShapeDescription.GetInputTensorShape(0);
-        std::vector<DimensionType> indicesDimensions = tensorShapeDescription.GetInputTensorShape(1);
-        std::vector<DimensionType> updatesDimensions = tensorShapeDescription.GetInputTensorShape(2);
-        std::vector<DimensionType> outputDimensions = tensorShapeDescription.GetOutputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> dataDimensions = tensorShapeDescription.GetInputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> indicesDimensions = tensorShapeDescription.GetInputTensorShape(1);
+        std::vector<OperatorHelper::DimensionType> updatesDimensions = tensorShapeDescription.GetInputTensorShape(2);
+        std::vector<OperatorHelper::DimensionType> outputDimensions = tensorShapeDescription.GetOutputTensorShape(0);
         ML_CHECK_VALID_ARGUMENT(dataDimensions == outputDimensions);
         ML_CHECK_VALID_ARGUMENT(indicesDimensions == updatesDimensions);
         ML_CHECK_VALID_ARGUMENT(dataDimensions.size() == indicesDimensions.size());
@@ -29,7 +29,7 @@ public:
         if (OperatorHelper::ContainsEmptyDimensions(indicesDimensions))
         {
             std::vector<std::optional<uint32_t>> kernelInputIndices(1, 0);
-            DmlOperator::Initialize(kernelCreationContext, kernelInputIndices);
+            Initialize(kernelCreationContext, kernelInputIndices);
 
             std::vector<DML_TENSOR_DESC> inputDescs = GetDmlInputDescs();
             std::vector<DML_TENSOR_DESC> outputDescs = GetDmlOutputDescs();
@@ -47,7 +47,7 @@ public:
         }
         else
         {
-            DmlOperator::Initialize(kernelCreationContext);
+            Initialize(kernelCreationContext);
 
             std::vector<DML_TENSOR_DESC> inputDescs = GetDmlInputDescs();
             std::vector<DML_TENSOR_DESC> outputDescs = GetDmlOutputDescs();
@@ -81,14 +81,14 @@ public:
         ML_CHECK_VALID_ARGUMENT(kernelCreationContext.GetOutputCount() == 1, "ScatterND expects 1 output.");
 
         auto tensorShapeDescription = kernelCreationContext.GetTensorShapeDescription();
-        std::vector<DimensionType> dataDimensions = tensorShapeDescription.GetInputTensorShape(0);
-        std::vector<DimensionType> indicesDimensions = tensorShapeDescription.GetInputTensorShape(1);
-        std::vector<DimensionType> updatesDimensions = tensorShapeDescription.GetInputTensorShape(2);
-        std::vector<DimensionType> outputDimensions = tensorShapeDescription.GetOutputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> dataDimensions = tensorShapeDescription.GetInputTensorShape(0);
+        std::vector<OperatorHelper::DimensionType> indicesDimensions = tensorShapeDescription.GetInputTensorShape(1);
+        std::vector<OperatorHelper::DimensionType> updatesDimensions = tensorShapeDescription.GetInputTensorShape(2);
+        std::vector<OperatorHelper::DimensionType> outputDimensions = tensorShapeDescription.GetOutputTensorShape(0);
         ML_CHECK_VALID_ARGUMENT(dataDimensions == outputDimensions);
 
         size_t dimensionCountMax = std::max({dataDimensions.size(), updatesDimensions.size(), indicesDimensions.size(), outputDimensions.size()});
-        DmlOperator::Initialize(kernelCreationContext, gsl::narrow_cast<uint32_t>(dimensionCountMax));
+        Initialize(kernelCreationContext, gsl::narrow_cast<uint32_t>(dimensionCountMax));
 
         std::vector<DML_TENSOR_DESC> inputDescs = GetDmlInputDescs();
         std::vector<DML_TENSOR_DESC> outputDescs = GetDmlOutputDescs();

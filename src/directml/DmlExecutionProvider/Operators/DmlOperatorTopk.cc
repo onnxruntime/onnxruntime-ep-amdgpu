@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorTopK : public DmlOperator, public TopKHelper
+class DmlOperatorTopK : public DmlOperator, public OperatorHelper::TopKHelper
 {
 public:
     using Self = DmlOperatorTopK;

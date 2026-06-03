@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorOneHot : public DmlOperator, OneHotHelper
+class DmlOperatorOneHot : public DmlOperator, OperatorHelper::OneHotHelper
 {
 public:
     using Self = DmlOperatorOneHot;
@@ -34,9 +34,9 @@ public:
                 m_inputTensorDescs[0].GetMlOperatorDataType(),
                 gsl::make_span(indicesDimensions),
                 gsl::make_span(indicesDimensions),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
                 1, // minDimensionCount
                 0
             );
@@ -46,9 +46,9 @@ public:
                 m_outputTensorDescs[0].GetMlOperatorDataType(),
                 gsl::make_span(m_outputDimensions),
                 gsl::make_span(m_outputDimensions),
-                TensorAxis::DoNotCoerce,
-                TensorAxis::W,
-                TensorAxis::RightAligned,
+                OperatorHelper::TensorAxis::DoNotCoerce,
+                OperatorHelper::TensorAxis::W,
+                OperatorHelper::TensorAxis::RightAligned,
                 1, // minDimensionCount
                 0
             );

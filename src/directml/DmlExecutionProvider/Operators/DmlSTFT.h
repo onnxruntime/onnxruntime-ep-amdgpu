@@ -354,7 +354,7 @@ public:
         descriptorHeapDesc.NumDescriptors = execBindingProps.RequiredDescriptorCount;
         descriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 
-        ORT_THROW_IF_FAILED(m_d3dDevice->CreateDescriptorHeap(&descriptorHeapDesc, IID_GRAPHICS_PPV_ARGS(&m_framingOperator.descriptorHeap)));
+        ORT_THROW_IF_FAILED(m_d3dDevice->CreateDescriptorHeap(&descriptorHeapDesc, IID_PPV_ARGS(&m_framingOperator.descriptorHeap)));
 
         DML_BINDING_TABLE_DESC bindingTableDesc = {};
         bindingTableDesc.Dispatchable = m_framingOperator.op.Get();

@@ -6,7 +6,7 @@
 namespace dml_ep {
 
 
-class DmlOperatorShape : public DmlOperator, ShapeHelper
+class DmlOperatorShape : public DmlOperator, OperatorHelper::ShapeHelper
 {
 public:
     DmlOperatorShape(const MLOperatorKernelCreationContext& kernelCreationContext)
