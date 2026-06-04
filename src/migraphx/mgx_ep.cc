@@ -12,6 +12,8 @@
 #include <migraphx/migraphx.hpp>
 #include <migraphx/version.h>
 
+#include "onnxruntime_session_options_config_keys.h"
+
 #include "common/constants.h"
 #include "common/enumerate.h"
 #include "common/env_var.h"
@@ -212,10 +214,6 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
                 return true;
             }
         }
-    } else if (op_type == "NonZero") {
-        if (!CanEvalNodeArgument(graph, node, {0})) {
-            return true;
-        }
     } else if (op_type == "OneHot") {
         if (!CanEvalNodeArgument(graph, node, {1})) {
             return true;
@@ -410,10 +408,20 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     const Ort::KeyValuePairs key_value_pairs{ort_key_value_pairs};
     const std::string ep_prefix{"ep." + lowercase + "."};
 
+    static constexpr std::array<std::string_view, 5> session_ep_context_keys{
+        std::string_view{kOrtSessionOptionEpContextEnable},
+        std::string_view{kOrtSessionOptionEpContextFilePath},
+        std::string_view{kOrtSessionOptionEpContextEmbedMode},
+        std::string_view{kOrtSessionOptionEpContextNodeNamePrefix},
+        std::string_view{kOrtSessionOptionsEpContextModelExternalInitializersFileName},
+    };
+
     ProviderOptions provider_options;
     for (const auto& [key, value] : key_value_pairs.GetKeyValuePairs()) {
         if (key.rfind(ep_prefix, 0) == 0) {
             provider_options.emplace(key.substr(ep_prefix.length()), value);
+        } else if (ranges::find(session_ep_context_keys, key) != session_ep_context_keys.end()) {
+            provider_options.emplace(key, value);
         }
     }
 
