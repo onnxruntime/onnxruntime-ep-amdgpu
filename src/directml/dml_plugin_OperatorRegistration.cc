@@ -26,29 +26,32 @@ using namespace OperatorHelper;
 
 namespace onnxruntime {
 
-constexpr auto DirectMLExecutionProvider = "DirectMLExecutionProvider";
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, SequenceAt);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, SequenceConstruct);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, SequenceEmpty);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, SequenceLength);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, ConcatFromSequence);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, SequenceErase);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, SequenceInsert);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 15, OptionalHasElement);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 15, OptionalGetElement);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 18, OptionalHasElement);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 18, OptionalGetElement);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 7, If);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, If);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 13, If);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 16, If);
-class ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 19, If);
+// Compile-time token used solely to generate unique C++ class names via
+// ONNX_OPERATOR_KERNEL_CLASS_NAME. This string is NOT the runtime provider name —
+// it is overwritten with the actual EP name before kernel registration.
+constexpr auto kKernelClassProviderToken = "DmlEpKernelClass";
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, SequenceAt);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, SequenceConstruct);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, SequenceEmpty);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, SequenceLength);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, ConcatFromSequence);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, SequenceErase);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, SequenceInsert);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 15, OptionalHasElement);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 15, OptionalGetElement);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 18, OptionalHasElement);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 18, OptionalGetElement);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 7, If);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, If);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 13, If);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 16, If);
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 19, If);
 
 ONNX_OPERATOR_KERNEL_EX(
     SequenceAt,
     kOnnxDomain,
     11,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .InputMemoryType(OrtMemTypeCPUInput, 1)
         .TypeConstraint("S", DataTypeImpl::AllFixedSizeSequenceTensorTypes())
@@ -62,7 +65,7 @@ ONNX_OPERATOR_KERNEL_EX(
     SequenceConstruct,
     kOnnxDomain,
     11,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .TypeConstraint("T", DataTypeImpl::AllFixedSizeTensorTypes())
         .TypeConstraint("S", DataTypeImpl::AllFixedSizeSequenceTensorTypes()),
@@ -72,7 +75,7 @@ ONNX_OPERATOR_KERNEL_EX(
     SequenceEmpty,
     kOnnxDomain,
     11,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .TypeConstraint("S", DataTypeImpl::AllFixedSizeSequenceTensorTypes()),
     SequenceEmpty);
@@ -81,7 +84,7 @@ ONNX_OPERATOR_KERNEL_EX(
     SequenceLength,
     kOnnxDomain,
     11,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .OutputMemoryType(OrtMemTypeCPUInput, 0)
         .TypeConstraint("S", DataTypeImpl::AllFixedSizeSequenceTensorTypes())
@@ -92,7 +95,7 @@ ONNX_OPERATOR_KERNEL_EX(
     SequenceErase,
     kOnnxDomain,
     11,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .InputMemoryType(OrtMemTypeCPUInput, 1)
         .TypeConstraint("S", DataTypeImpl::AllFixedSizeSequenceTensorTypes())
@@ -105,7 +108,7 @@ ONNX_OPERATOR_KERNEL_EX(
     SequenceInsert,
     kOnnxDomain,
     11,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .InputMemoryType(OrtMemTypeCPUInput, 2)
         .TypeConstraint("S", DataTypeImpl::AllFixedSizeSequenceTensorTypes())
@@ -118,7 +121,7 @@ ONNX_OPERATOR_KERNEL_EX(
     OptionalHasElement,
     kOnnxDomain,
     15,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .TypeConstraint("O", DataTypeImpl::AllOptionalTypes())
         .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>()),
@@ -128,7 +131,7 @@ ONNX_OPERATOR_KERNEL_EX(
     OptionalGetElement,
     kOnnxDomain,
     15,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .TypeConstraint("O", DataTypeImpl::AllOptionalTypes())
         .TypeConstraint("V", DataTypeImpl::AllTensorAndSequenceTensorTypes())
@@ -142,7 +145,7 @@ ONNX_OPERATOR_KERNEL_EX(
     OptionalHasElement,
     kOnnxDomain,
     18,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .TypeConstraint("O", DataTypeImpl::AllTensorAndSequenceTensorAndOptionalTypes())
         .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>()),
@@ -152,7 +155,7 @@ ONNX_OPERATOR_KERNEL_EX(
     OptionalGetElement,
     kOnnxDomain,
     18,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .TypeConstraint("O", DataTypeImpl::AllTensorAndSequenceTensorAndOptionalTypes())
         .TypeConstraint("V", DataTypeImpl::AllTensorAndSequenceTensorTypes())
@@ -166,7 +169,7 @@ ONNX_OPERATOR_KERNEL_EX(
     If,
     kOnnxDomain,
     7,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .InputMemoryType(OrtMemTypeCPUInput, 0)  // 'cond' needs to be on CPU
         .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>())
@@ -179,7 +182,7 @@ ONNX_OPERATOR_KERNEL_EX(
     If,
     kOnnxDomain,
     11,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .InputMemoryType(OrtMemTypeCPUInput, 0)  // 'cond' needs to be on CPU
         .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>())
@@ -190,7 +193,7 @@ ONNX_OPERATOR_KERNEL_EX(
     If,
     kOnnxDomain,
     13,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .InputMemoryType(OrtMemTypeCPUInput, 0)  // 'cond' needs to be on CPU
         .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>())
@@ -201,7 +204,7 @@ ONNX_OPERATOR_KERNEL_EX(
     If,
     kOnnxDomain,
     16,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .InputMemoryType(OrtMemTypeCPUInput, 0)  // 'cond' needs to be on CPU
         .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>())
@@ -212,7 +215,7 @@ ONNX_OPERATOR_KERNEL_EX(
     If,
     kOnnxDomain,
     19,
-    DirectMLExecutionProvider,
+    kKernelClassProviderToken,
     (*KernelDefBuilder::Create())
         .InputMemoryType(OrtMemTypeCPUInput, 0)  // 'cond' needs to be on CPU
         .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>())
@@ -1318,30 +1321,34 @@ void RegisterDmlOperators(IMLOperatorRegistry* registry, const PluginDmlExecutio
     PluginDmlGridSampleOperatorFactory::RegisterGridSampleKernel(registry);
 }
 
-void RegisterCpuOperatorsAsDml(onnxruntime::KernelRegistry* registry) {
+void RegisterCpuOperatorsAsDml(onnxruntime::KernelRegistry* registry, std::string_view ep_name) {
     using namespace onnxruntime;
 
     static const BuildKernelCreateInfoFn function_table[] = {
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, SequenceAt)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, SequenceConstruct)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, SequenceEmpty)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, SequenceLength)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, SequenceErase)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, SequenceInsert)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 15, OptionalHasElement)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 15, OptionalGetElement)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 18, OptionalHasElement)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 18, OptionalGetElement)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 7, If)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 11, If)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 13, If)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 16, If)>,
-        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(DirectMLExecutionProvider, kOnnxDomain, 19, If)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, SequenceAt)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, SequenceConstruct)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, SequenceEmpty)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, SequenceLength)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, SequenceErase)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, SequenceInsert)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 15, OptionalHasElement)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 15, OptionalGetElement)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 18, OptionalHasElement)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 18, OptionalGetElement)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 7, If)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 11, If)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 13, If)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 16, If)>,
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(kKernelClassProviderToken, kOnnxDomain, 19, If)>,
     };
 
     for (auto& function_table_entry : function_table) {
         KernelCreateInfo info = function_table_entry();
-        if (info.kernel_def != nullptr) { // filter disabled entries where type is void
+        if (info.kernel_def != nullptr) {
+            // ONNX_OPERATOR_KERNEL_EX bakes kKernelClassProviderToken into the KernelDef provider
+            // field at compile time. Overwrite it with the runtime EP name so ORT's kernel registry
+            // lookup matches the name this EP was registered under (e.g. "directml" via amdgpu-ep).
+            info.kernel_def->SetProvider(std::string(ep_name));
             ORT_THROW_IF_ERROR(registry->Register(std::move(info)));
         }
     }

@@ -457,6 +457,7 @@ AbiSafeKernelContext::AbiSafeKernelContext(
     const OrtApi* ort_api,
     const PluginDmlExecutionProviderImpl* execution_provider,
     bool is_internal_operator,
+    std::string_view ep_name,
     const std::vector<std::vector<uint32_t>>* inferred_output_shapes,
     IMLOperatorShapeInferrer* shape_inferrer,
     const std::vector<uint32_t>* required_constant_cpu_inputs,
@@ -466,6 +467,7 @@ AbiSafeKernelContext::AbiSafeKernelContext(
     , ort_api_(ort_api)
     , execution_provider_(execution_provider)
     , is_internal_operator_(is_internal_operator)
+    , ep_name_(ep_name)
     , inferred_output_shapes_(inferred_output_shapes)
     , shape_inferrer_(shape_inferrer)
     , required_constant_cpu_inputs_(required_constant_cpu_inputs)
@@ -800,10 +802,12 @@ HRESULT AbiSafeKernelContext::AllocateTemporaryData(size_t size, IUnknown** data
 
     // Allow size == 0 to match ONNX Runtime behavior (allocator may handle it)
 
-    // Create memory info for DirectML execution provider's device allocator
+    // Look up the GPU allocator by the EP's registered name (e.g. "amdgpu" when brokered,
+    // "directml" when standalone). The name must match what was used to register the
+    // per-session DmlBucketizedBufferAllocator in CreatePreferredAllocators.
     OrtMemoryInfo* mem_info = nullptr;
     OrtStatus* status = ort_api_->CreateMemoryInfo(
-        "DirectMLExecutionProvider", // The execution provider name
+        ep_name_.c_str(),
         OrtAllocatorType::OrtDeviceAllocator,
         0, // device id
         OrtMemType::OrtMemTypeDefault,
@@ -3108,6 +3112,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
         abi_kernel->ort_api = state->ort_api;
         abi_kernel->dml_execution_provider = state->dml_execution_provider;
         abi_kernel->is_internal_operator = state->is_internal_operator;
+        abi_kernel->ep_name = state->ep_name;
         abi_kernel->requires_input_shapes_at_creation = state->requires_input_shapes_at_creation;
         abi_kernel->requires_output_shapes_at_creation = state->requires_output_shapes_at_creation;
         abi_kernel->operator_name = state->operator_name ? state->operator_name : "Unknown";
@@ -3611,6 +3616,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                     kernel->ort_api,
                     kernel->dml_execution_provider,
                     kernel->is_internal_operator,
+                    kernel->ep_name,
                     &tmp_output_shapes,
                     kernel->shape_inferrer.Get(),
                     &kernel->required_constant_cpu_inputs,
@@ -3653,6 +3659,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             kernel->ort_api,
             kernel->dml_execution_provider,
             kernel->is_internal_operator,
+            kernel->ep_name,
             &kernel->inferred_output_shapes,
             kernel->shape_inferrer.Get(),
             &kernel->required_constant_cpu_inputs,

@@ -89,6 +89,11 @@ private:
 
     OrtHardwareDevice* virtual_device_{};
 
+    // Owned memory infos for the GPU and pinned device slots, registered with OrtEpDevice.
+    // These must outlive the EpDevice objects that reference them.
+    OrtMemoryInfo* gpu_memory_info_{};
+    OrtMemoryInfo* pinned_memory_info_{};
+
     std::unique_ptr<DataTransfer> data_transfer_{};
     std::unique_ptr<Allocator> allocator_{};
 };

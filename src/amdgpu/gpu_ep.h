@@ -11,6 +11,7 @@ namespace gpu_ep {
 struct ExecutionProvider : OrtEp, ApiPtrs {
     ExecutionProvider(ProviderFactory& factory, std::string_view ep_name,
         const Ort::ConstSessionOptions& session_options, const OrtLogger* logger);
+    ~ExecutionProvider();
 
 private:
     [[nodiscard]] const char* GetName() const noexcept;
@@ -28,10 +29,12 @@ private:
 
     Ort::Status OnRunStart(const OrtRunOptions* run_options) const noexcept;
     Ort::Status OnRunEnd(const OrtRunOptions* run_options, bool sync_stream) const noexcept;
+    Ort::Status CreateAllocator(const OrtMemoryInfo* memory_info, OrtAllocator** allocator) const noexcept;
     Ort::Status CreateSyncStreamForDevice(const OrtMemoryDevice* memory_device, OrtSyncStreamImpl** stream) const;
     [[nodiscard]] const char* GetCompiledModelCompatibilityInfo(const OrtGraph* graph) const;
     Ort::Status GetKernelRegistry(const OrtKernelRegistry** kernel_registry) const;
 
+    ProviderFactory& factory_;
     OrtEp* backend_ep_{};
 
     std::string ep_name_;

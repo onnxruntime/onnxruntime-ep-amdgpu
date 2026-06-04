@@ -51,6 +51,13 @@ class KernelDef {
     return provider_type_;
   }
 
+  // Rebind the provider name after construction. Used by plugin EPs that register kernels
+  // with a compile-time placeholder name and need to overwrite it with the runtime EP name
+  // before calling KernelRegistry::Register().
+  void SetProvider(const std::string& provider) {
+    provider_type_ = provider;
+  }
+
   // type constraints with types supported in this build
   const std::unordered_map<std::string, std::vector<MLDataType>>& TypeConstraints() const {
     return type_constraints_;

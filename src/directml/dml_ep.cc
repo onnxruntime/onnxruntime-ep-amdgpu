@@ -10,12 +10,16 @@
 
 namespace dml_ep {
 
+    // ep_name must match the name under which this EP is registered with ORT.
+    // Kernels stamped with a different name than the running EP's GetName() will never
+    // be dispatched — ORT matches kernel provider strings to EP type strings exactly.
     static void CreateDmlKernelRegistry(
         _In_ const PluginDmlExecutionProviderImpl* executionProvider,
+        std::string_view ep_name,
         _Out_ std::shared_ptr<onnxruntime::KernelRegistry>* registry,
         _Out_ std::shared_ptr<const InternalRegistrationInfoMap>* internalRegInfoMap)
     {
-        Microsoft::WRL::ComPtr<PluginAbiCustomRegistry> abiRegistry = wil::MakeOrThrow<PluginAbiCustomRegistry>(executionProvider);
+        Microsoft::WRL::ComPtr<PluginAbiCustomRegistry> abiRegistry = wil::MakeOrThrow<PluginAbiCustomRegistry>(executionProvider, ep_name);
         RegisterDmlOperators(abiRegistry.Get(), executionProvider);
 
         assert(abiRegistry->GetRegistries().size() == 1);
@@ -24,7 +28,7 @@ namespace dml_ep {
         *registry = customRegistry->GetKernelRegistry();
         *internalRegInfoMap = abiRegistry->GetInternalRegInfoMap();
 
-        RegisterCpuOperatorsAsDml(registry->get());
+        RegisterCpuOperatorsAsDml(registry->get(), ep_name);
     }
     
 ExecutionProviderPlugin::~ExecutionProviderPlugin() {
@@ -72,7 +76,7 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     m_dataTransfer = std::make_unique<DMLDataTransfer>(ApiPtrs{api_ptrs});
     m_dataTransfer->AttachExecutionProvider(m_executionProvider);
 
-    CreateDmlKernelRegistry(m_executionProvider.get(), &m_kernelRegistry, &m_internalRegInfoMap);
+    CreateDmlKernelRegistry(m_executionProvider.get(), name_, &m_kernelRegistry, &m_internalRegInfoMap);
     if(ConvertKernelRegistryToOrtKernelRegistry() != nullptr) {
         throw std::runtime_error("Failed to convert internal kernel registry to OrtKernelRegistry");
     }
@@ -218,6 +222,9 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
             // versions (e.g., inputs vs attributes), so each version needs its own kernelFactory.
             int since_ver_start = 0, since_ver_end = 0;
             def->SinceVersion(&since_ver_start, &since_ver_end);
+            // Key format must match what PluginAbiCustomRegistry::RegisterOperatorKernel writes.
+            // Uses sinceVersion (not sinceVersion+end) because each opset version that changes
+            // a kernel's interface (e.g. Pad, Slice, Clip) is registered as a separate entry.
             std::string regKey{std::string{def->Domain()} + "::" + std::string{def->OpName()} +
                                "::" + std::to_string(since_ver_start)};
 
@@ -244,6 +251,7 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
                 func_state->is_internal_operator = reg_info->isInternalOperator;
                 func_state->dml_execution_provider = m_executionProvider.get();
                 func_state->ep_plugin = this;
+                func_state->ep_name = name_;
 
                 // Populate tensor attribute names by operator name — these are tensor-typed ONNX attributes
                 // that cannot be stored in AttributeMap (which only supports int/float/string).
@@ -378,6 +386,7 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
                 creation_state.dml_execution_provider = state->dml_execution_provider;
                 creation_state.ort_api = state->ort_api_ptr;
                 creation_state.operator_name = state->operator_name.c_str();
+                creation_state.ep_name = state->ep_name;
 
                 // Pass the resolved constants (or empty map for lazy-init case).
                 // DmlAbiKernel_Create sets needs_lazy_init=true when required_constants_available=false,
@@ -714,31 +723,18 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::OnSessionInitializationEndImpl(
 
 bool ExecutionProviderPlugin::IsCpuAllocator(const OrtMemoryInfo* memory_info)
 {
-    if (!memory_info) {
-        return false;
-    }
-
+    if (memory_info == nullptr) return false;
     OrtMemoryInfoDeviceType device_type;
     ort_api.MemoryInfoGetDeviceType(memory_info, &device_type);
-    const char* name = nullptr;
-    ort_api.MemoryInfoGetName(memory_info, &name);
-
-    return (name != nullptr) && (std::strcmp(name, "directML_ep_cpu") == 0) && (device_type == OrtMemoryInfoDeviceType_CPU);
+    return device_type == OrtMemoryInfoDeviceType_CPU;
 }
 
 bool ExecutionProviderPlugin::IsGpuAllocator(const OrtMemoryInfo* memory_info)
 {
-    if (!memory_info) {
-        return false;
-    }
-
+    if (memory_info == nullptr) return false;
     OrtMemoryInfoDeviceType device_type;
     ort_api.MemoryInfoGetDeviceType(memory_info, &device_type);
-    const char* name = nullptr;
-    ort_api.MemoryInfoGetName(memory_info, &name);
-
-    return (name != nullptr) && (std::strcmp(name, "directML_ep_gpu") == 0) &&
-        (device_type == OrtMemoryInfoDeviceType_GPU);
+    return device_type == OrtMemoryInfoDeviceType_GPU;
 }
 
 uint32_t ExecutionProviderPlugin::GetSupportedDeviceDataTypeMask() const {
@@ -1036,7 +1032,9 @@ bool ExecutionProviderPlugin::IsNodeSupportedByDml(
     }
 
     const char* provider = ep_api.KernelDef_GetExecutionProvider(kernel_def);
-    if (provider == nullptr || std::strcmp(provider, "DirectMLExecutionProvider") != 0)
+    // Compare against the runtime EP name, not a hardcoded string, so kernel lookup works
+    // regardless of the name this EP was registered under (e.g. "directml" via amdgpu-ep).
+    if (provider == nullptr || std::strcmp(provider, name_.c_str()) != 0)
     {
         // Not a DML kernel -> won't be in internal map
         return false;

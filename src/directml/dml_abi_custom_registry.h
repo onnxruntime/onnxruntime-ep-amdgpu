@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <string_view>
 #include "dml_execution_provider.h"
 #include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
 #include "OperatorAuthorHelper/MLOperatorAuthorPrivate.h"
@@ -13,7 +14,8 @@ namespace dml_ep {
 class PluginAbiCustomRegistry : public Com<IMLOperatorRegistry, IMLOperatorRegistryPrivate> {
 public:
     PluginAbiCustomRegistry();
-    PluginAbiCustomRegistry(const dml_ep::PluginDmlExecutionProviderImpl* executionProvider);
+    PluginAbiCustomRegistry(const dml_ep::PluginDmlExecutionProviderImpl* executionProvider,
+                            std::string_view ep_name);
 
     HRESULT STDMETHODCALLTYPE RegisterOperatorSetSchema(
         const MLOperatorSetId* opSetId,
@@ -89,6 +91,11 @@ private:
     mutable std::shared_ptr<InternalRegistrationInfoMap> m_internalRegInfoMap;
 
     const dml_ep::PluginDmlExecutionProviderImpl* m_dmlPluginExecutionProvider = nullptr;
+
+    // Runtime EP name supplied at construction by the caller. Used as the provider tag on
+    // registered KernelDefs so ORT can match kernels to this EP by its registered identity.
+    // Previously hardcoded as "DirectMLExecutionProvider".
+    std::string m_epName;
 };
 
 }  // namespace dml_ep
