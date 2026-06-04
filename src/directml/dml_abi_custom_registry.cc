@@ -11,10 +11,15 @@ PluginAbiCustomRegistry::PluginAbiCustomRegistry() :
     m_kernelRegistry(std::make_shared<onnxruntime::CustomRegistry>()),
     m_internalRegInfoMap(std::make_shared<InternalRegistrationInfoMap>()) {}
 
-PluginAbiCustomRegistry::PluginAbiCustomRegistry(const PluginDmlExecutionProviderImpl* executionProvider) :
+PluginAbiCustomRegistry::PluginAbiCustomRegistry(const PluginDmlExecutionProviderImpl* executionProvider,
+                                                 std::string_view ep_name) :
     m_kernelRegistry(std::make_shared<onnxruntime::CustomRegistry>()),
     m_internalRegInfoMap(std::make_shared<InternalRegistrationInfoMap>()),
-    m_dmlPluginExecutionProvider(executionProvider) {}
+    m_dmlPluginExecutionProvider(executionProvider),
+    m_epName(ep_name)
+{
+    assert(!ep_name.empty() && "ep_name must not be empty — kernel registry lookup will silently fail");
+}
 
 #pragma warning(push)
 #pragma warning(suppress : 4702)
@@ -319,13 +324,16 @@ HRESULT STDMETHODCALLTYPE PluginAbiCustomRegistry::RegisterOperatorKernel(
             return E_INVALIDARG;
         }
 
-        // Might need to change cpu path later if we want to support CPU kernels that aren't just for copying data or
-        // shape/size queries, but for now these are the only CPU kernels we have and they can all use the same provider
-        // name.
+        // Both CPU and D3D12 kernels are registered under the same EP name so ORT's
+        // graph partitioning assigns them all to this EP. CPU-execution ops like
+        // MemcpyToHost/FromHost are distinguished at dispatch time via output memory
+        // type flags (OrtMemTypeCPUOutput/OrtMemTypeCPUInput), not by provider name.
+        // The EP name is set by the factory caller — e.g. "amdgpu" when brokered
+        // through amdgpu-ep, or "directml" when loaded standalone.
         if (opKernel->executionType == MLOperatorExecutionType::Cpu) {
-            providerType = "DirectMLExecutionProvider";
+            providerType = m_epName.c_str();
         } else if (opKernel->executionType == MLOperatorExecutionType::D3D12) {
-            providerType = "DirectMLExecutionProvider";
+            providerType = m_epName.c_str();
         } else {
             return E_INVALIDARG;
         }

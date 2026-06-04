@@ -72,6 +72,7 @@ public:
         const OrtApi* ort_api,
         const PluginDmlExecutionProviderImpl* execution_provider,
         bool is_internal_operator,
+        std::string_view ep_name,
         const std::vector<std::vector<uint32_t>>* inferred_output_shapes = nullptr,
         IMLOperatorShapeInferrer* shape_inferrer = nullptr,
         const std::vector<uint32_t>* required_constant_cpu_inputs = nullptr,
@@ -114,6 +115,10 @@ private:
     const std::vector<uint32_t>* required_constant_cpu_inputs_;
     const AttributeMap* default_attributes_;
     const OrtKernelInfo* kernel_info_ = nullptr;  // For AbiSafeShapeInferenceContext attribute reads
+
+    // Runtime EP name used for allocator lookup in AllocateTemporaryData. Previously hardcoded
+    // as "DirectMLExecutionProvider"; now supplied by the caller at construction time.
+    std::string ep_name_;
 };
 
 // ============================================================================
@@ -380,6 +385,7 @@ struct DmlKernelCreationState {
     const PluginDmlExecutionProviderImpl* dml_execution_provider = nullptr;
     const OrtApi* ort_api = nullptr;
     const char* operator_name = nullptr;  // For debugging
+    std::string ep_name;  // Runtime EP name, propagated to DmlAbiKernel for allocator lookup
 };
 
 // Snapshot of a constant CPU input tensor's content, used to detect value changes between Compute
@@ -461,6 +467,7 @@ struct DmlAbiKernel {
     const OrtApi* ort_api = nullptr;
     const PluginDmlExecutionProviderImpl* dml_execution_provider = nullptr;
     bool is_internal_operator = false;  // For resource state transitions (MemcpyToHost/FromHost)
+    std::string ep_name;  // Runtime EP name for allocator lookup in AbiSafeKernelContext
     std::vector<std::vector<uint32_t>> inferred_output_shapes;  // Shapes from graph inference
     std::string operator_name;  // For debugging
 

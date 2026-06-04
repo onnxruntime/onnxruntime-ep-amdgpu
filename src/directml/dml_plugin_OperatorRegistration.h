@@ -28,7 +28,7 @@ public:
 
 namespace dml_ep {
 void RegisterDmlOperators(IMLOperatorRegistry* registry, const PluginDmlExecutionProviderImpl* executionProvider);
-void RegisterCpuOperatorsAsDml(onnxruntime::KernelRegistry* registry);
+void RegisterCpuOperatorsAsDml(onnxruntime::KernelRegistry* registry, std::string_view ep_name);
 }  // namespace dml_ep
 
 // Declares a callback creation function of the given operator class.

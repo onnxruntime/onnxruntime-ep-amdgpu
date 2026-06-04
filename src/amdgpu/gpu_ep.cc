@@ -39,7 +39,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         const Ort::ConstSessionOptions& session_options, const OrtLogger* logger)
     : OrtEp{ORT_API_VERSION},
       ApiPtrs{factory.ort_api, factory.ep_api, factory.model_editor_api},
-      ep_name_{ep_name}, logger_{logger}
+      factory_{factory}, ep_name_{ep_name}, logger_{logger}
 {
     OrtEp::GetName = [](const OrtEp* this_) noexcept {
         API_CALL_T(const ExecutionProvider, this_, GetName, "");
@@ -69,7 +69,6 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     OrtEp::OnRunEnd = [](OrtEp* this_, const OrtRunOptions* run_options, bool sync_stream) noexcept {
         API_CALL_S(ExecutionProvider, this_, OnRunEnd, run_options, sync_stream);
     };
-    // TODO: OrtEp::CreateAllocator = [];
     OrtEp::CreateSyncStreamForDevice = [](OrtEp* this_, const OrtMemoryDevice* memory_device,
                                           OrtSyncStreamImpl** stream) noexcept {
         API_CALL_S(ExecutionProvider, this_, CreateSyncStreamForDevice, memory_device, stream);
@@ -106,6 +105,14 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     const ProviderInfo info{provider_options};
     if (info.profile == Profile::Auto || info.profile == Profile::Eager) {
         THROW_IF_ERROR(factory.CreateDirectMLBackend(local_session_options, logger, backend_ep_));
+        // DirectML manages its own per-session GPU allocator (DmlBucketizedBufferAllocator)
+        // via EP-level CreateAllocator. Wire it now that we know the backend is DirectML.
+        // MIGraphX allocators are handled at factory level — leave OrtEp::CreateAllocator null
+        // so ORT falls back to ep_factory_.CreateAllocator (the Allocator wrapper).
+        OrtEp::CreateAllocator = [](OrtEp* this_, const OrtMemoryInfo* memory_info,
+                                    OrtAllocator** allocator) noexcept {
+            API_CALL_S(ExecutionProvider, this_, CreateAllocator, memory_info, allocator);
+        };
     } else {
         const auto get_name = [](const std::string_view sv) {
             return std::string{"ep."}.append(kMIGraphXBackend).append(".").append(sv);
@@ -139,6 +146,20 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     ort_api.ReleaseSessionOptions(local_session_options);
 }
 
+ExecutionProvider::~ExecutionProvider() {
+    // Release the backend EP through the backend factory that created it.
+    // This frees all session-scoped resources: GPU allocator, D3D12/DML devices,
+    // execution context, upload/readback heaps, and kernel registry.
+    // Without this, each session leaks the entire directml EP chain.
+    if (backend_ep_ != nullptr) {
+        const auto backend_factory = factory_.GetBackendFactory();
+        if (backend_factory != nullptr && backend_factory->ReleaseEp != nullptr) {
+            backend_factory->ReleaseEp(backend_factory, backend_ep_);
+        }
+        backend_ep_ = nullptr;
+    }
+}
+
 const char* ExecutionProvider::GetName() const noexcept {
     return ep_name_.c_str();
 }
@@ -170,6 +191,11 @@ Ort::Status ExecutionProvider::SetDynamicOptions(const char* const* option_keys,
 
 Ort::Status ExecutionProvider::OnRunStart(const OrtRunOptions* run_options) const noexcept {
     EP_CALL_S(backend_ep_, OnRunStart, run_options);
+}
+
+Ort::Status ExecutionProvider::CreateAllocator(const OrtMemoryInfo* memory_info,
+    OrtAllocator** allocator) const noexcept {
+    EP_CALL_S(backend_ep_, CreateAllocator, memory_info, allocator);
 }
 
 Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* run_options, bool sync_stream) const noexcept {
