@@ -7,11 +7,13 @@
 // is parsed by the compiler.
 
 #include <filesystem>
+#include <utility>
+
 #include "common/plugin_ep_utils.h"
 
 #include "dml_execution_provider.h"
-#include "dml_abi_kernel.h"
 #include "dml_plugin_MLOperatorAuthorImpl.h"
+#include "dml_abi_kernel.h"
 
 namespace dml_ep {
 
@@ -192,335 +194,237 @@ void PrintKernelPerfCounters(const DmlAbiKernel& kernel) noexcept {
 
 #endif // DML_PERF_PROFILE
 
-static MLOperatorTensorDataType ConvertToMLOperatorTensorDataType(ONNXTensorElementDataType onnx_type);
+namespace {
+
+MLOperatorTensorDataType ConvertToMLOperatorTensorDataType(ONNXTensorElementDataType onnx_type) {
+    switch (onnx_type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+        return MLOperatorTensorDataType::Float;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+        return MLOperatorTensorDataType::UInt8;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+        return MLOperatorTensorDataType::Int8;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+        return MLOperatorTensorDataType::UInt16;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+        return MLOperatorTensorDataType::Int16;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+        return MLOperatorTensorDataType::Int32;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+        return MLOperatorTensorDataType::Int64;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING:
+        return MLOperatorTensorDataType::String;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+        return MLOperatorTensorDataType::Bool;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+        return MLOperatorTensorDataType::Float16;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+        return MLOperatorTensorDataType::Double;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+        return MLOperatorTensorDataType::UInt32;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
+        return MLOperatorTensorDataType::UInt64;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_COMPLEX64:
+        return MLOperatorTensorDataType::Complex64;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_COMPLEX128:
+        return MLOperatorTensorDataType::Complex128;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+        return MLOperatorTensorDataType::TensorProto_DataType_BFLOAT16;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN:
+        return MLOperatorTensorDataType::TensorProto_DataType_FLOAT8E4M3FN;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FNUZ:
+        return MLOperatorTensorDataType::TensorProto_DataType_FLOAT8E4M3FNUZ;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2:
+        return MLOperatorTensorDataType::TensorProto_DataType_FLOAT8E5M2;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2FNUZ:
+        return MLOperatorTensorDataType::TensorProto_DataType_FLOAT8E5M2FNUZ;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT4:
+        return MLOperatorTensorDataType::UInt4;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT4:
+        return MLOperatorTensorDataType::Int4;
+    default:
+        return MLOperatorTensorDataType::Undefined;
+    }
+}
 
 // Pre-fetches a single tensor attribute by name from kernel_info, copying its data into
 // a PreFetchedTensorAttr with owned plain bytes. This is the ONE place where the unsafe
 // Fetches a single named tensor attribute via the ORT C API (KernelInfoGetAttribute_tensor).
 // Returns nullopt if the attribute doesn't exist or isn't a tensor.
 // Fully ABI-safe: no protobuf access, no reinterpret_cast of OrtKernelInfo.
-static std::optional<PreFetchedTensorAttr>
-TryFetchTensorAttribute(const OrtKernelInfo* kernel_info, const OrtApi* ort_api, const char* name) {
-    OrtAllocator* allocator = nullptr;
-    ort_api->GetAllocatorWithDefaultOptions(&allocator);
-
-    OrtValue* tensor_value = nullptr;
-    OrtStatus* status = ort_api->KernelInfoGetAttribute_tensor(kernel_info, name, allocator, &tensor_value);
-    if (status != nullptr) {
-        ort_api->ReleaseStatus(status);
-        return std::nullopt;  // attribute absent or not a tensor type
+std::optional<PreFetchedTensorAttr> TryFetchTensorAttribute(const Ort::ConstKernelInfo& kernel_info, const char* name) {
+    const auto value{kernel_info.GetTensorAttribute(name, Ort::AllocatorWithDefaultOptions{})};
+    if (value == nullptr) {
+        return std::nullopt;
     }
-    if (!tensor_value) return std::nullopt;
-
-    PreFetchedTensorAttr result;
-    OrtTensorTypeAndShapeInfo* type_shape_info = nullptr;
-    ort_api->GetTensorTypeAndShape(tensor_value, &type_shape_info);
-
-    ONNXTensorElementDataType elem_type{};
-    ort_api->GetTensorElementType(type_shape_info, &elem_type);
-    result.data_type = ConvertToMLOperatorTensorDataType(elem_type);
-
-    size_t dim_count = 0;
-    ort_api->GetDimensionsCount(type_shape_info, &dim_count);
-    std::vector<int64_t> dims(dim_count);
-    ort_api->GetDimensions(type_shape_info, dims.data(), dim_count);
-    for (int64_t d : dims) result.shape.push_back(static_cast<uint32_t>(d));
-
-    size_t elem_count = 0;
-    ort_api->GetTensorShapeElementCount(type_shape_info, &elem_count);
-    ort_api->ReleaseTensorTypeAndShapeInfo(type_shape_info);
-
-    const void* raw_data = nullptr;
-    ort_api->GetTensorData(tensor_value, &raw_data);
-    size_t elem_size = 0;
+    const auto type_info{value.GetTensorTypeAndShapeInfo()};
+    const auto shape{type_info.GetShape()};
+    const auto elem_type{type_info.GetElementType()};
+    size_t elem_size{};
     switch (elem_type) {
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:   elem_size = 4; break;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:  elem_size = 8; break;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:    elem_size = 1; break;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16: elem_size = 2; break;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:  elem_size = 4; break;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:  elem_size = 8; break;
-        default: elem_size = 4; break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+        elem_size = 4; break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+        elem_size = 8; break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+        elem_size = 1; break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+        elem_size = 2; break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+        elem_size = 4; break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
+        elem_size = 8; break;
+    default:
+        elem_size = 4; break;
     }
-    size_t total_bytes = elem_count * elem_size;
-    if (raw_data && total_bytes > 0) {
-        result.raw_bytes.assign(
-            reinterpret_cast<const std::byte*>(raw_data),
-            reinterpret_cast<const std::byte*>(raw_data) + total_bytes);
-    }
-
-    ort_api->ReleaseValue(tensor_value);
-    return result;
+    const auto data{value.GetTensorData<std::byte>()};
+    const size_t total_bytes{type_info.GetElementCount() * elem_size};
+    return PreFetchedTensorAttr{
+        ConvertToMLOperatorTensorDataType(elem_type),
+        {shape.begin(), shape.end()},
+        {data, data + total_bytes}};
 }
+
+}  // namespace
 
 // Pre-fetches tensor-typed attributes from kernel_info into an ABI-safe cache map.
 // Only probes attributes listed in tensor_attribute_names — fully ABI-safe (ORT C API only).
 // AttributeValue cannot hold tensor types (GetDefaultAttributes rejects them), so tensor
 // attribute names cannot be derived from defaultAttributes and must be provided explicitly.
 // In this codebase, only ConstantOfShape has a tensor-typed ONNX attribute ("value").
-std::unordered_map<std::string, PreFetchedTensorAttr>
-FetchAllTensorAttributes(
-    const OrtKernelInfo* kernel_info,
-    const OrtApi* ort_api,
-    const std::vector<std::string>& tensor_attribute_names) {
-    std::unordered_map<std::string, PreFetchedTensorAttr> cache;
-    if (!kernel_info || !ort_api) return cache;
 
-    for (const auto& attr_name : tensor_attribute_names) {
-        auto fetched = TryFetchTensorAttribute(kernel_info, ort_api, attr_name.c_str());
-        if (fetched) {
-            cache.emplace(attr_name, std::move(*fetched));
+std::unordered_map<std::string, PreFetchedTensorAttr>
+FetchAllTensorAttributes(const OrtKernelInfo* ort_kernel_info, const std::vector<std::string>& attribute_names) {
+    const Ort::ConstKernelInfo kernel_info{ort_kernel_info};
+    std::unordered_map<std::string, PreFetchedTensorAttr> cache;
+    if (kernel_info != nullptr) {
+        for (const auto& attr_name : attribute_names) {
+            if (auto fetched = TryFetchTensorAttribute(kernel_info, attr_name.c_str())) {
+                cache.emplace(attr_name, std::move(*fetched));
+            }
         }
     }
     return cache;
-}
-
-// Helper function to convert ONNX tensor element type to ML operator tensor data type
-static MLOperatorTensorDataType ConvertToMLOperatorTensorDataType(ONNXTensorElementDataType onnx_type) {
-    switch (onnx_type) {
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:       return MLOperatorTensorDataType::Float;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:       return MLOperatorTensorDataType::UInt8;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:        return MLOperatorTensorDataType::Int8;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:      return MLOperatorTensorDataType::UInt16;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:       return MLOperatorTensorDataType::Int16;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:       return MLOperatorTensorDataType::Int32;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:       return MLOperatorTensorDataType::Int64;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING:      return MLOperatorTensorDataType::String;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:        return MLOperatorTensorDataType::Bool;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:     return MLOperatorTensorDataType::Float16;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:      return MLOperatorTensorDataType::Double;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:      return MLOperatorTensorDataType::UInt32;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:      return MLOperatorTensorDataType::UInt64;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_COMPLEX64:   return MLOperatorTensorDataType::Complex64;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_COMPLEX128:  return MLOperatorTensorDataType::Complex128;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:    return MLOperatorTensorDataType::TensorProto_DataType_BFLOAT16;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN: return MLOperatorTensorDataType::TensorProto_DataType_FLOAT8E4M3FN;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FNUZ: return MLOperatorTensorDataType::TensorProto_DataType_FLOAT8E4M3FNUZ;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2: return MLOperatorTensorDataType::TensorProto_DataType_FLOAT8E5M2;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2FNUZ: return MLOperatorTensorDataType::TensorProto_DataType_FLOAT8E5M2FNUZ;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT4:       return MLOperatorTensorDataType::UInt4;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT4:        return MLOperatorTensorDataType::Int4;
-        default:                                        return MLOperatorTensorDataType::Undefined;
-    }
 }
 
 // ============================================================================
 // AbiSafeTensor - IMLOperatorTensor
 // ============================================================================
 
-AbiSafeTensor::AbiSafeTensor(
-    const OrtValue* ort_value,
-    const OrtApi* ort_api,
-    const PluginDmlExecutionProviderImpl* execution_provider,
-    bool is_internal_operator)
-    : ort_value_(ort_value)
-    , ort_api_(ort_api)
-    , execution_provider_(execution_provider)
-    , is_internal_operator_(is_internal_operator)
-{
+AbiSafeTensor::AbiSafeTensor(const OrtValue* ort_value, const bool is_internal)
+    : is_internal_{is_internal}, ort_value_{const_cast<OrtValue*>(ort_value)} {
 }
 
-uint32_t AbiSafeTensor::GetDimensionCount() const noexcept {
-    if (!ort_value_ || !ort_api_) return 0;
-
-    OrtTensorTypeAndShapeInfo* type_shape_info = nullptr;
-    OrtStatus* status = ort_api_->GetTensorTypeAndShape(ort_value_, &type_shape_info);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return 0;
-    }
-
-    size_t dim_count = 0;
-    status = ort_api_->GetDimensionsCount(type_shape_info, &dim_count);
-    ort_api_->ReleaseTensorTypeAndShapeInfo(type_shape_info);
-
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return 0;
-    }
-
-    return static_cast<uint32_t>(dim_count);
+uint32_t AbiSafeTensor::GetDimensionCount() const noexcept
+try {
+    return ort_value_ == nullptr ? 0 :
+        ort_value_.GetTensorTypeAndShapeInfo().GetDimensionsCount();
+} catch (const Ort::Exception&) {
+    return 0;
 }
 
-HRESULT AbiSafeTensor::GetShape(uint32_t dimensionCount, uint32_t* dimensions) const noexcept {
-    if (!dimensions && dimensionCount > 0) return E_POINTER;  // Allow null for scalar (0-dim) tensors
-    if (!ort_value_ || !ort_api_) return E_FAIL;
-
-    OrtTensorTypeAndShapeInfo* type_shape_info = nullptr;
-    OrtStatus* status = ort_api_->GetTensorTypeAndShape(ort_value_, &type_shape_info);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
+HRESULT AbiSafeTensor::GetShape(uint32_t dimensionCount, uint32_t* dimensions) const noexcept
+try {
+    if (dimensions == nullptr && dimensionCount > 0) {
+        return E_POINTER;
     }
-
-    // Get dimensions as int64_t
-    size_t dim_count = 0;
-    ort_api_->GetDimensionsCount(type_shape_info, &dim_count);
-
-    if (dim_count != dimensionCount) {
-        ort_api_->ReleaseTensorTypeAndShapeInfo(type_shape_info);
-        return E_INVALIDARG;
+    if (ort_value_ != nullptr) {
+        const auto shape{ort_value_.GetTensorTypeAndShapeInfo().GetShape()};
+        if (shape.size() != dimensionCount) {
+            return E_INVALIDARG;
+        }
+        ranges::transform(shape, dimensions,
+            [](const int64_t elem) {
+                return static_cast<uint32_t>(elem);
+            });
     }
-
-    shape_cache_.resize(dim_count);
-    status = ort_api_->GetDimensions(type_shape_info, shape_cache_.data(), dim_count);
-    ort_api_->ReleaseTensorTypeAndShapeInfo(type_shape_info);
-
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    // Convert int64_t to uint32_t
-    for (size_t i = 0; i < dim_count; ++i) {
-        dimensions[i] = static_cast<uint32_t>(shape_cache_[i]);
-    }
-
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
-MLOperatorTensorDataType AbiSafeTensor::GetTensorDataType() const noexcept {
-    if (!ort_value_ || !ort_api_) return MLOperatorTensorDataType::Undefined;
-
-    OrtTensorTypeAndShapeInfo* type_shape_info = nullptr;
-    OrtStatus* status = ort_api_->GetTensorTypeAndShape(ort_value_, &type_shape_info);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
+MLOperatorTensorDataType AbiSafeTensor::GetTensorDataType() const noexcept
+try {
+    if (ort_value_ == nullptr) {
         return MLOperatorTensorDataType::Undefined;
     }
-
-    ONNXTensorElementDataType elem_type;
-    status = ort_api_->GetTensorElementType(type_shape_info, &elem_type);
-    ort_api_->ReleaseTensorTypeAndShapeInfo(type_shape_info);
-
-    if (status) {
-        ort_api_->ReleaseStatus(status);
+    switch (ort_value_.GetTensorTypeAndShapeInfo().GetElementType()) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+        return MLOperatorTensorDataType::Float;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+        return MLOperatorTensorDataType::UInt8;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+        return MLOperatorTensorDataType::Int8;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+        return MLOperatorTensorDataType::UInt16;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+        return MLOperatorTensorDataType::Int16;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+        return MLOperatorTensorDataType::Int32;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+        return MLOperatorTensorDataType::Int64;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING:
+        return MLOperatorTensorDataType::String;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+        return MLOperatorTensorDataType::Bool;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+        return MLOperatorTensorDataType::Float16;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+        return MLOperatorTensorDataType::Double;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+        return MLOperatorTensorDataType::UInt32;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
+        return MLOperatorTensorDataType::UInt64;
+    default:
         return MLOperatorTensorDataType::Undefined;
     }
-
-    // Map ONNX types to ML types
-    switch (elem_type) {
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: return MLOperatorTensorDataType::Float;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: return MLOperatorTensorDataType::UInt8;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: return MLOperatorTensorDataType::Int8;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16: return MLOperatorTensorDataType::UInt16;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16: return MLOperatorTensorDataType::Int16;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: return MLOperatorTensorDataType::Int32;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: return MLOperatorTensorDataType::Int64;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING: return MLOperatorTensorDataType::String;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL: return MLOperatorTensorDataType::Bool;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: return MLOperatorTensorDataType::Float16;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE: return MLOperatorTensorDataType::Double;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32: return MLOperatorTensorDataType::UInt32;
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64: return MLOperatorTensorDataType::UInt64;
-        default: return MLOperatorTensorDataType::Undefined;
-    }
+} catch (const Ort::Exception&) {
+    return MLOperatorTensorDataType::Undefined;
 }
 
 bool AbiSafeTensor::IsCpuData() const noexcept {
-    if (!ort_value_ || !ort_api_) return true; // Default to CPU if we can't check
-
-    const OrtMemoryInfo* mem_info = nullptr;
-    OrtStatus* status = ort_api_->GetTensorMemoryInfo(ort_value_, &mem_info);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return true; // Default to CPU on error
-    }
-
-    // Check name — "Cpu" means CPU memory
-    const char* name = nullptr;
-    status = ort_api_->MemoryInfoGetName(mem_info, &name);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
+    if (ort_value_ == nullptr) {
         return true;
     }
-    if (name == nullptr || strcmp(name, "Cpu") == 0) {
+    const auto memory_info{ort_value_.GetTensorMemoryInfo()};
+    if (memory_info.GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
         return true;
     }
-
-    // Also treat OrtMemTypeCPUInput/OrtMemTypeCPUOutput as CPU, matching TensorWrapper::IsCpuData
-    OrtMemType mem_type = OrtMemTypeDefault;
-    status = ort_api_->MemoryInfoGetMemType(mem_info, &mem_type);
-    if (!status && (mem_type == OrtMemTypeCPUInput || mem_type == OrtMemTypeCPUOutput)) {
-        return true;
-    }
-    if (status) ort_api_->ReleaseStatus(status);
-
-    return false;
-}
-
-bool AbiSafeTensor::IsDataInterface() const noexcept {
-    // GPU tensors use data interfaces, CPU tensors don't
-    return !IsCpuData();
+    const auto memory_type{memory_info.GetMemoryType()};
+    return memory_type == OrtMemTypeCPUInput ||
+           memory_type == OrtMemTypeCPUOutput;
 }
 
 void* AbiSafeTensor::GetData() noexcept {
-    if (!ort_value_ || !ort_api_) return nullptr;
-
-    // Only return data pointer for CPU tensors
-    if (!IsCpuData()) return nullptr;
-
-    void* data_ptr = nullptr;
-    OrtStatus* status = ort_api_->GetTensorMutableData(const_cast<OrtValue*>(ort_value_), &data_ptr);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
+    if (ort_value_ == nullptr || !IsCpuData()) {
         return nullptr;
     }
-
-    return data_ptr;
+    return ort_value_.GetTensorMutableRawData();
 }
 
 void AbiSafeTensor::GetDataInterface(IUnknown** dataInterface) noexcept {
-    if (!dataInterface) {
-        return;
+    if (dataInterface != nullptr) {
+        *dataInterface = nullptr;
+        if (ort_value_ != nullptr && !IsCpuData()) {
+            if (void* data_ptr{ort_value_.GetTensorMutableRawData()};
+                data_ptr != nullptr) {
+                const auto allocation_info{static_cast<PluginDmlAllocationInfo*>(data_ptr)};
+                if (is_internal_) {
+                    *dataInterface = allocation_info;
+                } else {
+                    *dataInterface = allocation_info->GetResource();
+                }
+                allocation_info->AddRef();
+            }
+        }
     }
-    *dataInterface = nullptr;
-
-    if (!ort_value_ || !ort_api_) {
-        return;
-    }
-
-    // Verify this is actually a GPU tensor
-    bool isCpu = IsCpuData();
-    if (isCpu) {
-        return;  // CPU tensors don't have data interfaces
-    }
-
-    // Get raw data pointer from OrtValue
-    // For GPU tensors allocated by the DML allocator, this is actually a PluginDmlAllocationInfo*
-    // Note: We need to cast away const because the C API's GetTensorMutableData doesn't have a const variant,
-    // but we're only reading the allocation pointer, not modifying the data.
-    void* data_ptr = nullptr;
-    OrtStatus* status = ort_api_->GetTensorMutableData(const_cast<OrtValue*>(ort_value_), &data_ptr);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return;
-    }
-
-    if (!data_ptr) {
-        return;
-    }
-
-    // GetTensorMutableData returns the raw data pointer (PluginDmlAllocationInfo* cast to void*).
-    // We need to go through GetABIDataInterface so external operators receive ID3D12Resource*
-    // (not the internal PluginDmlAllocationInfo*). Skipping this translation is the root cause
-    // of output corruption: the DML plugin operator casts the returned IUnknown* to ID3D12Resource*
-    // and binds wrong GPU memory when it gets PluginDmlAllocationInfo* instead.
-    IUnknown* allocation = execution_provider_->GetAllocationFromDataPointer(data_ptr);
-    if (!allocation) {
-        return;
-    }
-
-    // Translate to the ABI object the external operator expects (ID3D12Resource* for non-internal ops).
-    execution_provider_->GetABIDataInterface(is_internal_operator_, allocation, dataInterface);
-    allocation->Release();  // GetAllocationFromDataPointer already AddRef'd; GetABIDataInterface AddRef's the output
 }
 
 // ============================================================================
@@ -566,27 +470,25 @@ void AbiSafeD3D12Tensor::GetDataInterface(IUnknown** dataInterface) noexcept {
 
 AbiSafeKernelContext::AbiSafeKernelContext(
     OrtKernelContext* kernel_context,
-    const OrtApi* ort_api,
     const PluginDmlExecutionProviderImpl* execution_provider,
-    bool is_internal_operator,
-    std::string_view ep_name,
+    const bool is_internal_operator,
+    const std::string_view ep_name,
+    AttributeMap  default_attributes,
     const std::vector<std::vector<uint32_t>>* inferred_output_shapes,
     IMLOperatorShapeInferrer* shape_inferrer,
-    const std::vector<uint32_t>* required_constant_cpu_inputs,
-    const AttributeMap* default_attributes,
+    const std::vector<uint32_t>& required_constant_cpu_inputs,
     const OrtKernelInfo* kernel_info,
     const std::vector<ConstantGpuResource>* constant_gpu_resources)
-    : kernel_context_(kernel_context)
-    , ort_api_(ort_api)
-    , execution_provider_(execution_provider)
-    , is_internal_operator_(is_internal_operator)
-    , ep_name_(ep_name)
-    , inferred_output_shapes_(inferred_output_shapes)
-    , shape_inferrer_(shape_inferrer)
-    , required_constant_cpu_inputs_(required_constant_cpu_inputs)
-    , default_attributes_(default_attributes)
-    , kernel_info_(kernel_info)
-    , constant_gpu_resources_(constant_gpu_resources)
+    : kernel_context_{kernel_context}
+    , execution_provider_{execution_provider}
+    , is_internal_operator_{is_internal_operator}
+    , inferred_output_shapes_{inferred_output_shapes}
+    , shape_inferrer_{shape_inferrer}
+    , required_constant_cpu_inputs_{required_constant_cpu_inputs}
+    , default_attributes_{std::move(default_attributes)}
+    , kernel_info_{kernel_info}
+    , constant_gpu_resources_{constant_gpu_resources}
+    , ep_name_{ep_name}
 {
     // Get the ABI execution interface and store the winml provider for resource transitions.
     // Mirrors PluginOpKernelContextWrapper constructor which calls GetABIExecutionInterfaceAndInvalidateState
@@ -603,7 +505,7 @@ AbiSafeKernelContext::AbiSafeKernelContext(
     }
 }
 
-void AbiSafeKernelContext::TransitionResourcesForOperatorIfRequired(bool isBeforeOp) {
+void AbiSafeKernelContext::TransitionResourcesForOperatorIfRequired(const bool isBeforeOp) const {
     // Mirrors PluginOpKernelContextWrapper::TransitionResourcesForOperatorIfRequired.
     // External (non-internal) DML operators require D3D12 resources to be in COMMON state before
     // execution and UAV state after. Without these transitions, GPU reads/writes operate on
@@ -615,51 +517,48 @@ void AbiSafeKernelContext::TransitionResourcesForOperatorIfRequired(bool isBefor
     std::vector<IUnknown*> resourcesToTransition;
 
     // Collect input resources
-    size_t input_count = 0;
-    ort_api_->KernelContext_GetInputCount(kernel_context_, &input_count);
-    for (size_t i = 0; i < input_count; ++i) {
-        const OrtValue* input_value = nullptr;
-        OrtStatus* s = ort_api_->KernelContext_GetInput(kernel_context_, i, &input_value);
-        if (s) { ort_api_->ReleaseStatus(s); continue; }
-        if (!input_value) continue;
-
-        // Check if this is a GPU tensor
-        const OrtMemoryInfo* mem_info = nullptr;
-        s = ort_api_->GetTensorMemoryInfo(input_value, &mem_info);
-        if (s) { ort_api_->ReleaseStatus(s); continue; }
-
-        const char* name = nullptr;
-        ort_api_->MemoryInfoGetName(mem_info, &name);
-        if (name && strcmp(name, "Cpu") == 0) continue;
-
-        OrtMemType mem_type = OrtMemTypeDefault;
-        ort_api_->MemoryInfoGetMemType(mem_info, &mem_type);
-        if (mem_type == OrtMemTypeCPUInput || mem_type == OrtMemTypeCPUOutput) continue;
-
-        // Get the D3D12 resource via the ABI translation path
-        void* data_ptr = nullptr;
-        s = ort_api_->GetTensorMutableData(const_cast<OrtValue*>(input_value), &data_ptr);
-        if (s) { ort_api_->ReleaseStatus(s); continue; }
-        if (!data_ptr) continue;
-
-        IUnknown* allocation = execution_provider_->GetAllocationFromDataPointer(data_ptr);
-        if (!allocation) continue;
-
-        IUnknown* abiResource = nullptr;
-        execution_provider_->GetABIDataInterface(is_internal_operator_, allocation, &abiResource);
-        allocation->Release();
-        if (abiResource) {
-            resourcesToTransition.push_back(abiResource);
+    const auto input_count{kernel_context_.GetInputCount()};
+    for (auto i = 0; i < input_count; ++i) {
+        auto value{kernel_context_.GetInput(i)};
+        if (value == nullptr) {
+            continue;
+        }
+        const auto memory_info{value.GetTensorMemoryInfo()};
+        if (memory_info.GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
+            continue;
+        }
+        if (const auto memory_type{memory_info.GetMemoryType()};
+            memory_type == OrtMemTypeCPUInput ||
+            memory_type == OrtMemTypeCPUOutput ||
+            memory_type == OrtMemTypeCPU) {
+            continue;
+        }
+        const auto data_ptr{value.GetTensorRawData()};
+        if (data_ptr == nullptr) {
+            continue;
+        }
+        const auto allocation_info{
+            const_cast<PluginDmlAllocationInfo*>(
+                static_cast<const PluginDmlAllocationInfo*>(data_ptr))
+        };
+        if (allocation_info == nullptr) {
+            continue;
+        }
+        allocation_info->AddRef();
+        if (is_internal_operator_) {
+            resourcesToTransition.push_back(allocation_info);
+        } else {
+            resourcesToTransition.push_back(allocation_info->GetResource());
         }
     }
 
     // Collect output resources — use output_tensor_cache_ populated by GetOutputTensor calls.
     // We cannot call KernelContext_GetOutput here without a shape (would re-allocate the tensor).
     for (auto& t : output_tensor_cache_) {
-        if (t && t->IsDataInterface()) {
+        if (t != nullptr && t->IsDataInterface()) {
             IUnknown* resource = nullptr;
             t->GetDataInterface(&resource);
-            if (resource) {
+            if (resource != nullptr) {
                 resourcesToTransition.push_back(resource);
             }
         }
@@ -672,17 +571,20 @@ void AbiSafeKernelContext::TransitionResourcesForOperatorIfRequired(bool isBefor
             resourcesToTransition.data());
     }
 
-    // Release refs acquired by GetABIDataInterface
     for (IUnknown* r : resourcesToTransition) {
-        if (r) r->Release();
+        r->Release();
     }
 }
 
-HRESULT AbiSafeKernelContext::GetInputTensor(uint32_t inputIndex, IMLOperatorTensor** tensor) const noexcept {
-    if (!tensor) return E_POINTER;
+HRESULT AbiSafeKernelContext::GetInputTensor(uint32_t index, IMLOperatorTensor** tensor) const noexcept
+try {
+    if (tensor == nullptr) {
+        return E_POINTER;
+    }
     *tensor = nullptr;
-
-    if (!kernel_context_ || !ort_api_) return E_FAIL;
+    if (kernel_context_.GetOrtKernelContext() == nullptr) {
+        return E_FAIL;
+    }
 
     // Fast path: return a pre-uploaded GPU buffer if one was cached for this input index.
     // This is the core of the persistent-resource optimization — no CPU→GPU upload occurs.
@@ -695,39 +597,32 @@ HRESULT AbiSafeKernelContext::GetInputTensor(uint32_t inputIndex, IMLOperatorTen
         *tensor = gpu_tensor.Detach();
         return S_OK;
     }
+    
+    if (const auto value{kernel_context_.GetInput(index)}; value != nullptr) {
+        const auto abi_tensor{tensor_cache_.emplace_back(
+            Microsoft::WRL::Make<AbiSafeTensor>(value, is_internal_operator_))};
+        abi_tensor->AddRef();
+        *tensor = abi_tensor.Get();
+    }
+    return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
+}
 
-    const OrtValue* input_value = nullptr;
-    OrtStatus* status = ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
+HRESULT AbiSafeKernelContext::GetOutputTensor(uint32_t index, IMLOperatorTensor** tensor) noexcept
+try {
+    if (tensor == nullptr) {
+        return E_POINTER;
+    }
+    *tensor = nullptr;
+    if (kernel_context_.GetOrtKernelContext() == nullptr) {
         return E_FAIL;
     }
 
-    if (!input_value) {
-        // Optional input that doesn't exist
-        return S_OK;
-    }
-
-    // Create ABI-safe tensor wrapper and cache it to keep it alive
-    auto abi_tensor = Microsoft::WRL::Make<AbiSafeTensor>(input_value, ort_api_, execution_provider_, is_internal_operator_);
-    tensor_cache_.push_back(abi_tensor);
-    *tensor = abi_tensor.Get();
-    abi_tensor->AddRef(); // Caller gets a reference
-
-    return S_OK;
-}
-
-HRESULT AbiSafeKernelContext::GetOutputTensor(uint32_t outputIndex, IMLOperatorTensor** tensor) noexcept {
-    if (!tensor) return E_POINTER;
-    *tensor = nullptr;
-
-    if (!kernel_context_ || !ort_api_) return E_FAIL;
-
     // Use pre-inferred output shapes from graph compilation (source of truth)
     // If there are dynamic dimensions, fill them from runtime input shapes
-    if (inferred_output_shapes_ && outputIndex < inferred_output_shapes_->size()) {
-        const auto& shape = (*inferred_output_shapes_)[outputIndex];
-
+    if (inferred_output_shapes_ != nullptr && index < inferred_output_shapes_->size()) {
+        const auto& shape{(*inferred_output_shapes_)[index]};
         if (!shape.empty()) {
             // Check if shape contains dynamic dimensions (-1 cast to uint32_t becomes 0xFFFFFFFF)
             bool has_dynamic = false;
@@ -737,431 +632,212 @@ HRESULT AbiSafeKernelContext::GetOutputTensor(uint32_t outputIndex, IMLOperatorT
                     break;
                 }
             }
-
             if (!has_dynamic) {
                 // All dimensions are static - use shape as-is
-                return GetOutputTensor(outputIndex, static_cast<uint32_t>(shape.size()), shape.data(), tensor);
-            } else {
-                // Graph shape has dynamic dimensions - fill them from runtime input
-                // Assumption: dynamic dimensions match corresponding dimensions from input 0
-                const OrtValue* input0 = nullptr;
-                OrtStatus* input_status = ort_api_->KernelContext_GetInput(kernel_context_, 0, &input0);
-                if (input_status == nullptr && input0 != nullptr) {
-                    OrtTensorTypeAndShapeInfo* input_info = nullptr;
-                    input_status = ort_api_->GetTensorTypeAndShape(input0, &input_info);
-                    if (input_status == nullptr) {
-                        size_t input_dim_count = 0;
-                        ort_api_->GetDimensionsCount(input_info, &input_dim_count);
-
-                        if (input_dim_count == shape.size()) {
-                            std::vector<int64_t> input_dims(input_dim_count);
-                            ort_api_->GetDimensions(input_info, input_dims.data(), input_dim_count);
-
-                            // Fill dynamic dimensions from input
-                            std::vector<uint32_t> filled_shape(shape.size());
-
-                            for (size_t i = 0; i < shape.size(); ++i) {
-                                if (shape[i] == static_cast<uint32_t>(-1)) {
-                                    filled_shape[i] = static_cast<uint32_t>(input_dims[i]);
-                                } else {
-                                    filled_shape[i] = shape[i];
-                                }
-                            }
-
-                            ort_api_->ReleaseTensorTypeAndShapeInfo(input_info);
-                            return GetOutputTensor(outputIndex, static_cast<uint32_t>(filled_shape.size()), filled_shape.data(), tensor);
-                        }
-                        ort_api_->ReleaseTensorTypeAndShapeInfo(input_info);
-                    }
-                    if (input_status) ort_api_->ReleaseStatus(input_status);
-                } else if (input_status) {
-                    ort_api_->ReleaseStatus(input_status);
-                }
-
-                // Fallback: couldn't fill from input, let ONNX Runtime infer
-                // (will fall through to the end of the function)
+                return GetOutputTensor(index, static_cast<uint32_t>(shape.size()), shape.data(), tensor);
             }
+            // Graph shape has dynamic dimensions - fill them from runtime input
+            // Assumption: dynamic dimensions match corresponding dimensions from input 0
+            if (const auto input0{kernel_context_.GetInput(0)};
+                input0 != nullptr) {
+                if (const auto shape0{input0.GetTensorTypeAndShapeInfo().GetShape()};
+                    shape0.size() == shape.size()) {
+                    std::vector<uint32_t> filled_shape(shape.size());
+                    for (size_t i = 0; i < shape.size(); ++i) {
+                        if (shape[i] == static_cast<uint32_t>(-1)) {
+                            filled_shape[i] = static_cast<uint32_t>(shape0[i]);
+                        } else {
+                            filled_shape[i] = shape[i];
+                        }
+                    }
+                    return GetOutputTensor(index, static_cast<uint32_t>(filled_shape.size()), filled_shape.data(), tensor);
+                }
+            }
+            // Fallback: couldn't fill from input, let ONNX Runtime infer
+            // (will fall through to the end of the function)
         }
     }
 
     // For internal operators (MemcpyToHost/FromHost), output shape = input 0 shape
     if (is_internal_operator_) {
-        const OrtValue* input_value = nullptr;
-        OrtStatus* input_status = ort_api_->KernelContext_GetInput(kernel_context_, 0, &input_value);
-        if (input_status == nullptr && input_value != nullptr) {
-            OrtTensorTypeAndShapeInfo* input_info = nullptr;
-            input_status = ort_api_->GetTensorTypeAndShape(input_value, &input_info);
-            if (input_status == nullptr) {
-                size_t dim_count = 0;
-                ort_api_->GetDimensionsCount(input_info, &dim_count);
-                std::vector<int64_t> input_dims(dim_count);
-                if (dim_count > 0) {
-                    ort_api_->GetDimensions(input_info, input_dims.data(), dim_count);
-                }
-                ort_api_->ReleaseTensorTypeAndShapeInfo(input_info);
-
-                // Convert to uint32_t
-                std::vector<uint32_t> output_shape(dim_count);
-                for (size_t i = 0; i < dim_count; ++i) {
-                    output_shape[i] = static_cast<uint32_t>(input_dims[i]);
-                }
-
-                return GetOutputTensor(outputIndex, static_cast<uint32_t>(dim_count), output_shape.data(), tensor);
-            } else {
-                ort_api_->ReleaseStatus(input_status);
-            }
-        } else if (input_status) {
-            ort_api_->ReleaseStatus(input_status);
+        if (const auto value{kernel_context_.GetInput(0)};
+            value != nullptr) {
+            const auto shape{value.GetTensorTypeAndShapeInfo().GetShape()};
+            std::vector<uint32_t> output_shape(shape.size());
+            ranges::transform(shape, output_shape.begin(),
+                [](const int64_t elem) {
+                    return static_cast<uint32_t>(elem);
+                });
+                return GetOutputTensor(index, static_cast<uint32_t>(output_shape.size()),
+                    output_shape.data(), tensor);
         }
     }
 
     // For operators with shape inferrer (e.g., Reshape), call the inferrer to compute output shapes
     if (shape_inferrer_) {
-        auto inference_context = Microsoft::WRL::Make<AbiSafeShapeInferenceContext>(
-            kernel_context_,
-            ort_api_,
-            default_attributes_,
-            execution_provider_,
-            kernel_info_  // Pass kernel_info so attribute reads use actual node values, not just defaults
-        );
+        const auto inference_context{
+            Microsoft::WRL::Make<AbiSafeShapeInferenceContext>(
+                kernel_context_.GetOrtKernelContext(), default_attributes_, kernel_info_)};
 
-        HRESULT hr = shape_inferrer_->InferOutputShapes(inference_context.Get());
-        if (SUCCEEDED(hr)) {
-            const auto& inferred_shapes = inference_context->GetInferredOutputShapes();
-            if (outputIndex < inferred_shapes.size() && !inferred_shapes[outputIndex].empty()) {
-                const auto& shape = inferred_shapes[outputIndex];
-                return GetOutputTensor(outputIndex, static_cast<uint32_t>(shape.size()), shape.data(), tensor);
+        if (SUCCEEDED(shape_inferrer_->InferOutputShapes(inference_context.Get()))) {
+            const auto& inferred_shapes{inference_context->GetInferredOutputShapes()};
+            if (index < inferred_shapes.size() && !inferred_shapes[index].empty()) {
+                const auto& shape = inferred_shapes[index];
+                return GetOutputTensor(index, static_cast<uint32_t>(shape.size()), shape.data(), tensor);
             }
         }
     }
 
     // Get output without specifying shape - let ONNX Runtime infer at runtime
     // This handles: dynamic shapes, empty inferred shapes, or when shape inference is unavailable
-    OrtValue* output_value = nullptr;
-    OrtStatus* status = ort_api_->KernelContext_GetOutput(kernel_context_, outputIndex, nullptr, 0, &output_value);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
+    if (const auto value{kernel_context_.GetOutput(index, nullptr, 0)};
+        value != nullptr) {
+        // Create ABI-safe tensor wrapper and cache it for lifetime + post-op resource transitions
+        const auto abi_tensor{
+            output_tensor_cache_.emplace_back(
+                Microsoft::WRL::Make<AbiSafeTensor>(value, is_internal_operator_))};
+        abi_tensor->AddRef();
+        *tensor = abi_tensor.Get();
     }
-
-    if (!output_value) {
-        // Optional output
-        return S_OK;
-    }
-
-    // Log what shape ONNX Runtime actually created
-    OrtTensorTypeAndShapeInfo* output_info = nullptr;
-    status = ort_api_->GetTensorTypeAndShape(output_value, &output_info);
-    if (!status) {
-        size_t dim_count = 0;
-        ort_api_->GetDimensionsCount(output_info, &dim_count);
-        std::vector<int64_t> dims(dim_count);
-        if (dim_count > 0) {
-            ort_api_->GetDimensions(output_info, dims.data(), dim_count);
-        }
-
-        ort_api_->ReleaseTensorTypeAndShapeInfo(output_info);
-    } else {
-        ort_api_->ReleaseStatus(status);
-    }
-
-    // Create ABI-safe tensor wrapper and cache it for lifetime + post-op resource transitions
-    auto abi_tensor = Microsoft::WRL::Make<AbiSafeTensor>(output_value, ort_api_, execution_provider_, is_internal_operator_);
-
-    output_tensor_cache_.push_back(abi_tensor);
-    *tensor = abi_tensor.Get();
-    abi_tensor->AddRef(); // Caller gets a reference
-
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
-HRESULT AbiSafeKernelContext::GetOutputTensor(
-    uint32_t outputIndex,
-    uint32_t dimensionCount,
-    const uint32_t* dimensionSizes,
-    IMLOperatorTensor** tensor) noexcept {
-
-    if (!tensor) return E_POINTER;
-    if (!dimensionSizes && dimensionCount > 0) return E_POINTER;  // Allow null for scalar tensors
+HRESULT AbiSafeKernelContext::GetOutputTensor(uint32_t index, uint32_t dimensionCount,
+    const uint32_t* dimensionSizes, IMLOperatorTensor** tensor) noexcept
+try {
+    if (tensor == nullptr || (dimensionSizes == nullptr && dimensionCount > 0)) {
+        return E_POINTER;
+    }
     *tensor = nullptr;
-
-    if (!kernel_context_ || !ort_api_) return E_FAIL;
-
-    // Convert uint32_t dimensions to int64_t
-    std::vector<int64_t> shape(dimensionCount);
-    for (uint32_t i = 0; i < dimensionCount; ++i) {
-        shape[i] = static_cast<int64_t>(dimensionSizes[i]);
-    }
-
-    // Get output with specified shape
-    OrtValue* output_value = nullptr;
-    OrtStatus* status = ort_api_->KernelContext_GetOutput(
-        kernel_context_,
-        outputIndex,
-        shape.data(),
-        dimensionCount,
-        &output_value);
-
-    if (status) {
-        ort_api_->ReleaseStatus(status);
+    if (kernel_context_.GetOrtKernelContext() == nullptr) {
         return E_FAIL;
     }
 
-    if (!output_value) {
-        // Optional output
-        return S_OK;
+    const std::vector<int64_t> shape{dimensionSizes, dimensionSizes + dimensionCount};
+    const auto value{kernel_context_.GetOutput(index, shape.data(), shape.size())};
+    if (value != nullptr) {
+        const auto abi_tensor{output_tensor_cache_.emplace_back(
+            Microsoft::WRL::Make<AbiSafeTensor>(value, is_internal_operator_))};
+        abi_tensor->AddRef();
+        *tensor = abi_tensor.Get();
     }
-
-    // Create ABI-safe tensor wrapper and cache it for lifetime + post-op resource transitions
-    auto abi_tensor = Microsoft::WRL::Make<AbiSafeTensor>(output_value, ort_api_, execution_provider_, is_internal_operator_);
-
-    output_tensor_cache_.push_back(abi_tensor);
-    *tensor = abi_tensor.Get();
-    abi_tensor->AddRef(); // Caller gets a reference
-
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
-HRESULT AbiSafeKernelContext::AllocateTemporaryData(size_t size, IUnknown** data) const noexcept {
-    if (!data) return E_POINTER;
+HRESULT AbiSafeKernelContext::AllocateTemporaryData(size_t size, IUnknown** data) const noexcept
+try {
+    if (data == nullptr) {
+        return E_POINTER;
+    }
     *data = nullptr;
-
-    // Allow size == 0 to match ONNX Runtime behavior (allocator may handle it)
-
-    // Look up the GPU allocator by the EP's registered name (e.g. "amdgpu" when brokered,
-    // "directml" when standalone). The name must match what was used to register the
-    // per-session DmlBucketizedBufferAllocator in CreatePreferredAllocators.
-    OrtMemoryInfo* mem_info = nullptr;
-    OrtStatus* status = ort_api_->CreateMemoryInfo(
-        ep_name_.c_str(),
-        OrtAllocatorType::OrtDeviceAllocator,
-        0, // device id
-        OrtMemType::OrtMemTypeDefault,
-        &mem_info
-    );
-
-    if (status) {
-        ort_api_->ReleaseStatus(status);
+    if (kernel_context_.GetOrtKernelContext() == nullptr) {
         return E_FAIL;
     }
 
-    // Get allocator from kernel context
-    OrtAllocator* allocator = nullptr;
-    status = ort_api_->KernelContext_GetAllocator(kernel_context_, mem_info, &allocator);
-    ort_api_->ReleaseMemoryInfo(mem_info);
+    const Ort::MemoryInfo memory_info{"GPU", OrtMemoryInfoDeviceType_GPU,
+        amd::VendorId, 0, OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator};
 
-    if (status) {
-        ort_api_->ReleaseStatus(status);
+    Ort::Allocator allocator{kernel_context_.GetAllocator(*memory_info)};
+    if (allocator == nullptr) {
         return E_FAIL;
     }
-
-    if (!allocator) {
-        return E_FAIL;
-    }
-
-    // Allocate memory
-    void* allocated_memory = nullptr;
-    status = ort_api_->AllocatorAlloc(allocator, size, &allocated_memory);
-    ort_api_->ReleaseAllocator(allocator);
-
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    if (!allocated_memory) {
+    const auto memory{allocator.Alloc(size)};
+    if (memory == nullptr) {
         return E_OUTOFMEMORY;
     }
-
-    // DirectML operators expect raw memory pointers cast to IUnknown*
-    // This matches the existing behavior in the DML codebase
-    *data = reinterpret_cast<IUnknown*>(allocated_memory);
+    *data = static_cast<IUnknown*>(memory);
 
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
 void AbiSafeKernelContext::GetExecutionInterface(IUnknown** executionInterface) const noexcept {
-    if (!executionInterface) return;
-
-    if (abi_execution_object_) {
-        abi_execution_object_.CopyTo(executionInterface);
-    } else {
-        *executionInterface = nullptr;
+    if (executionInterface != nullptr) {
+        if (abi_execution_object_) {
+            abi_execution_object_.CopyTo(executionInterface);
+        } else {
+            *executionInterface = nullptr;
+        }
     }
 }
 
-// IMLOperatorKernelContextPrivate methods
-bool AbiSafeKernelContext::IsSequenceInputTensor(uint32_t inputIndex) const noexcept {
-    if (!kernel_context_ || !ort_api_) {
+bool AbiSafeKernelContext::IsSequenceInputTensor(const uint32_t index) const noexcept
+try {
+    if (kernel_context_.GetOrtKernelContext() == nullptr) {
         return false;
     }
-
-    // Get the input OrtValue
-    const OrtValue* input_value = nullptr;
-    OrtStatus* status = ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return false;
-    }
-
-    if (!input_value) {
-        return false;  // Optional input not provided
-    }
-
-    // Check the type
-    ONNXType value_type = ONNX_TYPE_UNKNOWN;
-    status = ort_api_->GetValueType(input_value, &value_type);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return false;
-    }
-
-    bool is_sequence = (value_type == ONNX_TYPE_SEQUENCE);
-    return is_sequence;
+    const auto value {kernel_context_.GetInput(index)};
+    return value != nullptr && value.GetTypeInfo().GetONNXType() == ONNX_TYPE_SEQUENCE;
+} catch (const Ort::Exception&) {
+    return false;
 }
 
-HRESULT AbiSafeKernelContext::GetSequenceInputInfo(uint32_t inputIndex, uint32_t* inputCount, MLOperatorTensorDataType* dataType) const noexcept {
-    if (!inputCount || !dataType) {
+HRESULT AbiSafeKernelContext::GetSequenceInputInfo(uint32_t index, uint32_t* inputCount, MLOperatorTensorDataType* dataType) const noexcept
+try {
+    if (inputCount == nullptr || dataType == nullptr) {
         return E_POINTER;
     }
-    if (!kernel_context_ || !ort_api_) {
+    *inputCount = 0;
+    if (kernel_context_.GetOrtKernelContext() == nullptr) {
         return E_FAIL;
     }
 
-    // Get the input OrtValue
-    const OrtValue* input_value = nullptr;
-    OrtStatus* status = ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
+    if (const auto value{kernel_context_.GetInput(index)};
+        value != nullptr) {
+        const auto type_info{value.GetTypeInfo()};
+        if (type_info.GetONNXType() != ONNX_TYPE_SEQUENCE) {
+            return E_INVALIDARG;
+        }
+        size_t count{};
+        if (Ort::Status status{Ort::GetApi().GetValueCount(value, &count)};
+            !status.IsOK()) {
+            return E_FAIL;
+        }
+        *inputCount = static_cast<uint32_t>(count);
+        *dataType = static_cast<MLOperatorTensorDataType>(
+            type_info.GetSequenceTypeInfo()
+                     .GetSequenceElementType()
+                     .GetTensorTypeAndShapeInfo()
+                     .GetElementType());
     }
-
-    if (!input_value) {
-        return E_FAIL;  // Optional input not provided
-    }
-
-    // Verify it's a sequence
-    ONNXType value_type = ONNX_TYPE_UNKNOWN;
-    status = ort_api_->GetValueType(input_value, &value_type);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    if (value_type != ONNX_TYPE_SEQUENCE) {
-        return E_INVALIDARG;
-    }
-
-    // Get the count of elements in the sequence
-    size_t count = 0;
-    status = ort_api_->GetValueCount(input_value, &count);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-    *inputCount = static_cast<uint32_t>(count);
-
-    // Get the data type from the sequence's type info
-    OrtTypeInfo* type_info = nullptr;
-    status = ort_api_->GetTypeInfo(input_value, &type_info);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    const OrtSequenceTypeInfo* sequence_info = nullptr;
-    status = ort_api_->CastTypeInfoToSequenceTypeInfo(type_info, &sequence_info);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    OrtTypeInfo* element_type_info = nullptr;
-    status = ort_api_->GetSequenceElementType(sequence_info, &element_type_info);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    // Get the tensor element data type
-    const OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
-    status = ort_api_->CastTypeInfoToTensorInfo(element_type_info, &tensor_info);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(element_type_info);
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    ONNXTensorElementDataType element_data_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-    status = ort_api_->GetTensorElementType(tensor_info, &element_data_type);
-    ort_api_->ReleaseTypeInfo(element_type_info);
-    ort_api_->ReleaseTypeInfo(type_info);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    // Convert ONNXTensorElementDataType to MLOperatorTensorDataType
-    *dataType = static_cast<MLOperatorTensorDataType>(element_data_type);
-
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
-HRESULT AbiSafeKernelContext::GetSequenceInputTensor(uint32_t inputIndex, uint32_t sequenceIndex, IMLOperatorTensor** tensor) const noexcept {
-    if (!tensor) {
+HRESULT AbiSafeKernelContext::GetSequenceInputTensor(uint32_t index, uint32_t sequence_index, IMLOperatorTensor** tensor) const noexcept
+try {
+    if (tensor == nullptr) {
         return E_POINTER;
     }
     *tensor = nullptr;
-
-    if (!kernel_context_ || !ort_api_) {
+    if (kernel_context_.GetOrtKernelContext()) {
         return E_FAIL;
     }
-
-    // Get the input sequence OrtValue
-    const OrtValue* input_value = nullptr;
-    OrtStatus* status = ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
+    if (const auto value{kernel_context_.GetInput(index)};
+        value != nullptr) {
+        Ort::AllocatorWithDefaultOptions allocator{};
+        const auto element_value{value.GetValue(index, allocator)};
+        if (element_value == nullptr) {
+            return E_FAIL;
+        }
+        auto abi_tensor{
+            Microsoft::WRL::Make<AbiSafeTensor>(
+                element_value, is_internal_operator_)
+        };
+        if (abi_tensor == nullptr) {
+            return E_OUTOFMEMORY;
+        }
+        *tensor = abi_tensor.Detach();
     }
-
-    if (!input_value) {
-        return E_FAIL;
-    }
-
-    // Get allocator for extracting sequence element
-    OrtAllocator* allocator = nullptr;
-    status = ort_api_->GetAllocatorWithDefaultOptions(&allocator);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    // Get the element at sequenceIndex
-    OrtValue* element_value = nullptr;
-    status = ort_api_->GetValue(input_value, sequenceIndex, allocator, &element_value);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    if (!element_value) {
-        return E_FAIL;
-    }
-
-    // Create AbiSafeTensor wrapper for the element
-    auto abi_tensor = Microsoft::WRL::Make<AbiSafeTensor>(element_value, ort_api_, execution_provider_, is_internal_operator_);
-    if (!abi_tensor) {
-        ort_api_->ReleaseValue(element_value);
-        return E_OUTOFMEMORY;
-    }
-
-    *tensor = abi_tensor.Detach();
-    // Note: element_value is now owned by the AbiSafeTensor, it will be released when the tensor is released
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
 HRESULT AbiSafeKernelContext::PrepareSequenceOutput(uint32_t outputIndex, MLOperatorTensorDataType dataType) const noexcept {
@@ -1171,657 +847,346 @@ HRESULT AbiSafeKernelContext::PrepareSequenceOutput(uint32_t outputIndex, MLOper
     return S_OK;
 }
 
-HRESULT AbiSafeKernelContext::GetSequenceOutputTensor(uint32_t outputIndex, uint32_t sequenceIndex,
-    MLOperatorTensorDataType dataType, uint32_t dimensions, const uint32_t* dimensionSizes,
-    bool gpuOutput, IMLOperatorTensor** tensor) const noexcept {
-    if (!tensor) {
+HRESULT AbiSafeKernelContext::GetSequenceOutputTensor(uint32_t index, uint32_t sequence_index,
+    MLOperatorTensorDataType data_type, uint32_t dimensions, const uint32_t* dimensionSizes, bool gpuOutput,
+    IMLOperatorTensor** tensor) const noexcept
+try {
+    if (tensor == nullptr) {
         return E_POINTER;
     }
     *tensor = nullptr;
-
-    if (!kernel_context_ || !ort_api_) {
+    if (kernel_context_.GetOrtKernelContext() == nullptr) {
         return E_FAIL;
     }
 
-    // Get allocator based on GPU/CPU output
-    OrtAllocator* allocator = nullptr;
-    OrtStatus* status = nullptr;
+    const std::vector<int64_t> shape{dimensionSizes, dimensionSizes + dimensions};
+    const Ort::Allocator allocator{gpuOutput ?
+        kernel_context_.GetAllocator(*Ort::MemoryInfo{"GPU",
+            OrtMemoryInfoDeviceType_GPU, amd::VendorId, 0, OrtDeviceMemoryType_DEFAULT,
+            0, OrtDeviceAllocator}) : Ort::AllocatorWithDefaultOptions{}};
 
-    if (gpuOutput) {
-        // Get GPU allocator from execution provider
-        OrtMemoryInfo* mem_info = nullptr;
-        status = ort_api_->CreateMemoryInfo("DML", OrtDeviceAllocator, 0, OrtMemTypeDefault, &mem_info);
-        if (status) {
-            ort_api_->ReleaseStatus(status);
-            return E_FAIL;
+    if (const auto element_value{Ort::Value::CreateTensor(allocator, shape.data(),
+        shape.size(), static_cast<ONNXTensorElementDataType>(data_type))};
+        element_value != nullptr) {
+        // DEFICIENCY: The C API does not provide incremental sequence building (no "append to sequence" method)
+        // The only way to create a sequence is via CreateValue() which requires all elements upfront
+        // This means we cannot properly implement GetSequenceOutputTensor in the ABI-safe path
+        //
+        // The unsafe path uses m_impl->Output<onnxruntime::TensorSeq>() which gives direct access to
+        // the C++ TensorSeq object and can call Add() to incrementally build the sequence
+        //
+        // Workaround: We create the tensor element and return it wrapped in AbiSafeTensor
+        // This works for operators that only read sequence elements (like Memcpy reading input sequences)
+        // but will NOT work correctly for operators that write/create sequence outputs
+        //
+        // If sequence output writing is needed, the operator must fall back to the unsafe path
+        auto abi_tensor{Microsoft::WRL::Make<AbiSafeTensor>(element_value, is_internal_operator_)};
+        if (abi_tensor == nullptr) {
+            return E_OUTOFMEMORY;
         }
-
-        status = ort_api_->KernelContext_GetAllocator(kernel_context_, mem_info, &allocator);
-        ort_api_->ReleaseMemoryInfo(mem_info);
-        if (status) {
-            ort_api_->ReleaseStatus(status);
-            return E_FAIL;
-        }
-    } else {
-        // Get CPU allocator
-        status = ort_api_->GetAllocatorWithDefaultOptions(&allocator);
-        if (status) {
-            ort_api_->ReleaseStatus(status);
-            return E_FAIL;
-        }
+        *tensor = abi_tensor.Detach();
     }
-
-    // Convert dimensions to int64_t
-    std::vector<int64_t> shape(dimensions);
-    for (uint32_t i = 0; i < dimensions; ++i) {
-        shape[i] = static_cast<int64_t>(dimensionSizes[i]);
-    }
-
-    // Create tensor element
-    OrtValue* element_value = nullptr;
-    ONNXTensorElementDataType onnx_type = static_cast<ONNXTensorElementDataType>(dataType);
-    status = ort_api_->CreateTensorAsOrtValue(allocator, shape.data(), shape.size(), onnx_type, &element_value);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    if (!element_value) {
-        return E_FAIL;
-    }
-
-    // DEFICIENCY: The C API does not provide incremental sequence building (no "append to sequence" method)
-    // The only way to create a sequence is via CreateValue() which requires all elements upfront
-    // This means we cannot properly implement GetSequenceOutputTensor in the ABI-safe path
-    //
-    // The unsafe path uses m_impl->Output<onnxruntime::TensorSeq>() which gives direct access to
-    // the C++ TensorSeq object and can call Add() to incrementally build the sequence
-    //
-    // Workaround: We create the tensor element and return it wrapped in AbiSafeTensor
-    // This works for operators that only read sequence elements (like Memcpy reading input sequences)
-    // but will NOT work correctly for operators that write/create sequence outputs
-    //
-    // If sequence output writing is needed, the operator must fall back to the unsafe path
-    auto abi_tensor = Microsoft::WRL::Make<AbiSafeTensor>(element_value, ort_api_, execution_provider_, is_internal_operator_);
-    if (!abi_tensor) {
-        ort_api_->ReleaseValue(element_value);
-        return E_OUTOFMEMORY;
-    }
-
-    *tensor = abi_tensor.Detach();
-    // Note: element_value is now owned by the AbiSafeTensor
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
 // ============================================================================
 // AbiSafeShapeInferenceContext - IMLOperatorShapeInferenceContext
 // ============================================================================
 
-AbiSafeShapeInferenceContext::AbiSafeShapeInferenceContext(
-    OrtKernelContext* kernel_context,
-    const OrtApi* ort_api,
-    const AttributeMap* default_attributes,
-    const PluginDmlExecutionProviderImpl* execution_provider,
-    const OrtKernelInfo* kernel_info)
-    : kernel_context_(kernel_context)
-    , ort_api_(ort_api)
-    , default_attributes_(default_attributes)
-    , execution_provider_(execution_provider)
-    , kernel_info_(kernel_info)
-{
+AbiSafeShapeInferenceContext::AbiSafeShapeInferenceContext(OrtKernelContext* kernel_context,
+    const AttributeMap& default_attributes, const OrtKernelInfo* kernel_info)
+    : kernel_context_{kernel_context}, default_attributes_{default_attributes}, kernel_info_{kernel_info} {
 }
 
-HRESULT AbiSafeShapeInferenceContext::GetAttributeElementCount(
-    const char* name,
-    MLOperatorAttributeType type,
-    uint32_t* elementCount) const noexcept {
-    if (!name || !elementCount) {
+HRESULT AbiSafeShapeInferenceContext::GetAttributeElementCount(const char* name,
+    MLOperatorAttributeType type, uint32_t* elementCount) const noexcept
+try {
+    if (name == nullptr || elementCount == nullptr) {
         return E_POINTER;
     }
-
-    // If kernel_info_ is available, get actual attributes from the ONNX node
-    // Otherwise fall back to default_attributes_
-    if (kernel_info_ && ort_api_) {
-        // Try to get attribute from kernel_info_ using ORT API
-        OrtStatus* status = nullptr;
-
+    *elementCount = 0;
+    if (kernel_info_ != nullptr) {
         if (type == MLOperatorAttributeType::Int) {
-            // For single Int, try to get as scalar first
-            int64_t dummy_value;
-            status = ort_api_->KernelInfoGetAttribute_int64(kernel_info_, name, &dummy_value);
-            if (!status) {
-                // Attribute exists as a scalar int
+            int64_t value{};
+            if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttribute_int64(
+                kernel_info_, name, &value)}; status.IsOK()) {
                 *elementCount = 1;
                 return S_OK;
             }
-            if (status) {
-                ort_api_->ReleaseStatus(status);
-                status = nullptr;
-            }
-        }
-        else if (type == MLOperatorAttributeType::IntArray) {
-            // For IntArray, get the array length
-            size_t size = 0;
-            status = ort_api_->KernelInfoGetAttributeArray_int64(kernel_info_, name, nullptr, &size);
-            if (!status) {
-                *elementCount = static_cast<uint32_t>(size);
+        } else if (type == MLOperatorAttributeType::IntArray) {
+            size_t count{};
+            if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttributeArray_int64(
+                kernel_info_, name, nullptr, &count)}; status.IsOK()) {
+                *elementCount = count;
                 return S_OK;
             }
-            if (status) {
-                ort_api_->ReleaseStatus(status);
-                status = nullptr;
-            }
-        }
-        else if (type == MLOperatorAttributeType::Float) {
-            // For single Float, try to get as scalar
-            float dummy_value;
-            status = ort_api_->KernelInfoGetAttribute_float(kernel_info_, name, &dummy_value);
-            if (!status) {
+        } else if (type == MLOperatorAttributeType::Float) {
+            float value{};
+            if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttribute_float(
+                kernel_info_, name, &value)}; status.IsOK()) {
                 *elementCount = 1;
                 return S_OK;
             }
-            if (status) {
-                ort_api_->ReleaseStatus(status);
-                status = nullptr;
-            }
-        }
-        else if (type == MLOperatorAttributeType::FloatArray) {
-            // For FloatArray, get the array length
-            size_t size = 0;
-            status = ort_api_->KernelInfoGetAttributeArray_float(kernel_info_, name, nullptr, &size);
-            if (!status) {
-                *elementCount = static_cast<uint32_t>(size);
+        } else if (type == MLOperatorAttributeType::FloatArray) {
+            size_t count{};
+            if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttributeArray_float(
+                kernel_info_, name, nullptr, &count)}; status.IsOK()) {
+                *elementCount = count;
                 return S_OK;
             }
-            if (status) {
-                ort_api_->ReleaseStatus(status);
-                status = nullptr;
-            }
-        }
-        else if (type == MLOperatorAttributeType::String) {
-            // For String, check if it exists by trying to get its length
-            size_t size = 0;
-            status = ort_api_->KernelInfoGetAttribute_string(kernel_info_, name, nullptr, &size);
-            if (!status) {
+        } else if (type == MLOperatorAttributeType::String) {
+            size_t count{};
+            if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttribute_string(
+                kernel_info_, name, nullptr, &count)}; status.IsOK()) {
                 *elementCount = 1;
                 return S_OK;
             }
-            if (status) {
-                ort_api_->ReleaseStatus(status);
-                status = nullptr;
-            }
         }
-        // Note: StringArray is not supported by ORT C API (no KernelInfoGetAttributeArray_string)
-        // It will fall through to default_attributes_ if needed
-
-        // Fall through to default_attributes_ if ORT API fails
     }
-
-    // Attributes come from default_attributes_ set during operator registration
-    // If attribute doesn't exist, return 0 (this is valid - means attribute not set)
-    if (!default_attributes_) {
-        *elementCount = 0;
-        return S_OK;
+    if (const auto it{default_attributes_.find(name)}; it != default_attributes_.end()) {
+        *elementCount = static_cast<uint32_t>(it->second.ElementCount());
     }
-
-    auto it = default_attributes_->find(name);
-    if (it == default_attributes_->end()) {
-        // Attribute not found - this is valid, return 0
-        *elementCount = 0;
-        return S_OK;
-    }
-
-    // Attribute exists - return element count based on type
-    const auto& attr_value = it->second;
-
-    try {
-        *elementCount = static_cast<uint32_t>(attr_value.ElementCount());
-    } catch (...) {
-        *elementCount = 0;
-    }
-
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
+} catch (const wil::ResultException& ex) {
+    return ex.GetErrorCode();
 }
 
-HRESULT AbiSafeShapeInferenceContext::GetAttribute(
-    const char* name,
-    MLOperatorAttributeType type,
-    uint32_t elementCount,
-    size_t elementByteSize,
-    void* value) const noexcept {
-    if (!name || !value) {
+HRESULT AbiSafeShapeInferenceContext::GetAttribute(const char* name, MLOperatorAttributeType type,
+    uint32_t elementCount, size_t elementByteSize, void* value) const noexcept
+try {
+    if (name == nullptr || value == nullptr) {
         return E_POINTER;
     }
-
-    // If kernel_info_ is available, get actual attributes from the ONNX node
-    if (kernel_info_ && ort_api_) {
-        OrtStatus* status = nullptr;
-
-        switch (type) {
-            case MLOperatorAttributeType::Int:
-                if (elementCount == 1 && elementByteSize == sizeof(int64_t)) {
-                    status = ort_api_->KernelInfoGetAttribute_int64(kernel_info_, name, static_cast<int64_t*>(value));
-                    if (!status) {
-                        return S_OK;
-                    }
-                }
-                break;
-
-            case MLOperatorAttributeType::IntArray:
-                {
-                    size_t count = elementCount;
-                    status = ort_api_->KernelInfoGetAttributeArray_int64(kernel_info_, name, static_cast<int64_t*>(value), &count);
-                    if (!status) {
-                        return S_OK;
-                    }
-                }
-                break;
-
-            case MLOperatorAttributeType::Float:
-                if (elementCount == 1 && elementByteSize == sizeof(float)) {
-                    status = ort_api_->KernelInfoGetAttribute_float(kernel_info_, name, static_cast<float*>(value));
-                    if (!status) {
-                        return S_OK;
-                    }
-                }
-                break;
-
-            case MLOperatorAttributeType::FloatArray:
-                {
-                    size_t count = elementCount;
-                    status = ort_api_->KernelInfoGetAttributeArray_float(kernel_info_, name, static_cast<float*>(value), &count);
-                    if (!status) {
-                        return S_OK;
-                    }
-                }
-                break;
-
-            case MLOperatorAttributeType::String:
-                // String attributes need special handling - they're stored in default_attributes
-                // because ORT C API doesn't provide direct string attribute access via KernelInfo
-                break;
-
-            default:
-                break;
+    if (kernel_info_ != nullptr) {
+        if (type == MLOperatorAttributeType::Int) {
+            if (elementCount == 1 && elementByteSize == sizeof(int64_t)) {
+                *static_cast<int64_t*>(value) = kernel_info_.GetAttribute<int64_t>(name);
+                return S_OK;
+            }
+        } else if (type == MLOperatorAttributeType::IntArray) {
+            size_t count{elementCount};
+            const Ort::Status status{Ort::GetApi().KernelInfoGetAttributeArray_int64(
+                kernel_info_, name, static_cast<int64_t*>(value), &count)};
+            if (status.IsOK()) {
+                return S_OK;
+            }
+        } else if (type == MLOperatorAttributeType::Float) {
+            if (elementCount == 1 && elementByteSize == sizeof(float)) {
+                *static_cast<float*>(value) = kernel_info_.GetAttribute<float>(name);
+                return S_OK;
+            }
+        } else if (type == MLOperatorAttributeType::FloatArray) {
+            size_t count{elementCount};
+            Ort::Status status{Ort::GetApi().KernelInfoGetAttributeArray_float(
+                kernel_info_, name, static_cast<float*>(value), &count)};
+            if (status.IsOK()) {
+                return S_OK;
+            }
         }
-
-        if (status) {
-            ort_api_->ReleaseStatus(status);
-        }
-        // Fall through to default_attributes_ if ORT API fails
     }
-
-    // Fall back to default_attributes_
-    if (!default_attributes_) {
-        return E_INVALIDARG;
-    }
-
-    auto it = default_attributes_->find(name);
-    if (it == default_attributes_->end()) {
-        return E_INVALIDARG;
-    }
-
-    // Use the AttributeValue::GetAttribute method which handles all types
-    const auto& attr_value = it->second;
-
-    try {
-        attr_value.GetAttribute(type, elementCount, elementByteSize, value);
+    if (const auto it{default_attributes_.find(name)}; it != default_attributes_.end()) {
+        it->second.GetAttribute(type, elementCount, elementByteSize, value);
         return S_OK;
-    } catch (const wil::ResultException& ex) {
-        return ex.GetErrorCode();
-    } catch (...) {
-        return E_FAIL;
     }
+    return E_INVALIDARG;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
+} catch (const wil::ResultException& ex) {
+    return ex.GetErrorCode();
 }
 
 HRESULT AbiSafeShapeInferenceContext::GetStringAttributeElementLength(
-    const char* name,
-    uint32_t elementIndex,
-    uint32_t* attributeElementByteLength) const noexcept {
-    if (!name || !attributeElementByteLength) {
+    const char* name, uint32_t index, uint32_t* attributeElementByteLength) const noexcept
+try {
+    if (name == nullptr || attributeElementByteLength == nullptr) {
         return E_POINTER;
     }
-
-    // Try to get from kernel_info_ first if available
-    if (kernel_info_ && ort_api_ && ort_api_->KernelInfoGetAttribute_string && elementIndex == 0) {
-        size_t size = 0;
-        OrtStatus* status = ort_api_->KernelInfoGetAttribute_string(kernel_info_, name, nullptr, &size);
-        if (!status) {
+    if (kernel_info_ != nullptr && index == 0) {
+        size_t size{};
+        if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttribute_string(kernel_info_, name, nullptr, &size)};
+            status.IsOK()) {
             *attributeElementByteLength = static_cast<uint32_t>(size);
             return S_OK;
         }
-        if (status) {
-            ort_api_->ReleaseStatus(status);
-        }
     }
-
-    // Fall back to default_attributes_
-    if (!default_attributes_) {
-        return E_INVALIDARG;
-    }
-
-    auto it = default_attributes_->find(name);
-    if (it == default_attributes_->end()) {
-        return E_INVALIDARG;
-    }
-
-    const auto& attr_value = it->second;
-
-    try {
-        // Use GetStringAttribute to get the string
-        const std::string* str = attr_value.GetStringAttribute(name, elementIndex);
-        if (!str) {
+    if (const auto it{default_attributes_.find(name)}; it != default_attributes_.end()) {
+        const auto s{it->second.GetStringAttribute(name, index)};
+        if (s == nullptr) {
             return E_INVALIDARG;
         }
-
         // Return length including null terminator
-        *attributeElementByteLength = static_cast<uint32_t>(str->size() + 1);
+        *attributeElementByteLength = static_cast<uint32_t>(s->length() + 1);
         return S_OK;
-    } catch (...) {
-        return E_FAIL;
     }
+    return E_INVALIDARG;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
+} catch (const wil::ResultException& e) {
+    return e.GetErrorCode();
 }
 
-HRESULT AbiSafeShapeInferenceContext::GetStringAttributeElement(
-    const char* name,
-    uint32_t elementIndex,
-    uint32_t attributeElementByteLength,
-    char* attributeElement) const noexcept {
-    if (!name || !attributeElement) {
+HRESULT AbiSafeShapeInferenceContext::GetStringAttributeElement(const char* name, uint32_t element_index,
+    uint32_t attributeElementByteLength, char* attributeElement) const noexcept
+try {
+    if (name == nullptr || attributeElement == nullptr) {
         return E_POINTER;
     }
-
-    // Try to get from kernel_info_ first if available
-    if (kernel_info_ && ort_api_ && ort_api_->KernelInfoGetAttribute_string && elementIndex == 0) {
-        size_t size = attributeElementByteLength;
-        OrtStatus* status = ort_api_->KernelInfoGetAttribute_string(kernel_info_, name, attributeElement, &size);
-        if (!status) {
+    if (kernel_info_ != nullptr && element_index == 0) {
+        size_t size{attributeElementByteLength};
+        if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttribute_string(
+            kernel_info_, name, attributeElement, &size)}; status.IsOK()) {
             return S_OK;
         }
-        if (status) {
-            ort_api_->ReleaseStatus(status);
-        }
     }
-
-    // Fall back to default_attributes_
-    if (!default_attributes_) {
-        return E_INVALIDARG;
-    }
-
-    auto it = default_attributes_->find(name);
-    if (it == default_attributes_->end()) {
-        return E_INVALIDARG;
-    }
-
-    const auto& attr_value = it->second;
-
-    try {
-        // Use GetStringAttribute to get the string
-        const std::string* str = attr_value.GetStringAttribute(name, elementIndex);
-        if (!str) {
+    if (const auto it{default_attributes_.find(name)}; it != default_attributes_.end()) {
+        const auto s{it->second.GetStringAttribute(name, element_index)};
+        if (s == nullptr) {
             return E_INVALIDARG;
         }
-
-        // Check buffer size
-        if (attributeElementByteLength < str->size() + 1) {
+        if (attributeElementByteLength < s->length() + 1) {
             return E_INVALIDARG;
         }
-
-        // Copy string including null terminator
-        strcpy_s(attributeElement, attributeElementByteLength, str->c_str());
+        s->copy(attributeElement, attributeElementByteLength);
         return S_OK;
-    } catch (...) {
-        return E_FAIL;
     }
+    return E_INVALIDARG;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
+} catch (const wil::ResultException& e) {
+    return e.GetErrorCode();
 }
 
-uint32_t AbiSafeShapeInferenceContext::GetInputCount() const noexcept {
-    if (ort_api_ == nullptr) return 0;
-
-    size_t count = 0;
-
-    // Try runtime context first (if available)
-    if (kernel_context_ != nullptr) {
-        if (Ort::Status status{ort_api_->KernelContext_GetInputCount(kernel_context_, &count)}; status.IsOK()) {
-            return static_cast<uint32_t>(count);
-        }
+uint32_t AbiSafeShapeInferenceContext::GetInputCount() const noexcept
+try {
+    if (kernel_context_.GetOrtKernelContext() != nullptr) {
+        return static_cast<uint32_t>(kernel_context_.GetInputCount());
     }
-
-    // Fall back to kernel_info at session init
-    if (kernel_info_ != nullptr && ort_api_->KernelInfo_GetInputCount) {
-        if (Ort::Status status{ort_api_->KernelInfo_GetInputCount(kernel_info_, &count)}; status.IsOK()) {
-            return static_cast<uint32_t>(count);
-        }
+    if (kernel_info_ != nullptr) {
+        return static_cast<uint32_t>(kernel_info_.GetInputCount());
     }
-
+    return 0;
+} catch (const Ort::Exception&) {
     return 0;
 }
 
-uint32_t AbiSafeShapeInferenceContext::GetOutputCount() const noexcept {
-    if (ort_api_ == nullptr) return 0;
-
-    size_t count = 0;
-
-    // Try runtime context first (if available)
-    if (kernel_context_ != nullptr) {
-        if (Ort::Status status{ort_api_->KernelContext_GetOutputCount(kernel_context_, &count)}; status.IsOK()) {
-            return static_cast<uint32_t>(count);
-        }
+uint32_t AbiSafeShapeInferenceContext::GetOutputCount() const noexcept
+try {
+    if (kernel_context_.GetOrtKernelContext() != nullptr) {
+        return static_cast<uint32_t>(kernel_context_.GetOutputCount());
     }
-
-    // Fall back to kernel_info at session init
-    if (kernel_info_ != nullptr && ort_api_->KernelInfo_GetOutputCount) {
-        if (Ort::Status status{ort_api_->KernelInfo_GetOutputCount(kernel_info_, &count)}; status.IsOK()) {
-            return static_cast<uint32_t>(count);
-        }
+    if (kernel_info_ != nullptr) {
+        return static_cast<uint32_t>(kernel_info_.GetOutputCount());
     }
-
+    return 0;
+} catch (const Ort::Exception&) {
     return 0;
 }
 
-bool AbiSafeShapeInferenceContext::IsInputValid(uint32_t inputIndex) const noexcept {
-    if (ort_api_ == nullptr) return false;
-
-    // Mirror OpNodeInfoWrapper::IsInputValid: index in range AND type/value is non-null.
-    if (kernel_context_ != nullptr) {
-        const OrtValue* value = nullptr;
-        if (Ort::Status status{ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &value)}; !status.IsOK()) {
-            return false;
-        }
-        return value != nullptr;
+bool AbiSafeShapeInferenceContext::IsInputValid(uint32_t index) const noexcept
+try {
+    if (kernel_context_.GetOrtKernelContext() != nullptr) {
+        return kernel_context_.GetInput(index) != nullptr;
     }
-
-    if (kernel_info_ != nullptr && ort_api_->KernelInfo_GetInputTypeInfo) {
-        OrtTypeInfo* type_info = nullptr;
-        if (Ort::Status status{ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info)}; !status.IsOK()) {
-            return false;
-        }
-        bool valid = (type_info != nullptr);
-        if (type_info != nullptr) ort_api_->ReleaseTypeInfo(type_info);
-        return valid;
+    if (kernel_info_ != nullptr) {
+        return kernel_info_.GetInputTypeInfo(index) != nullptr;
     }
-
+    return false;
+} catch (const Ort::Exception&) {
     return false;
 }
 
-bool AbiSafeShapeInferenceContext::IsOutputValid(uint32_t outputIndex) const noexcept {
-    if (ort_api_ == nullptr || kernel_info_ == nullptr) return false;
-    OrtTypeInfo* type_info = nullptr;
-    if (Ort::Status status{ort_api_->KernelInfo_GetOutputTypeInfo(kernel_info_, outputIndex, &type_info)}; !status.IsOK()) {
-        return false;
-    }
-    bool valid = (type_info != nullptr);
-    if (type_info != nullptr) ort_api_->ReleaseTypeInfo(type_info);
-    return valid;
+bool AbiSafeShapeInferenceContext::IsOutputValid(uint32_t index) const noexcept {
+    return kernel_info_ == nullptr ? false :
+        kernel_info_.GetOutputTypeInfo(index) != nullptr;
 }
 
 HRESULT AbiSafeShapeInferenceContext::GetInputEdgeDescription(
-    uint32_t inputIndex,
-    MLOperatorEdgeDescription* edgeDescription) const noexcept {
-
-    if (edgeDescription == nullptr) return E_POINTER;
-    if (ort_api_ == nullptr) return E_FAIL;
-    // Note: kernel_context_ can be nullptr at session init - we'll fall back to kernel_info_ below
-
-    OrtTypeInfo* type_info = nullptr;
-
-    // Try runtime context first (if available)
-    if (kernel_context_ != nullptr) {
-        const OrtValue* input_value = nullptr;
-        if (Ort::Status status{ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value)}; status.IsOK() && input_value != nullptr) {
-            Ort::Status type_status{ort_api_->GetTypeInfo(input_value, &type_info)};
-            if (!type_status.IsOK()) {
-                type_info = nullptr;
-            }
-        }
+    uint32_t index, MLOperatorEdgeDescription* description) const noexcept
+try {
+    if (description == nullptr) {
+        return E_POINTER;
     }
-
-    // Fall back to kernel_info if runtime didn't work or isn't available
-    if (type_info == nullptr && kernel_info_ != nullptr && ort_api_->KernelInfo_GetInputTypeInfo) {
-        if (Ort::Status status{ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info)}; !status.IsOK()) {
-            return E_INVALIDARG;
+    Ort::TypeInfo type_info;
+    if (kernel_context_.GetOrtKernelContext() != nullptr) {
+        if (const auto value{kernel_context_.GetInput(index)}; value != nullptr) {
+            type_info = value.GetTypeInfo();
         }
+    } else if (kernel_info_ != nullptr) {
+        type_info = kernel_info_.GetInputTypeInfo(index);
     }
-
     if (type_info == nullptr) {
         return E_INVALIDARG;
     }
-
-    // We have type_info from either runtime or kernel_info
-    ONNXType onnx_type;
-    if (Ort::Status status{ort_api_->GetOnnxTypeFromTypeInfo(type_info, &onnx_type)}; !status.IsOK()) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        return E_FAIL;
-    }
-
-    if (onnx_type == ONNX_TYPE_TENSOR) {
-        edgeDescription->edgeType = MLOperatorEdgeType::Tensor;
-        const OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
-        if (Ort::Status status{ort_api_->CastTypeInfoToTensorInfo(type_info, &tensor_info)}; status.IsOK() && tensor_info != nullptr) {
-            ONNXTensorElementDataType elem_type;
-            ort_api_->GetTensorElementType(tensor_info, &elem_type);
-            edgeDescription->tensorDataType = static_cast<MLOperatorTensorDataType>(elem_type);
-        }
+    if (type_info.GetONNXType() == ONNX_TYPE_TENSOR) {
+        description->edgeType = MLOperatorEdgeType::Tensor;
+        description->tensorDataType =  static_cast<MLOperatorTensorDataType>(
+            type_info.GetTensorTypeAndShapeInfo().GetElementType());
     } else {
-        edgeDescription->edgeType = MLOperatorEdgeType::Undefined;
+        description->edgeType = MLOperatorEdgeType::Undefined;
     }
-
-    ort_api_->ReleaseTypeInfo(type_info);
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
-HRESULT AbiSafeShapeInferenceContext::GetInputTensorDimensionCount(
-    uint32_t inputIndex,
-    uint32_t* dimensionCount) const noexcept {
-
-    if (dimensionCount == nullptr) {
+HRESULT AbiSafeShapeInferenceContext::GetInputTensorDimensionCount(uint32_t index, uint32_t* count) const noexcept
+try {
+    if (count == nullptr) {
         return E_POINTER;
     }
-    if (ort_api_ == nullptr) {
-        return E_FAIL;
-    }
-    // Note: kernel_context_ can be nullptr at session init - we'll fall back to kernel_info_ below
-
-    // Try to get runtime tensor first (only if kernel_context_ is available)
-    const OrtValue* input_value = nullptr;
-    if (kernel_context_ != nullptr) {
-        Ort::Status status{ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value)};
-        if (!status.IsOK()) {
-            input_value = nullptr;
-        }
-    }
-    if (input_value != nullptr) {
-        // Runtime tensor available
-        OrtTensorTypeAndShapeInfo* shape_info = nullptr;
-        if (Ort::Status status{ort_api_->GetTensorTypeAndShape(input_value, &shape_info)}; status.IsOK()) {
-            size_t dim_count = 0;
-            ort_api_->GetDimensionsCount(shape_info, &dim_count);
-            *dimensionCount = static_cast<uint32_t>(dim_count);
-            ort_api_->ReleaseTensorTypeAndShapeInfo(shape_info);
+    if (kernel_context_.GetOrtKernelContext() != nullptr) {
+        if (const auto value{kernel_context_.GetInput(index)};
+            value != nullptr) {
+            *count = value.GetTensorTypeAndShapeInfo().GetDimensionsCount();
             return S_OK;
         }
     }
-
-    // Fall back to graph shape from kernel_info (for initializers/constants)
-    if (kernel_info_ != nullptr && ort_api_->KernelInfo_GetInputTypeInfo) {
-        OrtTypeInfo* type_info = nullptr;
-        if (Ort::Status status{ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info)}; status.IsOK() && type_info != nullptr) {
-            const OrtTensorTypeAndShapeInfo* shape_info = nullptr;
-            if (Ort::Status cast_status{ort_api_->CastTypeInfoToTensorInfo(type_info, &shape_info)}; cast_status.IsOK() && shape_info != nullptr) {
-                size_t dim_count = 0;
-                ort_api_->GetDimensionsCount(shape_info, &dim_count);
-                *dimensionCount = static_cast<uint32_t>(dim_count);
-                ort_api_->ReleaseTypeInfo(type_info);
-                return S_OK;
-            }
-            ort_api_->ReleaseTypeInfo(type_info);
+    if (kernel_info_ != nullptr) {
+        if (const auto type_info{kernel_info_.GetInputTypeInfo(index)};
+            type_info != nullptr) {
+            *count = type_info.GetTensorTypeAndShapeInfo().GetDimensionsCount();
+            return S_OK;
         }
     }
-
     return E_INVALIDARG;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
-HRESULT AbiSafeShapeInferenceContext::GetInputTensorShape(
-    uint32_t inputIndex,
-    uint32_t dimensionCount,
-    uint32_t* dimensions) const noexcept {
-
-    if (dimensions == nullptr && dimensionCount > 0) {
+HRESULT AbiSafeShapeInferenceContext::GetInputTensorShape(uint32_t index, uint32_t count, uint32_t* dimensions) const noexcept
+try {
+    if (dimensions == nullptr && count > 0) {
         return E_POINTER;
     }
-    if (ort_api_ == nullptr) {
-        return E_FAIL;
-    }
-
-    // Prefer runtime shape when available (mirrors GetInputTensorDimensionCount behavior)
-    const OrtValue* input_value = nullptr;
-    if (kernel_context_ != nullptr) {
-        Ort::Status status{ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value)};
-        if (!status.IsOK()) {
-            input_value = nullptr;
+    if (kernel_context_.GetOrtKernelContext() != nullptr) {
+        if (const auto value{kernel_context_.GetInput(index)};
+            value != nullptr) {
+            const auto shape{value.GetTensorTypeAndShapeInfo().GetShape()};
+            ranges::transform(shape, dimensions,
+                [](const int64_t elem) {
+                    return static_cast<uint32_t>(elem);
+            });
+            return S_OK;
         }
     }
-    if (input_value != nullptr) {
-        OrtTensorTypeAndShapeInfo* shape_info = nullptr;
-        if (Ort::Status status{ort_api_->GetTensorTypeAndShape(input_value, &shape_info)}; status.IsOK()) {
-            size_t dim_count = 0;
-            ort_api_->GetDimensionsCount(shape_info, &dim_count);
-            if (dimensionCount == static_cast<uint32_t>(dim_count)) {
-                std::vector<int64_t> dims(dim_count);
-                ort_api_->GetDimensions(shape_info, dims.data(), dim_count);
-                ort_api_->ReleaseTensorTypeAndShapeInfo(shape_info);
-                for (size_t i = 0; i < dim_count; ++i) {
-                    dimensions[i] = static_cast<uint32_t>(dims[i]);
-                }
-                return S_OK;
-            }
-            ort_api_->ReleaseTensorTypeAndShapeInfo(shape_info);
+    if (kernel_info_ != nullptr) {
+        if (const auto type_info{kernel_info_.GetInputTypeInfo(index)};
+            type_info != nullptr) {
+            const auto shape{type_info.GetTensorTypeAndShapeInfo().GetShape()};
+            ranges::transform(shape, dimensions,
+                [](const int64_t elem) {
+                   return static_cast<uint32_t>(elem);
+                });
+            return S_OK;
         }
     }
-
-    // Fall back to graph shape from kernel_info (for initializers/constants at session init)
-    if (kernel_info_ != nullptr && ort_api_->KernelInfo_GetInputTypeInfo) {
-        OrtTypeInfo* type_info = nullptr;
-        if (Ort::Status status{ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info)}; status.IsOK() && type_info != nullptr) {
-            const OrtTensorTypeAndShapeInfo* shape_info = nullptr;
-            if (Ort::Status cast_status{ort_api_->CastTypeInfoToTensorInfo(type_info, &shape_info)}; cast_status.IsOK() && shape_info != nullptr) {
-                size_t dim_count = 0;
-                ort_api_->GetDimensionsCount(shape_info, &dim_count);
-                if (dimensionCount == static_cast<uint32_t>(dim_count)) {
-                    std::vector<int64_t> dims(dim_count);
-                    ort_api_->GetDimensions(shape_info, dims.data(), dim_count);
-                    ort_api_->ReleaseTypeInfo(type_info);
-                    for (size_t i = 0; i < dim_count; ++i) {
-                        dimensions[i] = static_cast<uint32_t>(dims[i]);
-                    }
-                    return S_OK;
-                }
-            }
-            ort_api_->ReleaseTypeInfo(type_info);
-        }
-    }
-
     return E_INVALIDARG;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
 HRESULT AbiSafeShapeInferenceContext::SetOutputTensorShape(
@@ -1841,109 +1206,65 @@ HRESULT AbiSafeShapeInferenceContext::SetOutputTensorShape(
     return S_OK;
 }
 
-HRESULT AbiSafeShapeInferenceContext::GetConstantInputTensor(
-    uint32_t inputIndex,
-    IMLOperatorTensor** tensor) const noexcept {
-
-    if (!tensor) return E_POINTER;
+HRESULT AbiSafeShapeInferenceContext::GetConstantInputTensor(uint32_t index, IMLOperatorTensor** tensor) const noexcept
+try {
+    if (tensor == nullptr) {
+        return E_POINTER;
+    }
     *tensor = nullptr;
-
-    if (!ort_api_) return E_FAIL;
-    // Note: kernel_context_ can be nullptr at session init - we'll fall back to kernel_info_ below
-
-    // Check if already cached
-    auto it = constant_tensor_cache_.find(inputIndex);
-    if (it != constant_tensor_cache_.end()) {
+    if (const auto it{constant_tensor_cache_.find(index)}; it != constant_tensor_cache_.end()) {
         *tensor = it->second.Get();
         (*tensor)->AddRef();
-
+        return S_OK;
+    }
+    Ort::ConstValue value{};
+    if (kernel_context_.GetOrtKernelContext() != nullptr) {
+        value = kernel_context_.GetInput(index);
+        DML_PERF_LOG("[ABI_SAFE] ShapeCtx::GetConstantInput[", inputIndex, "]: value=", (void*)value, "\n");
+    }
+    if (value == nullptr && kernel_info_ != nullptr) {
+        if (index >= GetInputCount()) {
+            return S_OK;
+        }
+        int is_constant{};
+        value = kernel_info_.GetTensorConstantInput(index, &is_constant);
+        if (value == nullptr && is_constant == 0) {
+            return S_OK;
+        }
+    }
+    if (value == nullptr) {
         return S_OK;
     }
 
-    const OrtValue* input_value = nullptr;
-
-    // Try runtime context first (if available)
-    if (kernel_context_ != nullptr) {
-        Ort::Status status{ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value)};
-        DML_PERF_LOG("[ABI_SAFE] ShapeCtx::GetConstantInput[", inputIndex, "]: ctx_status=",
-            status.IsOK() ? "OK" : "ERR", "  value=", (void*)input_value, "\n");
-        if (!status.IsOK() || input_value == nullptr) {
-            input_value = nullptr;
-        }
-    }
-
-    // Fall back to kernel_info for constant inputs at session init
-    if (input_value == nullptr && kernel_info_ != nullptr && ort_api_->KernelInfoGetConstantInput_tensor) {
-        // First check if the input index is valid
-        uint32_t input_count = GetInputCount();
-        if (inputIndex >= input_count) {
-            // Input doesn't exist - return S_OK with nullptr (not an error, just not available)
-            *tensor = nullptr;
-            return S_OK;
-        }
-
-        int is_constant = 0;
-        if (Ort::Status status{ort_api_->KernelInfoGetConstantInput_tensor(kernel_info_, inputIndex, &is_constant, &input_value)}; !status.IsOK()) {
-            // Return S_OK with nullptr rather than error - shape inferencer will handle it
-            *tensor = nullptr;
-            return S_OK;
-        }
-        if (is_constant == 0 || input_value == nullptr) {
-            // Not a constant input - return S_OK with nullptr to match unsafe path behavior
-            // Shape inferencers will check for nullptr and fall back to attributes
-            *tensor = nullptr;
-            return S_OK;
-        }
-    }
-
-    if (!input_value) {
-        // Input doesn't exist or couldn't be retrieved - return S_OK with nullptr to match unsafe path
-        *tensor = nullptr;
-        return S_OK;
-    }
-
-    // Create ABI-safe tensor wrapper (constant CPU tensors, not GPU — is_internal_operator=false)
-    auto abi_tensor = Microsoft::WRL::Make<AbiSafeTensor>(input_value, ort_api_, execution_provider_, false);
-    constant_tensor_cache_[inputIndex] = abi_tensor;
+    const auto abi_tensor{Microsoft::WRL::Make<AbiSafeTensor>(value)};
+    constant_tensor_cache_[index] = abi_tensor;
 
     *tensor = abi_tensor.Get();
     (*tensor)->AddRef();
 
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
-HRESULT AbiSafeShapeInferenceContext::TryGetConstantInputTensor(
-    uint32_t inputIndex,
-    IMLOperatorTensor** tensor) const noexcept {
-    // Same as GetConstantInputTensor but returns S_FALSE instead of error if not available
-    HRESULT hr = GetConstantInputTensor(inputIndex, tensor);
-    if (FAILED(hr)) {
-        return S_FALSE;
-    }
-    return hr;
+HRESULT AbiSafeShapeInferenceContext::TryGetConstantInputTensor(uint32_t index, IMLOperatorTensor** tensor) const noexcept {
+    return GetConstantInputTensor(index, tensor);
 }
 
 HRESULT AbiSafeShapeInferenceContext::GetSequenceInputInfo(
-    uint32_t inputIndex,
-    uint32_t* inputCount,
-    MLOperatorTensorDataType* dataType) const noexcept {
+    uint32_t index, uint32_t* inputCount, MLOperatorTensorDataType* dataType) const noexcept {
     // Sequence inputs not supported in shape inference context yet
     return E_NOTIMPL;
 }
 
 HRESULT AbiSafeShapeInferenceContext::GetSequenceInputTensorDimensionCount(
-    uint32_t inputIndex,
-    uint32_t sequenceIndex,
-    uint32_t* dimensionCount) const noexcept {
+    uint32_t index, uint32_t sequence_index, uint32_t* dimensionCount) const noexcept {
     // Sequence inputs not supported in shape inference context yet
     return E_NOTIMPL;
 }
 
 HRESULT AbiSafeShapeInferenceContext::GetSequenceInputTensorShape(
-    uint32_t inputIndex,
-    uint32_t sequenceIndex,
-    uint32_t dimensionCount,
-    uint32_t* dimensions) const noexcept {
+    uint32_t index, uint32_t sequence_index, uint32_t dimensionCount, uint32_t* dimensions) const noexcept {
     // Sequence inputs not supported in shape inference context yet
     return E_NOTIMPL;
 }
@@ -1952,20 +1273,19 @@ HRESULT AbiSafeShapeInferenceContext::GetSequenceInputTensorShape(
 // PreFetchedTensorAttrWrapper
 // ============================================================================
 
-PreFetchedTensorAttrWrapper::PreFetchedTensorAttrWrapper(
-    MLOperatorTensorDataType data_type,
-    std::vector<uint32_t> shape,
-    std::vector<std::byte> raw_bytes)
-    : data_type_(data_type)
-    , shape_(std::move(shape))
-    , raw_bytes_(std::move(raw_bytes)) {}
+PreFetchedTensorAttrWrapper::PreFetchedTensorAttrWrapper(const MLOperatorTensorDataType data_type,
+    std::vector<uint32_t> shape, std::vector<std::byte> raw_bytes)
+    : data_type_{data_type}, shape_{std::move(shape)}, raw_bytes_{std::move(raw_bytes)} {
+}
 
 uint32_t PreFetchedTensorAttrWrapper::GetDimensionCount() const noexcept {
     return static_cast<uint32_t>(shape_.size());
 }
 
 HRESULT PreFetchedTensorAttrWrapper::GetShape(uint32_t dim_count, uint32_t* dims) const noexcept {
-    if (!dims || dim_count != static_cast<uint32_t>(shape_.size())) return E_INVALIDARG;
+    if (dims == nullptr || dim_count != static_cast<uint32_t>(shape_.size())) {
+        return E_INVALIDARG;
+    }
     memcpy(dims, shape_.data(), dim_count * sizeof(uint32_t));
     return S_OK;
 }
@@ -1974,15 +1294,14 @@ MLOperatorTensorDataType PreFetchedTensorAttrWrapper::GetTensorDataType() const 
     return data_type_;
 }
 
-bool PreFetchedTensorAttrWrapper::IsCpuData() const noexcept { return true; }
-bool PreFetchedTensorAttrWrapper::IsDataInterface() const noexcept { return false; }
-
 void* PreFetchedTensorAttrWrapper::GetData() noexcept {
     return raw_bytes_.data();
 }
 
 void PreFetchedTensorAttrWrapper::GetDataInterface(IUnknown** dataInterface) noexcept {
-    if (dataInterface) *dataInterface = nullptr;
+    if (dataInterface != nullptr) {
+        *dataInterface = nullptr;
+    }
 }
 
 // ============================================================================
@@ -1991,29 +1310,27 @@ void PreFetchedTensorAttrWrapper::GetDataInterface(IUnknown** dataInterface) noe
 
 AbiSafeKernelCreationContext::AbiSafeKernelCreationContext(
     const OrtKernelInfo* kernel_info,
-    const OrtApi* ort_api,
-    const AttributeMap* default_attributes,
-    const std::vector<uint32_t>* required_constant_cpu_inputs,
+    AttributeMap default_attributes,
+    const std::vector<uint32_t>& required_constant_cpu_inputs,
     const PluginDmlExecutionProviderImpl* execution_provider,
     std::unordered_map<uint32_t, Microsoft::WRL::ComPtr<IMLOperatorTensor>>&& constant_tensors,
     OrtKernelContext* runtime_context,
     const char* operator_name,
-    bool is_internal_operator,
-    bool requires_input_shapes_at_creation,
+    const bool is_internal_operator,
+    const bool requires_input_shapes_at_creation,
     std::unordered_map<std::string, PreFetchedTensorAttr> tensor_attribute_cache,
     const EdgeShapes* input_shapes_override)
-    : kernel_info_(kernel_info)
-    , ort_api_(ort_api)
-    , default_attributes_(default_attributes)
-    , required_constant_cpu_inputs_(required_constant_cpu_inputs)
-    , execution_provider_(execution_provider)
-    , constant_tensors_(std::move(constant_tensors))
-    , runtime_context_(runtime_context)
-    , operator_name_(operator_name)
-    , is_internal_operator_(is_internal_operator)
-    , requires_input_shapes_at_creation_(requires_input_shapes_at_creation)
-    , tensor_attribute_cache_(std::move(tensor_attribute_cache))
-    , input_shapes_override_(input_shapes_override)
+    : kernel_info_{kernel_info}
+    , default_attributes_{std::move(default_attributes)}
+    , required_constant_cpu_inputs_{required_constant_cpu_inputs}
+    , execution_provider_{execution_provider}
+    , constant_tensors_{std::move(constant_tensors)}
+    , runtime_context_{runtime_context}
+    , operator_name_{operator_name}
+    , is_internal_operator_{is_internal_operator}
+    , input_shapes_override_{input_shapes_override}
+    , requires_input_shapes_at_creation_{requires_input_shapes_at_creation}
+    , tensor_attribute_cache_{std::move(tensor_attribute_cache)}
 {
     // Call GetABIExecutionInterfaceAndInvalidateState exactly once here, matching the
     // PluginOpKernelInfoWrapper constructor pattern. GetExecutionInterface then returns
@@ -2032,312 +1349,159 @@ AbiSafeKernelCreationContext::AbiSafeKernelCreationContext(
     }
 }
 
-uint32_t AbiSafeKernelCreationContext::GetInputCount() const noexcept {
-    size_t count = 0;
-    OrtStatus* status = ort_api_->KernelInfo_GetInputCount(kernel_info_, &count);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return 0;
-    }
-    return static_cast<uint32_t>(count);
+uint32_t AbiSafeKernelCreationContext::GetInputCount() const noexcept
+try {
+    return static_cast<uint32_t>(kernel_info_.GetInputCount());
+} catch (const Ort::Exception&) {
+    return 0;
 }
 
-uint32_t AbiSafeKernelCreationContext::GetOutputCount() const noexcept {
-    size_t count = 0;
-    OrtStatus* status = ort_api_->KernelInfo_GetOutputCount(kernel_info_, &count);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return 0;
-    }
-    return static_cast<uint32_t>(count);
+uint32_t AbiSafeKernelCreationContext::GetOutputCount() const noexcept
+try {
+    return static_cast<uint32_t>(kernel_info_.GetOutputCount());
+} catch (const Ort::Exception&) {
+    return 0;
 }
 
-bool AbiSafeKernelCreationContext::IsInputValid(uint32_t inputIndex) const noexcept {
-    // Mirror OpNodeInfoWrapper::IsInputValid: index in range AND type info is non-null.
-    // Optional inputs that are absent have no type info and must return false.
-    size_t count = 0;
-    OrtStatus* status = ort_api_->KernelInfo_GetInputCount(kernel_info_, &count);
-    if (status) { ort_api_->ReleaseStatus(status); return false; }
-    if (inputIndex >= count) return false;
-
-    OrtTypeInfo* type_info = nullptr;
-    status = ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info);
-    if (status) { ort_api_->ReleaseStatus(status); return false; }
-    bool valid = (type_info != nullptr);
-    if (type_info) ort_api_->ReleaseTypeInfo(type_info);
-    return valid;
+bool AbiSafeKernelCreationContext::IsInputValid(const uint32_t index) const noexcept
+try {
+    return kernel_info_.GetInputTypeInfo(index) != nullptr;
+} catch (const Ort::Exception&) {
+    return false;
 }
 
-bool AbiSafeKernelCreationContext::IsOutputValid(uint32_t outputIndex) const noexcept {
-    // Mirror OpNodeInfoWrapper::IsOutputValid: index in range AND type info is non-null.
-    size_t count = 0;
-    OrtStatus* status = ort_api_->KernelInfo_GetOutputCount(kernel_info_, &count);
-    if (status) { ort_api_->ReleaseStatus(status); return false; }
-    if (outputIndex >= count) return false;
-
-    OrtTypeInfo* type_info = nullptr;
-    status = ort_api_->KernelInfo_GetOutputTypeInfo(kernel_info_, outputIndex, &type_info);
-    if (status) { ort_api_->ReleaseStatus(status); return false; }
-    bool valid = (type_info != nullptr);
-    if (type_info) ort_api_->ReleaseTypeInfo(type_info);
-    return valid;
+bool AbiSafeKernelCreationContext::IsOutputValid(const uint32_t index) const noexcept
+try {
+    return kernel_info_.GetOutputTypeInfo(index) != nullptr;
+} catch (const Ort::Exception&) {
+    return false;
 }
 
-HRESULT AbiSafeKernelCreationContext::GetInputEdgeDescription(uint32_t inputIndex, MLOperatorEdgeDescription* edgeDesc) const noexcept {
-    if (!edgeDesc) {
+HRESULT AbiSafeKernelCreationContext::GetInputEdgeDescription(
+    const uint32_t index, MLOperatorEdgeDescription* description) const noexcept
+try {
+    if (description == nullptr) {
         return E_POINTER;
     }
-
-    OrtTypeInfo* type_info = nullptr;
-    OrtStatus* status = ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
+    const auto type_info{kernel_info_.GetInputTypeInfo(index)};
+    if (const auto onnx_type{type_info.GetONNXType()}; onnx_type == ONNX_TYPE_TENSOR) {
+        description->edgeType = MLOperatorEdgeType::Tensor;
+        description->tensorDataType = ConvertToMLOperatorTensorDataType(
+            type_info.GetTensorTypeAndShapeInfo().GetElementType());
+    } else if (onnx_type == ONNX_TYPE_SEQUENCE) {
+        description->edgeType = MLOperatorEdgeType::SequenceTensor;
+        description->tensorDataType = MLOperatorTensorDataType::Undefined;
+    } else {
+        description->edgeType = MLOperatorEdgeType::Undefined;
+        description->tensorDataType = MLOperatorTensorDataType::Undefined;
     }
-
-    // Determine the edge type (tensor, sequence, etc.)
-    ONNXType onnx_type = ONNX_TYPE_UNKNOWN;
-    status = ort_api_->GetOnnxTypeFromTypeInfo(type_info, &onnx_type);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    if (onnx_type == ONNX_TYPE_TENSOR) {
-        edgeDesc->edgeType = MLOperatorEdgeType::Tensor;
-
-        // Get tensor data type
-        const OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
-        status = ort_api_->CastTypeInfoToTensorInfo(type_info, &tensor_info);
-        if (status) {
-            ort_api_->ReleaseTypeInfo(type_info);
-            ort_api_->ReleaseStatus(status);
-            return E_FAIL;
-        }
-
-        ONNXTensorElementDataType elem_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-        status = ort_api_->GetTensorElementType(tensor_info, &elem_type);
-        if (status) {
-            ort_api_->ReleaseTypeInfo(type_info);
-            ort_api_->ReleaseStatus(status);
-            return E_FAIL;
-        }
-
-        // Convert ONNXTensorElementDataType to MLOperatorTensorDataType
-        edgeDesc->tensorDataType = ConvertToMLOperatorTensorDataType(elem_type);
-    }
-    else if (onnx_type == ONNX_TYPE_SEQUENCE) {
-        edgeDesc->edgeType = MLOperatorEdgeType::SequenceTensor;
-        // TODO: Get sequence element type if needed
-        edgeDesc->tensorDataType = MLOperatorTensorDataType::Undefined;
-    }
-    else {
-        edgeDesc->edgeType = MLOperatorEdgeType::Undefined;
-        edgeDesc->tensorDataType = MLOperatorTensorDataType::Undefined;
-    }
-
-    ort_api_->ReleaseTypeInfo(type_info);
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
-HRESULT AbiSafeKernelCreationContext::GetOutputEdgeDescription(uint32_t outputIndex, MLOperatorEdgeDescription* edgeDesc) const noexcept {
-    if (!edgeDesc) return E_POINTER;
-
-    OrtTypeInfo* type_info = nullptr;
-    OrtStatus* status = ort_api_->KernelInfo_GetOutputTypeInfo(kernel_info_, outputIndex, &type_info);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
+HRESULT AbiSafeKernelCreationContext::GetOutputEdgeDescription(
+    const uint32_t index, MLOperatorEdgeDescription* description) const noexcept
+try {
+    if (description ==  nullptr) {
+        return E_POINTER;
     }
-
-    // Determine the edge type (tensor, sequence, etc.)
-    ONNXType onnx_type = ONNX_TYPE_UNKNOWN;
-    status = ort_api_->GetOnnxTypeFromTypeInfo(type_info, &onnx_type);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
+    const auto type_info{kernel_info_.GetOutputTypeInfo(index)};
+    if (const auto onnx_type{type_info.GetONNXType()}; onnx_type == ONNX_TYPE_TENSOR) {
+        description->edgeType = MLOperatorEdgeType::Tensor;
+        description->tensorDataType = ConvertToMLOperatorTensorDataType(
+            type_info.GetTensorTypeAndShapeInfo().GetElementType());
+    } else if (onnx_type == ONNX_TYPE_SEQUENCE) {
+        description->edgeType = MLOperatorEdgeType::SequenceTensor;
+        description->tensorDataType = MLOperatorTensorDataType::Undefined;
+    } else {
+        description->edgeType = MLOperatorEdgeType::Undefined;
+        description->tensorDataType = MLOperatorTensorDataType::Undefined;
     }
-
-    if (onnx_type == ONNX_TYPE_TENSOR) {
-        edgeDesc->edgeType = MLOperatorEdgeType::Tensor;
-
-        // Get tensor data type
-        const OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
-        status = ort_api_->CastTypeInfoToTensorInfo(type_info, &tensor_info);
-        if (status) {
-            ort_api_->ReleaseTypeInfo(type_info);
-            ort_api_->ReleaseStatus(status);
-            return E_FAIL;
-        }
-
-        ONNXTensorElementDataType elem_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-        status = ort_api_->GetTensorElementType(tensor_info, &elem_type);
-        if (status) {
-            ort_api_->ReleaseTypeInfo(type_info);
-            ort_api_->ReleaseStatus(status);
-            return E_FAIL;
-        }
-
-        // Convert ONNXTensorElementDataType to MLOperatorTensorDataType
-        edgeDesc->tensorDataType = ConvertToMLOperatorTensorDataType(elem_type);
-    }
-    else if (onnx_type == ONNX_TYPE_SEQUENCE) {
-        edgeDesc->edgeType = MLOperatorEdgeType::SequenceTensor;
-        // TODO: Get sequence element type if needed
-        edgeDesc->tensorDataType = MLOperatorTensorDataType::Undefined;
-    }
-    else {
-        edgeDesc->edgeType = MLOperatorEdgeType::Undefined;
-        edgeDesc->tensorDataType = MLOperatorTensorDataType::Undefined;
-    }
-
-    ort_api_->ReleaseTypeInfo(type_info);
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
 bool AbiSafeKernelCreationContext::HasTensorShapeDescription() const noexcept {
     // Mirror old OpKernelInfoWrapper::HasTensorShapeDescription() = m_allowInputShapeQuery
     // which is a static flag from kernel registration, NOT a dynamic shape check.
     // At lazy-init (Compute time) with runtime_context_, shapes are always available.
-    if (runtime_context_) {
+    if (runtime_context_.GetOrtKernelContext() != nullptr) {
         return true;
     }
     return requires_input_shapes_at_creation_;
 }
 
-HRESULT AbiSafeKernelCreationContext::GetTensorShapeDescription(IMLOperatorTensorShapeDescription** shapeInfo) const noexcept {
-    if (!shapeInfo) {
+HRESULT AbiSafeKernelCreationContext::GetTensorShapeDescription(IMLOperatorTensorShapeDescription** shapeInfo) const noexcept
+try {
+    if (shapeInfo == nullptr) {
         return E_POINTER;
     }
-
     *shapeInfo = nullptr;
-
     if (!HasTensorShapeDescription()) {
         // Dynamic shapes not supported - return E_FAIL to trigger fallback to unsafe path
         return E_FAIL;
     }
-
     // If shapes are available, return this object as the shape description interface
-    Microsoft::WRL::ComPtr<IMLOperatorTensorShapeDescription> ret = const_cast<AbiSafeKernelCreationContext*>(this);
+    Microsoft::WRL::ComPtr<IMLOperatorTensorShapeDescription> ret{const_cast<AbiSafeKernelCreationContext*>(this)};
     *shapeInfo = ret.Detach();
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
-HRESULT AbiSafeKernelCreationContext::GetInputTensorDimensionCount(uint32_t inputIndex, uint32_t* dimensionCount) const noexcept {
-    if (!dimensionCount) {
+HRESULT AbiSafeKernelCreationContext::GetInputTensorDimensionCount(uint32_t index, uint32_t* dimensionCount) const noexcept
+try {
+    if (dimensionCount == nullptr) {
         return E_POINTER;
     }
-
-    // Use captured runtime shapes (mirrors old plugin's m_inputShapesOverride → OpNodeInfoWrapper behavior)
-    if (input_shapes_override_) {
-        if (inputIndex >= static_cast<uint32_t>(input_shapes_override_->EdgeCount())) {
+    if (input_shapes_override_ != nullptr) {
+        if (index >= static_cast<uint32_t>(input_shapes_override_->EdgeCount())) {
             return E_INVALIDARG;
         }
-        *dimensionCount = static_cast<uint32_t>(input_shapes_override_->GetShape(inputIndex).size());
-        return S_OK;
+        *dimensionCount = static_cast<uint32_t>(input_shapes_override_->GetShape(index).size());
+    } else {
+        *dimensionCount =
+            kernel_info_.GetInputTypeInfo(index)
+                        .GetTensorTypeAndShapeInfo()
+                        .GetDimensionsCount();
     }
-
-    // Fall back to graph shape information
-    OrtTypeInfo* type_info = nullptr;
-    OrtStatus* status = ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    const OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
-    status = ort_api_->CastTypeInfoToTensorInfo(type_info, &tensor_info);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    size_t dim_count = 0;
-    status = ort_api_->GetDimensionsCount(tensor_info, &dim_count);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    *dimensionCount = static_cast<uint32_t>(dim_count);
-    ort_api_->ReleaseTypeInfo(type_info);
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
+} catch (const wil::ResultException& e) {
+    return e.GetErrorCode();
 }
 
-HRESULT AbiSafeKernelCreationContext::GetInputTensorShape(uint32_t inputIndex, uint32_t dimensionCount, uint32_t* dimensions) const noexcept {
-    if (!dimensions && dimensionCount > 0) {
+HRESULT AbiSafeKernelCreationContext::GetInputTensorShape(
+    uint32_t index, uint32_t dimensionCount, uint32_t* dimensions) const noexcept
+try {
+    if (dimensions == nullptr && dimensionCount > 0) {
         return E_POINTER;
     }
-
-    // Use captured runtime input shapes (mirrors old plugin's m_inputShapesOverride → OpNodeInfoWrapper behavior)
-    if (input_shapes_override_) {
-        if (inputIndex >= static_cast<uint32_t>(input_shapes_override_->EdgeCount())) {
+    if (input_shapes_override_ != nullptr) {
+        if (index >= static_cast<uint32_t>(input_shapes_override_->EdgeCount())) {
             return E_INVALIDARG;
         }
-        const auto& shape = input_shapes_override_->GetShape(inputIndex);
+        const auto& shape = input_shapes_override_->GetShape(index);
         if (dimensionCount != static_cast<uint32_t>(shape.size())) {
             return E_INVALIDARG;
         }
-        for (uint32_t i = 0; i < dimensionCount; ++i) {
-            dimensions[i] = shape[i];
-        }
-        return S_OK;
+        ranges::transform(shape, dimensions, [](const int64_t elem) {
+                return static_cast<uint32_t>(elem);
+            });
+    } else {
+        const auto shape{kernel_info_.GetInputTypeInfo(index).GetTensorTypeAndShapeInfo().GetShape()};
+        ranges::transform(shape, dimensions, [](const int64_t elem) {
+                return static_cast<uint32_t>(elem);
+            });
     }
-
-    // Otherwise get from KernelInfo (may have dynamic dimensions)
-    OrtTypeInfo* type_info = nullptr;
-    OrtStatus* status = ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    const OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
-    status = ort_api_->CastTypeInfoToTensorInfo(type_info, &tensor_info);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    size_t dim_count = 0;
-    status = ort_api_->GetDimensionsCount(tensor_info, &dim_count);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    if (dimensionCount != static_cast<uint32_t>(dim_count)) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        return E_INVALIDARG;
-    }
-
-    std::vector<int64_t> dims(dim_count);
-    status = ort_api_->GetDimensions(tensor_info, dims.data(), dim_count);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    // Convert int64_t to uint32_t
-    // If we encounter dynamic dimensions here, it's a logic error - HasTensorShapeDescription should have returned false
-    for (size_t i = 0; i < dim_count; ++i) {
-        if (dims[i] < 0) {
-            // This should never happen - HasTensorShapeDescription should prevent this
-            ort_api_->ReleaseTypeInfo(type_info);
-            return E_UNEXPECTED;
-        }
-        dimensions[i] = static_cast<uint32_t>(dims[i]);
-    }
-
-    ort_api_->ReleaseTypeInfo(type_info);
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
+} catch (const wil::ResultException& e) {
+    return e.GetErrorCode();
 }
 
 bool AbiSafeKernelCreationContext::HasOutputShapeDescription() const noexcept {
@@ -2349,610 +1513,353 @@ bool AbiSafeKernelCreationContext::HasOutputShapeDescription() const noexcept {
     return !precomputed_output_shapes_.empty();
 }
 
-HRESULT AbiSafeKernelCreationContext::GetOutputTensorDimensionCount(uint32_t outputIndex, uint32_t* dimensionCount) const noexcept {
-    if (!dimensionCount) {
+HRESULT AbiSafeKernelCreationContext::GetOutputTensorDimensionCount(uint32_t index, uint32_t* dimensionCount) const noexcept
+try {
+    if (dimensionCount == nullptr) {
         return E_POINTER;
     }
-
-    // PRIORITY 1: Check precomputed shapes from shape inferrer
-    // These take precedence over graph shapes when available
-    if (outputIndex < precomputed_output_shapes_.size() && !precomputed_output_shapes_[outputIndex].empty()) {
-        *dimensionCount = static_cast<uint32_t>(precomputed_output_shapes_[outputIndex].size());
-        return S_OK;
+    if (index < precomputed_output_shapes_.size() && !precomputed_output_shapes_[index].empty()) {
+        *dimensionCount = static_cast<uint32_t>(precomputed_output_shapes_[index].size());
+    } else {
+        *dimensionCount =
+            kernel_info_.GetOutputTypeInfo(index)
+                        .GetTensorTypeAndShapeInfo()
+                        .GetDimensionsCount();
     }
-
-    // PRIORITY 2: Fall back to graph shape information
-    OrtTypeInfo* type_info = nullptr;
-    OrtStatus* status = ort_api_->KernelInfo_GetOutputTypeInfo(kernel_info_, outputIndex, &type_info);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    const OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
-    status = ort_api_->CastTypeInfoToTensorInfo(type_info, &tensor_info);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    size_t dim_count = 0;
-    status = ort_api_->GetDimensionsCount(tensor_info, &dim_count);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    *dimensionCount = static_cast<uint32_t>(dim_count);
-    ort_api_->ReleaseTypeInfo(type_info);
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
+} catch (const wil::ResultException& e) {
+    return e.GetErrorCode();
 }
 
-HRESULT AbiSafeKernelCreationContext::GetOutputTensorShape(uint32_t outputIndex, uint32_t dimensionCount, uint32_t* dimensions) const noexcept {
-    if (!dimensions && dimensionCount > 0) {
+HRESULT AbiSafeKernelCreationContext::GetOutputTensorShape(
+    uint32_t index, uint32_t dimensionCount, uint32_t* dimensions) const noexcept
+try {
+    if (dimensions == nullptr && dimensionCount > 0) {
         return E_POINTER;
     }
-
-    // Use pre-computed output shapes from shape inferrer if available.
-    // This mirrors PluginOpKernelInfoWrapper::GetOutputTensorShape which returns m_inferredOutputShapes directly.
-    if (outputIndex < precomputed_output_shapes_.size() && !precomputed_output_shapes_[outputIndex].empty()) {
-        const auto& precomputed_shape = precomputed_output_shapes_[outputIndex];
-        if (precomputed_shape.size() == dimensionCount) {
-            for (uint32_t i = 0; i < dimensionCount; ++i) {
-                dimensions[i] = precomputed_shape[i];
-            }
-            return S_OK;
+    if (index < precomputed_output_shapes_.size() && !precomputed_output_shapes_[index].empty()) {
+        if (const auto& precomputed_shape = precomputed_output_shapes_[index]; precomputed_shape.size() == dimensionCount) {
+            ranges::transform(precomputed_shape, dimensions, [](const int64_t elem) {
+                    return static_cast<uint32_t>(elem);
+                });
         }
+    } else {
+        const auto shape{kernel_info_.GetOutputTypeInfo(index).GetTensorTypeAndShapeInfo().GetShape()};
+        ranges::transform(shape, dimensions, [](const int64_t elem) {
+                return static_cast<uint32_t>(elem);
+            });
     }
-
-    // Fall back to kernel info (for static shapes or when runtime context not available)
-    OrtTypeInfo* type_info = nullptr;
-    OrtStatus* status = ort_api_->KernelInfo_GetOutputTypeInfo(kernel_info_, outputIndex, &type_info);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    const OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
-    status = ort_api_->CastTypeInfoToTensorInfo(type_info, &tensor_info);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    size_t dim_count = 0;
-    status = ort_api_->GetDimensionsCount(tensor_info, &dim_count);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    if (dimensionCount != static_cast<uint32_t>(dim_count)) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        return E_INVALIDARG;
-    }
-
-    std::vector<int64_t> dims(dim_count);
-    status = ort_api_->GetDimensions(tensor_info, dims.data(), dim_count);
-    if (status) {
-        ort_api_->ReleaseTypeInfo(type_info);
-        ort_api_->ReleaseStatus(status);
-        return E_FAIL;
-    }
-
-    // Convert int64_t to uint32_t
-    // If we encounter dynamic dimensions here, it's a logic error
-    // - If runtime_context is available, the PRIMARY APPROACH above should have handled it
-    // - If runtime_context is not available, HasTensorShapeDescription should have returned false
-    for (size_t i = 0; i < dim_count; ++i) {
-        if (dims[i] < 0) {
-            // This should never happen
-            ort_api_->ReleaseTypeInfo(type_info);
-            return E_UNEXPECTED;
-        }
-        dimensions[i] = static_cast<uint32_t>(dims[i]);
-    }
-
-    ort_api_->ReleaseTypeInfo(type_info);
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
 void AbiSafeKernelCreationContext::GetExecutionInterface(IUnknown** executionInterface) const noexcept {
-    if (!executionInterface) return;
-    abi_execution_object_.CopyTo(executionInterface);
+    if (executionInterface != nullptr) {
+        abi_execution_object_.CopyTo(executionInterface);
+    }
 }
 
-HRESULT AbiSafeKernelCreationContext::GetAttribute(
-    const char* name,
-    MLOperatorAttributeType type,
-    uint32_t elementCount,
-    size_t elementByteSize,
-    void* value) const noexcept {
-    if (!name || !value) return E_POINTER;
-
-    OrtStatus* status = nullptr;
-
-    switch (type) {
-        case MLOperatorAttributeType::Float:
-            if (elementCount == 1 && elementByteSize == sizeof(float)) {
-                status = ort_api_->KernelInfoGetAttribute_float(kernel_info_, name, static_cast<float*>(value));
-            }
-            break;
-
-        case MLOperatorAttributeType::FloatArray:
-            {
-                // Array of floats - C API uses size_t*
-                size_t count = elementCount;
-                status = ort_api_->KernelInfoGetAttributeArray_float(kernel_info_, name, static_cast<float*>(value), &count);
-            }
-            break;
-
-        case MLOperatorAttributeType::Int:
-            if (elementCount == 1 && elementByteSize == sizeof(int64_t)) {
-                status = ort_api_->KernelInfoGetAttribute_int64(kernel_info_, name, static_cast<int64_t*>(value));
-            }
-            break;
-
-        case MLOperatorAttributeType::IntArray:
-            {
-                // Array of int64s - C API uses size_t*
-                size_t count = elementCount;
-                status = ort_api_->KernelInfoGetAttributeArray_int64(kernel_info_, name, static_cast<int64_t*>(value), &count);
-            }
-            break;
-
-        case MLOperatorAttributeType::String:
-            if (elementCount == 1) {
-                // Single string - C API uses size_t*
-                size_t size = elementByteSize;
-                status = ort_api_->KernelInfoGetAttribute_string(kernel_info_, name, static_cast<char*>(value), &size);
-            }
-            break;
-
-        case MLOperatorAttributeType::StringArray:
-            // String arrays not directly supported in C API
-            return E_NOTIMPL;
-
-        default:
-            // Tensor and other unsupported types
-            return E_NOTIMPL;
+HRESULT AbiSafeKernelCreationContext::GetAttribute(const char* name, MLOperatorAttributeType type,
+    uint32_t elementCount, size_t elementByteSize, void* value) const noexcept
+try {
+    if (name == nullptr || value == nullptr) {
+        return E_POINTER;
     }
-
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        // Attribute absent from node — mirror OpNodeInfoWrapper behavior and check registered defaults.
-        if (default_attributes_) {
-            auto it = default_attributes_->find(name);
-            if (it != default_attributes_->end()) {
-                it->second.GetAttribute(type, elementCount, elementByteSize, value);
+    if (type == MLOperatorAttributeType::Float) {
+        if (elementCount == 1 && elementByteSize == sizeof(float)) {
+            *static_cast<float*>(value) = kernel_info_.GetAttribute<float>(name);
+            return S_OK;
+        }
+    } else if (type == MLOperatorAttributeType::FloatArray) {
+        size_t count{elementCount};
+        if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttributeArray_float(
+            kernel_info_, name, static_cast<float*>(value), &count)}; status.IsOK()) {
+            return S_OK;
+        }
+    } else if (type == MLOperatorAttributeType::Int) {
+        if (elementCount == 1 && elementByteSize == sizeof(int64_t)) {
+            *static_cast<int64_t*>(value) = kernel_info_.GetAttribute<int64_t>(name);
+            return S_OK;
+        }
+    } else if (type == MLOperatorAttributeType::IntArray) {
+        size_t count{elementCount};
+        if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttributeArray_int64(
+            kernel_info_, name, static_cast<int64_t*>(value), &count)}; status.IsOK()) {
+            return S_OK;
+        }
+    } else if (type == MLOperatorAttributeType::String) {
+        if (elementCount == 1) {
+            size_t size{elementByteSize};
+            if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttribute_string(
+                kernel_info_, name, static_cast<char*>(value), &size)}; status.IsOK()) {
                 return S_OK;
             }
         }
-        return E_FAIL;
+    } else {
+        return E_NOTIMPL;
     }
-
-    return S_OK;
+    if (const auto it{default_attributes_.find(name)}; it != default_attributes_.end()) {
+        it->second.GetAttribute(type, elementCount, elementByteSize, value);
+        return S_OK;
+    }
+    return E_FAIL;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
 HRESULT AbiSafeKernelCreationContext::GetAttributeElementCount(
-    const char* name,
-    MLOperatorAttributeType type,
-    uint32_t* elementCount) const noexcept {
-
-    if (!name || !elementCount) return E_POINTER;
-
-    // Initialize to 0 (attribute not found)
+    const char* name, const MLOperatorAttributeType type, uint32_t* elementCount) const noexcept
+try {
+    if (name == nullptr || elementCount == nullptr) {
+        return E_POINTER;
+    }
     *elementCount = 0;
-
-    OrtStatus* status = nullptr;
-
-    switch (type) {
-        case MLOperatorAttributeType::Float: {
-            float dummy;
-            status = ort_api_->KernelInfoGetAttribute_float(kernel_info_, name, &dummy);
-            if (status == nullptr) {
-                *elementCount = 1;
-            } else {
-                ort_api_->ReleaseStatus(status);
+    try {
+        if (type == MLOperatorAttributeTypeTensor) {
+            if (tensor_attribute_cache_.count(name) == 0) {
+                return E_INVALIDARG;
             }
-            break;
-        }
-
-        case MLOperatorAttributeType::FloatArray: {
-            // Query with null to get count
-            size_t count = 0;
-            status = ort_api_->KernelInfoGetAttributeArray_float(kernel_info_, name, nullptr, &count);
-            if (status == nullptr) {
+            *elementCount = 1;
+        } else if (type == MLOperatorAttributeType::Float) {
+            const auto _{kernel_info_.GetAttribute<float>(name)};
+            *elementCount = 1;
+        } else if (type == MLOperatorAttributeType::FloatArray) {
+            size_t count{};
+            if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttributeArray_float(
+                kernel_info_, name, nullptr, &count)}; status.IsOK()) {
                 *elementCount = static_cast<uint32_t>(count);
-            } else {
-                ort_api_->ReleaseStatus(status);
             }
-            break;
-        }
-
-        case MLOperatorAttributeType::Int: {
-            int64_t dummy;
-            status = ort_api_->KernelInfoGetAttribute_int64(kernel_info_, name, &dummy);
-            if (status == nullptr) {
-                *elementCount = 1;
-            } else {
-                ort_api_->ReleaseStatus(status);
-            }
-            break;
-        }
-
-        case MLOperatorAttributeType::IntArray: {
-            // Query with null to get count
-            size_t count = 0;
-            status = ort_api_->KernelInfoGetAttributeArray_int64(kernel_info_, name, nullptr, &count);
-            if (status == nullptr) {
+        } else if (type == MLOperatorAttributeType::Int) {
+            const auto _{kernel_info_.GetAttribute<int64_t>(name)};
+            *elementCount = 1;
+        } else if (type == MLOperatorAttributeType::IntArray) {
+            size_t count{};
+            if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttributeArray_int64(
+                kernel_info_, name, nullptr, &count)}; status.IsOK()) {
                 *elementCount = static_cast<uint32_t>(count);
-            } else {
-                ort_api_->ReleaseStatus(status);
             }
-            break;
+        } else if (type == MLOperatorAttributeType::String) {
+            size_t size{};
+            if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttribute_string(
+                kernel_info_, name, nullptr, &size)}; status.IsOK()) {
+                *elementCount = 1;
+            }
         }
-
-        case MLOperatorAttributeType::String: {
-            size_t size = 0;
-            status = ort_api_->KernelInfoGetAttribute_string(kernel_info_, name, nullptr, &size);
-            if (status == nullptr) {
-                *elementCount = 1; // Single string
-            } else {
-                ort_api_->ReleaseStatus(status);
-            }
-            break;
-        }
-
-        case MLOperatorAttributeType::StringArray:
-            // String arrays not directly supported by ORT C API — fall through to default_attributes_
-            break;
-
-        default:
-            if (type == MLOperatorAttributeTypeTensor) {
-                // ORT C API has no tensor attribute accessor; serve from pre-fetched cache
-                if (tensor_attribute_cache_.count(name)) {
-                    *elementCount = 1;
-                    return S_OK;
-                }
-                // Not in cache — attribute absent or not a tensor type
-                break;
-            }
-            return E_INVALIDARG;
+    } catch (const Ort::Exception&) {
     }
 
-    // Look for a value in the kernel's registered defaults if one was not found
-    // This also handles string arrays and tensor attributes which can't be queried through ORT C API
-    if (*elementCount == 0 && default_attributes_) {
-        auto defaultAttr = default_attributes_->find(name);
-        if (defaultAttr != default_attributes_->end()) {
-            *elementCount = static_cast<uint32_t>(defaultAttr->second.ElementCount());
+    if (*elementCount == 0) {
+        if (const auto it{default_attributes_.find(name)}; it != default_attributes_.end()) {
+            *elementCount = static_cast<uint32_t>(it->second.ElementCount());
         }
     }
-
     return S_OK;
+} catch (const wil::ResultException& e) {
+    return e.GetErrorCode();
 }
 
 HRESULT AbiSafeKernelCreationContext::GetStringAttributeElementLength(
-    const char* name,
-    uint32_t elementIndex,
-    uint32_t* attributeElementByteSize) const noexcept {
-
-    if (!name || !attributeElementByteSize) return E_POINTER;
-
-    // ORT C API only supports single strings (elementIndex == 0)
-    if (elementIndex == 0) {
-        size_t size = 0;
-        OrtStatus* status = ort_api_->KernelInfoGetAttribute_string(kernel_info_, name, nullptr, &size);
-        if (!status) {
+    const char* name, uint32_t index, uint32_t* attributeElementByteSize) const noexcept
+try {
+    if (name == nullptr || attributeElementByteSize == nullptr) {
+        return E_POINTER;
+    }
+    if (index == 0) {
+        size_t size{};
+        if (const Ort::Status status{Ort::GetApi().KernelInfoGetAttribute_string(
+            kernel_info_, name, nullptr, &size)}; status.IsOK()) {
             *attributeElementByteSize = static_cast<uint32_t>(size);
             return S_OK;
         }
-        ort_api_->ReleaseStatus(status);
     }
-
-    // Fall back to default_attributes_ for string arrays and ORT API failures
-    if (!default_attributes_) return E_INVALIDARG;
-
-    auto it = default_attributes_->find(name);
-    if (it == default_attributes_->end()) return E_INVALIDARG;
-
-    try {
-        const std::string* str = it->second.GetStringAttribute(name, elementIndex);
-        if (!str) return E_INVALIDARG;
-        *attributeElementByteSize = static_cast<uint32_t>(str->size() + 1);
-        return S_OK;
-    } catch (...) {
-        return E_FAIL;
+    if (const auto it{default_attributes_.find(name)}; it != default_attributes_.end()) {
+        if (const auto s{it->second.GetStringAttribute(name, index)}; s != nullptr) {
+            *attributeElementByteSize = static_cast<uint32_t>(s->length() + 1);
+            return S_OK;
+        }
     }
+    return E_INVALIDARG;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
+} catch (const wil::ResultException& e) {
+    return e.GetErrorCode();
 }
 
 HRESULT AbiSafeKernelCreationContext::GetStringAttributeElement(
-    const char* name,
-    uint32_t elementIndex,
-    uint32_t attributeElementByteSize,
-    char* attributeElement) const noexcept {
-
-    if (!name || !attributeElement) return E_POINTER;
-
-    // ORT C API only supports single strings (elementIndex == 0)
-    if (elementIndex == 0) {
-        size_t size = attributeElementByteSize;
-        OrtStatus* status = ort_api_->KernelInfoGetAttribute_string(kernel_info_, name, attributeElement, &size);
-        if (!status) {
+    const char* name, uint32_t index, uint32_t attributeElementByteSize, char* attributeElement) const noexcept
+try {
+    if (name == nullptr || attributeElement == nullptr) {
+        return E_POINTER;
+    }
+    if (index == 0) {
+        size_t size{attributeElementByteSize};
+        if (Ort::Status status{Ort::GetApi().KernelInfoGetAttribute_string(
+            kernel_info_, name, attributeElement, &size)}; status.IsOK()) {
             return S_OK;
         }
-        ort_api_->ReleaseStatus(status);
     }
-
-    // Fall back to default_attributes_ for string arrays and ORT API failures
-    if (!default_attributes_) return E_INVALIDARG;
-
-    auto it = default_attributes_->find(name);
-    if (it == default_attributes_->end()) return E_INVALIDARG;
-
-    try {
-        const std::string* str = it->second.GetStringAttribute(name, elementIndex);
-        if (!str) return E_INVALIDARG;
-        if (attributeElementByteSize < str->size() + 1) return E_INVALIDARG;
-        strcpy_s(attributeElement, attributeElementByteSize, str->c_str());
-        return S_OK;
-    } catch (...) {
-        return E_FAIL;
+    if (!default_attributes_.empty()) {
+        if (const auto it{default_attributes_.find(name)}; it != default_attributes_.end()) {
+            const auto s{it->second.GetStringAttribute(name, index)};
+            if (s != nullptr && attributeElementByteSize >= s->size() + 1) {
+                s->copy(attributeElement, attributeElementByteSize);
+                return S_OK;
+            }
+        }
     }
+    return E_INVALIDARG;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
+} catch (const wil::ResultException& e) {
+    return e.GetErrorCode();
 }
 
-HRESULT AbiSafeKernelCreationContext::GetTensorAttribute(
-    const char* name,
-    IMLOperatorTensor** tensor) const noexcept {
-    if (!name || !tensor) return E_POINTER;
-    *tensor = nullptr;
-
-    try {
-        auto it = tensor_attribute_cache_.find(name);
-        if (it == tensor_attribute_cache_.end()) return E_INVALIDARG;
-        const auto& cached = it->second;
-        auto wrapper = Microsoft::WRL::Make<PreFetchedTensorAttrWrapper>(
-            cached.data_type, cached.shape, cached.raw_bytes);
-        *tensor = wrapper.Detach();
-        return S_OK;
-    } catch (...) {
-        return E_FAIL;
-    }
-}
-
-HRESULT AbiSafeKernelCreationContext::GetConstantInputTensor(
-    uint32_t inputIndex,
-    IMLOperatorTensor** tensor) const noexcept {
-    if (!tensor) {
+HRESULT AbiSafeKernelCreationContext::GetTensorAttribute(const char* name, IMLOperatorTensor** tensor) const noexcept
+try {
+    if (name == nullptr || tensor == nullptr) {
         return E_POINTER;
     }
     *tensor = nullptr;
+    if (const auto it{tensor_attribute_cache_.find(name)}; it != tensor_attribute_cache_.end()) {
+        auto wrapper = Microsoft::WRL::Make<PreFetchedTensorAttrWrapper>(
+            it->second.data_type, it->second.shape, it->second.raw_bytes);
+        *tensor = wrapper.Detach();
+        return S_OK;
+    }
+    return E_INVALIDARG;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
+} catch (const wil::ResultException& e) {
+    return e.GetErrorCode();
+}
 
-    // Check if we have a pre-fetched constant tensor (hybrid approach - ABI-safe)
-    auto it = constant_tensors_.find(inputIndex);
-    if (it != constant_tensors_.end() && it->second) {
+HRESULT AbiSafeKernelCreationContext::GetConstantInputTensor(uint32_t index, IMLOperatorTensor** tensor) const noexcept
+try {
+    if (tensor == nullptr) {
+        return E_POINTER;
+    }
+    *tensor = nullptr;
+    if (const auto it{constant_tensors_.find(index)}; it != constant_tensors_.end() && it->second) {
         *tensor = it->second.Get();
         (*tensor)->AddRef();  // Caller will release
         return S_OK;
     }
-
-    // Try to fetch from ORT API (for lazy initialization at Compute time)
-    if (kernel_info_ && ort_api_ && ort_api_->KernelInfoGetConstantInput_tensor) {
-
-        int is_constant = 0;
-        const OrtValue* ort_value = nullptr;
-        OrtStatus* status = ort_api_->KernelInfoGetConstantInput_tensor(kernel_info_, inputIndex, &is_constant, &ort_value);
-
-        if (status) {
-            ort_api_->ReleaseStatus(status);
-        } else {
-
-            if (is_constant && ort_value) {
-                auto safe_tensor = Microsoft::WRL::Make<AbiSafeTensor>(ort_value, ort_api_, execution_provider_, false);
-                *tensor = safe_tensor.Detach();
-                return S_OK;
-            }
+    if (kernel_info_ != nullptr) {
+        int is_constant{};
+        if (const auto value{kernel_info_.GetTensorConstantInput(index, &is_constant)}; is_constant && value != nullptr) {
+            auto safe_tensor = Microsoft::WRL::Make<AbiSafeTensor>(value);
+            *tensor = safe_tensor.Detach();
+            return S_OK;
         }
     }
-
-    // Check if this input is required to be constant - if so, failure to get it is an error
-    bool inputRequiredAsConstant = false;
-    if (required_constant_cpu_inputs_) {
-        inputRequiredAsConstant = std::find(
-            required_constant_cpu_inputs_->begin(),
-            required_constant_cpu_inputs_->end(),
-            inputIndex) != required_constant_cpu_inputs_->end();
-    }
-
-
-    if (inputRequiredAsConstant) {
-        return E_FAIL;  // Required constant not available
-    }
-
-    return E_INVALIDARG; // Input not a constant
+    return ranges::find(required_constant_cpu_inputs_, index)
+        != required_constant_cpu_inputs_.end() ? E_FAIL : E_INVALIDARG;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
-HRESULT AbiSafeKernelCreationContext::TryGetConstantInputTensor(
-    uint32_t inputIndex,
-    IMLOperatorTensor** tensor) const noexcept {
-
-    if (!tensor) {
+HRESULT AbiSafeKernelCreationContext::TryGetConstantInputTensor(uint32_t index, IMLOperatorTensor** tensor) const noexcept
+try {
+    if (tensor == nullptr) {
         return E_POINTER;
     }
     *tensor = nullptr;
-
-    // Use C API to check if input is constant and get the value
-    int is_constant = 0;
-    const OrtValue* ort_value = nullptr;
-    OrtStatus* status = ort_api_->KernelInfoGetConstantInput_tensor(kernel_info_, inputIndex, &is_constant, &ort_value);
-
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        // Return S_OK with null tensor to indicate not available (not an error)
-        return S_OK;
-    }
-
-    if (!is_constant || !ort_value) {
-        // Check if this input is required to be constant
-        bool inputRequiredAsConstant = false;
-        if (required_constant_cpu_inputs_) {
-            inputRequiredAsConstant = std::find(
-                required_constant_cpu_inputs_->begin(),
-                required_constant_cpu_inputs_->end(),
-                inputIndex) != required_constant_cpu_inputs_->end();
+    if (kernel_info_ != nullptr) {
+        int is_constant{};
+        const auto value{kernel_info_.GetTensorConstantInput(index, &is_constant)};
+        if (is_constant == 0 || value == nullptr) {
+            return ranges::find(required_constant_cpu_inputs_, index)
+                != required_constant_cpu_inputs_.end() ? E_UNEXPECTED : S_OK;
         }
-
-        // This shouldn't happen since kernel creation is deferred when required constants are missing
-        if (inputRequiredAsConstant) {
-            return E_UNEXPECTED;
-        }
-
-        // Not a constant input - return S_OK with null tensor (OK for optional inputs)
-        return S_OK;
+        auto safe_tensor{Microsoft::WRL::Make<AbiSafeTensor>(value)};
+        *tensor = safe_tensor.Detach();
     }
-
-    // Wrap the OrtValue in an AbiSafeTensor (constant CPU initializer — is_internal_operator=false)
-    auto safe_tensor = Microsoft::WRL::Make<AbiSafeTensor>(ort_value, ort_api_, execution_provider_, false);
-    *tensor = safe_tensor.Detach();
-
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
-// IMLOperatorKernelCreationContextNodeWrapperPrivate - Node name methods using C API
-uint32_t AbiSafeKernelCreationContext::GetUtf8NameBufferSizeInBytes() const noexcept {
-    if (!kernel_info_ || !ort_api_) return 1;
-
-    // Query the size needed for the node name (including null terminator)
-    size_t size = 0;
-    OrtStatus* status = ort_api_->KernelInfo_GetNodeName(kernel_info_, nullptr, &size);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        return 1;
+uint32_t AbiSafeKernelCreationContext::GetUtf8NameBufferSizeInBytes() const noexcept
+try {
+    if (kernel_info_ != nullptr) {
+        size_t size{};
+        if (const Ort::Status status{Ort::GetApi().KernelInfo_GetNodeName(
+            kernel_info_, nullptr, &size)}; status.IsOK()) {
+            return static_cast<uint32_t>(size);
+        }
     }
-
-    return static_cast<uint32_t>(size);
+    return 1;
+} catch (const Ort::Exception&) {
+    return 1;
 }
 
-HRESULT AbiSafeKernelCreationContext::GetUtf8Name(uint32_t bufferSizeInBytes, char* outputName) const noexcept {
+HRESULT AbiSafeKernelCreationContext::GetUtf8Name(uint32_t bufferSizeInBytes, char* outputName) const noexcept
+try {
+    if (outputName == nullptr) {
+        return E_POINTER;
+    }
+    *outputName = '\0';
     if (bufferSizeInBytes == 0) {
         return E_INVALIDARG;
     }
-
-    if (!outputName || !kernel_info_ || !ort_api_) {
-        if (outputName && bufferSizeInBytes > 0) {
-            outputName[0] = '\0';
-        }
-        return outputName ? S_OK : E_POINTER;
+    if (kernel_info_ != nullptr) {
+        kernel_info_.GetNodeName().copy(outputName, bufferSizeInBytes);
     }
-
-    size_t size = bufferSizeInBytes;
-    OrtStatus* status = ort_api_->KernelInfo_GetNodeName(kernel_info_, outputName, &size);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
-        // On error, write empty string
-        outputName[0] = '\0';
-        return S_OK; // Match original behavior - don't fail, just return empty
-    }
-
     return S_OK;
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
-uint32_t AbiSafeKernelCreationContext::GetWideNameBufferSizeInBytes() const noexcept {
-    if (!kernel_info_ || !ort_api_) {
-        return sizeof(wchar_t); // Just null terminator
-    }
-
-    // Get UTF-8 name size first
-    uint32_t utf8Size = GetUtf8NameBufferSizeInBytes();
-    if (utf8Size <= 1) {
-        return sizeof(wchar_t); // Empty name, just null terminator
-    }
-
-    // Get the actual UTF-8 name
-    std::vector<char> utf8Name(utf8Size);
-    size_t size = utf8Size;
-    OrtStatus* status = ort_api_->KernelInfo_GetNodeName(kernel_info_, utf8Name.data(), &size);
-    if (status) {
-        ort_api_->ReleaseStatus(status);
+uint32_t AbiSafeKernelCreationContext::GetWideNameBufferSizeInBytes() const noexcept
+try {
+    if (kernel_info_ == nullptr) {
         return sizeof(wchar_t);
     }
-
-    // Calculate required wide char buffer size
-    int requiredSizeInChars = MultiByteToWideChar(CP_UTF8, 0, utf8Name.data(), static_cast<int>(utf8Size - 1), nullptr, 0);
-    if (requiredSizeInChars <= 0) {
+    const auto name{kernel_info_.GetNodeName()};
+    if (name.empty()) {
         return sizeof(wchar_t);
     }
-
-    // Include null terminator
-    return static_cast<uint32_t>((requiredSizeInChars + 1) * sizeof(wchar_t));
+    const auto size{MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.length()), nullptr, 0)};
+    return static_cast<uint32_t>(size <= 0 ? sizeof(wchar_t) : (size + 1) * sizeof(wchar_t));
+} catch (const Ort::Exception&) {
+    return E_FAIL;
 }
 
-HRESULT AbiSafeKernelCreationContext::GetWideName(uint32_t bufferSizeInBytes, wchar_t* outputName) const noexcept {
-    // Buffer needs to be large enough to at least hold a null terminator
+HRESULT AbiSafeKernelCreationContext::GetWideName(uint32_t bufferSizeInBytes, wchar_t* outputName) const noexcept
+try {
+    if (outputName == nullptr || kernel_info_ == nullptr) {
+        return E_POINTER;
+    }
     if (bufferSizeInBytes < sizeof(wchar_t)) {
         return E_INVALIDARG;
     }
-
-    if (!outputName || !kernel_info_ || !ort_api_) {
-        if (outputName) {
-            outputName[0] = L'\0';
+    *outputName = L'\0';
+    if (const auto name{kernel_info_.GetNodeName()}; !name.empty()) {
+        const auto size{name.length() / sizeof(wchar_t)};
+        auto copied{MultiByteToWideChar(CP_UTF8, 0, name.data(),
+            static_cast<int>(name.length()), outputName, static_cast<int>(size))};
+        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+            copied = std::max(0, copied - 1);
         }
-        return outputName ? S_OK : E_POINTER;
-    }
-
-    // Get UTF-8 name
-    uint32_t utf8Size = GetUtf8NameBufferSizeInBytes();
-    std::vector<char> utf8Name(utf8Size);
-    size_t size = utf8Size;
-    OrtStatus* status = ort_api_->KernelInfo_GetNodeName(kernel_info_, utf8Name.data(), &size);
-    if (status || utf8Size <= 1) {
-        if (status) ort_api_->ReleaseStatus(status);
-        outputName[0] = L'\0';
+        outputName[copied] = L'\0';
         return S_OK;
     }
-
-    // Convert to wide char
-    uint32_t bufferSizeInChars = bufferSizeInBytes / sizeof(wchar_t);
-    int charsCopiedIfSucceeded = MultiByteToWideChar(
-        CP_UTF8, 0,
-        utf8Name.data(), static_cast<int>(utf8Size - 1), // Don't include null terminator in source
-        outputName, bufferSizeInChars
-    );
-
-    if (charsCopiedIfSucceeded > 0) {
-        // Write null terminator at the end of copied chars
-        outputName[charsCopiedIfSucceeded] = L'\0';
-        return S_OK;
-    }
-
-    // Error occurred
-    DWORD lastError = GetLastError();
-    if (lastError == ERROR_INSUFFICIENT_BUFFER) {
-        // Buffer too small - truncate and add null terminator
-        outputName[bufferSizeInChars - 1] = L'\0';
-        return S_OK;
-    }
-
-    // Other error
-    outputName[0] = L'\0';
+    return E_FAIL;
+} catch (const Ort::Exception&) {
     return E_FAIL;
 }
 
 HRESULT AbiSafeKernelCreationContext::GetExecutionProvider(IUnknown** executionProvider) const noexcept {
-    if (!executionProvider) return E_POINTER;
-    *executionProvider = nullptr;
-
-    if (!execution_provider_) {
-        return S_OK; // No execution provider, return nullptr
+    if (executionProvider == nullptr) {
+        return E_POINTER;
     }
-
-    // PluginDmlExecutionProviderImpl implements IWinmlExecutionProvider
-    // Query for it and return
+    *executionProvider = nullptr;
+    if (execution_provider_ == nullptr) {
+        return S_OK;
+    }
     return const_cast<PluginDmlExecutionProviderImpl*>(execution_provider_)->QueryInterface(
         __uuidof(IWinmlExecutionProvider),
         reinterpret_cast<void**>(executionProvider)
@@ -3100,15 +2007,14 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
         }
         size_t constant_tensors_count = constant_tensors.size();  // capture before move for logging
 
-        auto tensor_attr_cache = FetchAllTensorAttributes(kernel_info, state->ort_api, state->tensor_attribute_names);
+        auto tensor_attr_cache{FetchAllTensorAttributes(kernel_info, state->tensor_attribute_names)};
 
         // Create ABI-safe kernel creation context with pre-fetched constants and tensor attrs.
         // NOTE: constant_tensors is moved here — all checks on it must happen BEFORE this line.
-        auto creation_context = Microsoft::WRL::Make<AbiSafeKernelCreationContext>(
+        const auto creation_context = Microsoft::WRL::Make<AbiSafeKernelCreationContext>(
             kernel_info,
-            state->ort_api,
             state->default_attributes,
-            &state->required_constant_cpu_inputs,
+            state->required_constant_cpu_inputs,
             state->dml_execution_provider,
             std::move(constant_tensors),
             nullptr,  // No runtime context yet
@@ -3165,36 +2071,25 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
                 }
 
                 if (required_constants_available) {
+                    const auto shape_inference_context{Microsoft::WRL::Make<AbiSafeShapeInferenceContext>(
+                        nullptr, state->default_attributes, kernel_info)};
 
-                    auto shape_inference_context = Microsoft::WRL::Make<AbiSafeShapeInferenceContext>(
-                        nullptr,  // No runtime kernel_context at session init
-                        state->ort_api,
-                        state->default_attributes,
-                        state->dml_execution_provider,
-                        kernel_info
-                    );
-
-
-                Microsoft::WRL::ComPtr<IMLOperatorShapeInferenceContext> shape_context_interface;
-                HRESULT shape_hr = shape_inference_context.As(&shape_context_interface);
-
-
-                if (SUCCEEDED(shape_hr)) {
-
-                    shape_hr = state->shape_inferrer->InferOutputShapes(shape_context_interface.Get());
+                    Microsoft::WRL::ComPtr<IMLOperatorShapeInferenceContext> shape_context_interface;
+                    HRESULT shape_hr = shape_inference_context.As(&shape_context_interface);
 
                     if (SUCCEEDED(shape_hr)) {
-                        creation_context->SetPrecomputedOutputShapes(shape_inference_context->GetInferredOutputShapes());
-                    } else {
-                        // Mirrors unsafe path: InferAndVerifyOutputSizes throws on failure when
-                        // requiresOutputShapesAtCreation=true. Fail here rather than proceeding with
-                        // no output shapes, which would produce incorrect tensor allocations.
-                        return state->ort_api->CreateStatus(ORT_FAIL,
-                            fmt::format("Eager shape inference failed with HR=0x{:08X} for {}",
-                                (unsigned)shape_hr, state->operator_name ? state->operator_name : "unknown").c_str());
+                        shape_hr = state->shape_inferrer->InferOutputShapes(shape_context_interface.Get());
+                        if (SUCCEEDED(shape_hr)) {
+                            creation_context->SetPrecomputedOutputShapes(shape_inference_context->GetInferredOutputShapes());
+                        } else {
+                            // Mirrors unsafe path: InferAndVerifyOutputSizes throws on failure when
+                            // requiresOutputShapesAtCreation=true. Fail here rather than proceeding with
+                            // no output shapes, which would produce incorrect tensor allocations.
+                            return state->ort_api->CreateStatus(ORT_FAIL,
+                                fmt::format("Eager shape inference failed with HR=0x{:08X} for {}",
+                                    static_cast<unsigned>(shape_hr), state->operator_name ? state->operator_name : "unknown").c_str());
+                        }
                     }
-                } else {
-                }
                 } // if required_constants_available
             }
 
@@ -3212,19 +2107,19 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
             if (FAILED(hr) || !ml_kernel) {
                 return state->ort_api->CreateStatus(ORT_FAIL,
                     fmt::format("ABI-safe kernel creation failed with HR=0x{:08X} for {}",
-                        (unsigned)hr, state->operator_name ? state->operator_name : "unknown").c_str());
+                        static_cast<unsigned>(hr), state->operator_name ? state->operator_name : "unknown").c_str());
             }
         }
 
         // Allocate memory for OrtKernelImpl + DmlAbiKernel
-        size_t total_size = sizeof(OrtKernelImpl) + sizeof(DmlAbiKernel);
-        void* memory = ::operator new(total_size, std::nothrow);
-        if (!memory) {
+        constexpr size_t total_size{sizeof(OrtKernelImpl) + sizeof(DmlAbiKernel)};
+        void* memory{::operator new(total_size, std::nothrow)};
+        if (memory == nullptr) {
             return state->ort_api->CreateStatus(ORT_FAIL, "Failed to allocate kernel memory");
         }
 
         // Construct OrtKernelImpl
-        OrtKernelImpl* impl = new (memory) OrtKernelImpl();
+        const auto impl = new (memory) OrtKernelImpl();
         impl->ort_version_supported = ORT_API_VERSION;
         impl->flags = 0;
         impl->Compute = DmlAbiKernel_Compute;
@@ -3233,7 +2128,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
         impl->SetSharedPrePackedWeight = nullptr;
 
         // Construct DmlAbiKernel immediately after OrtKernelImpl
-        DmlAbiKernel* abi_kernel = new (reinterpret_cast<char*>(memory) + sizeof(OrtKernelImpl)) DmlAbiKernel();
+        auto abi_kernel = new (static_cast<char*>(memory) + sizeof(OrtKernelImpl)) DmlAbiKernel();
         abi_kernel->ml_operator_kernel = std::move(ml_kernel);
         abi_kernel->ort_api = state->ort_api;
         abi_kernel->dml_execution_provider = state->dml_execution_provider;
@@ -3421,7 +2316,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                     "Lazy initialization failed: kernel_info not stored during creation");
             }
 
-            auto tensor_attr_cache_lazy = FetchAllTensorAttributes(kernel->kernel_info, kernel->ort_api, kernel->tensor_attribute_names);
+            auto tensor_attr_cache_lazy{FetchAllTensorAttributes(kernel->kernel_info, kernel->tensor_attribute_names)};
 
             // Build runtime input shapes from the actual input tensors.
             // Mirrors PluginDmlAbiOpKernel::Compute which calls GetInputShapes(context) and passes
@@ -3461,16 +2356,14 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                 OrtStatus* get_status = kernel->ort_api->KernelInfoGetConstantInput_tensor(
                     kernel->kernel_info, input_index, &is_constant, &constant_value);
                 if (get_status == nullptr && is_constant && constant_value != nullptr) {
-                    lazy_constant_tensors[input_index] = Microsoft::WRL::Make<AbiSafeTensor>(
-                        constant_value, kernel->ort_api, kernel->dml_execution_provider);
+                    lazy_constant_tensors[input_index] = Microsoft::WRL::Make<AbiSafeTensor>(constant_value);
                 } else {
                     if (get_status) kernel->ort_api->ReleaseStatus(get_status);
                     const OrtValue* runtime_value = nullptr;
                     OrtStatus* ctx_status = kernel->ort_api->KernelContext_GetInput(
                         context, input_index, &runtime_value);
                     if (ctx_status == nullptr && runtime_value != nullptr) {
-                        lazy_constant_tensors[input_index] = Microsoft::WRL::Make<AbiSafeTensor>(
-                            runtime_value, kernel->ort_api, kernel->dml_execution_provider);
+                        lazy_constant_tensors[input_index] = Microsoft::WRL::Make<AbiSafeTensor>(runtime_value);
                     } else if (ctx_status) {
                         kernel->ort_api->ReleaseStatus(ctx_status);
                     }
@@ -3519,9 +2412,8 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             // NOTE: lazy_constant_tensors is moved here — snapshot must happen before this line.
             auto creation_context = Microsoft::WRL::Make<AbiSafeKernelCreationContext>(
                 kernel->kernel_info,
-                kernel->ort_api,
                 kernel->default_attributes,
-                &kernel->required_constant_cpu_inputs,
+                kernel->required_constant_cpu_inputs,
                 kernel->dml_execution_provider,
                 std::move(lazy_constant_tensors),
                 context,
@@ -3546,12 +2438,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             if (kernel->shape_inferrer && kernel->requires_output_shapes_at_creation) {
 
                 auto inference_context = Microsoft::WRL::Make<AbiSafeShapeInferenceContext>(
-                    context,
-                    kernel->ort_api,
-                    kernel->default_attributes,
-                    kernel->dml_execution_provider,
-                    kernel->kernel_info  // Pass kernel_info for actual node attributes
-                );
+                    context, kernel->default_attributes, kernel->kernel_info);
 
                 HRESULT shape_hr = kernel->shape_inferrer->InferOutputShapes(inference_context.Get());
                 if (SUCCEEDED(shape_hr)) {
@@ -3580,10 +2467,10 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
         DML_PERF_LOG("[ABI_SAFE] lazy-init CreateKernel: op=", kernel->operator_name,
             "  HR=", Hex(hr), "  kernel=", (void*)ml_kernel.Get(), "\n");
 
-            if (FAILED(hr) || !ml_kernel) {
+            if (FAILED(hr) || ml_kernel == nullptr) {
                 return kernel->ort_api->CreateStatus(ORT_FAIL,
                     fmt::format("Lazy kernel creation failed with HR=0x{:08X} for {}",
-                        (unsigned)hr, kernel->operator_name).c_str());
+                        static_cast<long>(hr), kernel->operator_name).c_str());
             }
 
             // Store the created kernel
@@ -3672,8 +2559,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                 OrtStatus* get_status = kernel->ort_api->KernelInfoGetConstantInput_tensor(
                     kernel->kernel_info, input_index, &is_constant, &constant_value);
                 if (get_status == nullptr && is_constant && constant_value != nullptr) {
-                    tmp_constant_tensors[input_index] = Microsoft::WRL::Make<AbiSafeTensor>(
-                        constant_value, kernel->ort_api, kernel->dml_execution_provider);
+                    tmp_constant_tensors[input_index] = Microsoft::WRL::Make<AbiSafeTensor>(constant_value);
                 } else {
                     if (get_status) kernel->ort_api->ReleaseStatus(get_status);
                     // Stage 2: KernelContext_GetInput (dynamically computed constants)
@@ -3681,8 +2567,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                     OrtStatus* ctx_status = kernel->ort_api->KernelContext_GetInput(
                         context, input_index, &runtime_value);
                     if (ctx_status == nullptr && runtime_value != nullptr) {
-                        tmp_constant_tensors[input_index] = Microsoft::WRL::Make<AbiSafeTensor>(
-                            runtime_value, kernel->ort_api, kernel->dml_execution_provider);
+                        tmp_constant_tensors[input_index] = Microsoft::WRL::Make<AbiSafeTensor>(runtime_value);
                     } else {
                         if (ctx_status) kernel->ort_api->ReleaseStatus(ctx_status);
                         // Stage 3: snapshotted contents from kernel creation (e.g. Pad's pads,
@@ -3717,14 +2602,13 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                 // Shape or constant input value changed — create a temporary kernel for this call,
                 // do not replace the stored one. Mirrors unsafe path: local_kernel executed and released.
                 // tmp_constant_tensors is already populated above — reuse it directly.
-                auto tensor_attr_cache_tmp = FetchAllTensorAttributes(
-                    kernel->kernel_info, kernel->ort_api, kernel->tensor_attribute_names);
+                auto tensor_attr_cache_tmp{FetchAllTensorAttributes(
+                    kernel->kernel_info, kernel->tensor_attribute_names)};
 
                 auto tmp_creation_context = Microsoft::WRL::Make<AbiSafeKernelCreationContext>(
                     kernel->kernel_info,
-                    kernel->ort_api,
                     kernel->default_attributes,
-                    &kernel->required_constant_cpu_inputs,
+                    kernel->required_constant_cpu_inputs,
                     kernel->dml_execution_provider,
                     std::move(tmp_constant_tensors),
                     context,
@@ -3741,12 +2625,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                 std::vector<std::vector<uint32_t>> tmp_output_shapes;
                 if (kernel->shape_inferrer && kernel->requires_output_shapes_at_creation) {
                     auto tmp_inference_context = Microsoft::WRL::Make<AbiSafeShapeInferenceContext>(
-                        context,
-                        kernel->ort_api,
-                        kernel->default_attributes,
-                        kernel->dml_execution_provider,
-                        kernel->kernel_info
-                    );
+                        context, kernel->default_attributes, kernel->kernel_info);
                     HRESULT shape_hr = kernel->shape_inferrer->InferOutputShapes(tmp_inference_context.Get());
                     if (SUCCEEDED(shape_hr)) {
                         tmp_output_shapes = tmp_inference_context->GetInferredOutputShapes();
@@ -3784,14 +2663,13 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
 
                 auto tmp_kernel_context = Microsoft::WRL::Make<AbiSafeKernelContext>(
                     context,
-                    kernel->ort_api,
                     kernel->dml_execution_provider,
                     kernel->is_internal_operator,
                     kernel->ep_name,
+                    kernel->default_attributes,
                     &tmp_output_shapes,
                     kernel->shape_inferrer.Get(),
-                    &kernel->required_constant_cpu_inputs,
-                    kernel->default_attributes,
+                    kernel->required_constant_cpu_inputs,
                     kernel->kernel_info,
                     kernel->constant_gpu_resources.empty() ? nullptr : &kernel->constant_gpu_resources
                 );
@@ -3828,14 +2706,13 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
         DMLPERF_T0(ctx);
         auto kernel_context = Microsoft::WRL::Make<AbiSafeKernelContext>(
             context,
-            kernel->ort_api,
             kernel->dml_execution_provider,
             kernel->is_internal_operator,
             kernel->ep_name,
+            kernel->default_attributes,
             &kernel->inferred_output_shapes,
             kernel->shape_inferrer.Get(),
-            &kernel->required_constant_cpu_inputs,
-            kernel->default_attributes,
+            kernel->required_constant_cpu_inputs,
             kernel->kernel_info,
             kernel->constant_gpu_resources.empty() ? nullptr : &kernel->constant_gpu_resources
         );

@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: MIT
 
 #include "dml_ep.h"
+
+#include <utility>
+
+#include <utility>
 #include "dml_plugin_OperatorRegistration.h"
 #include "core/common/inlined_containers.h"
 #include "core/common/inlined_containers_fwd.h"
@@ -46,7 +50,7 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     , name_{name}
     , d3d12_device{d3d12_device_}
     , m_dmlDevice{dml_device_}
-    , m_context{executionContext}
+    , m_context{std::move(executionContext)}
 {
     GetName = GetNameImpl;
     OrtEp::GetCapability = GetCapabilityImpl;
@@ -237,7 +241,7 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
                 // Populate ABI-safe kernel creation fields (try this path first)
                 func_state->kernel_factory = reg_info->kernelFactory;
                 func_state->shape_inferrer = reg_info->shapeInferrer;
-                func_state->default_attributes = &reg_info->defaultAttributes;
+                func_state->default_attributes = reg_info->defaultAttributes;
                 // Use reg_info->requiredConstantCpuInputs rather than deriving from KernelDef
                 // InputMemoryTypeArgs. The KernelDef conflates device placement flags (e.g.
                 // OrtMemTypeCPUInput on MemcpyFromHost input 0) with required constants, causing
@@ -365,8 +369,7 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
                     }
 
                     if (resolved_value != nullptr) {
-                        constants_to_pass[input_index] = Microsoft::WRL::Make<AbiSafeTensor>(
-                            resolved_value, state->ort_api_ptr, state->dml_execution_provider);
+                        constants_to_pass[input_index] = Microsoft::WRL::Make<AbiSafeTensor>(resolved_value);
                     } else {
                         // Dynamically computed — defer to lazy init at Compute time.
                         required_constants_available = false;

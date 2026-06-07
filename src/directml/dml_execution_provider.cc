@@ -751,7 +751,7 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
         }
         else
         {
-            Microsoft::WRL::ComPtr<ID3D12Resource> resource = m_allocator->DecodeDataHandle(data)->GetResource();
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource{static_cast<PluginDmlAllocationInfo*>(data)->GetResource()};
             *abiData = resource.Detach();
         }
     }
@@ -866,21 +866,11 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
     // This is ABI-safe because both sides use the same allocator instance - no struct crossing
     IUnknown* PluginDmlExecutionProviderImpl::GetAllocationFromDataPointer(void* data_ptr) const
     {
-        if (!data_ptr || !m_allocator) {
-            return nullptr;
+        const auto allocation_info{static_cast<PluginDmlAllocationInfo*>(data_ptr)};
+        if (allocation_info != nullptr) {
+            allocation_info->AddRef(); // Caller owns the reference
         }
-
-        // Use the allocator's DecodeDataHandle to get the PluginDmlAllocationInfo
-        // This is safe because we're using the same allocator instance, not crossing DLL boundaries
-        const PluginDmlAllocationInfo* alloc_info = m_allocator->DecodeDataHandle(data_ptr);
-        if (!alloc_info) {
-            return nullptr;
-        }
-
-        // PluginDmlAllocationInfo inherits from IUnknown, so we can QueryInterface safely
-        IUnknown* allocation = const_cast<PluginDmlAllocationInfo*>(alloc_info);
-        allocation->AddRef();  // Caller owns the reference
-        return allocation;
+        return allocation_info;
     }
 
     std::shared_ptr<OrtAllocator> PluginDmlExecutionProviderImpl::GetGpuAllocator()

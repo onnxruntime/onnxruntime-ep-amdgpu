@@ -28,7 +28,7 @@ namespace dml_ep {
             , m_requestedSize(requestedSize)
         {}
 
-        ~PluginDmlAllocationInfo();
+        ~PluginDmlAllocationInfo() override;
 
         DmlBucketizedBufferAllocator* GetOwner() const
         {

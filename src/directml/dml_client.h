@@ -16,8 +16,12 @@
 #include <wrl/implements.h>
 
 namespace dml_ep {
+
 template <typename... T>
 using Com = ::Microsoft::WRL::RuntimeClass<::Microsoft::WRL::RuntimeClassFlags<::Microsoft::WRL::ClassicCom>, T...>;
+
+template <typename... T>
+using ChainInterfaces = Com<Microsoft::WRL::ChainInterfaces<T...>>;
 
 enum class AllocatorRoundingMode {
     Disabled = 0, Enabled = 1

@@ -265,7 +265,7 @@ class PluginDmlAbiOpKernel : public onnxruntime::OpKernel
     Microsoft::WRL::ComPtr<IUnknown> m_abiExecutionObject;
 
     const AttributeMap* m_defaultAttributes = nullptr;
-    const dml_ep::PluginDmlExecutionProviderImpl* m_dmlPluginExecutionProvider = nullptr;
+    const PluginDmlExecutionProviderImpl* m_dmlPluginExecutionProvider = nullptr;
 
     const OrtKernelInfo* m_ortKernelInfo = nullptr;
     const OrtApi* m_ortApi = nullptr;

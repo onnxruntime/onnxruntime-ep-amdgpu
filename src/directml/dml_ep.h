@@ -53,7 +53,7 @@ private:
         // TRY ABI-SAFE PATH FIRST
         IMLOperatorKernelFactory* kernel_factory = nullptr;
         IMLOperatorShapeInferrer* shape_inferrer = nullptr;
-        const AttributeMap* default_attributes = nullptr;
+        AttributeMap default_attributes;
         std::vector<uint32_t> required_constant_cpu_inputs;
         bool requires_input_shapes_at_creation = false;
         bool requires_output_shapes_at_creation = false;
