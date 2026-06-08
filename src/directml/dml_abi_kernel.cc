@@ -16,8 +16,82 @@
 namespace dml_ep {
 
 // Forward declarations for file-local helpers defined later in this file.
+// UploadConstantTensorsToGpu is defined before its call sites and needs no forward declaration.
 static TensorContent SnapshotConstantInput(IMLOperatorTensor* tensor);
 static bool ConstantInputChanged(const TensorContent& last, IMLOperatorTensor* current_tensor);
+
+// Uploads CPU-resident entries from constant_tensors to D3D12_HEAP_TYPE_DEFAULT GPU buffers.
+// gpu_resources is resized to hold one slot per input index (sparse — GPU-resident or missing
+// entries remain null). Callers must QueueReference each non-null resource after this returns.
+static void UploadConstantTensorsToGpu(
+    const std::unordered_map<uint32_t, Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constant_tensors,
+    const PluginDmlExecutionProviderImpl* provider,
+    std::vector<ConstantGpuResource>& gpu_resources)
+{
+    // Find the max input index so we can size the sparse vector exactly once.
+    uint32_t max_index = 0;
+    for (const auto& kv : constant_tensors) {
+        if (kv.second) max_index = std::max(max_index, kv.first);
+    }
+    gpu_resources.resize(static_cast<size_t>(max_index) + 1);
+
+    Microsoft::WRL::ComPtr<ID3D12Device> d3d_device;
+    ORT_THROW_IF_FAILED(provider->GetD3DDevice(d3d_device.GetAddressOf()));
+
+    for (const auto& kv : constant_tensors) {
+        IMLOperatorTensor* ml_tensor = kv.second.Get();
+        if (!ml_tensor || !ml_tensor->IsCpuData()) {
+            // Null or already GPU-resident — skip (GPU-resident initializers are already in VRAM).
+            continue;
+        }
+
+        const void* cpu_data = ml_tensor->GetData();
+        if (!cpu_data) continue;
+
+        // Compute byte size, shape, dtype via MLOperatorTensor helper.
+        MLOperatorTensor wrapper(ml_tensor);
+        size_t byte_size = wrapper.GetUnalignedTensorByteSize();
+        if (byte_size == 0) continue;
+
+        // Allocate a GPU-exclusive (D3D12_HEAP_TYPE_DEFAULT) buffer.
+        // Size is 4-byte aligned — required by D3D12 for UAV buffer resources.
+        const uint64_t aligned_size = (static_cast<uint64_t>(byte_size) + 3u) & ~3ull;
+
+        D3D12_HEAP_PROPERTIES heap_props = {};
+        heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        D3D12_RESOURCE_DESC res_desc = {};
+        res_desc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+        res_desc.Width             = aligned_size;
+        res_desc.Height            = 1;
+        res_desc.DepthOrArraySize  = 1;
+        res_desc.MipLevels         = 1;
+        res_desc.SampleDesc.Count  = 1;
+        res_desc.Layout            = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        res_desc.Flags             = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> gpu_buf;
+        HRESULT hr = d3d_device->CreateCommittedResource(
+            &heap_props,
+            D3D12_HEAP_FLAG_NONE,
+            &res_desc,
+            D3D12_RESOURCE_STATE_COMMON,
+            nullptr,
+            IID_PPV_ARGS(gpu_buf.GetAddressOf()));
+        if (FAILED(hr) || !gpu_buf) continue;
+
+        // Copy CPU data into the buffer via the provider's pooled upload heap.
+        hr = provider->UploadToResource(gpu_buf.Get(), cpu_data, byte_size);
+        if (FAILED(hr)) {
+            continue;
+        }
+
+        ConstantGpuResource& slot = gpu_resources[kv.first];
+        slot.resource = std::move(gpu_buf);
+        slot.shape    = wrapper.GetShape();
+        slot.dtype    = wrapper.GetTensorDataType();
+    }
+}
 
 // ============================================================================
 // Profiling - compiled in only when /DDML_PERF_PROFILE is defined.
@@ -70,6 +144,7 @@ void DmlPerfWriteLogImpl(std::string_view msg) noexcept {
     fmt::print(f, "{}", msg);
     std::fflush(f);
 }
+
 
 void PrintKernelPerfCounters(const DmlAbiKernel& kernel) noexcept {
     if (kernel.perf != nullptr)
@@ -449,6 +524,43 @@ void AbiSafeTensor::GetDataInterface(IUnknown** dataInterface) noexcept {
 }
 
 // ============================================================================
+// AbiSafeD3D12Tensor - GPU-resident constant wrapper (no OrtValue, no re-upload)
+// ============================================================================
+
+AbiSafeD3D12Tensor::AbiSafeD3D12Tensor(
+    ID3D12Resource* resource,
+    std::vector<uint32_t> shape,
+    MLOperatorTensorDataType dtype)
+    : resource_(resource)
+    , shape_(std::move(shape))
+    , dtype_(dtype)
+{
+}
+
+uint32_t AbiSafeD3D12Tensor::GetDimensionCount() const noexcept {
+    return static_cast<uint32_t>(shape_.size());
+}
+
+HRESULT AbiSafeD3D12Tensor::GetShape(uint32_t dimensionCount, uint32_t* dimensions) const noexcept {
+    if (!dimensions && dimensionCount > 0) return E_POINTER;
+    const uint32_t copy_count = std::min(dimensionCount, static_cast<uint32_t>(shape_.size()));
+    for (uint32_t i = 0; i < copy_count; ++i) {
+        dimensions[i] = shape_[i];
+    }
+    return S_OK;
+}
+
+MLOperatorTensorDataType AbiSafeD3D12Tensor::GetTensorDataType() const noexcept {
+    return dtype_;
+}
+
+void AbiSafeD3D12Tensor::GetDataInterface(IUnknown** dataInterface) noexcept {
+    if (!dataInterface) return;
+    *dataInterface = resource_.Get();
+    if (*dataInterface) (*dataInterface)->AddRef();
+}
+
+// ============================================================================
 // AbiSafeKernelContext - IMLOperatorKernelContext
 // ============================================================================
 
@@ -462,7 +574,8 @@ AbiSafeKernelContext::AbiSafeKernelContext(
     IMLOperatorShapeInferrer* shape_inferrer,
     const std::vector<uint32_t>* required_constant_cpu_inputs,
     const AttributeMap* default_attributes,
-    const OrtKernelInfo* kernel_info)
+    const OrtKernelInfo* kernel_info,
+    const std::vector<ConstantGpuResource>* constant_gpu_resources)
     : kernel_context_(kernel_context)
     , ort_api_(ort_api)
     , execution_provider_(execution_provider)
@@ -473,6 +586,7 @@ AbiSafeKernelContext::AbiSafeKernelContext(
     , required_constant_cpu_inputs_(required_constant_cpu_inputs)
     , default_attributes_(default_attributes)
     , kernel_info_(kernel_info)
+    , constant_gpu_resources_(constant_gpu_resources)
 {
     // Get the ABI execution interface and store the winml provider for resource transitions.
     // Mirrors PluginOpKernelContextWrapper constructor which calls GetABIExecutionInterfaceAndInvalidateState
@@ -569,6 +683,18 @@ HRESULT AbiSafeKernelContext::GetInputTensor(uint32_t inputIndex, IMLOperatorTen
     *tensor = nullptr;
 
     if (!kernel_context_ || !ort_api_) return E_FAIL;
+
+    // Fast path: return a pre-uploaded GPU buffer if one was cached for this input index.
+    // This is the core of the persistent-resource optimization — no CPU→GPU upload occurs.
+    if (constant_gpu_resources_ &&
+        inputIndex < constant_gpu_resources_->size() &&
+        (*constant_gpu_resources_)[inputIndex].resource) {
+        const ConstantGpuResource& cached = (*constant_gpu_resources_)[inputIndex];
+        auto gpu_tensor = Microsoft::WRL::Make<AbiSafeD3D12Tensor>(
+            cached.resource.Get(), cached.shape, cached.dtype);
+        *tensor = gpu_tensor.Detach();
+        return S_OK;
+    }
 
     const OrtValue* input_value = nullptr;
     OrtStatus* status = ort_api_->KernelContext_GetInput(kernel_context_, inputIndex, &input_value);
@@ -3187,6 +3313,30 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
             }
         }
 
+        // Pre-upload CPU-resident constant inputs to a D3D12_HEAP_TYPE_DEFAULT GPU buffer.
+        // After this point, AbiSafeKernelContext::GetInputTensor() will return an
+        // AbiSafeD3D12Tensor backed by constant_gpu_resources[inputIndex] instead of
+        // re-fetching and re-uploading from the ORT execution context on every Compute() call.
+        if (!needs_lazy_init && !constant_tensors.empty() && state->dml_execution_provider) {
+            UploadConstantTensorsToGpu(
+                constant_tensors,
+                state->dml_execution_provider,
+                abi_kernel->constant_gpu_resources);
+
+            uint32_t cached_count = 0;
+            for (auto& entry : abi_kernel->constant_gpu_resources) {
+                if (entry.resource) {
+                    ++cached_count;
+                    // QueueReference so the GPU has finished with in-flight upload work before
+                    // the resource could be freed (e.g. if the kernel is destroyed early).
+                    if (abi_kernel->winml_provider) {
+                        abi_kernel->winml_provider->QueueReference(entry.resource.Get());
+                    }
+                }
+            }
+
+        }
+
         *kernel_out = impl;
         return nullptr;
 
@@ -3342,6 +3492,27 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                 if (it != lazy_constant_tensors.end() && it->second) {
                     lazy_constant_snapshot[input_index] = SnapshotConstantInput(it->second.Get());
                 }
+            }
+
+            // Pre-upload constant inputs to GPU while the tensors are still available
+            // (before std::move(lazy_constant_tensors) below). Future Compute() calls then hit
+            // the cached D3D12Resource in GetInputTensor() instead of re-uploading.
+            if (kernel->dml_execution_provider && !lazy_constant_tensors.empty()) {
+                UploadConstantTensorsToGpu(
+                    lazy_constant_tensors,
+                    kernel->dml_execution_provider,
+                    kernel->constant_gpu_resources);
+
+                uint32_t cached_count = 0;
+                for (auto& entry : kernel->constant_gpu_resources) {
+                    if (entry.resource) {
+                        ++cached_count;
+                        if (kernel->winml_provider) {
+                            kernel->winml_provider->QueueReference(entry.resource.Get());
+                        }
+                    }
+                }
+
             }
 
             // Create context with runtime shapes from actual input tensors.
@@ -3621,7 +3792,8 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                     kernel->shape_inferrer.Get(),
                     &kernel->required_constant_cpu_inputs,
                     kernel->default_attributes,
-                    kernel->kernel_info
+                    kernel->kernel_info,
+                    kernel->constant_gpu_resources.empty() ? nullptr : &kernel->constant_gpu_resources
                 );
 
                 tmp_kernel_context->TransitionResourcesForOperatorIfRequired(true);
@@ -3664,7 +3836,8 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             kernel->shape_inferrer.Get(),
             &kernel->required_constant_cpu_inputs,
             kernel->default_attributes,
-            kernel->kernel_info
+            kernel->kernel_info,
+            kernel->constant_gpu_resources.empty() ? nullptr : &kernel->constant_gpu_resources
         );
         DMLPERF_ADD(ns_context_construction, ctx);
 
