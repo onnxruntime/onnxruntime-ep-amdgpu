@@ -21,19 +21,19 @@ PluginDmlCommandRecorder::PluginDmlCommandRecorder(
     ORT_THROW_IF_FAILED(dmlDevice->CreateCommandRecorder(IID_PPV_ARGS(&m_recorder)));
 }
 
-void PluginDmlCommandRecorder::SetAllocator(std::weak_ptr<DmlBucketizedBufferAllocator> allocator)
+void PluginDmlCommandRecorder::SetAllocator(const std::weak_ptr<DmlBucketizedBufferAllocator>& allocator)
 {
     m_bufferAllocator = allocator;
 }
 
 void PluginDmlCommandRecorder::InitializeOperator(
-    IDMLCompiledOperator* op,
+    const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& op,
     const DML_BINDING_DESC& persistentResourceBinding,
     const DML_BINDING_DESC& inputArrayBinding)
 {
+    const std::vector ops{op.Get()};
     // Reset the initializer to reference the input operator.
-    IDMLCompiledOperator* ops[] = { op };
-    ORT_THROW_IF_FAILED(m_initializer->Reset(ARRAYSIZE(ops), ops));
+    THROW_IF_FAILED(m_initializer->Reset(ops.size(), ops.data()));
 
     DML_BINDING_PROPERTIES initBindingProps = m_initializer->GetBindingProperties();
 
@@ -104,10 +104,10 @@ void PluginDmlCommandRecorder::InitializeOperator(
 }
 
 void PluginDmlCommandRecorder::ExecuteOperator(
-    IDMLCompiledOperator* op,
+    const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& op,
     const DML_BINDING_DESC& persistentResourceBinding,
-    gsl::span<const DML_BINDING_DESC> inputBindings,
-    gsl::span<const DML_BINDING_DESC> outputBindings)
+    const std::vector<DML_BINDING_DESC>& inputBindings,
+    const std::vector<DML_BINDING_DESC>& outputBindings)
 {
     DML_BINDING_PROPERTIES execBindingProps = op->GetBindingProperties();
 

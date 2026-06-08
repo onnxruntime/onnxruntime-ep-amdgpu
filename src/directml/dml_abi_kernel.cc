@@ -319,13 +319,13 @@ FetchAllTensorAttributes(const OrtKernelInfo* ort_kernel_info, const std::vector
 // ============================================================================
 
 AbiSafeTensor::AbiSafeTensor(const OrtValue* ort_value, const bool is_internal)
-    : is_internal_{is_internal}, ort_value_{const_cast<OrtValue*>(ort_value)} {
+    : is_internal_{is_internal}, value_{const_cast<OrtValue*>(ort_value)} {
 }
 
 uint32_t AbiSafeTensor::GetDimensionCount() const noexcept
 try {
-    return ort_value_ == nullptr ? 0 :
-        ort_value_.GetTensorTypeAndShapeInfo().GetDimensionsCount();
+    return value_ == nullptr ? 0 :
+        value_.GetTensorTypeAndShapeInfo().GetDimensionsCount();
 } catch (const Ort::Exception&) {
     return 0;
 }
@@ -335,8 +335,8 @@ try {
     if (dimensions == nullptr && dimensionCount > 0) {
         return E_POINTER;
     }
-    if (ort_value_ != nullptr) {
-        const auto shape{ort_value_.GetTensorTypeAndShapeInfo().GetShape()};
+    if (value_ != nullptr) {
+        const auto shape{value_.GetTensorTypeAndShapeInfo().GetShape()};
         if (shape.size() != dimensionCount) {
             return E_INVALIDARG;
         }
@@ -352,10 +352,10 @@ try {
 
 MLOperatorTensorDataType AbiSafeTensor::GetTensorDataType() const noexcept
 try {
-    if (ort_value_ == nullptr) {
+    if (value_ == nullptr) {
         return MLOperatorTensorDataType::Undefined;
     }
-    switch (ort_value_.GetTensorTypeAndShapeInfo().GetElementType()) {
+    switch (value_.GetTensorTypeAndShapeInfo().GetElementType()) {
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
         return MLOperatorTensorDataType::Float;
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
@@ -389,31 +389,40 @@ try {
     return MLOperatorTensorDataType::Undefined;
 }
 
-bool AbiSafeTensor::IsCpuData() const noexcept {
-    if (ort_value_ == nullptr) {
+bool AbiSafeTensor::IsCpuData() const noexcept
+try {
+    if (value_ == nullptr) {
         return true;
     }
-    const auto memory_info{ort_value_.GetTensorMemoryInfo()};
+    const auto memory_info{value_.GetTensorMemoryInfo()};
+    fmt::println("---> device_type: {}", memory_info.GetDeviceType());
     if (memory_info.GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
         return true;
     }
     const auto memory_type{memory_info.GetMemoryType()};
+    fmt::println("---> memory_type: {}", memory_type);
     return memory_type == OrtMemTypeCPUInput ||
            memory_type == OrtMemTypeCPUOutput;
+} catch (const Ort::Exception&) {
+    return true;
 }
 
-void* AbiSafeTensor::GetData() noexcept {
-    if (ort_value_ == nullptr || !IsCpuData()) {
+void* AbiSafeTensor::GetData() noexcept
+try {
+    if (value_ == nullptr || !IsCpuData()) {
         return nullptr;
     }
-    return ort_value_.GetTensorMutableRawData();
+    return value_.GetTensorMutableRawData();
+} catch (const Ort::Exception&) {
+    return nullptr;
 }
 
-void AbiSafeTensor::GetDataInterface(IUnknown** dataInterface) noexcept {
+void AbiSafeTensor::GetDataInterface(IUnknown** dataInterface) noexcept
+try {
     if (dataInterface != nullptr) {
         *dataInterface = nullptr;
-        if (ort_value_ != nullptr && !IsCpuData()) {
-            if (void* data_ptr{ort_value_.GetTensorMutableRawData()};
+        if (value_ != nullptr && !IsCpuData()) {
+            if (void* data_ptr{value_.GetTensorMutableRawData()};
                 data_ptr != nullptr) {
                 const auto allocation_info{static_cast<PluginDmlAllocationInfo*>(data_ptr)};
                 if (is_internal_) {
@@ -425,6 +434,12 @@ void AbiSafeTensor::GetDataInterface(IUnknown** dataInterface) noexcept {
             }
         }
     }
+} catch (const Ort::Exception& e) {
+    // TODO: log Ort failure
+    fmt::println("ERROR: Ort: {}: {}", e.GetOrtErrorCode(), e.what());
+} catch (const wil::ResultException& e) {
+    // TODO: log wil failure
+    fmt::println("ERROR: wil: {}", e.what());
 }
 
 // ============================================================================

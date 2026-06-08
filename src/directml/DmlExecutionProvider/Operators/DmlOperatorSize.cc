@@ -18,26 +18,17 @@ public:
     }
 
     // Takes a tensor as input and outputs a scalar int64 tensor containing the size of the input tensor.
-    void Compute(const MLOperatorKernelContext& kernelContext)
-    {
-        std::vector<IMLOperatorTensor*> inputTensors = GetInputTensors(kernelContext);
-        std::vector<IMLOperatorTensor*> outputTensors = GetOutputTensors(kernelContext);
-        assert(inputTensors.size() == 1);
-        assert(outputTensors.size() == 1);
-
-        // Get input shape as a vector and compute the number of elements
-        const IMLOperatorTensor* inputTensor = inputTensors[0];
-        const uint32_t inputDimCount = inputTensor->GetDimensionCount();
+    void Compute(const MLOperatorKernelContext& kernelContext) override {
+        const auto inputs{GetInputTensors(kernelContext)};
+        const auto& input{inputs[0]};
+        const auto inputDimCount{input->GetDimensionCount()};
         std::vector<uint32_t> inputShape(inputDimCount);
-        THROW_IF_FAILED(inputTensor->GetShape(inputDimCount, inputShape.data()));
-        uint32_t numElements = ComputeElementCountFromDimensions(inputShape);
-
-        // Write the number of elements to output data
-        IMLOperatorTensor* outputTensor = outputTensors[0];
-
-        ML_CHECK_VALID_ARGUMENT(outputTensor->IsCpuData(), "Output must be a CPU tensor.");
-        int64_t* outputData = reinterpret_cast<int64_t*>(outputTensor->GetData());
-        outputData[0] = static_cast<uint64_t>(numElements);
+        THROW_IF_FAILED(input->GetShape(inputDimCount, inputShape.data()));
+        const auto outputs{GetOutputTensors(kernelContext)};
+        const auto& output{outputs[0]};
+        ML_CHECK_VALID_ARGUMENT(output->IsCpuData(), "Output must be a CPU tensor.");
+        const auto outputData{output->GetData<int64_t>()};
+        *outputData = static_cast<uint64_t>(ComputeElementCountFromDimensions(inputShape));
     }
 };
 

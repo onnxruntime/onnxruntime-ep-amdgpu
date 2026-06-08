@@ -22,10 +22,13 @@ class ExecutionContext : public Com<IUnknown>
 {
 public:
     // Constructs an ExecutionContext that executes on the supplied queue.
-    ExecutionContext(ID3D12Device* d3d12Device, IDMLDevice* dmlDevice, ID3D12CommandQueue* queue,
-                     bool cpuSyncSpinningEnabled, bool keepOpen);
+    ExecutionContext(
+        const Microsoft::WRL::ComPtr<ID3D12Device>& d3d12Device,
+        const Microsoft::WRL::ComPtr<IDMLDevice>& dmlDevice,
+        const Microsoft::WRL::ComPtr<ID3D12CommandQueue>& queue,
+        bool cpuSyncSpinningEnabled, bool keepOpen);
 
-    void SetAllocator(std::weak_ptr<DmlBucketizedBufferAllocator> allocator);
+    void SetAllocator(const std::weak_ptr<DmlBucketizedBufferAllocator>& allocator);
 
     // Waits for flushed work, discards unflushed work, and discards associated references to
     // prevent circular references.  Must be the last call on the object before destruction.
@@ -41,18 +44,22 @@ public:
     void FillBufferWithPattern(ID3D12Resource* dstBuffer,
                                gsl::span<const std::byte> pattern /* Data type agnostic value, treated as raw bits */);
 
-    void InitializeOperator(IDMLCompiledOperator* op, const DML_BINDING_DESC& persistentResourceBinding,
-                            const DML_BINDING_DESC& inputArrayBinding);
+    void InitializeOperator(
+        const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& op,
+        const DML_BINDING_DESC& persistentResourceBinding,
+        const DML_BINDING_DESC& inputArrayBinding);
 
-    void ExecuteOperator(IDMLCompiledOperator* op, const DML_BINDING_DESC& persistentResourceBinding,
-                         gsl::span<const DML_BINDING_DESC> inputBindings,
-                         gsl::span<const DML_BINDING_DESC> outputBindings);
+    void ExecuteOperator(
+        const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& op,
+        const DML_BINDING_DESC& persistentResourceBinding,
+        const std::vector<DML_BINDING_DESC>& inputBindings,
+        const std::vector<DML_BINDING_DESC>& outputBindings);
 
-    void ExecuteCommandList(ID3D12GraphicsCommandList* commandList, _Outptr_ ID3D12Fence** fence,
-                            _Out_ uint64_t* completionValue);
+    void ExecuteCommandList(ID3D12GraphicsCommandList* commandList,
+        _Outptr_ ID3D12Fence** fence, _Out_ uint64_t* completionValue);
 
     void AddUAVBarrier();
-    void ResourceBarrier(gsl::span<const D3D12_RESOURCE_BARRIER> barriers);
+    void ResourceBarrier(const std::vector<D3D12_RESOURCE_BARRIER>& barriers);
 
     void GetCommandListForRecordingAndInvalidateState(ID3D12GraphicsCommandList** commandList);
 

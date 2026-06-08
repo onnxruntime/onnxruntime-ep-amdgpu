@@ -259,4 +259,62 @@ inline std::vector<Ort::ConstValueInfo> GetValueInfos(std::vector<Ort::ConstValu
     return value_infos;
 }
 
+template <> struct fmt::formatter<OrtErrorCode> : formatter<std::string_view> {
+    format_context::iterator format(const OrtErrorCode error_code, format_context& ctx) const {
+#define ORT_ERROR_CODE(__error_code) \
+    case __error_code: name = #__error_code; break;
+        std::string_view name{"<UNKNOWN>"};
+        switch (error_code) {
+            ORT_ERROR_CODE(ORT_OK)
+            ORT_ERROR_CODE(ORT_FAIL)
+            ORT_ERROR_CODE(ORT_INVALID_ARGUMENT)
+            ORT_ERROR_CODE(ORT_NO_SUCHFILE)
+            ORT_ERROR_CODE(ORT_NO_MODEL)
+            ORT_ERROR_CODE(ORT_ENGINE_ERROR)
+            ORT_ERROR_CODE(ORT_RUNTIME_EXCEPTION)
+            ORT_ERROR_CODE(ORT_INVALID_PROTOBUF)
+            ORT_ERROR_CODE(ORT_MODEL_LOADED)
+            ORT_ERROR_CODE(ORT_NOT_IMPLEMENTED)
+            ORT_ERROR_CODE(ORT_INVALID_GRAPH)
+            ORT_ERROR_CODE(ORT_EP_FAIL)
+            ORT_ERROR_CODE(ORT_MODEL_LOAD_CANCELED)
+            ORT_ERROR_CODE(ORT_MODEL_REQUIRES_COMPILATION)
+            ORT_ERROR_CODE(ORT_NOT_FOUND)
+        }
+        return formatter<std::string_view>::format(name, ctx);
+#undef ORT_ERROR_CODE
+    }
+};
+
+template <> struct fmt::formatter<OrtMemoryInfoDeviceType> : formatter<std::string_view> {
+    format_context::iterator format(const OrtMemoryInfoDeviceType memory_info_device_type, format_context& ctx) const {
+#define ORT_MEMORY_INFO_DEVICE_TYPE(__memory_info_device_type) \
+    case __memory_info_device_type: name = #__memory_info_device_type; break;
+        std::string_view name{"<UNKNOWN>"};
+        switch (memory_info_device_type) {
+            ORT_MEMORY_INFO_DEVICE_TYPE(OrtMemoryInfoDeviceType_CPU)
+            ORT_MEMORY_INFO_DEVICE_TYPE(OrtMemoryInfoDeviceType_GPU)
+            ORT_MEMORY_INFO_DEVICE_TYPE(OrtMemoryInfoDeviceType_FPGA)
+            ORT_MEMORY_INFO_DEVICE_TYPE(OrtMemoryInfoDeviceType_NPU)
+        }
+        return formatter<std::string_view>::format(name, ctx);
+#undef ORT_MEMORY_INFO_DEVICE_TYPE
+    }
+};
+
+template <> struct fmt::formatter<OrtMemType> : formatter<std::string_view> {
+    format_context::iterator format(const OrtMemType memory_type, format_context& ctx) const {
+#define ORT_MEM_TYPE(__memory_type) \
+    case __memory_type: name = #__memory_type; break;
+        std::string_view name{"<UNKNOWN>"};
+        switch (memory_type) {
+            ORT_MEM_TYPE(OrtMemTypeCPUInput)
+            ORT_MEM_TYPE(OrtMemTypeCPUOutput)
+            ORT_MEM_TYPE(OrtMemTypeDefault)
+        }
+        return formatter<std::string_view>::format(name, ctx);
+#undef ORT_MEM_TYPE
+    }
+};
+
 #include "provider_options.h"

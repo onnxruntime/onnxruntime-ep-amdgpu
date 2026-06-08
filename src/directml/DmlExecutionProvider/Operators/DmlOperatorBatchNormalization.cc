@@ -149,17 +149,10 @@ public:
         m_compiledOperator.Attach(graph.Compile(executionFlags, outputs).Detach());
     }
 
-    void Compute(const MLOperatorKernelContext& kernelContext) override
-    {
-        std::vector<IMLOperatorTensor*> inputTensors = GetInputTensorsForExecute(kernelContext);
-        std::vector<IMLOperatorTensor*> outputTensors = GetOutputTensorsForExecute(kernelContext);
-
-        ORT_THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
-            m_compiledOperator.Get(),
-            m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-            gsl::make_span(inputTensors),
-            gsl::make_span(outputTensors)
-        ));
+    void Compute(const MLOperatorKernelContext& kernelContext) override {
+        THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
+            m_compiledOperator, m_persistentResourceBinding,
+            GetInputTensorsForExecute(kernelContext), GetOutputTensorsForExecute(kernelContext)));
     }
 };
 

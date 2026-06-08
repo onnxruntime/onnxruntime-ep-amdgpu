@@ -20,12 +20,10 @@ public:
 
         std::vector<OperatorHelper::DimensionType> tensorShape;
 
-        for (uint32_t i = 0; i < kernelInfo.GetInputCount(); i++)
-        {
+        for (uint32_t i = 0; i < kernelInfo.GetInputCount(); i++) {
             // Only keep the non-empty tensors
-            if (!OperatorHelper::ContainsEmptyDimensions(tensorShapeDescription.GetInputTensorShape(i)))
-            {
-                kernelInputIndices.push_back(i);
+            if (!OperatorHelper::ContainsEmptyDimensions(tensorShapeDescription.GetInputTensorShape(i))) {
+                kernelInputIndices.emplace_back(i);
             }
         }
 
@@ -36,20 +34,14 @@ public:
         {
             uint32_t dmlAxis = GetDmlAdjustedAxis(m_axis, kernelInfo, m_inputTensorDescs.front().GetDimensionCount());
 
-            std::vector<DML_TENSOR_DESC> inputDescs;
-            inputDescs.reserve(m_inputTensorDescs.size());
-
-            for (size_t i = 0; i < m_inputTensorDescs.size(); i++)
-            {
-                // DML doesn't support empty tensors for concat, so we ignore them
-                if (!OperatorHelper::ContainsEmptyDimensions(m_inputTensorDescs[i].GetSizes()))
-                {
-                    inputDescs.push_back(m_inputTensorDescs[i].GetDmlDesc());
+            std::vector<DML_TENSOR_DESC> inputDescs(m_inputTensorDescs.size());
+            for (auto & m_inputTensorDesc : m_inputTensorDescs) {
+                if (!OperatorHelper::ContainsEmptyDimensions(m_inputTensorDesc.GetSizes())) {
+                    inputDescs.push_back(m_inputTensorDesc.GetDmlDesc());
                 }
             }
 
-            std::vector<DML_TENSOR_DESC> outputDescs = GetDmlOutputDescs();
-
+            const auto outputDescs{GetDmlOutputDescs()};
             DML_JOIN_OPERATOR_DESC joinDesc = {};
             joinDesc.InputCount = gsl::narrow_cast<uint32_t>(inputDescs.size());
             joinDesc.InputTensors = inputDescs.data();
@@ -62,18 +54,12 @@ public:
         }
     }
 
-    void Compute(const MLOperatorKernelContext& kernelContext)
-    {
-        std::vector<IMLOperatorTensor*> inputTensors = GetInputTensorsForExecute(kernelContext);
-        std::vector<IMLOperatorTensor*> outputTensors = GetOutputTensorsForExecute(kernelContext);
-
-        if (!inputTensors.empty())
-        {
-            ORT_THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
-                m_compiledOperator.Get(),
-                m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-                gsl::make_span(inputTensors),
-                gsl::make_span(outputTensors)));
+    void Compute(const MLOperatorKernelContext& kernelContext) override {
+        if (const auto inputTensors{GetInputTensorsForExecute(kernelContext)};
+            !inputTensors.empty()) {
+            THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
+                m_compiledOperator, m_persistentResourceBinding,
+                inputTensors, GetOutputTensorsForExecute(kernelContext)));
         }
     }
 };

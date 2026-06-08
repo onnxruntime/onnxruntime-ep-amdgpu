@@ -17,17 +17,17 @@ namespace dml_ep {
     {
     public:
         PluginDmlCommandRecorder(
-            ID3D12Device* d3dDevice,
-            IDMLDevice* device,
+            const Microsoft::WRL::ComPtr<ID3D12Device>& d3dDevice,
+            const Microsoft::WRL::ComPtr<IDMLDevice>& device,
             std::shared_ptr<CommandQueue> commandQueue);
 
         void InitializeOperator(
-            IDMLCompiledOperator* op,
+            const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& op,
             const DML_BINDING_DESC& persistentResourceBinding,
             const DML_BINDING_DESC& inputArrayBinding);
 
         void ExecuteOperator(
-            IDMLCompiledOperator* op,
+            const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& op,
             const DML_BINDING_DESC& persistentResourceBinding,
             gsl::span<const DML_BINDING_DESC> inputBindings,
             gsl::span<const DML_BINDING_DESC> outputBindings);
@@ -50,13 +50,13 @@ namespace dml_ep {
 
         Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> GetCommandList();
 
-        void ResourceBarrier(gsl::span<const D3D12_RESOURCE_BARRIER> barriers);
+        void ResourceBarrier(const std::vector<D3D12_RESOURCE_BARRIER>& barriers);
         void AddUAVBarrier();
 
         void Open() final;
         void CloseAndExecute() final;
 
-        void SetAllocator(std::weak_ptr<DmlBucketizedBufferAllocator> allocator);
+        void SetAllocator(const std::weak_ptr<DmlBucketizedBufferAllocator>& allocator);
 
         bool HasUnsubmittedWork() override
         {

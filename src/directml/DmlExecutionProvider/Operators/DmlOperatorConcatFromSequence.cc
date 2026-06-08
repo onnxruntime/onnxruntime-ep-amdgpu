@@ -126,33 +126,18 @@ public:
         }
     }
 
-    void Compute(const MLOperatorKernelContext& kernelContext)
-    {
-        auto outputTensor = kernelContext.GetOutputTensor(0, m_outputShape).GetInterface().Get();
-
-        if (!m_inputIndices.size())
-        {
-            return;
+    void Compute(const MLOperatorKernelContext& kernelContext) override {
+        auto outputTensor{kernelContext.GetOutputTensor(0, m_outputShape).GetInterface()};
+        if (!m_inputIndices.empty()) {
+            Microsoft::WRL::ComPtr<IMLOperatorKernelContextPrivate> operatorKernelContext;
+            ML_CHECK_HRESULT(kernelContext.GetInterface().As(&operatorKernelContext));
+            std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> inputs(m_inputIndices.size());
+            for (uint32_t i = 0; i < inputs.size(); i++) {
+                THROW_IF_FAILED(operatorKernelContext->GetSequenceInputTensor(0, m_inputIndices[i], &inputs[i]));
+            }
+            THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
+                m_compiledOperator, m_persistentResourceBinding, inputs, {outputTensor}));
         }
-
-        Microsoft::WRL::ComPtr<IMLOperatorKernelContextPrivate> operatorKernelContext;
-        kernelContext.GetInterface().As(&operatorKernelContext);
-        auto inputTensors = std::vector<IMLOperatorTensor*>(m_inputIndices.size());
-        for (uint32_t i = 0; i < inputTensors.size(); i++)
-        {
-            assert(m_inputTensorDescs[i].IsValid());
-            Microsoft::WRL::ComPtr<IMLOperatorTensor> inputTensor;
-            ORT_THROW_IF_FAILED(operatorKernelContext->GetSequenceInputTensor(0, m_inputIndices[i], &inputTensor));
-            inputTensors[i] = inputTensor.Get();
-        }
-
-        auto outputTensors = gsl::span<IMLOperatorTensor*> { &outputTensor, 1 };
-
-        ORT_THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
-            m_compiledOperator.Get(),
-            m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-            gsl::make_span(inputTensors),
-            outputTensors));
     }
 };
 

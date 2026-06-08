@@ -5,12 +5,9 @@
 
 namespace dml_ep {
 
-
 class DmlOperatorTopK : public DmlOperator, public OperatorHelper::TopKHelper
 {
 public:
-    using Self = DmlOperatorTopK;
-
     DmlOperatorTopK(const MLOperatorKernelCreationContext& kernelCreationContext, uint32_t opsetVersion)
     :   DmlOperator(kernelCreationContext),
         TopKHelper(kernelCreationContext, kernelCreationContext.GetTensorShapeDescription(), opsetVersion)
@@ -52,22 +49,14 @@ public:
         SetDmlOperatorDesc(opDesc, kernelCreationContext);
     }
 
-    void Compute(const MLOperatorKernelContext& kernelContext) override
-    {
-        std::vector<IMLOperatorTensor*> inputTensors = GetInputTensorsForExecute(kernelContext);
-        std::vector<IMLOperatorTensor*> outputTensors = GetOutputTensorsForExecute(kernelContext);
-
-        if (m_zeroOperator)
-        {
-            ExecuteZeroInt64Tensor(m_zeroOperator.Get(), outputTensors[1]);
+    void Compute(const MLOperatorKernelContext& kernelContext) override {
+        const auto outputTensors{GetOutputTensorsForExecute(kernelContext)};
+        if (m_zeroOperator) {
+            ExecuteZeroInt64Tensor(m_zeroOperator, outputTensors[1]);
         }
-
-        ORT_THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
-            m_compiledOperator.Get(),
-            m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-            gsl::make_span(inputTensors),
-            gsl::make_span(outputTensors)
-            ));
+        THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
+            m_compiledOperator, m_persistentResourceBinding,
+            GetInputTensorsForExecute(kernelContext), outputTensors));
     }
 
 private:

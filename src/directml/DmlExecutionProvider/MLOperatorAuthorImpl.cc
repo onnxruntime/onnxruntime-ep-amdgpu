@@ -163,7 +163,7 @@ namespace dml_ep {
         default:
             // The type is validated when default attributes are registered
             assert(false);
-            ORT_THROW_HR(E_FAIL);
+            THROW_HR(E_FAIL);
             return 0;
         }
 #pragma warning(pop)
@@ -197,7 +197,7 @@ namespace dml_ep {
             break;
 
         default:
-            ORT_THROW_HR(E_INVALIDARG);
+            THROW_HR(E_INVALIDARG);
         }
     }
 
@@ -376,7 +376,7 @@ namespace dml_ep {
         ML_TENSOR_TYPE_CASE(uint64_t);
         ML_TENSOR_TYPE_CASE(onnxruntime::MLFloat16);
 
-        ORT_THROW_HR(E_NOTIMPL);
+        THROW_HR(E_NOTIMPL);
         return MLOperatorTensorDataType::Undefined;
 #pragma warning(pop)
     }
@@ -424,7 +424,7 @@ namespace dml_ep {
             ML_TENSOR_TYPE_CASE(uint64_t);
             ML_TENSOR_TYPE_CASE(onnxruntime::MLFloat16);
 
-            ORT_THROW_HR(E_NOTIMPL);
+            THROW_HR(E_NOTIMPL);
             return onnxruntime::DataTypeImpl::GetTensorType<float>();
         }
         else if (edgeType == ::MLOperatorEdgeType::SequenceTensor)
@@ -447,7 +447,7 @@ namespace dml_ep {
             ML_SEQUENCE_TENSOR_TYPE_CASE(uint64_t);
             ML_SEQUENCE_TENSOR_TYPE_CASE(onnxruntime::MLFloat16);
 
-            ORT_THROW_HR(E_NOTIMPL);
+            THROW_HR(E_NOTIMPL);
             return onnxruntime::DataTypeImpl::GetSequenceTensorType<float>();
         }
         else if (edgeType == ::MLOperatorEdgeType::Primitive)
@@ -470,11 +470,11 @@ namespace dml_ep {
             ML_PRIMITIVE_TYPE_CASE(uint64_t);
             ML_PRIMITIVE_TYPE_CASE(onnxruntime::MLFloat16);
 
-            ORT_THROW_HR(E_NOTIMPL);
+            THROW_HR(E_NOTIMPL);
             return onnxruntime::DataTypeImpl::GetType<float>();
         }
 #pragma warning(pop)
-        ORT_THROW_HR(E_NOTIMPL);
+        THROW_HR(E_NOTIMPL);
     }
 
 
@@ -536,7 +536,7 @@ namespace dml_ep {
             return MLOperatorTensorDataType::Complex128;
 
         default:
-            ORT_THROW_HR(E_NOTIMPL);
+            THROW_HR(E_NOTIMPL);
             return MLOperatorTensorDataType::Undefined;
         }
 #pragma warning(pop)
@@ -669,7 +669,7 @@ namespace dml_ep {
                 return "tensor(complext128)";
 
             default:
-                ORT_THROW_HR(E_NOTIMPL);
+                THROW_HR(E_NOTIMPL);
                 return "";
             }
         }
@@ -729,13 +729,13 @@ namespace dml_ep {
                 return "seq(tensor(complext128))";
 
             default:
-                ORT_THROW_HR(E_NOTIMPL);
+                THROW_HR(E_NOTIMPL);
                 return "";
             }
         }
         else
         {
-            ORT_THROW_HR(E_NOTIMPL);
+            THROW_HR(E_NOTIMPL);
         }
 #pragma warning(pop)
     }
@@ -783,18 +783,14 @@ namespace dml_ep {
         uint32_t* elementCount
         ) const noexcept
     {
-        ORT_TRY
-        {
+        try {
             VerifyNotClosed();
 
             *elementCount = 0;
 
-            if (IsPrimitiveAttributeType(type))
-            {
+            if (IsPrimitiveAttributeType(type)) {
                 *elementCount = m_impl->GetPrimitiveAttrElementCount(ToProto(type), std::string(name));
-            }
-            else
-            {
+            } else {
                 // ONNX runtime does not implement OpNodeProtoHelper<Impl_t>::GetPrimitiveAttrElementCount for tensors.
                 // So we need to test presence a different way.
 
@@ -803,18 +799,16 @@ namespace dml_ep {
             }
 
             // Look for a value in the kernel's registered defaults if one was not found
-            if (*elementCount == 0 && m_defaultAttributes)
-            {
+            if (*elementCount == 0 && m_defaultAttributes) {
                 auto defaultAttr = m_defaultAttributes->find(name);
-                if (defaultAttr != m_defaultAttributes->end())
-                {
+                if (defaultAttr != m_defaultAttributes->end()) {
                     *elementCount = static_cast<uint32_t>(defaultAttr->second.ElementCount());
                 }
             }
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
@@ -843,7 +837,7 @@ namespace dml_ep {
         /*out*/void* attributeValue
         ) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -852,13 +846,13 @@ namespace dml_ep {
             {
                 if (!m_defaultAttributes)
                 {
-                    ORT_THROW_HR(E_FAIL);
+                    THROW_HR(E_FAIL);
                 }
 
                 auto defaultAttr = m_defaultAttributes->find(name);
                 if (defaultAttr == m_defaultAttributes->end())
                 {
-                    ORT_THROW_HR(E_FAIL);
+                    THROW_HR(E_FAIL);
                 }
 
                 defaultAttr->second.GetAttribute(type, elementCount, elementByteSize, /*out*/attributeValue);
@@ -889,7 +883,7 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
@@ -906,13 +900,13 @@ namespace dml_ep {
         {
             if (!m_defaultAttributes)
             {
-                ORT_THROW_HR(E_FAIL);
+                THROW_HR(E_FAIL);
             }
 
             auto defaultAttr = m_defaultAttributes->find(name);
             if (defaultAttr == m_defaultAttributes->end())
             {
-                ORT_THROW_HR(E_FAIL);
+                THROW_HR(E_FAIL);
             }
 
             return defaultAttr->second.GetStringAttribute(name, elementIndex);
@@ -942,7 +936,7 @@ namespace dml_ep {
         uint32_t* attributeElementByteLength
         ) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -957,7 +951,7 @@ namespace dml_ep {
             *attributeElementByteLength = static_cast<uint32_t>(protoString->size() + 1);
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
@@ -968,7 +962,7 @@ namespace dml_ep {
         char* attributeElement
         ) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -980,7 +974,7 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
@@ -1004,7 +998,7 @@ namespace dml_ep {
         _Outptr_ IMLOperatorTensor** tensor
         ) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -1027,13 +1021,13 @@ namespace dml_ep {
 
             return E_INVALIDARG;  // The argument has no valid matching attribute.
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
     HRESULT STDMETHODCALLTYPE OpNodeInfoWrapper<NodeInfoImpl_t, Base1_t, Base2_t>::GetInputEdgeDescription(
         uint32_t inputIndex, MLOperatorEdgeDescription* edgeDesc) const noexcept {
-        ORT_TRY {
+        try{
             VerifyNotClosed();
 
             memset(edgeDesc, 0, sizeof(*edgeDesc));
@@ -1047,13 +1041,13 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
     HRESULT STDMETHODCALLTYPE OpNodeInfoWrapper<NodeInfoImpl_t, Base1_t, Base2_t>::GetOutputEdgeDescription(
         uint32_t outputIndex, MLOperatorEdgeDescription* edgeDesc) const noexcept {
-        ORT_TRY {
+        try{
             VerifyNotClosed();
 
             memset(edgeDesc, 0, sizeof(*edgeDesc));
@@ -1064,13 +1058,13 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
     HRESULT STDMETHODCALLTYPE OpNodeInfoWrapper<NodeInfoImpl_t, Base1_t, Base2_t>::GetInputTensorShape(
         uint32_t inputIndex, uint32_t dimensionCount, uint32_t* dimensions) const noexcept {
-        ORT_TRY {
+        try{
             VerifyNotClosed();
 
             memset(dimensions, 0, dimensionCount * sizeof(dimensions[0]));
@@ -1100,13 +1094,13 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
     HRESULT STDMETHODCALLTYPE OpNodeInfoWrapper<NodeInfoImpl_t, Base1_t, Base2_t>::GetSequenceInputTensorShape(
         uint32_t inputIndex, uint32_t sequenceIndex, uint32_t dimensionCount, uint32_t* dimensions) const noexcept {
-        ORT_TRY {
+        try{
             VerifyNotClosed();
 
             memset(dimensions, 0, dimensionCount * sizeof(dimensions[0]));
@@ -1149,7 +1143,7 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
@@ -1175,7 +1169,7 @@ namespace dml_ep {
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
     HRESULT STDMETHODCALLTYPE OpNodeInfoWrapper<NodeInfoImpl_t, Base1_t, Base2_t>::GetInputTensorDimensionCount(
         uint32_t inputIndex, uint32_t* dimensionCount) const noexcept {
-        ORT_TRY {
+        try{
             VerifyNotClosed();
 
             *dimensionCount = 0;
@@ -1200,13 +1194,13 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
     HRESULT STDMETHODCALLTYPE OpNodeInfoWrapper<NodeInfoImpl_t, Base1_t, Base2_t>::GetSequenceInputInfo(
         uint32_t inputIndex, uint32_t* inputCount, MLOperatorTensorDataType* dataType) const noexcept {
-        ORT_TRY {
+        try{
             VerifyNotClosed();
 
             ML_CHECK_BOOL(inputIndex < GetInputCount());
@@ -1221,13 +1215,13 @@ namespace dml_ep {
             *dataType = ToMLTensorDataType(inputTensorSeq->DataType());
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
     HRESULT STDMETHODCALLTYPE OpNodeInfoWrapper<NodeInfoImpl_t, Base1_t, Base2_t>::GetSequenceInputTensorDimensionCount(
         uint32_t inputIndex, uint32_t sequenceIndex, uint32_t* dimensionCount) const noexcept {
-        ORT_TRY {
+        try{
             VerifyNotClosed();
 
             *dimensionCount = 0;
@@ -1261,23 +1255,23 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
     HRESULT STDMETHODCALLTYPE OpNodeInfoWrapper<NodeInfoImpl_t, Base1_t, Base2_t>::GetConstantInputTensor(uint32_t inputIndex, IMLOperatorTensor** tensor) const noexcept
     {
-        ORT_TRY
+        try
         {
             bool inputRequiredAsConstant = std::find(
                                              m_requiredConstantCpuInputs.begin(),
                                              m_requiredConstantCpuInputs.end(),
                                              inputIndex) != m_requiredConstantCpuInputs.end();
 
-            ORT_THROW_HR_IF(E_INVALIDARG, !inputRequiredAsConstant);
+            THROW_HR_IF(E_INVALIDARG, !inputRequiredAsConstant);
 
             auto constantInput = m_constantInputGetter(inputIndex);
-            ORT_THROW_HR_IF(E_INVALIDARG, !std::holds_alternative<Microsoft::WRL::ComPtr<IMLOperatorTensor>>(constantInput));
+            THROW_HR_IF(E_INVALIDARG, !std::holds_alternative<Microsoft::WRL::ComPtr<IMLOperatorTensor>>(constantInput));
 
             auto tensorWrapper = std::get<Microsoft::WRL::ComPtr<IMLOperatorTensor>>(constantInput);
             if (tensorWrapper == nullptr)
@@ -1290,16 +1284,16 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     template <class NodeInfoImpl_t, class Base1_t, class Base2_t>
     HRESULT STDMETHODCALLTYPE OpNodeInfoWrapper<NodeInfoImpl_t, Base1_t, Base2_t>::TryGetConstantInputTensor(uint32_t inputIndex, IMLOperatorTensor** tensor) const noexcept
     {
-        ORT_TRY
+        try
         {
             auto constantInput = m_constantInputGetter(inputIndex);
-            ORT_THROW_HR_IF(E_INVALIDARG, !std::holds_alternative<Microsoft::WRL::ComPtr<IMLOperatorTensor>>(constantInput));
+            THROW_HR_IF(E_INVALIDARG, !std::holds_alternative<Microsoft::WRL::ComPtr<IMLOperatorTensor>>(constantInput));
 
             auto tensorWrapper = std::get<Microsoft::WRL::ComPtr<IMLOperatorTensor>>(constantInput);
             if (tensorWrapper == nullptr)
@@ -1310,19 +1304,19 @@ namespace dml_ep {
                                                  inputIndex) != m_requiredConstantCpuInputs.end();
 
                 // This shouldn't happen since kernel creation is deferred and repeated when required constant inputs are not present.
-                ORT_THROW_HR_IF(E_UNEXPECTED, inputRequiredAsConstant);
+                THROW_HR_IF(E_UNEXPECTED, inputRequiredAsConstant);
             }
 
             *tensor = tensorWrapper.Detach();
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     HRESULT STDMETHODCALLTYPE OpKernelInfoWrapper::GetOutputTensorShape(uint32_t outputIndex, uint32_t dimensionCount, uint32_t* dimensions) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -1350,12 +1344,12 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     HRESULT STDMETHODCALLTYPE OpKernelInfoWrapper::GetOutputTensorDimensionCount(uint32_t outputIndex, uint32_t* dimensionCount) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -1375,7 +1369,7 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     bool STDMETHODCALLTYPE OpKernelInfoWrapper::HasTensorShapeDescription() const noexcept
@@ -1385,7 +1379,7 @@ namespace dml_ep {
 
     HRESULT STDMETHODCALLTYPE OpKernelInfoWrapper::GetTensorShapeDescription(IMLOperatorTensorShapeDescription** shapeInfo) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -1402,7 +1396,7 @@ namespace dml_ep {
             *shapeInfo = ret.Detach();
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     void STDMETHODCALLTYPE OpKernelInfoWrapper::GetExecutionInterface(IUnknown** executionInterface) const noexcept
@@ -1542,7 +1536,7 @@ namespace dml_ep {
 
     HRESULT STDMETHODCALLTYPE DmlGraphOpKernelInfoWrapper::GetOutputTensorShape(uint32_t outputIndex, uint32_t dimensionCount, uint32_t* dimensions) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -1570,12 +1564,12 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     HRESULT STDMETHODCALLTYPE DmlGraphOpKernelInfoWrapper::GetOutputTensorDimensionCount(uint32_t outputIndex, uint32_t* dimensionCount) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -1595,7 +1589,7 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     bool STDMETHODCALLTYPE DmlGraphOpKernelInfoWrapper::HasTensorShapeDescription() const noexcept
@@ -1605,7 +1599,7 @@ namespace dml_ep {
 
     HRESULT STDMETHODCALLTYPE DmlGraphOpKernelInfoWrapper::GetTensorShapeDescription(IMLOperatorTensorShapeDescription** shapeInfo) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -1622,7 +1616,7 @@ namespace dml_ep {
             *shapeInfo = ret.Detach();
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     void STDMETHODCALLTYPE DmlGraphOpKernelInfoWrapper::GetExecutionInterface(IUnknown** executionInterface) const noexcept
@@ -1645,7 +1639,7 @@ namespace dml_ep {
         _In_ const MLOperatorGraphDesc* operatorGraphDesc
         ) const noexcept
     {
-        ORT_TRY
+        try
         {
             assert(operatorGraphDesc != nullptr);
             assert(operatorGraphDesc->nodeCount == 0 || operatorGraphDesc->nodes);
@@ -1682,7 +1676,7 @@ namespace dml_ep {
             m_graphNodeCreateInfo->nodeCount = operatorGraphDesc->nodeCount;
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     OnnxTensorWrapper::OnnxTensorWrapper(onnx::TensorProto* impl, const std::filesystem::path& modelPath) : m_impl(impl)
@@ -1732,7 +1726,7 @@ namespace dml_ep {
         uint32_t dimensionCount,
         uint32_t* dimensions) const noexcept
     {
-        ORT_TRY
+        try
         {
           VerifyNotClosed();
 
@@ -1748,17 +1742,17 @@ namespace dml_ep {
 
           return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     MLOperatorTensorDataType STDMETHODCALLTYPE OnnxTensorWrapper::GetTensorDataType() const noexcept
     {
-        ORT_TRY
+        try
         {
           VerifyNotClosed();
           return ToMLTensorDataType(static_cast<onnx::TensorProto_DataType>(m_impl->data_type()));
         }
-        ORT_CATCH_GENERIC
+        catch (...)
         {
           return MLOperatorTensorDataType::Undefined;
         }
@@ -1848,7 +1842,7 @@ namespace dml_ep {
         uint32_t dimensionCount,
         uint32_t* dimensions) const noexcept
     {
-        ORT_TRY
+        try
         {
           VerifyNotClosed();
 
@@ -1864,17 +1858,17 @@ namespace dml_ep {
 
           return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     MLOperatorTensorDataType STDMETHODCALLTYPE TensorWrapper::GetTensorDataType() const noexcept
     {
-        ORT_TRY
+        try
         {
           VerifyNotClosed();
           return ToMLTensorDataType(m_impl->DataType());
         }
-        ORT_CATCH_GENERIC
+        catch (...)
         {
           return MLOperatorTensorDataType::Undefined;
         }
@@ -1945,11 +1939,11 @@ namespace dml_ep {
                     Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor;
                     if (m_inputTensors[i].size() == 1)
                     {
-                        ORT_THROW_IF_FAILED(GetInputTensor(i, tensor.GetAddressOf()));
+                        THROW_IF_FAILED(GetInputTensor(i, tensor.GetAddressOf()));
                     }
                     else
                     {
-                        ORT_THROW_IF_FAILED(GetSequenceInputTensor(i, j, tensor.GetAddressOf()));
+                        THROW_IF_FAILED(GetSequenceInputTensor(i, j, tensor.GetAddressOf()));
                     }
 
                     if (tensor)
@@ -1967,7 +1961,7 @@ namespace dml_ep {
             for (uint32_t i = 0; i < m_outputTensors.size(); ++i)
             {
                 Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor;
-                ORT_THROW_IF_FAILED(GetOutputTensor(i, tensor.GetAddressOf()));
+                THROW_IF_FAILED(GetOutputTensor(i, tensor.GetAddressOf()));
 
                 Microsoft::WRL::ComPtr<IUnknown> resource;
                 tensor->GetDataInterface(resource.GetAddressOf());
@@ -2078,7 +2072,7 @@ namespace dml_ep {
 
     HRESULT STDMETHODCALLTYPE OpKernelContextWrapper::GetInputTensor(uint32_t inputIndex, IMLOperatorTensor** tensor) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
             *tensor = nullptr;
@@ -2107,12 +2101,12 @@ namespace dml_ep {
             }
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     HRESULT STDMETHODCALLTYPE OpKernelContextWrapper::GetSequenceInputTensor(uint32_t inputIndex, uint32_t sequenceIndex, IMLOperatorTensor** tensor) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
             *tensor = nullptr;
@@ -2149,14 +2143,14 @@ namespace dml_ep {
             }
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     HRESULT STDMETHODCALLTYPE OpKernelContextWrapper::PrepareSequenceOutput(
         uint32_t outputIndex,
         MLOperatorTensorDataType dataType) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -2171,7 +2165,7 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     HRESULT STDMETHODCALLTYPE OpKernelContextWrapper::GetSequenceOutputTensor(
@@ -2183,7 +2177,7 @@ namespace dml_ep {
         bool gpuOutput,
         IMLOperatorTensor** tensor) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
             *tensor = nullptr;
@@ -2213,12 +2207,12 @@ namespace dml_ep {
                 if (gpuOutput)
                 {
                     auto status = m_impl->GetTempSpaceAllocator(&alloc);
-                    ORT_THROW_HR_IF(E_INVALIDARG, !status.IsOK());
+                    THROW_HR_IF(E_INVALIDARG, !status.IsOK());
                 }
                 else
                 {
                     auto status = m_impl->GetTempSpaceCPUAllocator(&alloc);
-                    ORT_THROW_HR_IF(E_INVALIDARG, !status.IsOK());
+                    THROW_HR_IF(E_INVALIDARG, !status.IsOK());
                 }
 
                 std::vector<int64_t> shapeDims(dimensions);
@@ -2250,12 +2244,12 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     HRESULT STDMETHODCALLTYPE OpKernelContextWrapper::GetSequenceInputInfo(uint32_t inputIndex, uint32_t* inputCount, MLOperatorTensorDataType* dataType) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -2269,12 +2263,12 @@ namespace dml_ep {
             *dataType = ToMLTensorDataType(inputTensorSeq->DataType());
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     HRESULT STDMETHODCALLTYPE OpKernelContextWrapper::GetOutputTensor(uint32_t outputIndex, IMLOperatorTensor** tensor) noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -2293,12 +2287,12 @@ namespace dml_ep {
             uint32_t dimensionCount = gsl::narrow_cast<uint32_t>(m_outputShapes->GetShape(outputIndex).size());
             return GetOutputTensor(outputIndex, dimensionCount, m_outputShapes->GetShape(outputIndex).data(), tensor);
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     HRESULT STDMETHODCALLTYPE OpKernelContextWrapper::GetOutputTensor(uint32_t outputIndex, uint32_t dimensions, const uint32_t* dimensionSizes, IMLOperatorTensor** tensor) noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
             *tensor = nullptr;
@@ -2340,22 +2334,22 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     HRESULT STDMETHODCALLTYPE OpKernelContextWrapper::AllocateTemporaryData(size_t size, IUnknown** abiAllocation) const noexcept
     {
-        ORT_TRY
+        try
         {
             uint64_t allocId;
             return AllocateTemporaryData(size, abiAllocation, &allocId);
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     HRESULT STDMETHODCALLTYPE OpKernelContextWrapper::AllocateTemporaryData(size_t size, IUnknown** abiAllocation, uint64_t* allocId) const
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -2386,7 +2380,7 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     void STDMETHODCALLTYPE OpKernelContextWrapper::GetExecutionInterface(IUnknown** executionInterface) const noexcept
@@ -2394,75 +2388,59 @@ namespace dml_ep {
         m_abiExecutionObject.CopyTo(executionInterface);
     }
 
-    std::vector<IMLOperatorTensor*> OpKernelContextWrapper::GetInputTensors()
-    {
-        std::vector<IMLOperatorTensor*> ret;
-        ret.reserve(m_inputTensors.size());
-
-        for (int i = 0; i < m_impl->InputCount(); ++i)
-        {
+    std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> OpKernelContextWrapper::GetInputTensors() {
+        std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> ret(m_inputTensors.size());
+        for (int i = 0; i < m_impl->InputCount(); ++i) {
             Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor;
-            ORT_THROW_IF_FAILED(GetInputTensor(i, tensor.GetAddressOf()));
+            THROW_IF_FAILED(GetInputTensor(i, tensor.GetAddressOf()));
             ret.push_back(m_inputTensors[i][0].Get());
         }
 
         return ret;
     }
 
-    std::vector<IMLOperatorTensor*> OpKernelContextWrapper::GetOutputTensors(const EdgeShapes& outputShapes)
+    std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>
+    OpKernelContextWrapper::GetOutputTensors(const EdgeShapes& outputShapes)
     {
-        std::vector<IMLOperatorTensor*> ret;
-        ret.reserve(m_outputTensors.size());
-
-        ORT_THROW_HR_IF(E_INVALIDARG, static_cast<size_t>(m_impl->OutputCount()) != outputShapes.EdgeCount());
-
-        for (int i = 0; i < m_impl->OutputCount(); ++i)
-        {
+        std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> result(m_outputTensors.size());
+        THROW_HR_IF(E_INVALIDARG, static_cast<size_t>(m_impl->OutputCount()) != outputShapes.EdgeCount());
+        for (int i = 0; i < m_impl->OutputCount(); ++i){
             Microsoft::WRL::ComPtr<IMLOperatorTensor> tensor;
-            ORT_THROW_IF_FAILED(GetOutputTensor(
-                i,
-                static_cast<uint32_t>(outputShapes.GetShape(i).size()),
-                outputShapes.GetShape(i).data(),
-                tensor.GetAddressOf()));
-
-            ret.push_back(m_outputTensors[i][0].Get());
+            THROW_IF_FAILED(GetOutputTensor(i, static_cast<uint32_t>(outputShapes.GetShape(i).size()),
+                outputShapes.GetShape(i).data(), tensor.GetAddressOf()));
+            result.emplace_back(m_outputTensors[i][0]);
         }
-
-        return ret;
+        return result;
     }
 
     AbiOpKernel::AbiOpKernel(
         IMLOperatorKernelFactory* operatorFactory,
-        const onnxruntime::OpKernelInfo& kerneInfo,
+        const onnxruntime::OpKernelInfo& kernelInfo,
         bool requiresInputShapesAtCreation,
         bool requiresOutputShapesAtCreation,
         bool isInternalOperator,
         gsl::span<const uint32_t> requiredConstantCpuInputs,
         IMLOperatorShapeInferrer* shapeInferrer,
         const AttributeMap* defaultAttributes)
-    :   OpKernel(kerneInfo),
+    :   OpKernel(kernelInfo),
         m_requiresInputShapesAtCreation(requiresInputShapesAtCreation),
         m_requiresOutputShapesAtCreation(requiresOutputShapesAtCreation),
         m_shapeInferrer(shapeInferrer),
         m_internalOperator(isInternalOperator),
         m_defaultAttributes(defaultAttributes)
     {
-        assert(requiresInputShapesAtCreation || !requiresOutputShapesAtCreation);
-
         m_requiredConstantCpuInputs.assign(requiredConstantCpuInputs.begin(), requiredConstantCpuInputs.end());
 
-        const void* executionHandle = kerneInfo.GetExecutionProvider()->GetExecutionHandle();
-        if (executionHandle)
-        {
+        const auto executionHandle{kernelInfo.GetExecutionProvider()->GetExecutionHandle()};
+        if (executionHandle) {
             // We assume the execution object inherits IUnknown as its first base
             Microsoft::WRL::ComPtr<IUnknown> providerExecutionObject = const_cast<IUnknown*>(static_cast<const IUnknown*>(executionHandle));
             m_abiExecutionObject = providerExecutionObject;
 
             // Get the WinML-specific execution provider interface from the execution object.
-            providerExecutionObject.As(&m_winmlProvider);
+            ML_CHECK_HRESULT(providerExecutionObject.As(&m_winmlProvider));
 
-            if (m_winmlProvider)
-            {
+            if (m_winmlProvider) {
                 // Get the particular object to return to a isInternalOperator based on the registration of that kernel.
                 m_winmlProvider->GetABIExecutionInterfaceAndInvalidateState(isInternalOperator, m_abiExecutionObject.ReleaseAndGetAddressOf());
             }
@@ -2472,7 +2450,7 @@ namespace dml_ep {
         for (uint32_t index : requiredConstantCpuInputs)
         {
             const onnxruntime::Tensor* tensor = nullptr;
-            if (!kerneInfo.TryGetConstantInput(index, &tensor) || !tensor)
+            if (!kernelInfo.TryGetConstantInput(index, &tensor) || !tensor)
             {
                 requiredConstantCpuInputsAvailable = false;
                 break;
@@ -2485,11 +2463,11 @@ namespace dml_ep {
             auto winmlProviderCapture = m_winmlProvider;
             auto internalOpCapture = m_internalOperator;
 
-            MLOperatorTensorGetter constantInputGetter = [kerneInfo, winmlProviderCapture, internalOpCapture](uint32_t index)
+            MLOperatorTensorGetter constantInputGetter = [kernelInfo, winmlProviderCapture, internalOpCapture](uint32_t index)
             {
                 Microsoft::WRL::ComPtr<IMLOperatorTensor> tensorWrapper = nullptr;
                 const onnxruntime::Tensor* tensor = nullptr;
-                if (kerneInfo.TryGetConstantInput(index, &tensor))
+                if (kernelInfo.TryGetConstantInput(index, &tensor))
                 {
                     tensorWrapper = wil::MakeOrThrow<TensorWrapper>(
                         const_cast<onnxruntime::Tensor*>(tensor),
@@ -2511,7 +2489,7 @@ namespace dml_ep {
 
             // Create the kernel while allowing input shape and output shape queries according to options
             Microsoft::WRL::ComPtr<OpKernelInfoWrapper> kernelInfoWrapper = wil::MakeOrThrow<OpKernelInfoWrapper>(
-                &kerneInfo,
+                &kernelInfo,
                 m_abiExecutionObject.Get(),
                 nullptr,
                 m_requiresOutputShapesAtCreation ? &m_inferredOutputShapes : nullptr,
@@ -2523,7 +2501,7 @@ namespace dml_ep {
                 constantInputGetter,
                 nullptr /*const onnxruntime::OpKernelContext* m_kernelContext*/);
 
-            ORT_THROW_IF_FAILED(operatorFactory->CreateKernel(kernelInfoWrapper.Get(), m_kernel.GetAddressOf()));
+            THROW_IF_FAILED(operatorFactory->CreateKernel(kernelInfoWrapper.Get(), m_kernel.GetAddressOf()));
             kernelInfoWrapper->Close();
 
             // Ensure that scheduled work, if any, is completed before freeing the kernel if the execution
@@ -2589,7 +2567,7 @@ namespace dml_ep {
                 else
                 {
                     assert(false);
-                    ORT_THROW_HR(E_INVALIDARG);
+                    THROW_HR(E_INVALIDARG);
                 }
             }
 
@@ -2619,7 +2597,7 @@ namespace dml_ep {
                 context /*const onnxruntime::OpKernelContext* m_kernelContext*/);
 
             Microsoft::WRL::ComPtr<IMLOperatorKernel> ret;
-            ORT_THROW_IF_FAILED(m_operatorFactory->CreateKernel(kernelInfoWrapper.Get(), ret.GetAddressOf()));
+            THROW_IF_FAILED(m_operatorFactory->CreateKernel(kernelInfoWrapper.Get(), ret.GetAddressOf()));
             kernelInfoWrapper->Close();
 
             return ret;
@@ -2689,7 +2667,7 @@ namespace dml_ep {
                     m_internalOperator,
                     m_requiresOutputShapesAtCreation ? &localInferredOutputShapes : nullptr);
 
-                ORT_THROW_IF_FAILED(localKernel->Compute(kernelContextWrapper.Get()));
+                THROW_IF_FAILED(localKernel->Compute(kernelContextWrapper.Get()));
                 kernelContextWrapper->Close();
 
                 // Ensure that scheduled work, if any, is completed before freeing the kernel if the execution
@@ -2708,7 +2686,7 @@ namespace dml_ep {
             m_internalOperator,
             m_requiresOutputShapesAtCreation ? &m_inferredOutputShapes : nullptr);
 
-        ORT_THROW_IF_FAILED(m_kernel->Compute(kernelContextWrapper.Get()));
+        THROW_IF_FAILED(m_kernel->Compute(kernelContextWrapper.Get()));
         kernelContextWrapper->Close();
 
         // Ensure that scheduled work, if any, is completed before freeing the kernel if the execution
@@ -2887,7 +2865,7 @@ namespace dml_ep {
                 }
                 else
                 {
-                    ORT_THROW_HR(E_INVALIDARG);
+                    THROW_HR(E_INVALIDARG);
                 }
             }
         }
@@ -2929,7 +2907,7 @@ namespace dml_ep {
 
         outputShapes.Reset(info.GetOutputCount());
 
-        ORT_THROW_IF_FAILED(shapeInferrer->InferOutputShapes(inferenceContext.Get()));
+        THROW_IF_FAILED(shapeInferrer->InferOutputShapes(inferenceContext.Get()));
         inferenceContext->Close();
 
         for (size_t outputIndex = 0; outputIndex < outputShapes.EdgeCount(); ++outputIndex)
@@ -3004,12 +2982,12 @@ namespace dml_ep {
         uint32_t dimensionCount,
         const uint32_t* dimensions) noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
             MLOperatorEdgeDescription edgeDesc;
-            ORT_THROW_IF_FAILED(GetOutputEdgeDescription(outputIndex, &edgeDesc));
+            THROW_IF_FAILED(GetOutputEdgeDescription(outputIndex, &edgeDesc));
 
             // In the process of calling mutable_tensor_type, the type may switch from undefined to tensor.
             // This is done here in case the dimension count is zero (scalar)
@@ -3023,14 +3001,14 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     HRESULT STDMETHODCALLTYPE MLSchemaInferenceContext::SetOutputEdgeDescription(
         uint32_t outputIndex,
         const MLOperatorEdgeDescription* edgeDesc) const noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -3038,7 +3016,7 @@ namespace dml_ep {
             m_context->getOutputType(outputIndex)->CopyFrom(onnx::Utils::DataTypeUtils::ToTypeProto(&typeStr));
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     HRESULT STDMETHODCALLTYPE MLKernelInferenceContext::SetOutputTensorShape(
@@ -3046,7 +3024,7 @@ namespace dml_ep {
         uint32_t dimensionCount,
         const uint32_t* dimensions) noexcept
     {
-        ORT_TRY
+        try
         {
             VerifyNotClosed();
 
@@ -3059,7 +3037,7 @@ namespace dml_ep {
 
             return S_OK;
         }
-        ORT_CATCH_RETURN
+        CATCH_RETURN()
     }
 
     Microsoft::WRL::ComPtr<MLSupportQueryContext> MLSupportQueryContext::Create(onnxruntime::OpNodeProtoHelper<onnxruntime::ProtoHelperNodeContext>* info,
@@ -3182,7 +3160,7 @@ namespace dml_ep {
     size_t elementCount = initializer.##Z();                                                       \
     tensorByteSize = elementCount * sizeof(Y);                                                     \
     unpackedTensor.reset(new std::byte[tensorByteSize]);                                           \
-    ORT_THROW_HR_IF(E_FAIL, !onnxruntime::utils::UnpackTensor(                                     \
+    THROW_HR_IF(E_FAIL, !onnxruntime::utils::UnpackTensor(                                     \
                              initializer,                                                          \
                              modelPath,                                                            \
                              reinterpret_cast<Y*>(unpackedTensor.get()), elementCount)             \
@@ -3203,7 +3181,7 @@ namespace dml_ep {
         CASE_PROTO(UINT32, uint32_t, uint64_data_size);
         CASE_PROTO(UINT64, uint64_t, uint64_data_size);
         CASE_PROTO(FLOAT16, onnxruntime::MLFloat16, int32_data_size);
-        default: ORT_THROW_HR(E_INVALIDARG);
+        default: THROW_HR(E_INVALIDARG);
         }
 
         return std::make_tuple(std::move(unpackedTensor), tensorByteSize);

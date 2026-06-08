@@ -9,7 +9,7 @@ namespace dml_ep {
 class DmlOperatorShape : public DmlOperator, OperatorHelper::ShapeHelper
 {
 public:
-    DmlOperatorShape(const MLOperatorKernelCreationContext& kernelCreationContext)
+    explicit DmlOperatorShape(const MLOperatorKernelCreationContext& kernelCreationContext)
     :   DmlOperator(kernelCreationContext),
         ShapeHelper(kernelCreationContext, kernelCreationContext.GetTensorShapeDescription())
     {
@@ -19,29 +19,24 @@ public:
     }
 
     // Takes a tensor as input and outputs a 1D int64 tensor containing the shape of the input tensor.
-    void Compute(const MLOperatorKernelContext& kernelContext)
-    {
-        std::vector<IMLOperatorTensor*> inputTensors = GetInputTensors(kernelContext);
-        std::vector<IMLOperatorTensor*> outputTensors = GetOutputTensors(kernelContext);
-        assert(inputTensors.size() == 1);
-        assert(outputTensors.size() == 1);
+    void Compute(const MLOperatorKernelContext& kernelContext) override {
+        const auto inputs{GetInputTensors(kernelContext)};
+        const auto outputs{GetOutputTensors(kernelContext)};
 
-        const IMLOperatorTensor* inputTensor = inputTensors[0];
-        IMLOperatorTensor* outputTensor = outputTensors[0];
+        const auto input{inputs[0]};
+        const auto output{outputs[0]};
 
-        const uint32_t inputDimCount = inputTensor->GetDimensionCount();
+        const uint32_t inputDimCount = input->GetDimensionCount();
         std::vector<uint32_t> inputShape(inputDimCount);
-        THROW_IF_FAILED(inputTensor->GetShape(inputDimCount, inputShape.data()));
+        THROW_IF_FAILED(input->GetShape(inputDimCount, inputShape.data()));
 
-        assert(m_sliceEnd >= m_sliceStart);
-        std::vector<uint32_t> outputShape(inputShape.begin() + m_sliceStart, inputShape.begin() + m_sliceEnd);
+        const std::vector<uint32_t> outputShape(inputShape.begin() + m_sliceStart, inputShape.begin() + m_sliceEnd);
 
-        ML_CHECK_VALID_ARGUMENT(outputTensor->IsCpuData(), "Output must be a CPU tensor.");
-        int64_t* outputData = reinterpret_cast<int64_t*>(outputTensor->GetData());
+        ML_CHECK_VALID_ARGUMENT(output->IsCpuData(), "Output must be a CPU tensor.");
+        const auto outputData{output->GetData<int64_t>()};
 
         // Write input shape to output data
-        for (uint32_t i = 0U; i < outputShape.size(); ++i)
-        {
+        for (uint32_t i = 0U; i < outputShape.size(); ++i) {
             outputData[i] = static_cast<int64_t>(outputShape[i]);
         }
     }

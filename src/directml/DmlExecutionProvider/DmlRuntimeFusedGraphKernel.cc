@@ -60,14 +60,12 @@ namespace dml_ep {
             }
         }
 
-        void TranslateAndCompileGraph(const onnxruntime::OpKernelInfo& kernelInfo, std::vector<DML_BUFFER_BINDING> initInputBindings) const
-        {
-            // Allocate a persistent resource and initialize the operator
-            UINT64 persistentResourceSize = m_compiledExecutionPlanOperator->GetBindingProperties().PersistentResourceSize;
-            if (persistentResourceSize > 0)
-            {
-                ORT_THROW_IF_FAILED(m_provider->AllocatePooledResource(
-                    static_cast<size_t>(persistentResourceSize),
+        void TranslateAndCompileGraph(const onnxruntime::OpKernelInfo& kernelInfo,
+            const std::vector<DML_BUFFER_BINDING>& initInputBindings) const {
+            if (UINT64 persistentResourceSize{m_compiledExecutionPlanOperator->GetBindingProperties().PersistentResourceSize};
+                persistentResourceSize > 0) {
+                THROW_IF_FAILED(m_provider->AllocatePooledResource(
+                    persistentResourceSize,
                     AllocatorRoundingMode::Disabled,
                     m_persistentResource.ReleaseAndGetAddressOf(),
                     m_persistentResourceAllocatorUnknown.ReleaseAndGetAddressOf()));
@@ -75,10 +73,8 @@ namespace dml_ep {
                 m_persistentResourceBinding = DML_BUFFER_BINDING { m_persistentResource.Get(), 0, persistentResourceSize };
             }
 
-            ORT_THROW_IF_FAILED(m_provider->InitializeOperator(
-                m_compiledExecutionPlanOperator.Get(),
-                m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-                gsl::make_span(initInputBindings)));
+            THROW_IF_FAILED(m_provider->InitializeOperator(
+                m_compiledExecutionPlanOperator, m_persistentResourceBinding, initInputBindings));
         }
 
         Ort::Status Compute(onnxruntime::OpKernelContext* kernelContext) const override
@@ -87,7 +83,7 @@ namespace dml_ep {
             auto providerImpl = static_cast<PluginDmlExecutionProviderImpl*>(m_provider.Get());
             providerImpl->ReleaseCompletedReferences();
 
-            ORT_THROW_HR_IF(E_UNEXPECTED, static_cast<ptrdiff_t>(m_subgraphInputs.size()) != kernelContext->InputCount());
+            THROW_HR_IF(E_UNEXPECTED, static_cast<ptrdiff_t>(m_subgraphInputs.size()) != kernelContext->InputCount());
 
             bool recompileNeeded = m_compiledExecutionPlanOperator == nullptr;
 

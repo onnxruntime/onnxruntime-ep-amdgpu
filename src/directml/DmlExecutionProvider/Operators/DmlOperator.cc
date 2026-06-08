@@ -6,47 +6,34 @@
 
 namespace dml_ep {
 
-
-    /*static*/ const uint32_t DmlOperator::zeroArray[8] = {};
-
-    DmlOperator::DmlOperator(const MLOperatorKernelCreationContext& kernelInfo)
-    {
+    DmlOperator::DmlOperator(const MLOperatorKernelCreationContext& kernelInfo) {
         ML_CHECK_HRESULT(kernelInfo.GetExecutionInterface().As(&m_executionProvider));
         ML_CHECK_HRESULT(m_executionProvider->GetDmlDevice(/*out*/ m_dmlDevice.GetAddressOf()));
     }
 
-    void DmlOperator::SetDmlOperatorDesc(
-        const DML_OPERATOR_DESC& operatorDesc,
-        const MLOperatorKernelCreationContext& kernelInfo
-        )
-    {
-        // Initialize should only be called once.
-        assert(m_compiledOperator == nullptr);
+    void DmlOperator::SetDmlOperatorDesc(const DML_OPERATOR_DESC& operatorDesc,
+        const MLOperatorKernelCreationContext& kernelInfo) {
 
         // DML doesn't support empty tensors. If an operator is still executable with empty tensors, the empty tensors
         // should be removed or massaged depending on the definition.
-        for (const TensorDesc& desc : m_inputTensorDescs)
-        {
-            if (OperatorHelper::ContainsEmptyDimensions(desc.GetSizes()))
-            {
+        for (const TensorDesc& desc : m_inputTensorDescs) {
+            if (OperatorHelper::ContainsEmptyDimensions(desc.GetSizes())) {
                 return;
             }
         }
 
-        for (const TensorDesc& desc : m_outputTensorDescs)
-        {
-            if (OperatorHelper::ContainsEmptyDimensions(desc.GetSizes()))
-            {
+        for (const TensorDesc& desc : m_outputTensorDescs) {
+            if (OperatorHelper::ContainsEmptyDimensions(desc.GetSizes())) {
                 return;
             }
         }
 
         // Create and compile the operator.
         Microsoft::WRL::ComPtr<IDMLOperator> dmlOperator;
-        ORT_THROW_IF_FAILED(m_dmlDevice->CreateOperator(&operatorDesc, IID_PPV_ARGS(&dmlOperator)));
+        THROW_IF_FAILED(m_dmlDevice->CreateOperator(&operatorDesc, IID_PPV_ARGS(&dmlOperator)));
 
         Microsoft::WRL::ComPtr<IMLOperatorKernelCreationContextPrivate> contextPrivate;
-        ORT_THROW_IF_FAILED(kernelInfo.GetInterface()->QueryInterface(contextPrivate.GetAddressOf()));
+        THROW_IF_FAILED(kernelInfo.GetInterface()->QueryInterface(contextPrivate.GetAddressOf()));
 
         if (contextPrivate->IsDmlGraphNode())
         {
@@ -86,22 +73,20 @@ namespace dml_ep {
             operatorGraphDesc.outputEdgeCount = gsl::narrow_cast<uint32_t>(outputEdges.size());
             operatorGraphDesc.outputEdges = outputEdges.data();
 
-            ORT_THROW_IF_FAILED(contextPrivate->SetDmlOperator(&operatorGraphDesc));
-        }
-        else
-        {
+            THROW_IF_FAILED(contextPrivate->SetDmlOperator(&operatorGraphDesc));
+        } else {
             DML_EXECUTION_FLAGS executionFlags = GetExecutionFlags();
-            ORT_THROW_IF_FAILED(m_dmlDevice->CompileOperator(dmlOperator.Get(), executionFlags, IID_PPV_ARGS(&m_compiledOperator)));
+            THROW_IF_FAILED(m_dmlDevice->CompileOperator(dmlOperator.Get(), executionFlags, IID_PPV_ARGS(&m_compiledOperator)));
 
             // Static buffer (might truncate name) to avoid excessive dynamic allocation only for debugging purposes.
             wchar_t nodeName[512];
-            ORT_THROW_IF_FAILED(kernelInfo.GetNodeWrapperInterface()->GetWideName(sizeof(nodeName), nodeName));
-            ORT_THROW_IF_FAILED(m_compiledOperator->SetName(nodeName));
+            THROW_IF_FAILED(kernelInfo.GetNodeWrapperInterface()->GetWideName(sizeof(nodeName), nodeName));
+            THROW_IF_FAILED(m_compiledOperator->SetName(nodeName));
 
             UINT64 persistentResourceSize = m_compiledOperator->GetBindingProperties().PersistentResourceSize;
             if (persistentResourceSize > 0)
             {
-                ORT_THROW_IF_FAILED(m_executionProvider->AllocatePooledResource(
+                THROW_IF_FAILED(m_executionProvider->AllocatePooledResource(
                     static_cast<size_t>(persistentResourceSize),
                     AllocatorRoundingMode::Enabled,
                     m_persistentResource.GetAddressOf(),
@@ -112,10 +97,8 @@ namespace dml_ep {
 
             std::vector<DML_BUFFER_BINDING> initializationInputBindings(m_kernelInputIndices.size());
 
-            ORT_THROW_IF_FAILED(m_executionProvider->InitializeOperator(
-                m_compiledOperator.Get(),
-                m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-                gsl::make_span(initializationInputBindings)));
+            THROW_IF_FAILED(m_executionProvider->InitializeOperator(
+                m_compiledOperator, m_persistentResourceBinding, initializationInputBindings));
         }
     }
 
@@ -166,10 +149,10 @@ namespace dml_ep {
         }
 
         Microsoft::WRL::ComPtr<IMLOperatorKernelCreationContextPrivate> contextPrivate;
-        ORT_THROW_IF_FAILED(kernelInfo.GetInterface()->QueryInterface(contextPrivate.GetAddressOf()));
+        THROW_IF_FAILED(kernelInfo.GetInterface()->QueryInterface(contextPrivate.GetAddressOf()));
         if (contextPrivate->IsDmlGraphNode())
         {
-            ORT_THROW_IF_FAILED(contextPrivate->SetDmlOperator(&operatorGraphDesc));
+            THROW_IF_FAILED(contextPrivate->SetDmlOperator(&operatorGraphDesc));
         }
         else
         {
@@ -195,17 +178,17 @@ namespace dml_ep {
             Microsoft::WRL::ComPtr<IDMLDevice1> dmlDevice1;
             DMLX_THROW_IF_FAILED(m_dmlDevice->QueryInterface(IID_PPV_ARGS(&dmlDevice1)));
             DML_EXECUTION_FLAGS executionFlags = GetExecutionFlags();
-            ORT_THROW_IF_FAILED(dmlDevice1->CompileGraph(&graphDesc, executionFlags, IID_PPV_ARGS(&m_compiledOperator)));
+            THROW_IF_FAILED(dmlDevice1->CompileGraph(&graphDesc, executionFlags, IID_PPV_ARGS(&m_compiledOperator)));
 
             // Static buffer (might truncate name) to avoid excessive dynamic allocation only for debugging purposes.
             wchar_t nodeName[512];
-            ORT_THROW_IF_FAILED(kernelInfo.GetNodeWrapperInterface()->GetWideName(sizeof(nodeName), nodeName));
-            ORT_THROW_IF_FAILED(m_compiledOperator->SetName(nodeName));
+            THROW_IF_FAILED(kernelInfo.GetNodeWrapperInterface()->GetWideName(sizeof(nodeName), nodeName));
+            THROW_IF_FAILED(m_compiledOperator->SetName(nodeName));
 
             UINT64 persistentResourceSize = m_compiledOperator->GetBindingProperties().PersistentResourceSize;
             if (persistentResourceSize > 0)
             {
-                ORT_THROW_IF_FAILED(m_executionProvider->AllocatePooledResource(
+                THROW_IF_FAILED(m_executionProvider->AllocatePooledResource(
                     static_cast<size_t>(persistentResourceSize),
                     AllocatorRoundingMode::Enabled,
                     m_persistentResource.GetAddressOf(),
@@ -214,12 +197,10 @@ namespace dml_ep {
                 m_persistentResourceBinding = DML_BUFFER_BINDING{ m_persistentResource.Get(), 0, persistentResourceSize };
             }
 
-            std::vector<DML_BUFFER_BINDING> initializationInputBindings(m_kernelInputIndices.size());
+            const std::vector<DML_BUFFER_BINDING> initializationInputBindings(m_kernelInputIndices.size());
 
-            ORT_THROW_IF_FAILED(m_executionProvider->InitializeOperator(
-                m_compiledOperator.Get(),
-                m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-                gsl::make_span(initializationInputBindings)));
+            THROW_IF_FAILED(m_executionProvider->InitializeOperator(
+                m_compiledOperator, m_persistentResourceBinding, initializationInputBindings));
         }
     }
 
@@ -233,8 +214,8 @@ namespace dml_ep {
         // call this method more than once, since Compute may take different inputs each execution.
         m_compiledOperator.Reset();
         Microsoft::WRL::ComPtr<IDMLOperator> dmlOperator;
-        ORT_THROW_IF_FAILED(m_dmlDevice->CreateOperator(&operatorDesc, IID_PPV_ARGS(&dmlOperator)));
-        ORT_THROW_IF_FAILED(m_dmlDevice->CompileOperator(dmlOperator.Get(), GetExecutionFlags(), IID_PPV_ARGS(&m_compiledOperator)));
+        THROW_IF_FAILED(m_dmlDevice->CreateOperator(&operatorDesc, IID_PPV_ARGS(&dmlOperator)));
+        THROW_IF_FAILED(m_dmlDevice->CompileOperator(dmlOperator.Get(), GetExecutionFlags(), IID_PPV_ARGS(&m_compiledOperator)));
 
         UINT64 persistentResourceSize = m_compiledOperator->GetBindingProperties().PersistentResourceSize;
         if (persistentResourceSize > 0)
@@ -242,21 +223,18 @@ namespace dml_ep {
             if (!m_persistentResource || m_persistentResource->GetDesc().Width < persistentResourceSize)
             {
                 m_persistentResource = nullptr;
-                ORT_THROW_IF_FAILED(m_executionProvider->AllocatePooledResource(
+                THROW_IF_FAILED(m_executionProvider->AllocatePooledResource(
                     static_cast<size_t>(persistentResourceSize),
                     AllocatorRoundingMode::Enabled,
                     m_persistentResource.GetAddressOf(),
                     m_persistentResourcePoolingUnk.GetAddressOf()));
             }
 
-            m_persistentResourceBinding = DML_BUFFER_BINDING{ m_persistentResource.Get(), 0, persistentResourceSize };
+            m_persistentResourceBinding = DML_BUFFER_BINDING{m_persistentResource.Get(), 0, persistentResourceSize};
         }
 
-        ORT_THROW_IF_FAILED(m_executionProvider->InitializeOperator(
-            m_compiledOperator.Get(),
-            m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-            gsl::span<const DML_BUFFER_BINDING>() // Empty input bindings since ownedByDml is not used.
-            ));
+        THROW_IF_FAILED(m_executionProvider->InitializeOperator(
+            m_compiledOperator, m_persistentResourceBinding, {}));
     }
 
     void DmlOperator::Initialize(
@@ -465,16 +443,11 @@ namespace dml_ep {
         InitializeOutputsWithShapes(kernelInfo, kernelOutputIndices, outputShapes, minDimensionCount);
     }
 
-    void DmlOperator::Compute(const MLOperatorKernelContext& kernelContext)
-    {
-        std::vector<IMLOperatorTensor*> inputTensors = GetInputTensorsForExecute(kernelContext);
-        std::vector<IMLOperatorTensor*> outputTensors = GetOutputTensorsForExecute(kernelContext);
-
-        ORT_THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
-            m_compiledOperator.Get(),
-            m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-            gsl::make_span(inputTensors),
-            gsl::make_span(outputTensors)));
+    void DmlOperator::Compute(const MLOperatorKernelContext& kernelContext) {
+        THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
+            m_compiledOperator, m_persistentResourceBinding,
+            GetInputTensorsForExecute(kernelContext),
+            GetOutputTensorsForExecute(kernelContext)));
     }
 
     bool DmlOperator::AllowHalfPrecisionComputation() const
@@ -508,59 +481,48 @@ namespace dml_ep {
         return usesFloat16Tensors;
     }
 
-    DML_EXECUTION_FLAGS DmlOperator::GetExecutionFlags() const
-    {
+    DML_EXECUTION_FLAGS DmlOperator::GetExecutionFlags() const {
         DML_EXECUTION_FLAGS flags = DML_EXECUTION_FLAG_NONE;
-        if (AllowHalfPrecisionComputation())
-        {
+        if (AllowHalfPrecisionComputation()) {
             flags |= DML_EXECUTION_FLAG_ALLOW_HALF_PRECISION_COMPUTATION;
         }
-
-        if (!m_executionProvider->MetacommandsEnabled())
-        {
+        if (!m_executionProvider->MetacommandsEnabled()) {
             flags |= DML_EXECUTION_FLAG_DISABLE_META_COMMANDS;
         }
-
         return flags;
     }
 
-    std::vector<IMLOperatorTensor*> DmlOperator::GetInputTensors(const MLOperatorKernelContext& kernelContext)
-    {
-        std::vector<IMLOperatorTensor*> inputTensors(m_kernelInputIndices.size());
-        for (uint32_t i = 0; i < inputTensors.size(); i++)
-        {
-            if (m_kernelInputIndices[i] != std::nullopt)
-            {
-                assert(m_inputTensorDescs[i].IsValid());
-                inputTensors[i] = kernelContext.GetInputTensor(*m_kernelInputIndices[i]).GetInterface().Get();
+    std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>
+    DmlOperator::GetInputTensors(const MLOperatorKernelContext& kernelContext) const {
+        std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> inputTensors(m_kernelInputIndices.size());
+        for (uint32_t i = 0; i < inputTensors.size(); i++) {
+            if (m_kernelInputIndices[i].has_value()) {
+                inputTensors[i] = kernelContext.GetInputTensor(
+                    m_kernelInputIndices[i].value()).GetInterface().Get();
             }
         }
-
         return inputTensors;
     }
 
-    std::vector<IMLOperatorTensor*> DmlOperator::GetOutputTensors(const MLOperatorKernelContext& kernelContext)
-    {
-        std::vector<IMLOperatorTensor*> outputTensors(m_kernelOutputIndices.size());
-        for (uint32_t i = 0; i < outputTensors.size(); i++)
-        {
-            if (m_kernelOutputIndices[i] != std::nullopt)
-            {
-                assert(m_outputTensorDescs[i].IsValid());
-                outputTensors[i] = kernelContext.GetOutputTensor(*m_kernelOutputIndices[i]).GetInterface().Get();
+    std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>
+    DmlOperator::GetOutputTensors(const MLOperatorKernelContext& kernelContext) const {
+        std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> outputTensors(m_kernelOutputIndices.size());
+        for (uint32_t i = 0; i < outputTensors.size(); i++) {
+            if (m_kernelOutputIndices[i].has_value()) {
+                outputTensors[i] = kernelContext.GetOutputTensor(
+                    m_kernelOutputIndices[i].value()).GetInterface();
             }
         }
-
         return outputTensors;
     }
 
-    std::vector<IMLOperatorTensor*> DmlOperator::GetInputTensorsForExecute(const MLOperatorKernelContext& kernelContext)
-    {
+    std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>
+    DmlOperator::GetInputTensorsForExecute(const MLOperatorKernelContext& kernelContext) const {
         return GetInputTensors(kernelContext);
     }
 
-    std::vector<IMLOperatorTensor*> DmlOperator::GetOutputTensorsForExecute(const MLOperatorKernelContext& kernelContext)
-    {
+    std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>
+    DmlOperator::GetOutputTensorsForExecute(const MLOperatorKernelContext& kernelContext) const {
         return GetOutputTensors(kernelContext);
     }
 
@@ -615,27 +577,19 @@ namespace dml_ep {
         DML_OPERATOR_DESC opDesc = { DML_OPERATOR_ELEMENT_WISE_LOGICAL_XOR, &xorDesc };
 
         Microsoft::WRL::ComPtr<IDMLOperator> dmlOperator;
-        ORT_THROW_IF_FAILED(m_dmlDevice->CreateOperator(&opDesc, IID_PPV_ARGS(&dmlOperator)));
+        THROW_IF_FAILED(m_dmlDevice->CreateOperator(&opDesc, IID_PPV_ARGS(&dmlOperator)));
 
         Microsoft::WRL::ComPtr<IDMLCompiledOperator> dmlCompiledOperator;
-        ORT_THROW_IF_FAILED(m_dmlDevice->CompileOperator(dmlOperator.Get(), GetExecutionFlags(), IID_PPV_ARGS(&dmlCompiledOperator)));
+        THROW_IF_FAILED(m_dmlDevice->CompileOperator(dmlOperator.Get(), GetExecutionFlags(), IID_PPV_ARGS(&dmlCompiledOperator)));
 
         return dmlCompiledOperator;
     }
 
-    void DmlOperator::ExecuteZeroInt64Tensor(IDMLCompiledOperator* compiledOperator, IMLOperatorTensor* tensor)
-    {
-        // Element-wise XOR takes two inputs and an output. We want in-place execution, so all three
-        // resources are the same.
-        IMLOperatorTensor* inputTensors[] = { tensor, tensor };
-        IMLOperatorTensor* outputTensors[] = { tensor };
-
-        ORT_THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
-            compiledOperator,
-            nullptr, // persistent resource binding
-            gsl::make_span(inputTensors),
-            gsl::make_span(outputTensors)
-            ));
+    void DmlOperator::ExecuteZeroInt64Tensor(
+        const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& compiledOperator,
+        const Microsoft::WRL::ComPtr<IMLOperatorTensor>& tensor) const {
+        THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
+            compiledOperator, std::nullopt, {tensor, tensor}, {tensor}));
     }
 
     TensorDesc DmlOperator::CreateTensorDescFromInput(
@@ -646,8 +600,7 @@ namespace dml_ep {
         int32_t leftAlignedDimensionCount,
         std::optional<gsl::span<const uint32_t>> tensorShape,
         uint32_t minDimensionCount
-        ) const
-    {
+        ) {
         if (!kernelInfo.IsInputValid(index))
         {
             // The tensor is optional.
@@ -688,8 +641,7 @@ namespace dml_ep {
         int32_t leftAlignedDimensionCount,
         std::optional<gsl::span<const uint32_t>> tensorShape,
         uint32_t minDimensionCount
-        ) const
-    {
+        ) {
         if (!kernelInfo.IsInputValid(index))
         {
             // The tensor is optional.
@@ -698,7 +650,7 @@ namespace dml_ep {
 
         auto edgeDesc = kernelInfo.GetInputEdgeDescription(index);
         assert(edgeDesc.edgeType == MLOperatorEdgeType::SequenceTensor);
-        ORT_THROW_HR_IF(E_INVALIDARG, edgeDesc.edgeType != MLOperatorEdgeType::SequenceTensor);
+        THROW_HR_IF(E_INVALIDARG, edgeDesc.edgeType != MLOperatorEdgeType::SequenceTensor);
 
         const auto& shapeDescription = kernelInfo.GetTensorShapeDescription();
         const uint32_t numTensors = shapeDescription.GetSequenceInputCount(index);
@@ -741,8 +693,7 @@ namespace dml_ep {
         int32_t leftAlignedDimensionCount,
         std::optional<gsl::span<const uint32_t>> tensorShape,
         uint32_t minDimensionCount
-        ) const
-    {
+        ) {
         if (!kernelInfo.IsOutputValid(index))
         {
             // The tensor is optional.
@@ -796,7 +747,7 @@ namespace dml_ep {
         for (size_t i = 0; i < graphDesc.NodeCount; ++i)
         {
             // Create the operator.
-            ORT_THROW_IF_FAILED(m_dmlDevice->CreateOperator(operatorGraphDesc.nodes[i], IID_PPV_ARGS(&dmlOperators[i])));
+            THROW_IF_FAILED(m_dmlDevice->CreateOperator(operatorGraphDesc.nodes[i], IID_PPV_ARGS(&dmlOperators[i])));
             dmlOperatorGraphNodes[i] = DML_OPERATOR_GRAPH_NODE_DESC{dmlOperators[i].Get()};
             dmlGraphNodes[i] = DML_GRAPH_NODE_DESC{DML_GRAPH_NODE_TYPE_OPERATOR, &dmlOperatorGraphNodes[i]};
         }

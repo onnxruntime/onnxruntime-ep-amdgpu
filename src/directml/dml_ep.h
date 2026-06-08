@@ -199,7 +199,7 @@ private:
 
     OrtStatus* ConvertKernelRegistryToOrtKernelRegistry();
 
-    ONNXTensorElementDataType GetElementTypeFromMLDataType(onnxruntime::MLDataType);
+    static ONNXTensorElementDataType GetElementTypeFromMLDataType(onnxruntime::MLDataType);
 
     std::string name_{};
     const OrtLogger* logger_;

@@ -23,7 +23,7 @@
     {\
         if ((x) == false)\
         {\
-            ORT_THROW_HR(E_INVALIDARG);\
+            THROW_HR(E_INVALIDARG);\
         }\
     }
 
@@ -34,7 +34,7 @@
     {\
         if (FAILED(hr))\
         {\
-            ORT_THROW_HR(E_INVALIDARG);\
+            THROW_HR(E_INVALIDARG);\
         }\
     }
 

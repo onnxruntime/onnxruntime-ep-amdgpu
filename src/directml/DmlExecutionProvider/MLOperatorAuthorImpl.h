@@ -479,7 +479,7 @@ private:
 class OpKernelContextWrapper : public Com<IMLOperatorKernelContext, IMLOperatorKernelContextPrivate>, public Closable
 {
  public:
-    ~OpKernelContextWrapper();
+    ~OpKernelContextWrapper() override;
 
     OpKernelContextWrapper(onnxruntime::OpKernelContext* context, const onnxruntime::IExecutionProvider* provider, bool isInternalOperator, const EdgeShapes* outputShapes);
 
@@ -512,10 +512,10 @@ class OpKernelContextWrapper : public Com<IMLOperatorKernelContext, IMLOperatorK
 
     void Close() override;
 
-    std::vector<IMLOperatorTensor*> GetInputTensors();
-    std::vector<IMLOperatorTensor*> GetOutputTensors(const EdgeShapes& outputShapes);
+    std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> GetInputTensors();
+    std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> GetOutputTensors(const EdgeShapes& outputShapes);
 
-    onnxruntime::OpKernelContext* GetOpKernelContext() { return m_impl; }
+    onnxruntime::OpKernelContext* GetOpKernelContext() const { return m_impl; }
 
  protected:
     void ClearTempAllocations();
@@ -547,7 +547,7 @@ class AbiOpKernel : public onnxruntime::OpKernel
  public:
     AbiOpKernel(
         IMLOperatorKernelFactory* operatorFactory,
-        const onnxruntime::OpKernelInfo& kerneInfo,
+        const onnxruntime::OpKernelInfo& kernelInfo,
         bool requiresInputShapesAtCreation,
         bool requiresOutputShapesAtCreation,
         bool isInternalOperator,

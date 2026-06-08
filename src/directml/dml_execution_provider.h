@@ -40,9 +40,9 @@ namespace dml_ep {
         ~PluginDmlExecutionProviderImpl() override;
 
         PluginDmlExecutionProviderImpl(
-            IDMLDevice* dmlDevice,
-            ID3D12Device* d3d12Device,
-            ExecutionContext* executionContext,
+            const Microsoft::WRL::ComPtr<IDMLDevice>& dmlDevice,
+            const Microsoft::WRL::ComPtr<ID3D12Device>& d3d12Device,
+            const Microsoft::WRL::ComPtr<ExecutionContext>& executionContext,
             const ApiPtrs& api_ptrs,
             bool enableMetacommands,
             bool enableGraphCapture,
@@ -69,31 +69,36 @@ namespace dml_ep {
         STDMETHOD(AddUAVBarrier)() const noexcept final;
 
         STDMETHOD(InitializeOperator)(
-            IDMLCompiledOperator* op,
-            _In_opt_ const DML_BUFFER_BINDING* persistentResourceBinding,
-            gsl::span<const DML_BUFFER_BINDING> inputBindings
+            const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& op,
+            const DML_BUFFER_BINDING& persistentResourceBinding,
+            const std::vector<DML_BUFFER_BINDING>& inputBindings
             ) const noexcept final;
 
         STDMETHOD(ExecuteOperator)(
-            IDMLCompiledOperator* op,
-            _In_opt_ const DML_BUFFER_BINDING* persistentResourceBinding,
-            gsl::span<IMLOperatorTensor*> inputTensors,
-            gsl::span<IMLOperatorTensor*> outputTensors
+            const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& op,
+            const DML_BUFFER_BINDING& persistentResourceBinding,
+            const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& inputs,
+            const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& outputs
             ) const noexcept final;
 
         STDMETHOD(ExecuteOperator)(
-            IDMLCompiledOperator* op,
-            _In_opt_ const DML_BUFFER_BINDING* persistentResourceBinding,
-            gsl::span<DML_BINDING_DESC> inputTensors,
-            gsl::span<DML_BINDING_DESC> outputTensors
+            const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& op,
+            const DML_BUFFER_BINDING& persistentResourceBinding,
+            const std::vector<DML_BINDING_DESC>& inputs,
+            const std::vector<DML_BINDING_DESC>& outputs
             ) const noexcept final;
 
-        STDMETHOD(CopyTensor)(IMLOperatorTensor* dst, IMLOperatorTensor* src) const noexcept final;
-        STDMETHOD(CopyTensors)(gsl::span<IMLOperatorTensor*> dst, gsl::span<IMLOperatorTensor*> src) const noexcept final;
+        STDMETHOD(CopyTensor)(
+            const Microsoft::WRL::ComPtr<IMLOperatorTensor>& dst,
+            const Microsoft::WRL::ComPtr<IMLOperatorTensor>& src) const noexcept final;
+
+        STDMETHOD(CopyTensors)(
+            const Microsoft::WRL::ComPtr<IMLOperatorTensor>& dst,
+            const Microsoft::WRL::ComPtr<IMLOperatorTensor>& src) const noexcept final;
 
         STDMETHOD(FillTensorWithPattern)(
-            IMLOperatorTensor* dst,
-            gsl::span<const std::byte> rawValue
+            const Microsoft::WRL::ComPtr<IMLOperatorTensor>& dst,
+            const std::vector<std::byte>& rawValue
             ) const noexcept final;
 
         STDMETHOD(UploadToResource)(ID3D12Resource* dstData, const void* srcData, uint64_t srcDataSize) const noexcept final;

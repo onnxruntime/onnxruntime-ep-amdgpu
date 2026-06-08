@@ -327,6 +327,11 @@ IMLOperatorTensor : IUnknown
     //! from the tensor's shape.  It is fully packed in memory.
     STDMETHOD_(void*, GetData)() noexcept PURE;
 
+    template <typename R>
+    R* GetData() noexcept {
+        return static_cast<R*>(GetData());
+    }
+
     //! Gets an interface pointer for the tensor.  This may be
     //! used when IsDataInterface returns true, because the kernel was
     //! registered using MLOperatorExecutionType::D3D12.  The dataInterface

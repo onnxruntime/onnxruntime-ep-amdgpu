@@ -6,9 +6,9 @@
 namespace dml_ep {
 
 ExecutionContext::ExecutionContext(
-    ID3D12Device* d3d12Device,
-    IDMLDevice* dmlDevice,
-    ID3D12CommandQueue* queue,
+    const Microsoft::WRL::ComPtr<ID3D12Device>& d3d12Device,
+    const Microsoft::WRL::ComPtr<IDMLDevice>& dmlDevice,
+    const Microsoft::WRL::ComPtr<ID3D12CommandQueue>& queue,
     bool cpuSyncSpinningEnabled, bool keepOpen)
     : m_queue(std::make_shared<CommandQueue>(queue, cpuSyncSpinningEnabled))
     , m_dmlRecorder(d3d12Device, dmlDevice, m_queue)
@@ -18,7 +18,7 @@ ExecutionContext::ExecutionContext(
     THROW_IF_FAILED(dmlDevice->GetParentDevice(IID_PPV_ARGS(m_d3dDevice.GetAddressOf())));
 }
 
-void ExecutionContext::SetAllocator(std::weak_ptr<DmlBucketizedBufferAllocator> allocator)
+void ExecutionContext::SetAllocator(const std::weak_ptr<DmlBucketizedBufferAllocator>& allocator)
 {
     m_dmlRecorder.SetAllocator(allocator);
 }
@@ -66,17 +66,19 @@ void ExecutionContext::ExecuteCommandList(ID3D12GraphicsCommandList* commandList
     m_dmlRecorder.ExecuteCommandList(commandList, fence, completionValue);
 }
 
-void ExecutionContext::InitializeOperator(IDMLCompiledOperator* op,
-                                                   const DML_BINDING_DESC& persistentResourceBinding,
-                                          const DML_BINDING_DESC& inputArrayBinding) {
+void ExecutionContext::InitializeOperator(
+    const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& op,
+    const DML_BINDING_DESC& persistentResourceBinding,
+    const DML_BINDING_DESC& inputArrayBinding) {
     SetCommandRecorder(&m_dmlRecorder);
-    m_dmlRecorder.InitializeOperator(op, persistentResourceBinding, inputArrayBinding);
+    m_dmlRecorder.InitializeOperator(op.Get(), persistentResourceBinding, inputArrayBinding);
 }
 
-void ExecutionContext::ExecuteOperator(IDMLCompiledOperator* op,
-                                                const DML_BINDING_DESC& persistentResourceBinding,
-                                       gsl::span<const DML_BINDING_DESC> inputBindings,
-                                       gsl::span<const DML_BINDING_DESC> outputBindings) {
+void ExecutionContext::ExecuteOperator(
+    const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& op,
+    const DML_BINDING_DESC& persistentResourceBinding,
+    const std::vector<DML_BINDING_DESC>& inputBindings,
+    const std::vector<DML_BINDING_DESC>& outputBindings) {
     SetCommandRecorder(&m_dmlRecorder);
 
     m_dmlRecorder.ExecuteOperator(op, persistentResourceBinding, inputBindings, outputBindings);

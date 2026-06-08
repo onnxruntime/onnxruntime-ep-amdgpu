@@ -84,7 +84,7 @@ template<typename T>
 void SetFusedActivation(T& opDesc, const DML_OPERATOR_DESC* fusedActivation)
 {
     // Activation is only fused for sum operators, which have a template specialization
-    ORT_THROW_HR(E_INVALIDARG);
+    THROW_HR(E_INVALIDARG);
 }
 
 template<>
@@ -120,7 +120,7 @@ public:
         if (fusedActivation != std::nullopt)
         {
             // Activation is only fused for two-input sum operators
-            ORT_THROW_HR_IF(E_INVALIDARG, opDescDesc.Type != DML_OPERATOR_ELEMENT_WISE_ADD1 || kernelInfo.GetInputCount() > 2);
+            THROW_HR_IF(E_INVALIDARG, opDescDesc.Type != DML_OPERATOR_ELEMENT_WISE_ADD1 || kernelInfo.GetInputCount() > 2);
 
             SetFusedActivation(opDesc, &fusedActivationDmlDesc);
         }
@@ -138,8 +138,8 @@ Microsoft::WRL::ComPtr<IDMLCompiledOperator> CreateSecondaryOperator(
 {
     Microsoft::WRL::ComPtr<IDMLOperator> dmlOperator;
     Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiledOperator;
-    ORT_THROW_IF_FAILED(dmlDevice->CreateOperator(&operatorDesc, IID_PPV_ARGS(&dmlOperator)));
-    ORT_THROW_IF_FAILED(dmlDevice->CompileOperator(dmlOperator.Get(), executionFlags, IID_PPV_ARGS(&compiledOperator)));
+    THROW_IF_FAILED(dmlDevice->CreateOperator(&operatorDesc, IID_PPV_ARGS(&dmlOperator)));
+    THROW_IF_FAILED(dmlDevice->CompileOperator(dmlOperator.Get(), executionFlags, IID_PPV_ARGS(&compiledOperator)));
     return compiledOperator;
 }
 
@@ -162,7 +162,7 @@ public:
         DML_OPERATOR_DESC fusedActivationDmlDesc = fusedActivation ? fusedActivation->GetDmlDesc() : DML_OPERATOR_DESC();
 
         // Activation is only fused for two-input sum operators
-        ORT_THROW_HR_IF(E_INVALIDARG, fusedActivation != std::nullopt && inputCount != 2);
+        THROW_HR_IF(E_INVALIDARG, fusedActivation != std::nullopt && inputCount != 2);
 
         if (inputCount == 1)
         {
@@ -212,46 +212,33 @@ public:
         }
     }
 
-    void Compute(const MLOperatorKernelContext& kernelContext)
-    {
-        // For 1 input, just return the input (identity).
-        if (m_inputTensorDescs.size() == 1)
-        {
+    void Compute(const MLOperatorKernelContext& kernelContext) override {
+        if (m_inputTensorDescs.size() == 1) {
             DmlOperator::Compute(kernelContext);
-            return;
-        }
+        } else {
+            const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> inputs{
+                kernelContext.GetInputTensor(0).GetInterface(),
+                kernelContext.GetInputTensor(1).GetInterface()
+            };
+            const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> outputs{
+                kernelContext.GetOutputTensor(0).GetInterface()
+            };
 
-        // Apply the operator to the first two inputs.
-        std::array<IMLOperatorTensor*, 2> inputTensors;
-        inputTensors[0] = kernelContext.GetInputTensor(0).GetInterface().Get();
-        inputTensors[1] = kernelContext.GetInputTensor(1).GetInterface().Get();
+            // Combine the first two inputs and store the result in the output tensor.
+            THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
+                m_compiledOperator, m_persistentResourceBinding, inputs, outputs));
 
-        IMLOperatorTensor* outputTensor = kernelContext.GetOutputTensor(0).GetInterface().Get();
-        gsl::span<IMLOperatorTensor*> outputTensors{ &outputTensor, 1 };
+            // For each input after the first two, accumulate into the output tensor.
+            for (size_t index{2}; index < m_inputTensorDescs.size(); ++index) {
+                const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> locals{
+                    kernelContext.GetInputTensor(index).GetInterface(), outputs[0]
+                };
+                const auto compiledOperator{m_compiledOperators.empty() ?
+                    m_compiledOperator : m_compiledOperators[index - 2]};
 
-        // Combine the first two inputs and store the result in the output tensor.
-        ORT_THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
-            m_compiledOperator.Get(),
-            m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-            gsl::make_span(inputTensors),
-            outputTensors));
-
-        // For each input after the first two, accumulate into the output tensor.
-        for (size_t inputIndex = 2; inputIndex < m_inputTensorDescs.size(); ++inputIndex)
-        {
-            inputTensors[0] = kernelContext.GetInputTensor(gsl::narrow_cast<uint32_t>(inputIndex)).GetInterface().Get();
-            inputTensors[1] = outputTensors[0];
-
-            // Get the next operator for this pair, either reusing the first or using a distinct operator.
-            IDMLCompiledOperator* compiledOperator = m_compiledOperators.empty()
-                                                   ? m_compiledOperator.Get()
-                                                   : m_compiledOperators[inputIndex - 2].Get();
-
-            ORT_THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
-                compiledOperator,
-                m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-                gsl::make_span(inputTensors),
-                outputTensors));
+                THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
+                    compiledOperator, m_persistentResourceBinding, inputs, outputs));
+            }
         }
     }
 
@@ -338,65 +325,38 @@ public:
             DML_OPERATOR_DESC identityDescDesc = { DML_OPERATOR_ELEMENT_WISE_IDENTITY, &identityDesc };
 
             Microsoft::WRL::ComPtr<IDMLOperator> identityOp;
-            ORT_THROW_IF_FAILED(m_dmlDevice->CreateOperator(&identityDescDesc, IID_PPV_ARGS(&identityOp)));
+            THROW_IF_FAILED(m_dmlDevice->CreateOperator(&identityDescDesc, IID_PPV_ARGS(&identityOp)));
 
-            ORT_THROW_IF_FAILED(m_dmlDevice->CompileOperator(identityOp.Get(), GetExecutionFlags(), IID_PPV_ARGS(&m_compiledIdentityOp)));
+            THROW_IF_FAILED(m_dmlDevice->CompileOperator(identityOp.Get(), GetExecutionFlags(), IID_PPV_ARGS(&m_compiledIdentityOp)));
         }
     }
 
-    void Compute(const MLOperatorKernelContext& kernelContext)
-    {
-        // Where there's only a single element, just return the input (identity).
-        if (m_inputTensorDescs.size() == 1)
-        {
+    void Compute(const MLOperatorKernelContext& kernelContext) override {
+        if (m_inputTensorDescs.size() == 1 || m_compiledIdentityOp == nullptr) {
             DmlOperator::Compute(kernelContext);
-        }
-        else if (!m_compiledIdentityOp)
-        {
-            // Use DML mean operator.
-            DmlOperator::Compute(kernelContext);
-        }
-        else
-        {
-            // Do N-1 adds followed by a division, where N is the number of inputs.
-            std::array<IMLOperatorTensor*, 2> inputTensors;
-            inputTensors[0] = kernelContext.GetInputTensor(0).GetInterface().Get();
-            inputTensors[1] = kernelContext.GetInputTensor(1).GetInterface().Get();
+        } else {
+            const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> inputs{
+                kernelContext.GetInputTensor(0).GetInterface(),
+                kernelContext.GetInputTensor(1).GetInterface()
+            };
+            const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> output{
+                kernelContext.GetOutputTensor(0).GetInterface()
+            };
+            THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
+                m_compiledOperator, m_persistentResourceBinding, inputs, output));
 
-            IMLOperatorTensor* outputTensor = kernelContext.GetOutputTensor(0).GetInterface().Get();
-            gsl::span<IMLOperatorTensor*> outputTensors{ &outputTensor, 1 };
+            for (size_t index{2}; index < m_inputTensorDescs.size(); ++index) {
+                std::array<Microsoft::WRL::ComPtr<IMLOperatorTensor>, 2> locals{
+                    kernelContext.GetInputTensor(index).GetInterface(), output[0]
+                };
+                const auto compiledOperator{m_compiledOperators.empty() ?
+                    m_compiledOperator : m_compiledOperators[index - 2]};
 
-            // Add the first two inputs and store the result in the output tensor.
-            ORT_THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
-                m_compiledOperator.Get(),
-                m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-                gsl::make_span(inputTensors),
-                outputTensors));
-
-            // For each input after the first two, accumulate into the output tensor.
-            for (size_t inputIndex = 2; inputIndex < m_inputTensorDescs.size(); ++inputIndex)
-            {
-                inputTensors[0] = kernelContext.GetInputTensor(gsl::narrow_cast<uint32_t>(inputIndex)).GetInterface().Get();
-                inputTensors[1] = outputTensors[0];
-
-                // Get the next operator for this pair, either reusing the first or using a distinct operator.
-                IDMLCompiledOperator* compiledOperator = m_compiledOperators.empty()
-                    ? m_compiledOperator.Get()
-                    : m_compiledOperators[inputIndex - 2].Get();
-
-                ORT_THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
-                    compiledOperator,
-                    m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-                    gsl::make_span(inputTensors),
-                    outputTensors));
+                THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
+                    compiledOperator, m_persistentResourceBinding, inputs, output));
             }
-
-            // Dispatch the identity w/ scale operator in-place on the output.
-            ORT_THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
-                m_compiledIdentityOp.Get(),
-                nullptr, // persistent resoruce binding
-                outputTensors,
-                outputTensors));
+            THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
+                m_compiledIdentityOp, std::nullopt, output, output));
         }
     }
 

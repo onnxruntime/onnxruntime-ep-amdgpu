@@ -10,7 +10,7 @@ namespace dml_ep {
     class DmlOperator
     {
     public:
-        DmlOperator(const MLOperatorKernelCreationContext& kernelInfo);
+        explicit DmlOperator(const MLOperatorKernelCreationContext& kernelInfo);
 
         virtual ~DmlOperator() = default;
 
@@ -20,7 +20,7 @@ namespace dml_ep {
         Microsoft::WRL::ComPtr<IExecutionProvider> m_executionProvider;
         Microsoft::WRL::ComPtr<IDMLDevice> m_dmlDevice;
 
-        // Tensor descs ordered based on index arrays passed to Initialize
+        // Tensor desc ordered based on index arrays passed to Initialize
         std::vector<TensorDesc> m_inputTensorDescs;
         std::vector<TensorDesc> m_outputTensorDescs;
 
@@ -92,14 +92,20 @@ namespace dml_ep {
             );
 
         // Tensors ordered based on index arrays passed to Initialize
-        std::vector<IMLOperatorTensor*> GetInputTensors(const MLOperatorKernelContext& kernelContext);
-        std::vector<IMLOperatorTensor*> GetOutputTensors(const MLOperatorKernelContext& kernelContext);
+        std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>
+        GetInputTensors(const MLOperatorKernelContext& kernelContext) const;
+
+        std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>
+        GetOutputTensors(const MLOperatorKernelContext& kernelContext) const;
 
         // Retrieves the input/output tensors to be supplied to DirectML for execution. These differ from
         // Get[Input|Output]Tensors in that they account for the binding requirements of DML, instead of
         // unconditionally retrieving all input and output tensors.
-        std::vector<IMLOperatorTensor*> GetInputTensorsForExecute(const MLOperatorKernelContext& kernelContext);
-        std::vector<IMLOperatorTensor*> GetOutputTensorsForExecute(const MLOperatorKernelContext& kernelContext);
+        std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>
+        GetInputTensorsForExecute(const MLOperatorKernelContext& kernelContext) const;
+
+        std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>
+        GetOutputTensorsForExecute(const MLOperatorKernelContext& kernelContext) const;
 
         // Tensor descs ordered based on index arrays passed to Initialize
         std::vector<DML_TENSOR_DESC> GetDmlInputDescs();
@@ -117,9 +123,11 @@ namespace dml_ep {
         // It returns nullptr if there is no work to do (0 bytes).
         //
         Microsoft::WRL::ComPtr<IDMLCompiledOperator> InitializeZeroInt64Tensor(uint64_t tensorSizeInBytes);
-        void ExecuteZeroInt64Tensor(IDMLCompiledOperator* compiledOperator, IMLOperatorTensor* tensor);
+        void ExecuteZeroInt64Tensor(
+            const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& compiledOperator,
+            const Microsoft::WRL::ComPtr<IMLOperatorTensor>& tensor) const;
 
-        TensorDesc CreateTensorDescFromInput(
+        static TensorDesc CreateTensorDescFromInput(
             const MLOperatorKernelCreationContext& kernelInfo,
             uint32_t index,
             int32_t coerceAxis = OperatorHelper::TensorAxis::DoNotCoerce,
@@ -127,9 +135,9 @@ namespace dml_ep {
             int32_t leftAlignedDimensionCount = OperatorHelper::TensorAxis::RightAligned,
             std::optional<gsl::span<const uint32_t>> tensorShape = std::nullopt,
             uint32_t minDimensionCount = OperatorHelper::NchwDimensionCount
-            ) const;
+            );
 
-        TensorSequenceDesc CreateTensorSequenceDescFromInput(
+        static TensorSequenceDesc CreateTensorSequenceDescFromInput(
             const MLOperatorKernelCreationContext& kernelInfo,
             uint32_t index,
             int32_t coerceAxis = OperatorHelper::TensorAxis::DoNotCoerce,
@@ -137,9 +145,9 @@ namespace dml_ep {
             int32_t leftAlignedDimensionCount = OperatorHelper::TensorAxis::RightAligned,
             std::optional<gsl::span<const uint32_t>> tensorShape = std::nullopt,
             uint32_t minDimensionCount = OperatorHelper::NchwDimensionCount
-            ) const;
+            );
 
-        TensorDesc CreateTensorDescFromOutput(
+        static TensorDesc CreateTensorDescFromOutput(
             const MLOperatorKernelCreationContext& kernelInfo,
             uint32_t index,
             int32_t coerceAxis = OperatorHelper::TensorAxis::DoNotCoerce,
@@ -147,7 +155,7 @@ namespace dml_ep {
             int32_t leftAlignedDimensionCount = OperatorHelper::TensorAxis::RightAligned,
             std::optional<gsl::span<const uint32_t>> tensorShape = std::nullopt,
             uint32_t minDimensionCount = OperatorHelper::NchwDimensionCount
-            ) const;
+            );
 
         static void TryConvertTensorToBroadcastScalar(
             const MLOperatorKernelCreationContext& kernelInfo,
@@ -169,7 +177,7 @@ namespace dml_ep {
                                    _Inout_ std::vector<DML_GRAPH_EDGE_DESC>& dmlOutputEdges,
                                    _Inout_ std::vector<DML_GRAPH_EDGE_DESC>& dmlIntermediateEdges);
 
-        static const uint32_t zeroArray[8];
+        static constexpr uint32_t zeroArray[8] = {};
     };
 
 }  // namespace dml_ep

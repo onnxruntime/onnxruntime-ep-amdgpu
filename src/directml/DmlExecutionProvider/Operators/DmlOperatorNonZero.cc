@@ -96,18 +96,17 @@ public:
             executionProvider,
             true);
 
-        std::vector<IMLOperatorTensor*> nonzeroCoordinatesInputTensors = GetInputTensors(kernelContext);
-        std::vector<IMLOperatorTensor*> nonzeroCoordinatesOutputTensors = {outputCountDmlWrapper.Get(), intermediateCoordinatesDmlWrapper.Get()};
+        const auto nonzeroCoordinatesInputTensors{GetInputTensors(kernelContext)};
+        std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>> nonzeroCoordinatesOutputTensors{
+            outputCountDmlWrapper, intermediateCoordinatesDmlWrapper};
 
         uint32_t nonzeroElementCount = 0;
 
         if (!m_emptyInput)
         {
-            ORT_THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
-                m_compiledOperator.Get(),
-                m_persistentResourceBinding ? &*m_persistentResourceBinding : nullptr,
-                gsl::make_span(nonzeroCoordinatesInputTensors),
-                gsl::make_span(nonzeroCoordinatesOutputTensors)));
+            THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
+                m_compiledOperator, m_persistentResourceBinding,
+                nonzeroCoordinatesInputTensors, nonzeroCoordinatesOutputTensors));
 
             // Copy the number of nonzero elements back to the CPU
             onnxruntime::Tensor outputCountCpu(onnxruntime::DataTypeImpl::GetType<uint32_t>(), {1}, cpuInputAllocator);
@@ -116,7 +115,7 @@ public:
                 false,
                 executionProvider,
                 true);
-            ORT_THROW_IF_FAILED(m_executionProvider->CopyTensor(
+            THROW_IF_FAILED(m_executionProvider->CopyTensor(
                 outputCountCpuWrapper.Get(),
                 nonzeroCoordinatesOutputTensors.front()));
             nonzeroElementCount = outputCountCpu.Data<uint32_t>()[0];
@@ -126,27 +125,22 @@ public:
         std::vector<uint32_t> outputSizes({m_rank, nonzeroElementCount});
         auto outputTensor = kernelContext.GetOutputTensor(0, outputSizes);
 
-        if (!m_emptyInput && nonzeroElementCount > 0)
-        {
+        if (!m_emptyInput && nonzeroElementCount > 0) {
             // TODO: Remove this hack when DML supports native int64 for NonZero
             // We use the int64/uint32 stride hack here, so zero out the data before writing to it
-            uint64_t tensorSizeInBytes = uint64_t(m_rank) * uint64_t(nonzeroElementCount) * sizeof(int64_t);
+            uint64_t tensorSizeInBytes = static_cast<uint64_t>(m_rank) * static_cast<uint64_t>(nonzeroElementCount) * sizeof(int64_t);
             Microsoft::WRL::ComPtr<IDMLCompiledOperator> zeroOperator = InitializeZeroInt64Tensor(tensorSizeInBytes);
 
             // TODO: Remove this hack when DML supports native int64 for NonZero
             ExecuteZeroInt64Tensor(zeroOperator.Get(), outputTensor.GetInterface().Get());
 
-            Microsoft::WRL::ComPtr<IDMLCompiledOperator> sliceOperator = InitializeSlice(m_intermediateTensorDescs[1], nonzeroElementCount);
+            const auto sliceOperator{
+                InitializeSlice(m_intermediateTensorDescs[1], nonzeroElementCount)
+            };
 
             // Finally, we crop the output to the actual number of nonzero elements, thus removing the padding
-            std::array<IMLOperatorTensor*, 1> sliceInputTensors = {nonzeroCoordinatesOutputTensors[1]};
-            std::array<IMLOperatorTensor*, 1> sliceOutputTensors = {outputTensor.GetInterface().Get()};
-
-            ORT_THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
-                sliceOperator.Get(),
-                nullptr, // persistent resource binding
-                sliceInputTensors,
-                sliceOutputTensors));
+            THROW_IF_FAILED(m_executionProvider->ExecuteOperator(
+                sliceOperator, std::nullopt, {nonzeroCoordinatesOutputTensors[1]}, {outputTensor.GetInterface()}));
         }
     }
 

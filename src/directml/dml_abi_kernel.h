@@ -52,7 +52,7 @@ struct AbiSafeTensor : Com<IMLOperatorTensor> {
 
 private:
     bool is_internal_;
-    Ort::UnownedValue ort_value_;
+    Ort::UnownedValue value_;
 };
 
 // ============================================================================

@@ -68,16 +68,9 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     IsConcurrentRunSupported = IsConcurrentRunSupportedImpl;
 
     m_executionProvider = std::make_shared<PluginDmlExecutionProviderImpl>(
-        m_dmlDevice.Get(),
-        d3d12_device.Get(),
-        m_context.Get(),
-        ApiPtrs{api_ptrs},
-        m_areMetacommandsEnabled,
-        m_graphCaptureEnabled,
-        false,
-        false);
+        m_dmlDevice, d3d12_device, m_context, api_ptrs, m_areMetacommandsEnabled, m_graphCaptureEnabled, false, false);
 
-    m_dataTransfer = std::make_unique<DMLDataTransfer>(ApiPtrs{api_ptrs});
+    m_dataTransfer = std::make_unique<DMLDataTransfer>(api_ptrs);
     m_dataTransfer->AttachExecutionProvider(m_executionProvider);
 
     CreateDmlKernelRegistry(m_executionProvider.get(), name_, &m_kernelRegistry, &m_internalRegInfoMap);
