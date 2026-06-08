@@ -15,6 +15,8 @@ add_library(migraphx-ep MODULE
         mgx_ep_ctx.h
         mgx_factory.cc
         mgx_factory.h
+        mgx_hip_graph.cc
+        mgx_hip_graph.h
         mgx_info.cc
         mgx_info.h
         mgx_interop.cc
