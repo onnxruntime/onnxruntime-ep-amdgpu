@@ -61,6 +61,7 @@ private:
         std::vector<std::string> tensor_attribute_names;  // Tensor-typed ONNX attribute names (e.g., ConstantOfShape's "value")
         const PluginDmlExecutionProviderImpl* dml_execution_provider = nullptr;
         ExecutionProviderPlugin* ep_plugin = nullptr;  // For m_graphInitializerMap access during constant resolution
+        std::string ep_name;  // Runtime EP name, propagated to DmlKernelCreationState and DmlAbiKernel
 
         // FALLBACK: ABI-UNSAFE PATH (when ABI-safe fails, e.g., E_UNEXPECTED)
         onnxruntime::KernelCreateFn* kernel_create_fn = nullptr;
