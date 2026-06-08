@@ -530,6 +530,43 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     /* TODO: print configured options for the session */
 }
 
+ExecutionProvider::~ExecutionProvider() {
+    // Best-effort teardown of EP-owned device memory and captured graphs.  Errors
+    // are ignored because the HIP context may already be torn down at process exit.
+    (void)hipSetDevice(device_id_);
+    for (auto& [name, cs] : compute_states_) {
+        for (auto& [hash, entry] : cs.hip_graph_cache) {
+            if (entry.exec != nullptr) {
+                (void)hipGraphExecDestroy(entry.exec);
+                entry.exec = nullptr;
+            }
+            if (entry.graph != nullptr) {
+                (void)hipGraphDestroy(entry.graph);
+                entry.graph = nullptr;
+            }
+            entry.captured = false;
+        }
+        for (auto& [param_name, buf] : cs.staging_inputs) {
+            if (buf.data != nullptr) {
+                (void)hipFree(buf.data);
+                buf.data = nullptr;
+            }
+        }
+        for (auto& [param_name, buf] : cs.staging_outputs) {
+            if (buf.data != nullptr) {
+                (void)hipFree(buf.data);
+                buf.data = nullptr;
+            }
+        }
+        for (auto& [hash, buf] : cs.scratch_bufs) {
+            if (buf.data != nullptr) {
+                (void)hipFree(buf.data);
+                buf.data = nullptr;
+            }
+        }
+    }
+}
+
 Ort::Status ExecutionProvider::GetCapability(const Ort::ConstGraph& graph,
                                              OrtEpGraphSupportInfo* graph_support_info) const noexcept
 try {
@@ -806,7 +843,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             ep_context_node));
     }
 
-    compute_states_.emplace(subgraph_name,
+    auto [state_it, inserted] = compute_states_.emplace(subgraph_name,
         ComputeState{
             mutex_,
             device_id_,
@@ -833,6 +870,12 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             external_data_dir_,
             mxr_prefix,
         });
+
+    // Propagate hipGraph / dynamic-batch configuration onto the compute state.
+    auto& compute_state{state_it->second};
+    compute_state.hip_graph_enable = hip_graph_enable_;
+    compute_state.max_dynamic_batch = max_dynamic_batch_;
+    compute_state.compile_batches = compile_batches_;
 
     node_compute_info = std::make_unique<NodeComputeInfo>(*this).release();
     return STATUS_OK;
