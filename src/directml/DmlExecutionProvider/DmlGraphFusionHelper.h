@@ -25,13 +25,13 @@ namespace DmlGraphFusionHelper
 
     Microsoft::WRL::ComPtr<ID3D12Resource>
     CreateResource(
-        const ExecutionProviderImpl* provider,
+        const PluginDmlExecutionProviderImpl* provider,
         const std::byte* tensorPtr,
         size_t tensorByteSize);
 
     Microsoft::WRL::ComPtr<ID3D12Resource>
     CreateCpuResource(
-        const ExecutionProviderImpl* provider,
+        const PluginDmlExecutionProviderImpl* provider,
         const std::byte* tensorPtr,
         size_t tensorByteSize);
 

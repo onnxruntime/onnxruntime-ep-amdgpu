@@ -28,6 +28,16 @@ namespace dml_ep {
 // Forward declarations
 class PluginDmlExecutionProviderImpl;
 
+// Bundles a pre-uploaded D3D12_HEAP_TYPE_DEFAULT GPU buffer with the shape and dtype of the
+// constant tensor it holds. Used by the safe path to serve constant/initializer inputs without
+// re-uploading on each Compute() call. Owned by DmlAbiKernel; referenced (non-owning pointer
+// to the vector) by AbiSafeKernelContext during each Compute().
+struct ConstantGpuResource {
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource;  // null = slot not cached
+    std::vector<uint32_t> shape;
+    MLOperatorTensorDataType dtype = MLOperatorTensorDataType::Undefined;
+};
+
 // ============================================================================
 // ABI-Safe Tensor Wrapper - implements IMLOperatorTensor using C API
 // ============================================================================
@@ -61,6 +71,37 @@ private:
 };
 
 // ============================================================================
+// GPU-Resident Constant Tensor - wraps a pre-uploaded ID3D12Resource
+// ============================================================================
+
+// Wraps a D3D12_HEAP_TYPE_DEFAULT buffer that was uploaded once at kernel-creation time.
+// Used by the safe path to serve constant/initializer inputs without re-uploading on each
+// Compute() call. Shape and dtype are captured at upload time.
+class AbiSafeD3D12Tensor : public Microsoft::WRL::RuntimeClass<
+    Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+    IMLOperatorTensor>
+{
+public:
+    AbiSafeD3D12Tensor(
+        ID3D12Resource* resource,
+        std::vector<uint32_t> shape,
+        MLOperatorTensorDataType dtype);
+
+    STDMETHOD_(uint32_t, GetDimensionCount)() const noexcept override;
+    STDMETHOD(GetShape)(uint32_t dimensionCount, uint32_t* dimensions) const noexcept override;
+    STDMETHOD_(MLOperatorTensorDataType, GetTensorDataType)() const noexcept override;
+    STDMETHOD_(bool, IsCpuData)() const noexcept override { return false; }
+    STDMETHOD_(bool, IsDataInterface)() const noexcept override { return true; }
+    STDMETHOD_(void*, GetData)() noexcept override { return nullptr; }
+    STDMETHOD_(void, GetDataInterface)(IUnknown** dataInterface) noexcept override;
+
+private:
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource_;
+    std::vector<uint32_t> shape_;
+    MLOperatorTensorDataType dtype_;
+};
+
+// ============================================================================
 // ABI-Safe Kernel Context - implements IMLOperatorKernelContext using C API
 // ============================================================================
 
@@ -77,7 +118,8 @@ public:
         IMLOperatorShapeInferrer* shape_inferrer = nullptr,
         const std::vector<uint32_t>* required_constant_cpu_inputs = nullptr,
         const AttributeMap* default_attributes = nullptr,
-        const OrtKernelInfo* kernel_info = nullptr);
+        const OrtKernelInfo* kernel_info = nullptr,
+        const std::vector<ConstantGpuResource>* constant_gpu_resources = nullptr);
 
     // IMLOperatorKernelContext methods - implemented using only C API
     STDMETHOD(GetInputTensor)(uint32_t inputIndex, IMLOperatorTensor** tensor) const noexcept override;
@@ -119,6 +161,10 @@ private:
     // Runtime EP name used for allocator lookup in AllocateTemporaryData. Previously hardcoded
     // as "DirectMLExecutionProvider"; now supplied by the caller at construction time.
     std::string ep_name_;
+
+    // Pre-uploaded GPU resources for constant inputs. Indexed by input index (sparse).
+    // Non-null resource = D3D12_HEAP_TYPE_DEFAULT buffer uploaded once at kernel-creation time.
+    const std::vector<ConstantGpuResource>* constant_gpu_resources_ = nullptr;
 };
 
 // ============================================================================
@@ -503,6 +549,13 @@ struct DmlAbiKernel {
     // in PluginDmlAbiOpKernel. Only the tensor (non-sequence) case is needed here since sequence-typed
     // constant CPU inputs do not occur for DML operators.
     std::vector<TensorContent> constant_input_tensor_contents;
+
+    // Pre-uploaded GPU resources for required_constant_cpu_inputs (safe path only).
+    // Indexed by input index (sparse — null resource = slot not cached). Each entry is
+    // populated at kernel-creation time by UploadConstantTensorsToGpu(). AbiSafeKernelContext
+    // holds a non-owning pointer to this vector and serves cached entries from GetInputTensor()
+    // instead of re-uploading on every Compute(). ComPtr lifetime = kernel object lifetime.
+    std::vector<ConstantGpuResource> constant_gpu_resources;
 };
 
 // Pre-fetches tensor-typed attributes from kernel_info into an ABI-safe cache map.

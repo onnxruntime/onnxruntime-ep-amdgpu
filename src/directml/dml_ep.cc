@@ -556,6 +556,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
 
     // Get the list of nodes that should stay on the CPU
     std::unordered_set<size_t> cpuPreferredNodes = ep->GetCpuPreferredNodes(graph, graph_support_info, tentativeNodes);
+
     std::vector<const OrtNode*> supportedNodes;
     for (const OrtNode* node : nodesInTopologicalOrder) {
         size_t nodeID = 0;
@@ -932,6 +933,13 @@ std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const O
         {
             auto* input = valueInfoInputs[i];
 
+            // Null input = missing optional edge — treat as GPU tensor (don't pull to CPU).
+            // Matches ORT's fallback_cpu_capability.cc which skips null NodeArgs naturally.
+            if (!input || !input->GetTypeInfo() || !input->GetTypeInfo()->tensor_type_info) {
+                place_in_cpu = false;
+                break;
+            }
+
             ONNXTensorElementDataType datatype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
             ort_api.GetTensorElementType(input->GetTypeInfo()->tensor_type_info.get(), &datatype);
 
@@ -949,7 +957,7 @@ std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const O
             }
 
             // allow placing on CPU if it's a small initializer or graph input
-            if (IsSmallInitializer(graph,input) ||
+            if (IsSmallInitializer(graph, input) ||
                 std::find(graphInputsValueInfo.begin(), graphInputsValueInfo.end(), input) != graphInputsValueInfo.end()) {
                 continue;
             }
@@ -1040,10 +1048,15 @@ bool ExecutionProviderPlugin::IsNodeSupportedByDml(
         return false;
     }
 
-    // Build key from domain and operator name
+    // Build key from domain, operator name, and since-version — must match the format written
+    // by ConvertKernelRegistryToOrtKernelRegistry: domain::opname::since_version.
     const char* op_name = ep_api.KernelDef_GetOperatorType(kernel_def);
     const char* domain = ep_api.KernelDef_GetDomain(kernel_def);
-    std::string regKey = std::string(domain) + "::" + std::string(op_name);
+    int since_ver = 0, until_ver = 0;
+    OrtStatus* ver_st = ep_api.KernelDef_GetSinceVersion(kernel_def, &since_ver, &until_ver);
+    if (ver_st) { ort_api.ReleaseStatus(ver_st); since_ver = 0; }
+    std::string regKey = std::string(domain) + "::" + std::string(op_name) +
+                         "::" + std::to_string(since_ver);
 
     auto regInfoIter = m_internalRegInfoMap->find(regKey);
     std::shared_ptr<InternalRegistrationInfo> internalRegInfo;
@@ -1061,8 +1074,11 @@ bool ExecutionProviderPlugin::IsNodeSupportedByDml(
     }
 
     // Check whether the node uses any data types which are unsupported by the device.
-    // Pass nullptr for regInfo during graph partitioning - requiredConstantCpuInputs is for kernel creation, not capability checking
-    bool dataTypesSupported = DoesNodeContainSupportedDataTypes(node, nullptr, supportedDeviceDataTypeMask,
+    // Pass internalRegInfo so that requiredConstantCpuInputs are excluded from GPU type validation —
+    // those inputs (e.g. Resize's sizes/scales/roi) are read on CPU and never need GPU type support.
+    // Passing nullptr here was a bug: it caused ops like Resize to be rejected because their
+    // int64 CPU-side inputs failed the device type check, matching ORT's ExecutionProvider.cpp:876.
+    bool dataTypesSupported = DoesNodeContainSupportedDataTypes(node, internalRegInfo.get(), supportedDeviceDataTypeMask,
                                            m_native16BitShaderOpsSupported);
     if (!dataTypesSupported) {
         return false;
@@ -1111,7 +1127,14 @@ bool ExecutionProviderPlugin::DoesNodeContainSupportedDataTypes(
         if (!valueInfo.IsTensor()) {
             // If the model has nodes that use Optional we will arrive here. It's a valid ONNX model but
             // we don't handle Optional.
-            nodeContainsSupportedDataTypes = false;
+            // Exception: if this is a required CPU constant input that is unconnected (missing optional),
+            // skip it rather than rejecting the node. ORT's ForEachDef naturally skips these via
+            // NodeArg::Exists(); our OrtNodeAdapter doesn't have that check, so we replicate it here.
+            bool isMissingConstantCpuInput = isInput &&
+                std::find(constantCpuInputs.begin(), constantCpuInputs.end(), &valueInfo) != constantCpuInputs.end();
+            if (!isMissingConstantCpuInput) {
+                nodeContainsSupportedDataTypes = false;
+            }
             return;
         }
 
