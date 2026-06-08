@@ -74,6 +74,10 @@ StagingBindResult BindStagingParams(ComputeState& cs,
 void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
     const Ort::KernelContext& ctx, hipStream_t stream);
 
+// Free all staging buffers and reset the allocation flag (used when the program
+// is recompiled for a new shape so buffers are re-sized on next use).
+void FreeStaging(ComputeState& cs);
+
 // ── hipGraph capture / replay ────────────────────────────────────────────────
 
 // Destroy all captured graphs held by a compute state (used to invalidate the

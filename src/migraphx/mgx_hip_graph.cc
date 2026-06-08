@@ -373,6 +373,24 @@ void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
     }
 }
 
+void FreeStaging(ComputeState& cs) {
+    for (auto& [name, buf] : cs.staging_inputs) {
+        if (buf.data != nullptr) {
+            (void)hipFree(buf.data);
+            buf.data = nullptr;
+        }
+    }
+    for (auto& [name, buf] : cs.staging_outputs) {
+        if (buf.data != nullptr) {
+            (void)hipFree(buf.data);
+            buf.data = nullptr;
+        }
+    }
+    cs.staging_inputs.clear();
+    cs.staging_outputs.clear();
+    cs.staging_allocated = false;
+}
+
 void DestroyHipGraphs(ComputeState& cs) {
     for (auto& [hash, entry] : cs.hip_graph_cache) {
         if (entry.exec != nullptr) {

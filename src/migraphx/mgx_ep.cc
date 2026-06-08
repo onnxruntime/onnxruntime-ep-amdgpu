@@ -23,6 +23,7 @@
 #include "mgx_dynamic_batch.h"
 #include "mgx_ep.h"
 #include "mgx_ep_ctx.h"
+#include "mgx_hip_graph.h"
 #include "mgx_info.h"
 #include "mgx_utils.h"
 
@@ -1077,6 +1078,12 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
 
     // If the input shapes are different (e.g., LLMs), the EP needs to reparse and recompile the program
     if (!input_shapes_match) {
+        // The program is about to change; any staging buffers and captured graphs
+        // were sized/recorded against the previous shape and must be rebuilt.
+        if (compute_state.hip_graph_enable) {
+            DestroyHipGraphs(compute_state);
+            FreeStaging(compute_state);
+        }
         migraphx::program_parameters compile_params{};
         fs::path mxr_path;
         if (!compute_state.cache_dir.empty()) {
@@ -1119,6 +1126,22 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             }
         }
         param_shapes = program.get_parameter_shapes();
+    }
+
+    // hipGraph capture/replay path: stage I/O into EP-owned (pointer-stable)
+    // buffers, bind scratch, then replay a cached graph or capture a new one.
+    if (compute_state.hip_graph_enable && param_shapes.size() > 0) {
+        const auto shape_hash{hash::ToHex(input_shapes_hash)};
+        const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
+        HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
+        AllocateStaging(compute_state, param_shapes, hip_stream);
+        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream);
+        auto bind{BindStagingParams(compute_state, param_shapes, shape_hash, hip_stream)};
+        RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
+            bind.params, bind.prog_output_indices, shape_hash);
+        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream);
+        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        return STATUS_OK;
     }
 
     migraphx::program_parameters compute_params;
