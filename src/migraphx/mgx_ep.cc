@@ -212,10 +212,6 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
                 return true;
             }
         }
-    } else if (op_type == "NonZero") {
-        if (!CanEvalNodeArgument(graph, node, {0})) {
-            return true;
-        }
     } else if (op_type == "OneHot") {
         if (!CanEvalNodeArgument(graph, node, {1})) {
             return true;
