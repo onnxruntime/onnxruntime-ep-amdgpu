@@ -74,4 +74,21 @@ StagingBindResult BindStagingParams(ComputeState& cs,
 void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
     const Ort::KernelContext& ctx, hipStream_t stream);
 
+// ── hipGraph capture / replay ────────────────────────────────────────────────
+
+// Destroy all captured graphs held by a compute state (used to invalidate the
+// cache when the underlying program is recompiled).
+void DestroyHipGraphs(ComputeState& cs);
+
+// Dispatch a program run: replay a cached hipGraph for shape_hash, capture one
+// on first use, or fall back to an eager run if capture fails.  `params` must
+// already be bound to staging buffers/scratch and inputs already staged.
+// Extra (non-pre-bound) outputs are materialized into ORT after the launch.
+void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
+    const Ort::KernelContext& ctx,
+    migraphx::program& program,
+    migraphx::program_parameters& params,
+    const std::vector<std::size_t>& prog_output_indices,
+    const std::string& shape_hash);
+
 }  // namespace mgx_ep

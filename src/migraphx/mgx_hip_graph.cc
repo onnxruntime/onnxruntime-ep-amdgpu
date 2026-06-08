@@ -6,7 +6,10 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <mutex>
+#include <optional>
 #include <string_view>
+#include <unordered_set>
 
 #include "hip/utils.h"
 
@@ -15,6 +18,179 @@ namespace mgx_ep {
 namespace {
 
 constexpr std::string_view kScratchParam{"scratch"};
+
+// Capture warm-in tuning.  A small pre-capture eager phase finalizes MIGraphX's
+// lazy allocations; the post-capture phase replays the instantiated graph to push
+// state-dependent kernels (atomic reductions, fused-attention accumulators) close
+// to steady state before the first real inference.
+constexpr int kCaptureFinalizeIterations = 2;
+constexpr int kPostCaptureWarmInBase = 10;
+
+// One extra post-capture replay per doubling of the compiled batch size.
+int PostCaptureWarminFor(std::size_t batch) {
+    int extra{0};
+    for (std::size_t b{batch}; b > 1; b >>= 1) {
+        ++extra;
+    }
+    return kPostCaptureWarmInBase + extra;
+}
+
+// Best-effort read of the compiled batch size from the input parameter shapes,
+// used only to tune warm-in iteration counts.
+std::size_t InferCompiledBatchFromParams(const migraphx::program_parameter_shapes& param_shapes,
+    const Map<std::size_t>& input_name_indices)
+{
+    std::size_t batch{0};
+    for (const auto& name : param_shapes.names()) {
+        if (input_name_indices.count(std::string{name}) == 0) {
+            continue;
+        }
+        const auto lens{param_shapes[name].lengths()};
+        if (!lens.empty()) {
+            batch = std::max(batch, static_cast<std::size_t>(lens.front()));
+        }
+    }
+    return batch;
+}
+
+// Copy extra (non-pre-bound) MIGraphX outputs into their ORT output tensors.
+// Their device pointers are stable across replays because the graph replays the
+// same kernels into the same MIGraphX-managed memory.
+void MaterializeExtraOutputs(const Ort::KernelContext& ctx, hipStream_t stream,
+    const std::vector<CapturedHipGraph::ExtraOutput>& extras)
+{
+    for (const auto& extra : extras) {
+        auto ort_shape{extra.ort_shape};
+        auto output_tensor{ctx.GetOutput(extra.output_index, ort_shape.data(), ort_shape.size())};
+        void* dst{output_tensor.GetTensorMutableRawData()};
+        if (extra.bytes > 0) {
+            HIP_CALL_THROW(hipMemcpyWithStream(dst, extra.gpu_data, extra.bytes,
+                hipMemcpyDeviceToDevice, stream));
+        }
+    }
+}
+
+// Warm up, then capture a hipGraph for the currently bound params.  Returns false
+// (and disables hipGraph on the state) if capture fails so callers fall back to
+// eager execution.
+bool WarmupAndCaptureHipGraph(ComputeState& cs, hipStream_t stream,
+    migraphx::program& program, migraphx::program_parameters& params,
+    const std::vector<std::size_t>& prog_output_indices, const std::string& shape_hash)
+{
+    // Zero staging outputs and scratch so warmup-derived bytes are not baked into
+    // the capture.
+    for (auto& [name, buf] : cs.staging_outputs) {
+        if (buf.data != nullptr) {
+            HIP_CALL_THROW(hipMemsetAsync(buf.data, 0, buf.size_bytes, stream));
+        }
+    }
+    ZeroScratchFor(cs, shape_hash, stream);
+
+    // Pre-capture eager loop to finalize MIGraphX's lazy allocations.
+    std::optional<migraphx::arguments> warmup_outputs;
+    for (int i{0}; i < kCaptureFinalizeIterations; ++i) {
+        std::lock_guard<std::mutex> lock{cs.mutex};
+        warmup_outputs = program.run_async(params, stream);
+    }
+    HIP_CALL_THROW(hipStreamSynchronize(stream));
+
+    const std::size_t compiled_batch{
+        InferCompiledBatchFromParams(program.get_parameter_shapes(), cs.input_name_indices)};
+    const int post_warmin{PostCaptureWarminFor(compiled_batch)};
+
+    auto& entry{cs.hip_graph_cache[shape_hash]};
+
+    // Re-zero scratch right before capture so the captured kernel sequence is
+    // anchored to a known baseline (the warmup loop just dirtied it).
+    ZeroScratchFor(cs, shape_hash, stream);
+    HIP_CALL_THROW(hipStreamSynchronize(stream));
+
+    try {
+        // ThreadLocal capture mode so concurrent serving threads don't have their
+        // unrelated stream work swept into this capture.
+        HIP_CALL_THROW(hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal));
+        {
+            std::lock_guard<std::mutex> lock{cs.mutex};
+            program.run_async(params, stream);
+        }
+        const hipError_t err{hipStreamEndCapture(stream, &entry.graph)};
+        if (err != hipSuccess || entry.graph == nullptr) {
+            entry.graph = nullptr;
+            entry.captured = false;
+            cs.hip_graph_enable = false;
+            return false;
+        }
+
+        HIP_CALL_THROW(hipGraphInstantiate(&entry.exec, entry.graph, nullptr, nullptr, 0));
+        entry.captured = true;
+
+        // Record the scratch pointer baked into the graph for drift detection.
+        if (const auto it{cs.scratch_bufs.find(shape_hash)}; it != cs.scratch_bufs.end()) {
+            entry.captured_scratch_ptr = it->second.data;
+        } else {
+            entry.captured_scratch_ptr = nullptr;
+        }
+
+        // Record the output buffers to zero before every replay (kernels may
+        // read-modify-write their output).
+        entry.captured_output_zeroes.clear();
+        entry.captured_output_zeroes.reserve(cs.staging_outputs.size());
+        for (auto& [name, buf] : cs.staging_outputs) {
+            if (buf.data != nullptr) {
+                entry.captured_output_zeroes.emplace_back(buf.data, buf.size_bytes);
+            }
+        }
+
+        // Post-capture warm-in replays to settle workspace before first real use.
+        for (int i{0}; i < post_warmin; ++i) {
+            HIP_CALL_THROW(hipGraphLaunch(entry.exec, stream));
+        }
+        HIP_CALL_THROW(hipStreamSynchronize(stream));
+
+        // Record extra (non-pre-bound) outputs returned by run_async.
+        const std::unordered_set<std::size_t> pre_alloc{
+            prog_output_indices.begin(), prog_output_indices.end()};
+        entry.extra_outputs.clear();
+        if (warmup_outputs) {
+            const auto output_num{warmup_outputs->size()};
+            for (std::size_t i{0}; i < output_num; ++i) {
+                if (pre_alloc.count(i) > 0) {
+                    continue;
+                }
+                auto gpu_res{(*warmup_outputs)[i]};
+                const migraphx::shape res_shape{gpu_res.get_shape()};
+                const auto res_lens{res_shape.lengths()};
+                std::vector<std::int64_t> ort_shape{res_lens.begin(), res_lens.end()};
+                entry.extra_outputs.push_back(
+                    CapturedHipGraph::ExtraOutput{i, std::move(ort_shape),
+                        gpu_res.data(), res_shape.bytes()});
+            }
+        }
+        return true;
+    } catch (...) {
+        hipGraph_t dummy{nullptr};
+        (void)hipStreamEndCapture(stream, &dummy);
+        if (dummy != nullptr) {
+            (void)hipGraphDestroy(dummy);
+        }
+        entry.graph = nullptr;
+        entry.exec = nullptr;
+        entry.captured = false;
+        cs.hip_graph_enable = false;
+        return false;
+    }
+}
+
+// Replay a previously captured graph: zero scratch + RMW outputs, then launch.
+void ReplayHipGraph(ComputeState& cs, hipStream_t stream,
+    CapturedHipGraph& entry, const std::string& shape_hash)
+{
+    ZeroScratchFor(cs, shape_hash, stream);
+    for (const auto& [ptr, bytes] : entry.captured_output_zeroes) {
+        HIP_CALL_THROW(hipMemsetAsync(ptr, 0, bytes, stream));
+    }
+    HIP_CALL_THROW(hipGraphLaunch(entry.exec, stream));
+}
 
 }  // namespace
 
@@ -195,6 +371,68 @@ void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
             HIP_CALL_THROW(hipMemcpyAsync(dst, stage.data, stage.size_bytes, hipMemcpyDefault, stream));
         }
     }
+}
+
+void DestroyHipGraphs(ComputeState& cs) {
+    for (auto& [hash, entry] : cs.hip_graph_cache) {
+        if (entry.exec != nullptr) {
+            (void)hipGraphExecDestroy(entry.exec);
+            entry.exec = nullptr;
+        }
+        if (entry.graph != nullptr) {
+            (void)hipGraphDestroy(entry.graph);
+            entry.graph = nullptr;
+        }
+        entry.captured = false;
+    }
+    cs.hip_graph_cache.clear();
+}
+
+void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
+    const Ort::KernelContext& ctx,
+    migraphx::program& program,
+    migraphx::program_parameters& params,
+    const std::vector<std::size_t>& prog_output_indices,
+    const std::string& shape_hash)
+{
+    const auto eager_run{[&]() {
+        std::lock_guard<std::mutex> lock{cs.mutex};
+        program.run_async(params, stream);
+    }};
+
+    if (!cs.hip_graph_enable) {
+        eager_run();
+        return;
+    }
+
+    if (const auto it{cs.hip_graph_cache.find(shape_hash)};
+        it != cs.hip_graph_cache.end() && it->second.captured)
+    {
+        // Re-capture if the scratch buffer was reallocated since capture.
+        const auto scratch_it{cs.scratch_bufs.find(shape_hash)};
+        void* current_scratch{scratch_it != cs.scratch_bufs.end() ? scratch_it->second.data : nullptr};
+        if (it->second.captured_scratch_ptr != current_scratch) {
+            if (it->second.exec != nullptr) {
+                (void)hipGraphExecDestroy(it->second.exec);
+                it->second.exec = nullptr;
+            }
+            if (it->second.graph != nullptr) {
+                (void)hipGraphDestroy(it->second.graph);
+                it->second.graph = nullptr;
+            }
+            it->second.captured = false;
+        } else {
+            ReplayHipGraph(cs, stream, it->second, shape_hash);
+            MaterializeExtraOutputs(ctx, stream, it->second.extra_outputs);
+            return;
+        }
+    }
+
+    if (!WarmupAndCaptureHipGraph(cs, stream, program, params, prog_output_indices, shape_hash)) {
+        eager_run();
+        return;
+    }
+    MaterializeExtraOutputs(ctx, stream, cs.hip_graph_cache.at(shape_hash).extra_outputs);
 }
 
 }  // namespace mgx_ep
