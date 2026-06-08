@@ -6,18 +6,28 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cstdint>
+#include <functional>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <string_view>
 #include <unordered_set>
 
 #include "hip/utils.h"
+#include "mgx_dynamic_batch.h"
 
 namespace mgx_ep {
 
 namespace {
 
 constexpr std::string_view kScratchParam{"scratch"};
+
+// Product of a length vector (1 for an empty/scalar shape).
+std::size_t ProductOf(const std::vector<std::size_t>& lengths) {
+    return std::accumulate(lengths.begin(), lengths.end(), std::size_t{1},
+        std::multiplies<std::size_t>{});
+}
 
 // Capture warm-in tuning.  A small pre-capture eager phase finalizes MIGraphX's
 // lazy allocations; the post-capture phase replays the instantiated graph to push
@@ -57,14 +67,26 @@ std::size_t InferCompiledBatchFromParams(const migraphx::program_parameter_shape
 // Their device pointers are stable across replays because the graph replays the
 // same kernels into the same MIGraphX-managed memory.
 void MaterializeExtraOutputs(const Ort::KernelContext& ctx, hipStream_t stream,
-    const std::vector<CapturedHipGraph::ExtraOutput>& extras)
+    const std::vector<CapturedHipGraph::ExtraOutput>& extras, const DynamicBatchContext& dyn)
 {
     for (const auto& extra : extras) {
         auto ort_shape{extra.ort_shape};
+        std::size_t bytes{extra.bytes};
+
+        // Slice a batched extra output (captured at target_batch) down to request.
+        if (dyn.active && dyn.target_batch > dyn.requested_batch &&
+            !ort_shape.empty() &&
+            static_cast<std::size_t>(ort_shape.front()) == dyn.target_batch)
+        {
+            const std::size_t row_bytes{bytes / dyn.target_batch};
+            ort_shape.front() = static_cast<std::int64_t>(dyn.requested_batch);
+            bytes = row_bytes * dyn.requested_batch;
+        }
+
         auto output_tensor{ctx.GetOutput(extra.output_index, ort_shape.data(), ort_shape.size())};
         void* dst{output_tensor.GetTensorMutableRawData()};
-        if (extra.bytes > 0) {
-            HIP_CALL_THROW(hipMemcpyWithStream(dst, extra.gpu_data, extra.bytes,
+        if (bytes > 0) {
+            HIP_CALL_THROW(hipMemcpyWithStream(dst, extra.gpu_data, bytes,
                 hipMemcpyDeviceToDevice, stream));
         }
     }
@@ -266,14 +288,25 @@ void ZeroScratchFor(ComputeState& cs, const std::string& shape_hash, hipStream_t
 }
 
 void AllocateStaging(ComputeState& cs,
-    const migraphx::program_parameter_shapes& param_shapes, hipStream_t stream)
+    const migraphx::program_parameter_shapes& param_shapes, hipStream_t stream,
+    const DynamicBatchContext& dyn)
 {
     if (cs.staging_allocated) {
         return;
     }
 
-    const auto alloc_buffer{[&stream](const migraphx::shape& shape) -> StagingBuffer {
-        const std::size_t bytes{shape.bytes()};
+    // Batched buffers (batch on axis 0) are sized at max_dynamic_batch so the same
+    // allocation serves every compiled bucket; smaller buckets bind a prefix.
+    const auto alloc_buffer{[&](const migraphx::shape& shape) -> StagingBuffer {
+        std::size_t bytes{shape.bytes()};
+        if (dyn.active && dyn.target_batch > 0) {
+            const auto lens{shape.lengths()};
+            if (!lens.empty() && lens.front() == dyn.target_batch) {
+                const std::size_t row_bytes{bytes / dyn.target_batch};
+                const std::size_t max_batch{std::max(cs.max_dynamic_batch, dyn.target_batch)};
+                bytes = row_bytes * max_batch;
+            }
+        }
         void* ptr{nullptr};
         HIP_CALL_THROW(hipMalloc(&ptr, bytes));
         HIP_CALL_THROW(hipMemsetAsync(ptr, 0, bytes, stream));
@@ -298,7 +331,8 @@ void AllocateStaging(ComputeState& cs,
 
 void CopyInputsToStaging(ComputeState& cs,
     const migraphx::program_parameter_shapes& param_shapes,
-    const Ort::KernelContext& ctx, hipStream_t stream)
+    const Ort::KernelContext& ctx, hipStream_t stream,
+    const DynamicBatchContext& dyn)
 {
     for (const auto& name : param_shapes.names()) {
         const std::string param_name{name};
@@ -313,12 +347,31 @@ void CopyInputsToStaging(ComputeState& cs,
         const auto& stage{stage_it->second};
         const auto input_tensor{ctx.GetInput(idx_it->second)};
         const void* src{input_tensor.GetTensorRawData()};
-        std::size_t bytes{param_shapes[name].bytes()};
-        if (bytes > stage.size_bytes) {
-            bytes = stage.size_bytes;
-        }
-        if (bytes > 0) {
-            HIP_CALL_THROW(hipMemcpyAsync(stage.data, src, bytes, hipMemcpyDefault, stream));
+        const auto prog_shape{param_shapes[name]};
+        const auto prog_lens{prog_shape.lengths()};
+        const auto actual_shape{input_tensor.GetTensorTypeAndShapeInfo().GetShape()};
+
+        // A batched input arrives with requested_batch rows but the program (and
+        // staging) expect target_batch rows; replicate the last row to pad.
+        const bool batched{dyn.active && dyn.target_batch > dyn.requested_batch &&
+            !prog_lens.empty() && prog_lens.front() == dyn.target_batch &&
+            !actual_shape.empty() &&
+            static_cast<std::size_t>(actual_shape.front()) == dyn.requested_batch};
+
+        if (batched) {
+            const std::size_t total_elems{ProductOf(prog_lens)};
+            const std::size_t elements_per_row{total_elems / dyn.target_batch};
+            const std::size_t element_size{total_elems > 0 ? prog_shape.bytes() / total_elems : 0};
+            PadInputTensor(src, stage.data, dyn.requested_batch, dyn.target_batch,
+                element_size, elements_per_row, stream);
+        } else {
+            std::size_t bytes{prog_shape.bytes()};
+            if (bytes > stage.size_bytes) {
+                bytes = stage.size_bytes;
+            }
+            if (bytes > 0) {
+                HIP_CALL_THROW(hipMemcpyAsync(stage.data, src, bytes, hipMemcpyDefault, stream));
+            }
         }
     }
 }
@@ -348,27 +401,46 @@ StagingBindResult BindStagingParams(ComputeState& cs,
             result.params.add(name, migraphx::argument{param_shapes[name], stage_it->second.data});
             result.prog_output_indices.push_back(static_cast<std::size_t>(oi));
             result.bound_output_names.push_back(param_name);
+            result.bound_output_shapes.push_back(param_shapes[name]);
         }
     }
     return result;
 }
 
 void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
-    const Ort::KernelContext& ctx, hipStream_t stream)
+    const Ort::KernelContext& ctx, hipStream_t stream,
+    const DynamicBatchContext& dyn)
 {
-    for (std::size_t i{}; i < bind.prog_output_indices.size() && i < bind.bound_output_names.size(); ++i) {
+    for (std::size_t i{}; i < bind.prog_output_indices.size() &&
+        i < bind.bound_output_names.size() && i < bind.bound_output_shapes.size(); ++i)
+    {
         const auto oi{bind.prog_output_indices[i]};
         const auto stage_it{cs.staging_outputs.find(bind.bound_output_names[i])};
         if (stage_it == cs.staging_outputs.end()) {
             continue;
         }
         const auto& stage{stage_it->second};
-        const auto lengths{stage.shape.lengths()};
+        // Use the current bucket's output shape, not the (first-bucket) staging
+        // shape, so dynamic-batch buckets report the correct dimensions.
+        const auto& out_shape{bind.bound_output_shapes[i]};
+        const auto lengths{out_shape.lengths()};
         std::vector<std::int64_t> ort_shape{lengths.begin(), lengths.end()};
+        std::size_t bytes{out_shape.bytes()};
+
+        // Slice a batched output down to the requested batch.
+        if (dyn.active && dyn.target_batch > dyn.requested_batch &&
+            !ort_shape.empty() &&
+            static_cast<std::size_t>(ort_shape.front()) == dyn.target_batch)
+        {
+            const std::size_t row_bytes{bytes / dyn.target_batch};
+            ort_shape.front() = static_cast<std::int64_t>(dyn.requested_batch);
+            bytes = row_bytes * dyn.requested_batch;
+        }
+
         auto output_tensor{ctx.GetOutput(oi, ort_shape.data(), ort_shape.size())};
         void* dst{output_tensor.GetTensorMutableRawData()};
-        if (stage.size_bytes > 0) {
-            HIP_CALL_THROW(hipMemcpyAsync(dst, stage.data, stage.size_bytes, hipMemcpyDefault, stream));
+        if (bytes > 0) {
+            HIP_CALL_THROW(hipMemcpyAsync(dst, stage.data, bytes, hipMemcpyDefault, stream));
         }
     }
 }
@@ -411,7 +483,8 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
     migraphx::program& program,
     migraphx::program_parameters& params,
     const std::vector<std::size_t>& prog_output_indices,
-    const std::string& shape_hash)
+    const std::string& shape_hash,
+    const DynamicBatchContext& dyn)
 {
     const auto eager_run{[&]() {
         std::lock_guard<std::mutex> lock{cs.mutex};
@@ -441,7 +514,7 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
             it->second.captured = false;
         } else {
             ReplayHipGraph(cs, stream, it->second, shape_hash);
-            MaterializeExtraOutputs(ctx, stream, it->second.extra_outputs);
+            MaterializeExtraOutputs(ctx, stream, it->second.extra_outputs, dyn);
             return;
         }
     }
@@ -450,7 +523,7 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
         eager_run();
         return;
     }
-    MaterializeExtraOutputs(ctx, stream, cs.hip_graph_cache.at(shape_hash).extra_outputs);
+    MaterializeExtraOutputs(ctx, stream, cs.hip_graph_cache.at(shape_hash).extra_outputs, dyn);
 }
 
 }  // namespace mgx_ep

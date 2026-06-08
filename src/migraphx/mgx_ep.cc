@@ -1031,10 +1031,47 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     migraphx::program_parameter_shapes param_shapes;
     hash::Value input_shapes_hash{};
 
+    // Resolve dynamic-batch bucketing for this call (no-op when disabled).  The
+    // batch is assumed to live on axis 0 of the model inputs.
+    DynamicBatchContext dyn{};
+    if (compute_state.max_dynamic_batch > 0) {
+        if (compute_state.compiled_batch_sizes.empty()) {
+            compute_state.compiled_batch_sizes = GenerateCompiledBatchSizes(
+                compute_state.max_dynamic_batch, compute_state.compile_batches);
+        }
+        bool have_min{false};
+        size_t min_index{0};
+        size_t requested{0};
+        for (const auto& [name, index] : input_name_indices) {
+            const auto shape{kernel_context.GetInput(index).GetTensorTypeAndShapeInfo().GetShape()};
+            if (!shape.empty() && (!have_min || index < min_index)) {
+                have_min = true;
+                min_index = index;
+                requested = static_cast<size_t>(shape.front());
+            }
+        }
+        if (requested > 0) {
+            const auto bucket{FindNearestCompiledBatchSize(requested, compute_state.compiled_batch_sizes)};
+            dyn.requested_batch = requested;
+            dyn.target_batch = bucket > 0 ? bucket : requested;
+            dyn.active = true;
+        }
+    }
+
+    // Map an actual input shape to the shape the program is compiled for: a batched
+    // input (axis-0 extent == requested batch) is bucketed up to the target batch.
+    const auto effective_shape{[&dyn](std::vector<int64_t> shape) {
+        if (dyn.active && !shape.empty() &&
+            static_cast<size_t>(shape.front()) == dyn.requested_batch) {
+            shape.front() = static_cast<int64_t>(dyn.target_batch);
+        }
+        return shape;
+    }};
+
     if (!compute_state.has_input_shapes) {
         for (auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
-            auto shape{value.GetTensorTypeAndShapeInfo().GetShape()};
+            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape())};
             onnx_options.set_input_parameter_shape(name, {shape.begin(), shape.end()});
             hash::Hash(input_shapes_hash, shape);
         }
@@ -1055,7 +1092,8 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                         prog_strides.size() == 1 && prog_strides.front() == 0) {
                         prog_lengths.clear();
                     }
-                    std::vector<size_t> lengths{shape.begin(), shape.end()};
+                    const auto eff{effective_shape(shape)};
+                    std::vector<size_t> lengths{eff.begin(), eff.end()};
                     if (prog_lengths != lengths) {
                         onnx_options.set_input_parameter_shape(name, lengths);
                         input_shapes_match = false;
@@ -1071,23 +1109,37 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         // for identical input shapes regardless of which program is currently active.
         for (const auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
-            auto shape{value.GetTensorTypeAndShapeInfo().GetShape()};
+            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape())};
             hash::Hash(input_shapes_hash, shape);
         }
     }
 
     // If the input shapes are different (e.g., LLMs), the EP needs to reparse and recompile the program
     if (!input_shapes_match) {
-        // The program is about to change; any staging buffers and captured graphs
-        // were sized/recorded against the previous shape and must be rebuilt.
-        if (compute_state.hip_graph_enable) {
+        const std::string current_hash{hash::ToHex(input_shapes_hash)};
+        bool loaded_from_cache{false};
+
+        if (dyn.active) {
+            // Bounded bucket set: reuse a previously compiled bucket program to keep
+            // it (and its captured graph) alive and avoid recompilation when batch
+            // sizes alternate between buckets.
+            if (const auto cit{compute_state.cached_programs.find(current_hash)};
+                cit != compute_state.cached_programs.end()) {
+                program = cit->second;
+                loaded_from_cache = true;
+            }
+        } else if (compute_state.hip_graph_enable) {
+            // Unbounded dynamic-shape (e.g. LLM) path: keep only the current shape's
+            // graph/staging, so invalidate before the program changes.
             DestroyHipGraphs(compute_state);
             FreeStaging(compute_state);
         }
+
+        if (!loaded_from_cache) {
         migraphx::program_parameters compile_params{};
         fs::path mxr_path;
         if (!compute_state.cache_dir.empty()) {
-            mxr_path = compute_state.cache_dir / (compute_state.mxr_prefix + hash::ToHex(input_shapes_hash) + ".mxr");
+            mxr_path = compute_state.cache_dir / (compute_state.mxr_prefix + current_hash + ".mxr");
         }
         if (compute_state.force_recompile || !load_compiled_program(program, mxr_path)) {
             const auto external_data_dir{compute_state.external_data_dir.empty() ?
@@ -1125,21 +1177,28 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 save_compiled_program(program, mxr_path);
             }
         }
+            // Keep a copy of the freshly compiled bucket program so it (and any
+            // graph captured against it) survives later bucket switches.
+            if (dyn.active) {
+                compute_state.cached_programs.emplace(current_hash, program);
+            }
+        }
         param_shapes = program.get_parameter_shapes();
     }
 
-    // hipGraph capture/replay path: stage I/O into EP-owned (pointer-stable)
-    // buffers, bind scratch, then replay a cached graph or capture a new one.
-    if (compute_state.hip_graph_enable && param_shapes.size() > 0) {
+    // Staging path: required for hipGraph capture (pointer stability) and for
+    // dynamic batching (input padding / output slicing).  Stage I/O into EP-owned
+    // buffers, bind scratch, then replay/capture a graph or run eagerly.
+    if ((compute_state.hip_graph_enable || dyn.active) && param_shapes.size() > 0) {
         const auto shape_hash{hash::ToHex(input_shapes_hash)};
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
-        AllocateStaging(compute_state, param_shapes, hip_stream);
-        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream);
+        AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
+        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn);
         auto bind{BindStagingParams(compute_state, param_shapes, shape_hash, hip_stream)};
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
-            bind.params, bind.prog_output_indices, shape_hash);
-        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream);
+            bind.params, bind.prog_output_indices, shape_hash, dyn);
+        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn);
         HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
         return STATUS_OK;
     }
