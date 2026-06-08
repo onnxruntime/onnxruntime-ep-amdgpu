@@ -33,6 +33,9 @@ constexpr auto kCacheDir = "ORT_MIGRAPHX_CACHE_DIR"sv;
 constexpr auto kComputeMode = "ORT_MIGRAPHX_COMPUTE_MODE"sv;
 constexpr auto kINT8UseNativeCalibrationTable = "ORT_MIGRAPHX_INT8_USE_NATIVE_CALIBRATION_TABLE"sv;
 constexpr auto kExhaustiveTune = "ORT_MIGRAPHX_EXHAUSTIVE_TUNE"sv;
+constexpr auto kHipGraphEnable = "ORT_MIGRAPHX_HIP_GRAPH_ENABLE"sv;
+constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
+constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
 }  // namespace env_vars
 
 struct ComputeState {
@@ -157,6 +160,9 @@ private:
     std::string context_node_name_prefix_{};
     fs::path context_file_path_{};
     fs::path external_initializers_file_name_{};
+    bool hip_graph_enable_{};
+    std::size_t max_dynamic_batch_{};
+    std::string compile_batches_{};
 
     std::mutex mutex_{};
 };

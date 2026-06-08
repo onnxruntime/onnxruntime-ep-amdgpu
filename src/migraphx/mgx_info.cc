@@ -34,6 +34,12 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
                     return STATUS_OK;
                 })
             .AddValueParser(
+                provider_option::kCompileBatches,
+                [this](const std::string_view value) -> Ort::Status {
+                    compile_batches = value;
+                    return STATUS_OK;
+                })
+            .AddValueParser(
                 provider_option::kComputeMode,
                 [this](const std::string_view value) -> Ort::Status {
                     std::string lower{value};
@@ -65,6 +71,8 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kDisableCaching, disable_caching)
             .AddAssignmentToReference(provider_option::kDumpSubgraphs, dump_subgraphs)
             .AddAssignmentToReference(provider_option::kForceRecompile, force_recompile)
+            .AddAssignmentToReference(provider_option::kHipGraphEnable, hip_graph_enable)
+            .AddAssignmentToReference(provider_option::kMaxDynamicBatch, max_dynamic_batch)
             .Parse(provider_options));
 }
 

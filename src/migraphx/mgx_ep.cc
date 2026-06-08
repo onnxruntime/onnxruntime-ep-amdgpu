@@ -20,6 +20,7 @@
 
 #include "hip/stream_support.h"
 
+#include "mgx_dynamic_batch.h"
 #include "mgx_ep.h"
 #include "mgx_ep_ctx.h"
 #include "mgx_info.h"
@@ -437,6 +438,9 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     external_initializers_file_name_ = info.external_initializers_file_name;
     context_file_path_ = info.context_file_path;
     context_node_name_prefix_ = info.context_node_name_prefix;
+    hip_graph_enable_ = info.hip_graph_enable;
+    max_dynamic_batch_ = info.max_dynamic_batch;
+    compile_batches_ = info.compile_batches;
 
     HIP_CALL_THROW(hipSetDevice(device_id_));
     HIP_CALL_THROW(hipGetDeviceProperties(&device_prop_, device_id_));
@@ -455,6 +459,9 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kDumpSubgraphs, dump_subgraphs_);
     PARSE_ENV_VAR(env_var::kDumpEpContextModel, context_enable_);
     PARSE_ENV_VAR(env_var::kExhaustiveTune, exhaustive_tune_);
+    PARSE_ENV_VAR(env_var::kHipGraphEnable, hip_graph_enable_);
+    PARSE_ENV_VAR(env_var::kMaxDynamicBatch, max_dynamic_batch_);
+    PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
 
     auto compute_mode{platform::GetEnvironmentVar(env_var::kComputeMode)};
     if (!compute_mode.empty()) {
@@ -478,6 +485,31 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     if (enable_fp8_ && enable_int8_) {
         enable_fp8_ = enable_int8_ = false;
         /* TODO: log fp8 and int8 are mutually exclusive - ignore both flags. */
+    }
+
+    // hipGraph capture requires single-stream MIGraphX execution and a capturable
+    // (non-default, non-tracing) stream.  Disable it when the environment forces
+    // configurations that are incompatible with capture.
+    if (hip_graph_enable_) {
+        const auto nstreams{ParseEnvironmentVariableWithDefault<int>("MIGRAPHX_NSTREAMS", 1)};
+        const auto trace_eval{ParseEnvironmentVariableWithDefault<int>("MIGRAPHX_TRACE_EVAL", 0)};
+        const auto null_stream{ParseEnvironmentVariableWithDefault<int>("MIGRAPHX_ENABLE_NULL_STREAM", 0)};
+        if (nstreams > 1 || trace_eval != 0 || null_stream != 0) {
+            // MIGRAPHX_NSTREAMS>1: multi-stream execution cannot be captured.
+            // MIGRAPHX_TRACE_EVAL: inserts per-instruction hipStreamSynchronize.
+            // MIGRAPHX_ENABLE_NULL_STREAM: default stream is illegal during capture.
+            hip_graph_enable_ = false;
+            /* TODO: log that hipGraph was disabled due to incompatible MIGraphX env. */
+        }
+    }
+
+    // If compile_batches is set, derive max_dynamic_batch from the spec's max value.
+    if (!compile_batches_.empty()) {
+        if (const auto explicit_sizes{ParseCompileBatches(compile_batches_)}; !explicit_sizes.empty()) {
+            if (const auto derived_max{explicit_sizes.back()}; max_dynamic_batch_ < derived_max) {
+                max_dynamic_batch_ = derived_max;
+            }
+        }
     }
 
     int8_calibration_cache_available_ =
