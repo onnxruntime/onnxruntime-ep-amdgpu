@@ -60,7 +60,7 @@ namespace dml_ep {
     class DescriptorPool
     {
     public:
-        DescriptorPool(ID3D12Device* device, uint32_t initialCapacity);
+        DescriptorPool(const Microsoft::WRL::ComPtr<ID3D12Device>& device, uint32_t initialCapacity);
 
         // Reserves a contiguous range of descriptors from a single descriptor heap. The
         // lifetime of the referenced descriptor heap is managed by the DescriptorPool class.

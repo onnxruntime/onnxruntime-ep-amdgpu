@@ -29,8 +29,8 @@ namespace dml_ep {
         void ExecuteOperator(
             const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& op,
             const DML_BINDING_DESC& persistentResourceBinding,
-            gsl::span<const DML_BINDING_DESC> inputBindings,
-            gsl::span<const DML_BINDING_DESC> outputBindings);
+            const std::vector<DML_BINDING_DESC>& inputBindings,
+            const std::vector<DML_BINDING_DESC>& outputBindings);
 
         void CopyBufferRegion(
             ID3D12Resource* dstBuffer,

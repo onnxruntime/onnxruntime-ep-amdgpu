@@ -329,26 +329,19 @@ HRESULT __stdcall PluginDmlExecutionProviderImpl::ExecuteOperator(
 }
 
 HRESULT __stdcall PluginDmlExecutionProviderImpl::ExecuteOperator(
-    IDMLCompiledOperator* op,
-    _In_opt_ const DML_BUFFER_BINDING* persistentResourceBinding,
-    gsl::span<DML_BINDING_DESC> inputTensors,
-    gsl::span<DML_BINDING_DESC> outputTensors
+    const Microsoft::WRL::ComPtr<IDMLCompiledOperator>& op,
+    const DML_BUFFER_BINDING& persistentResourceBinding,
+    const std::vector<DML_BINDING_DESC>& inputs,
+    const std::vector<DML_BINDING_DESC>& outputs
     ) const noexcept
 {
     try
     {
-        assert(!m_closed);
-
-        DML_BINDING_DESC persistentResourceBindingDesc =
-            persistentResourceBinding
-            ? DML_BINDING_DESC{ DML_BINDING_TYPE_BUFFER, persistentResourceBinding }
-        : DML_BINDING_DESC{ DML_BINDING_TYPE_NONE, nullptr };
-
         m_context->ExecuteOperator(
             op,
-            persistentResourceBindingDesc,
-            inputTensors,
-            outputTensors);
+            {DML_BINDING_TYPE_BUFFER, &persistentResourceBinding},
+            inputs,
+            outputs);
 
         return S_OK;
     }
@@ -365,14 +358,14 @@ static gsl::span<std::byte> AsByteSpan(void* data, size_t sizeInBytes)
     return gsl::make_span(static_cast<std::byte*>(data), sizeInBytes);
 }
 
-HRESULT __stdcall PluginDmlExecutionProviderImpl::CopyTensor(IMLOperatorTensor* dst, IMLOperatorTensor* src) const noexcept
+HRESULT __stdcall PluginDmlExecutionProviderImpl::CopyTensor(
+    const Microsoft::WRL::ComPtr<IMLOperatorTensor>& dst,
+    const Microsoft::WRL::ComPtr<IMLOperatorTensor>& src) const noexcept
 {
     try
     {
-        assert(!m_closed);
-
-        const size_t sourceSizeInBytes = ComputeByteSizeFromTensor(*src);
-        const size_t dataSizeInBytes = ComputeByteSizeFromTensor(*dst);
+        const size_t sourceSizeInBytes = ComputeByteSizeFromTensor(src);
+        const size_t dataSizeInBytes = ComputeByteSizeFromTensor(dst);
         THROW_HR_IF(E_INVALIDARG, dataSizeInBytes != sourceSizeInBytes); // Tensors must be the same size
 
         if (dataSizeInBytes == 0) {

@@ -14,13 +14,13 @@ namespace dml_ep {
     {
     public:
         CommandAllocatorRing(
-            ID3D12Device* device,
+            const Microsoft::WRL::ComPtr<ID3D12Device>& device,
             D3D12_COMMAND_LIST_TYPE commandListType,
             GpuEvent initialEvent)
         {
             for (auto& info : m_commandAllocators)
             {
-                ORT_THROW_IF_FAILED(device->CreateCommandAllocator(
+                THROW_IF_FAILED(device->CreateCommandAllocator(
                     commandListType,
                     IID_PPV_ARGS(info.allocator.ReleaseAndGetAddressOf())));
 
@@ -34,7 +34,7 @@ namespace dml_ep {
 
             if (m_commandAllocators[earliestOtherAllocator].completionEvent.IsSignaled())
             {
-                ORT_THROW_IF_FAILED(m_commandAllocators[earliestOtherAllocator].Get()->Reset());
+                THROW_IF_FAILED(m_commandAllocators[earliestOtherAllocator].Get()->Reset());
                 m_currentCommandAllocator = earliestOtherAllocator;
             }
 

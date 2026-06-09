@@ -69,14 +69,14 @@ public:
 
     // Returns an event which will become signaled when everything submitted to the execution context thus far has
     // completed execution on the GPU, including work that has yet to be flushed to the queue.
-    GpuEvent GetCurrentCompletionEvent();
+    GpuEvent GetCurrentCompletionEvent() const;
 
     // Adds a reference which will be released when queued GPU work is completed
-    void QueueReference(IUnknown* object);
+    void QueueReference(IUnknown* object) const;
 
     // Release any accumulated references who corresponding GPU fence values have
     // been reached.
-    void ReleaseCompletedReferences();
+    void ReleaseCompletedReferences() const;
 
     D3D12_COMMAND_LIST_TYPE GetCommandListTypeForQueue() const;
     bool CpuSyncSpinningEnabled() const { return m_cpuSyncSpinningEnabled; }

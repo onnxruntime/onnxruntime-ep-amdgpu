@@ -201,7 +201,7 @@ namespace dml_ep {
         void CpuToGpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst);
         void GpuToGpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst);
         void GpuToCpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst);
-        bool IsGpuTensor(const onnxruntime::Tensor& tensor);
+        static bool IsGpuTensor(const onnxruntime::Tensor& tensor);
 
         Microsoft::WRL::ComPtr<ID3D12Device> m_d3d12Device;
         Microsoft::WRL::ComPtr<IDMLDevice> m_dmlDevice;

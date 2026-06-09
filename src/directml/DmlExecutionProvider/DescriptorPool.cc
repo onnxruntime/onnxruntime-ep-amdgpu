@@ -56,7 +56,7 @@ namespace dml_ep {
         return range;
     }
 
-    DescriptorPool::DescriptorPool(ID3D12Device* device, uint32_t initialCapacity) : 
+    DescriptorPool::DescriptorPool(const Microsoft::WRL::ComPtr<ID3D12Device>& device, uint32_t initialCapacity) :
         m_device(device),
         m_initialHeapCapacity(initialCapacity)
     {
@@ -83,7 +83,6 @@ namespace dml_ep {
         uint32_t newHeapCapacity = std::max(numDescriptors, m_initialHeapCapacity);
         CreateHeap(newHeapCapacity, heapFlags);
         auto descriptorRange = m_heaps.back().TryAllocDescriptors(numDescriptors, completionEvent, heapFlags);
-        assert(descriptorRange.has_value());
         return descriptorRange.value();
     }
 

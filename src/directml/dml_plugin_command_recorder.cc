@@ -8,8 +8,8 @@
 namespace dml_ep {
 
 PluginDmlCommandRecorder::PluginDmlCommandRecorder(
-    ID3D12Device* d3dDevice,
-    IDMLDevice* dmlDevice,
+    const Microsoft::WRL::ComPtr<ID3D12Device>& d3dDevice,
+    const Microsoft::WRL::ComPtr<IDMLDevice>& dmlDevice,
     std::shared_ptr<CommandQueue> commandQueue)
     : m_queue(std::move(commandQueue)),
       m_d3dDevice(d3dDevice),
@@ -17,8 +17,8 @@ PluginDmlCommandRecorder::PluginDmlCommandRecorder(
       m_descriptorPool(d3dDevice, 2048),
       m_commandAllocatorRing(d3dDevice, m_queue->GetType(), m_queue->GetCurrentCompletionEvent())
 {
-    ORT_THROW_IF_FAILED(dmlDevice->CreateOperatorInitializer(0, nullptr, IID_PPV_ARGS(&m_initializer)));
-    ORT_THROW_IF_FAILED(dmlDevice->CreateCommandRecorder(IID_PPV_ARGS(&m_recorder)));
+    THROW_IF_FAILED(dmlDevice->CreateOperatorInitializer(0, nullptr, IID_PPV_ARGS(&m_initializer)));
+    THROW_IF_FAILED(dmlDevice->CreateCommandRecorder(IID_PPV_ARGS(&m_recorder)));
 }
 
 void PluginDmlCommandRecorder::SetAllocator(const std::weak_ptr<DmlBucketizedBufferAllocator>& allocator)
@@ -50,7 +50,7 @@ void PluginDmlCommandRecorder::InitializeOperator(
     bindingTableDesc.SizeInDescriptors = numDescriptors;
 
     Microsoft::WRL::ComPtr<IDMLBindingTable> bindingTable;
-    ORT_THROW_IF_FAILED(m_dmlDevice->CreateBindingTable(&bindingTableDesc, IID_PPV_ARGS(&bindingTable)));
+    THROW_IF_FAILED(m_dmlDevice->CreateBindingTable(&bindingTableDesc, IID_PPV_ARGS(&bindingTable)));
 
     // Create a temporary resource for initializing the op, if it's required.
     UINT64 temporaryResourceSize = initBindingProps.TemporaryResourceSize;
@@ -63,7 +63,7 @@ void PluginDmlCommandRecorder::InitializeOperator(
         void* tempResourceHandle = allocator->AllocImpl(static_cast<size_t>(temporaryResourceSize));
         if (!tempResourceHandle)
         {
-            ORT_THROW_HR(E_OUTOFMEMORY);
+            THROW_HR(E_OUTOFMEMORY);
         }
 
         ID3D12Resource* buffer = allocator->DecodeDataHandle(tempResourceHandle)->GetResource();
@@ -118,13 +118,13 @@ void PluginDmlCommandRecorder::ExecuteOperator(
 
     // Create a binding table for execution.
     DML_BINDING_TABLE_DESC bindingTableDesc = {};
-    bindingTableDesc.Dispatchable = op;
+    bindingTableDesc.Dispatchable = op.Get();
     bindingTableDesc.CPUDescriptorHandle = descriptorRange.cpuHandle;
     bindingTableDesc.GPUDescriptorHandle = descriptorRange.gpuHandle;
     bindingTableDesc.SizeInDescriptors = numDescriptors;
 
     Microsoft::WRL::ComPtr<IDMLBindingTable> bindingTable;
-    ORT_THROW_IF_FAILED(m_dmlDevice->CreateBindingTable(&bindingTableDesc, IID_PPV_ARGS(&bindingTable)));
+    THROW_IF_FAILED(m_dmlDevice->CreateBindingTable(&bindingTableDesc, IID_PPV_ARGS(&bindingTable)));
 
     // Create a temporary resource for executing the op, if it's required.
     UINT64 temporaryResourceSize = execBindingProps.TemporaryResourceSize;
@@ -137,7 +137,7 @@ void PluginDmlCommandRecorder::ExecuteOperator(
         void* tempResourceHandle = allocator->AllocImpl(static_cast<size_t>(temporaryResourceSize));
         if (!tempResourceHandle)
         {
-            ORT_THROW_HR(E_OUTOFMEMORY);
+            THROW_HR(E_OUTOFMEMORY);
         }
 
         ID3D12Resource* buffer = allocator->DecodeDataHandle(tempResourceHandle)->GetResource();
@@ -159,7 +159,7 @@ void PluginDmlCommandRecorder::ExecuteOperator(
 
     // Record the execution work.
     SetDescriptorHeap(descriptorRange.heap);
-    m_recorder->RecordDispatch(m_currentCommandList.Get(), op, bindingTable.Get());
+    m_recorder->RecordDispatch(m_currentCommandList.Get(), op.Get(), bindingTable.Get());
     m_operationsRecordedInCurrentCommandList = true;
 
     // Barrier all outputs.
@@ -211,7 +211,7 @@ void PluginDmlCommandRecorder::FillBufferWithPattern(
     uavDesc.Buffer.NumElements = gsl::narrow<uint32_t>(dstBuffer->GetDesc().Width / sizeof(uint32_t));
     uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
 
-    const uint32_t neededDescriptorCount = 1;
+    constexpr uint32_t neededDescriptorCount = 1;
     DescriptorRange descriptorRangeCpu = m_descriptorPool.AllocDescriptors(neededDescriptorCount, m_queue->GetNextCompletionEvent(), D3D12_DESCRIPTOR_HEAP_FLAG_NONE);
     DescriptorRange descriptorRangeGpu = m_descriptorPool.AllocDescriptors(neededDescriptorCount, m_queue->GetNextCompletionEvent(), D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
     m_d3dDevice->CreateUnorderedAccessView(dstBuffer, nullptr, &uavDesc, descriptorRangeCpu.cpuHandle);
@@ -258,8 +258,8 @@ void PluginDmlCommandRecorder::ExecuteCommandList(
         m_commandAllocatorRing.UpdateCurrentAllocatorCompletionEvent(m_queue->GetNextCompletionEvent());
 
         // Fail early if something horrifying happens
-        ORT_THROW_IF_FAILED(m_dmlDevice->GetDeviceRemovedReason());
-        ORT_THROW_IF_FAILED(m_d3dDevice->GetDeviceRemovedReason());
+        THROW_IF_FAILED(m_dmlDevice->GetDeviceRemovedReason());
+        THROW_IF_FAILED(m_d3dDevice->GetDeviceRemovedReason());
 
         return;
     }
@@ -287,7 +287,7 @@ Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> PluginDmlCommandRecorder::GetC
     return m_currentCommandList;
 }
 
-void PluginDmlCommandRecorder::ResourceBarrier(gsl::span<const D3D12_RESOURCE_BARRIER> barriers)
+void PluginDmlCommandRecorder::ResourceBarrier(const std::vector<D3D12_RESOURCE_BARRIER>& barriers)
 {
     m_currentCommandList->ResourceBarrier(gsl::narrow_cast<uint32_t>(barriers.size()), barriers.data());
     m_operationsRecordedInCurrentCommandList = true;
@@ -307,7 +307,7 @@ void PluginDmlCommandRecorder::Open()
 
     if (!m_cachedCommandList)
     {
-        ORT_THROW_IF_FAILED(m_d3dDevice->CreateCommandList(
+        THROW_IF_FAILED(m_d3dDevice->CreateCommandList(
             0,
             m_queue->GetType(),
             allocator,
@@ -318,7 +318,7 @@ void PluginDmlCommandRecorder::Open()
     {
         m_currentCommandList = m_cachedCommandList;
         m_cachedCommandList = nullptr;
-        ORT_THROW_IF_FAILED(m_currentCommandList->Reset(allocator, nullptr));
+        THROW_IF_FAILED(m_currentCommandList->Reset(allocator, nullptr));
     }
 }
 
@@ -329,7 +329,7 @@ void PluginDmlCommandRecorder::CloseAndExecute()
 
 void PluginDmlCommandRecorder::CloseAndExecute(_In_opt_ ID3D12GraphicsCommandList* commandList)
 {   
-    ORT_THROW_IF_FAILED(m_currentCommandList->Close());
+    THROW_IF_FAILED(m_currentCommandList->Close());
 
     ID3D12GraphicsCommandList* commandListsToExecute[2] = {};
     uint32_t commandListsToExecuteCount = 0;
@@ -358,8 +358,8 @@ void PluginDmlCommandRecorder::CloseAndExecute(_In_opt_ ID3D12GraphicsCommandLis
     m_currentDescriptorHeap = nullptr;
 
     // Fail early if something horrifying happens
-    ORT_THROW_IF_FAILED(m_dmlDevice->GetDeviceRemovedReason());
-    ORT_THROW_IF_FAILED(m_d3dDevice->GetDeviceRemovedReason());
+    THROW_IF_FAILED(m_dmlDevice->GetDeviceRemovedReason());
+    THROW_IF_FAILED(m_d3dDevice->GetDeviceRemovedReason());
 }
 
 void PluginDmlCommandRecorder::SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap)

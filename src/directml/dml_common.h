@@ -17,8 +17,8 @@ DML_TENSOR_DATA_TYPE GetDmlDataTypeFromMlDataTypeNoThrow(MLOperatorTensorDataTyp
 MLOperatorTensorDataType GetMlDataTypeFromDmlDataType(DML_TENSOR_DATA_TYPE tensorDataType);
 size_t ComputeByteSizeFromDimensions(gsl::span<const OperatorHelper::DimensionType> dimensions,
                                      MLOperatorTensorDataType tensorDataType);
-size_t ComputeByteSizeFromTensor(IMLOperatorTensor& tensor);
-uint32_t GetSupportedDeviceDataTypeMask(IDMLDevice* dmlDevice);
+size_t ComputeByteSizeFromTensor(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& tensor);
+uint32_t GetSupportedDeviceDataTypeMask(const Microsoft::WRL::ComPtr<IDMLDevice>& dmlDevice);
 uint32_t GetBitMaskFromIndices(gsl::span<const uint32_t> indices) noexcept;
 uint32_t CountLeastSignificantZeros(uint32_t value) noexcept;
 void GetDescendingPackedStrides(gsl::span<const uint32_t> sizes, /*out*/ gsl::span<uint32_t> strides) noexcept;

@@ -196,7 +196,7 @@ namespace dml_ep {
                 const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& tensors) {
                 for (const auto tensor : tensors) {
                     if (tensor) {
-                        ID3D12Resource* resource = m_provider->DecodeResource(tensor->GetDataInterface().Get());
+                        ID3D12Resource* resource = m_provider->DecodeResource(MLOperatorTensor(tensor).GetDataInterface().Get());
                         D3D12_RESOURCE_DESC resourceDesc = resource->GetDesc();
                         bufferBindings.push_back({ resource, 0, resourceDesc.Width });
                         bindingDescs.push_back({ DML_BINDING_TYPE_BUFFER, &bufferBindings.back() });

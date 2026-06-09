@@ -95,8 +95,7 @@ MLOperatorTensorDataType GetMlDataTypeFromDmlDataType(DML_TENSOR_DATA_TYPE tenso
 
 size_t ComputeBitSizeFromDimensions(gsl::span<const OperatorHelper::DimensionType> dimensions,
                                     MLOperatorTensorDataType tensorDataType) {
-    auto bitSize = ComputeElementCountFromDimensions(dimensions) * GetBitSizeFromMlDataType(tensorDataType);
-    return bitSize;
+    return ComputeElementCountFromDimensions(dimensions) * GetBitSizeFromMlDataType(tensorDataType);
 }
 
 size_t ComputeByteSizeFromDimensions(gsl::span<const OperatorHelper::DimensionType> dimensions, MLOperatorTensorDataType tensorDataType)
@@ -104,21 +103,21 @@ size_t ComputeByteSizeFromDimensions(gsl::span<const OperatorHelper::DimensionTy
     return (ComputeBitSizeFromDimensions(dimensions, tensorDataType) + CHAR_BIT - 1) / CHAR_BIT;
 }
 
-size_t ComputeByteSizeFromTensor(IMLOperatorTensor& tensor)
+size_t ComputeByteSizeFromTensor(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& tensor)
 {
-    uint32_t dimensionCount = 0;
-    dimensionCount = tensor.GetDimensionCount();
+    uint32_t dimensionCount{};
+    dimensionCount = tensor->GetDimensionCount();
     ML_CHECK_VALID_ARGUMENT(dimensionCount <= MaximumDimensionCount, "Dimensions are beyond supported count.");
 
     std::array<OperatorHelper::DimensionType, MaximumDimensionCount> dimensions;
-    ORT_THROW_IF_FAILED(tensor.GetShape(dimensionCount, /*out*/ dimensions.data()));
+    THROW_IF_FAILED(tensor->GetShape(dimensionCount, dimensions.data()));
 
-    return ComputeByteSizeFromDimensions(gsl::make_span(dimensions.data(), dimensionCount), tensor.GetTensorDataType());
+    return ComputeByteSizeFromDimensions(gsl::make_span(dimensions.data(), dimensionCount), tensor->GetTensorDataType());
 }
 
-uint32_t GetSupportedDeviceDataTypeMask(IDMLDevice* dmlDevice)
+uint32_t GetSupportedDeviceDataTypeMask(const Microsoft::WRL::ComPtr<IDMLDevice>& dmlDevice)
 {
-    uint32_t deviceTypeMask = 0u;
+    uint32_t deviceTypeMask{};
 
     // Form the bitmask of all supported data types.
     for (uint32_t i = 0; i <= DML_TENSOR_DATA_TYPE_INT4; ++i)
@@ -126,7 +125,7 @@ uint32_t GetSupportedDeviceDataTypeMask(IDMLDevice* dmlDevice)
         DML_FEATURE_QUERY_TENSOR_DATA_TYPE_SUPPORT dataTypeQuery = { static_cast<DML_TENSOR_DATA_TYPE>(i) };
         DML_FEATURE_DATA_TENSOR_DATA_TYPE_SUPPORT dataTypeSupport = {};
 
-        ORT_THROW_IF_FAILED(dmlDevice->CheckFeatureSupport(
+        THROW_IF_FAILED(dmlDevice->CheckFeatureSupport(
             DML_FEATURE_TENSOR_DATA_TYPE_SUPPORT,
             sizeof(dataTypeQuery),
             &dataTypeQuery,

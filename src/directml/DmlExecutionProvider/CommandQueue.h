@@ -13,7 +13,7 @@ namespace dml_ep {
     {
     public:
         // Creates a CommandQueue object that wraps an existing D3D12 queue.
-        CommandQueue(ID3D12CommandQueue* existingQueue, bool cpuSyncSpinningEnabled);
+        CommandQueue(const Microsoft::WRL::ComPtr<ID3D12CommandQueue>& existingQueue, bool cpuSyncSpinningEnabled);
 
         D3D12_COMMAND_LIST_TYPE GetType() const { return m_type; }
         Microsoft::WRL::ComPtr<ID3D12Fence> GetFence() const { return m_fence; }

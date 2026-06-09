@@ -6,14 +6,14 @@
 
 namespace dml_ep {
 
-    CommandQueue::CommandQueue(ID3D12CommandQueue* existingQueue, bool cpuSyncSpinningEnabled)
+    CommandQueue::CommandQueue(const Microsoft::WRL::ComPtr<ID3D12CommandQueue>& existingQueue, bool cpuSyncSpinningEnabled)
         : m_queue(existingQueue)
         , m_type(existingQueue->GetDesc().Type)
         , m_cpuSyncSpinningEnabled(cpuSyncSpinningEnabled)
     {
         Microsoft::WRL::ComPtr<ID3D12Device> device;
-        ORT_THROW_IF_FAILED(m_queue->GetDevice(IID_PPV_ARGS(device.GetAddressOf())));
-        ORT_THROW_IF_FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(m_fence.ReleaseAndGetAddressOf())));
+        THROW_IF_FAILED(m_queue->GetDevice(IID_PPV_ARGS(device.GetAddressOf())));
+        THROW_IF_FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(m_fence.ReleaseAndGetAddressOf())));
     }
 
     void CommandQueue::ExecuteCommandList(ID3D12CommandList* commandList)
@@ -26,15 +26,15 @@ namespace dml_ep {
         m_queue->ExecuteCommandLists(gsl::narrow<uint32_t>(commandLists.size()), commandLists.data());
 
         ++m_lastFenceValue;
-        ORT_THROW_IF_FAILED(m_queue->Signal(m_fence.Get(), m_lastFenceValue));
+        THROW_IF_FAILED(m_queue->Signal(m_fence.Get(), m_lastFenceValue));
     }
 
     void CommandQueue::Wait(ID3D12Fence* fence, uint64_t value)
     {
-        ORT_THROW_IF_FAILED(m_queue->Wait(fence, value));
+        THROW_IF_FAILED(m_queue->Wait(fence, value));
 
         ++m_lastFenceValue;
-        ORT_THROW_IF_FAILED(m_queue->Signal(m_fence.Get(), m_lastFenceValue));
+        THROW_IF_FAILED(m_queue->Signal(m_fence.Get(), m_lastFenceValue));
     }
 
     GpuEvent CommandQueue::GetCurrentCompletionEvent() const

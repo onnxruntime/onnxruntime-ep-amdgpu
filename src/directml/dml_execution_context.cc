@@ -90,7 +90,7 @@ void ExecutionContext::AddUAVBarrier() {
     m_dmlRecorder.AddUAVBarrier();
 }
 
-void ExecutionContext::ResourceBarrier(gsl::span<const D3D12_RESOURCE_BARRIER> barriers) {
+void ExecutionContext::ResourceBarrier(const std::vector<D3D12_RESOURCE_BARRIER>& barriers) {
     SetCommandRecorder(&m_dmlRecorder);
     m_dmlRecorder.ResourceBarrier(barriers);
 }
@@ -132,10 +132,10 @@ void ExecutionContext::Flush() {
     SetCommandRecorder(&m_dmlRecorder);
 }
 
-void ExecutionContext::QueueReference(IUnknown* object) {
+void ExecutionContext::QueueReference(IUnknown* object) const {
     // If something has been recorded into a command list but not submitted yet, it means that the *next* fence
     // value is the one to signal completion.
-    bool waitForUnsubmittedWork = (m_currentRecorder != nullptr);
+    const bool waitForUnsubmittedWork = (m_currentRecorder != nullptr);
     m_queue->QueueReference(object, waitForUnsubmittedWork);
 }
 
@@ -152,7 +152,7 @@ void ExecutionContext::Close() {
     }
 }
 
-GpuEvent ExecutionContext::GetCurrentCompletionEvent() {
+GpuEvent ExecutionContext::GetCurrentCompletionEvent() const {
     GpuEvent event = m_queue->GetCurrentCompletionEvent();
 
     // If something has been recorded into a command list but not submitted yet, it means that the *next* fence
@@ -165,7 +165,7 @@ GpuEvent ExecutionContext::GetCurrentCompletionEvent() {
     return event;
 }
 
-void ExecutionContext::ReleaseCompletedReferences() {
+void ExecutionContext::ReleaseCompletedReferences() const {
     m_queue->ReleaseCompletedReferences();
 }
 
