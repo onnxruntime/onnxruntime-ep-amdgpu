@@ -588,12 +588,12 @@ try {
 
     // Fast path: return a pre-uploaded GPU buffer if one was cached for this input index.
     // This is the core of the persistent-resource optimization — no CPU→GPU upload occurs.
-    if (constant_gpu_resources_ &&
-        inputIndex < constant_gpu_resources_->size() &&
-        (*constant_gpu_resources_)[inputIndex].resource) {
-        const ConstantGpuResource& cached = (*constant_gpu_resources_)[inputIndex];
-        auto gpu_tensor = Microsoft::WRL::Make<AbiSafeD3D12Tensor>(
-            cached.resource.Get(), cached.shape, cached.dtype);
+    if (constant_gpu_resources_ != nullptr &&
+        index < constant_gpu_resources_->size() &&
+        (*constant_gpu_resources_)[index].resource)
+    {
+        const auto& [resource, shape, dtype] = (*constant_gpu_resources_)[index];
+        auto gpu_tensor = Microsoft::WRL::Make<AbiSafeD3D12Tensor>(resource.Get(), shape, dtype);
         *tensor = gpu_tensor.Detach();
         return S_OK;
     }
