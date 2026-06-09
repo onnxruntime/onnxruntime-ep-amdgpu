@@ -31,10 +31,7 @@ if(WIN32)
             PROPERTY LINK_FLAGS /DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
 
     foreach(_file migraphx-hiprtc-driver.exe migraphx.dll migraphx_c.dll migraphx_tf.dll migraphx_gpu.dll migraphx_device.dll migraphx_onnx.dll)
-        set(_path "$<TARGET_FILE_DIR:migraphx::migraphx>/${_file}")
-        if(EXISTS "${_path}")
-            list(APPEND MGX_FILES "${_path}")
-        endif()
+        list(APPEND MGX_FILES "$<TARGET_FILE_DIR:migraphx::migraphx>/${_file}")
     endforeach()
 
     foreach(_file ${MGX_FILES} ${HIP_FILES})
