@@ -103,7 +103,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     }
 
     const ProviderInfo info{provider_options};
-    if (info.profile == Profile::Auto || info.profile == Profile::Eager) {
+    if (info.profile == Profile::Eager) {
         THROW_IF_ERROR(factory.CreateDirectMLBackend(local_session_options, logger, backend_ep_));
         // DirectML manages its own per-session GPU allocator (DmlBucketizedBufferAllocator)
         // via EP-level CreateAllocator. Wire it now that we know the backend is DirectML.
