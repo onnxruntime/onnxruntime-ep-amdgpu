@@ -410,6 +410,8 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     for (const auto& [key, value] : key_value_pairs.GetKeyValuePairs()) {
         if (key.rfind(ep_prefix, 0) == 0) {
             provider_options.emplace(key.substr(ep_prefix.length()), value);
+        } else if (key.rfind("ep.", 0) == 0) {
+            provider_options.emplace(key, value);
         }
     }
 
