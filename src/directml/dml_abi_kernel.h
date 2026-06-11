@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <optional>
 #include "dml_client.h"
 
 #ifdef DML_PERF_PROFILE
@@ -114,7 +115,7 @@ public:
         const PluginDmlExecutionProviderImpl* execution_provider,
         bool is_internal_operator,
         std::string_view ep_name,
-        const std::vector<std::vector<uint32_t>>* inferred_output_shapes = nullptr,
+        const std::vector<std::optional<std::vector<uint32_t>>>* inferred_output_shapes = nullptr,
         IMLOperatorShapeInferrer* shape_inferrer = nullptr,
         const std::vector<uint32_t>* required_constant_cpu_inputs = nullptr,
         const AttributeMap* default_attributes = nullptr,
@@ -146,7 +147,7 @@ private:
     const OrtApi* ort_api_;
     const PluginDmlExecutionProviderImpl* execution_provider_;
     bool is_internal_operator_;  // For resource state transitions (MemcpyToHost/FromHost)
-    const std::vector<std::vector<uint32_t>>* inferred_output_shapes_;
+    const std::vector<std::optional<std::vector<uint32_t>>>* inferred_output_shapes_;
     mutable std::vector<Microsoft::WRL::ComPtr<AbiSafeTensor>> tensor_cache_;         // input tensors
     mutable std::vector<Microsoft::WRL::ComPtr<AbiSafeTensor>> output_tensor_cache_;  // output tensors (for post-op transitions)
     mutable Microsoft::WRL::ComPtr<IUnknown> abi_execution_object_;
@@ -256,8 +257,10 @@ public:
         uint32_t dimensionCount,
         _Out_writes_(dimensionCount) uint32_t* dimensions) const noexcept override;
 
-    // Retrieve inferred output shapes after calling shape inferrer
-    const std::vector<std::vector<uint32_t>>& GetInferredOutputShapes() const { return inferred_output_shapes_; }
+    // Retrieve inferred output shapes after calling shape inferrer.
+    // Each entry is nullopt if SetOutputTensorShape was never called for that output,
+    // or an optional<vector> (possibly empty for scalars) if it was explicitly set.
+    const std::vector<std::optional<std::vector<uint32_t>>>& GetInferredOutputShapes() const { return inferred_output_shapes_; }
 
 private:
     OrtKernelContext* kernel_context_;
@@ -266,8 +269,9 @@ private:
     const PluginDmlExecutionProviderImpl* execution_provider_;
     const OrtKernelInfo* kernel_info_;  // For accessing actual node attributes
 
-    // Stores output shapes set by the shape inferrer
-    std::vector<std::vector<uint32_t>> inferred_output_shapes_;
+    // Stores output shapes set by the shape inferrer.
+    // nullopt = never set; optional<vector>{} = explicitly set as scalar (0-dim).
+    std::vector<std::optional<std::vector<uint32_t>>> inferred_output_shapes_;
 
     // Cache for constant input tensors
     mutable std::unordered_map<uint32_t, Microsoft::WRL::ComPtr<AbiSafeTensor>> constant_tensor_cache_;
@@ -332,7 +336,8 @@ public:
         bool is_internal_operator = false,  // Controls GetExecutionInterface return value
         bool requires_input_shapes_at_creation = true,  // Mirrors old m_allowInputShapeQuery
         std::unordered_map<std::string, PreFetchedTensorAttr> tensor_attribute_cache = {},  // Pre-fetched tensor attrs
-        const EdgeShapes* input_shapes_override = nullptr);  // Runtime shapes (lazy-init)
+        const EdgeShapes* input_shapes_override = nullptr,  // Runtime shapes (lazy-init)
+        bool requires_output_shapes_at_creation = false);  // Mirrors old m_allowOutputShapeQuery
 
     // IMLOperatorKernelCreationContext methods
     STDMETHOD_(uint32_t, GetInputCount)() const noexcept override;
@@ -376,8 +381,9 @@ public:
     STDMETHOD(GetOutputTensorDimensionCount)(uint32_t outputIndex, _Out_ uint32_t* dimensionCount) const noexcept override;
     STDMETHOD(GetOutputTensorShape)(uint32_t outputIndex, uint32_t dimensionCount, _Out_writes_(dimensionCount) uint32_t* dimensions) const noexcept override;
 
-    // Set pre-computed output shapes (e.g., from shape inferrer)
-    void SetPrecomputedOutputShapes(const std::vector<std::vector<uint32_t>>& shapes) {
+    // Set pre-computed output shapes (e.g., from shape inferrer).
+    // Each entry is nullopt if not set, or optional<vector> (possibly empty for scalars) if explicitly set.
+    void SetPrecomputedOutputShapes(const std::vector<std::optional<std::vector<uint32_t>>>& shapes) {
         precomputed_output_shapes_ = shapes;
     }
 
@@ -397,10 +403,12 @@ private:
     bool is_internal_operator_ = false;  // Controls GetExecutionInterface (ID3D12GraphicsCommandList* vs provider)
     // Captured runtime input shapes (mirrors old plugin's m_inputShapesOverride passed to PluginOpKernelInfoWrapper)
     const EdgeShapes* input_shapes_override_ = nullptr;
-    bool requires_input_shapes_at_creation_ = true;  // Mirrors old m_allowInputShapeQuery static flag
+    bool requires_input_shapes_at_creation_ = true;   // Mirrors old m_allowInputShapeQuery static flag
+    bool requires_output_shapes_at_creation_ = false; // Mirrors old m_allowOutputShapeQuery static flag
 
-    // Pre-computed output shapes from shape inferrer (takes precedence over fallback logic)
-    std::vector<std::vector<uint32_t>> precomputed_output_shapes_;
+    // Pre-computed output shapes from shape inferrer (takes precedence over fallback logic).
+    // nullopt = never set; optional<vector>{} = explicitly set as scalar (0-dim).
+    std::vector<std::optional<std::vector<uint32_t>>> precomputed_output_shapes_;
 
     // Pre-fetched tensor attribute cache (ABI-safe, no protobuf). Populated at construction
     // by TryFetchTensorAttribute() called at each AbiSafeKernelCreationContext creation site.
@@ -514,7 +522,7 @@ struct DmlAbiKernel {
     const PluginDmlExecutionProviderImpl* dml_execution_provider = nullptr;
     bool is_internal_operator = false;  // For resource state transitions (MemcpyToHost/FromHost)
     std::string ep_name;  // Runtime EP name for allocator lookup in AbiSafeKernelContext
-    std::vector<std::vector<uint32_t>> inferred_output_shapes;  // Shapes from graph inference
+    std::vector<std::optional<std::vector<uint32_t>>> inferred_output_shapes;  // nullopt=unset, empty vector=scalar
     std::string operator_name;  // For debugging
 
     // Profiling - only active when DML_PERF_PROFILE=1

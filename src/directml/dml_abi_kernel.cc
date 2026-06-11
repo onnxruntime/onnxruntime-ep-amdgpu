@@ -570,7 +570,7 @@ AbiSafeKernelContext::AbiSafeKernelContext(
     const PluginDmlExecutionProviderImpl* execution_provider,
     bool is_internal_operator,
     std::string_view ep_name,
-    const std::vector<std::vector<uint32_t>>* inferred_output_shapes,
+    const std::vector<std::optional<std::vector<uint32_t>>>* inferred_output_shapes,
     IMLOperatorShapeInferrer* shape_inferrer,
     const std::vector<uint32_t>* required_constant_cpu_inputs,
     const AttributeMap* default_attributes,
@@ -725,62 +725,59 @@ HRESULT AbiSafeKernelContext::GetOutputTensor(uint32_t outputIndex, IMLOperatorT
 
     // Use pre-inferred output shapes from graph compilation (source of truth)
     // If there are dynamic dimensions, fill them from runtime input shapes
-    if (inferred_output_shapes_ && outputIndex < inferred_output_shapes_->size()) {
-        const auto& shape = (*inferred_output_shapes_)[outputIndex];
+    // Use pre-inferred output shapes from graph compilation (source of truth).
+    // has_value() distinguishes "explicitly set as scalar" (empty vector) from "never set" (nullopt).
+    if (inferred_output_shapes_ && outputIndex < inferred_output_shapes_->size() &&
+        (*inferred_output_shapes_)[outputIndex].has_value()) {
+        const auto& shape = *(*inferred_output_shapes_)[outputIndex];
 
-        if (!shape.empty()) {
-            // Check if shape contains dynamic dimensions (-1 cast to uint32_t becomes 0xFFFFFFFF)
-            bool has_dynamic = false;
-            for (uint32_t dim : shape) {
-                if (dim == static_cast<uint32_t>(-1)) {
-                    has_dynamic = true;
-                    break;
-                }
+        // Check if shape contains dynamic dimensions (-1 cast to uint32_t becomes 0xFFFFFFFF)
+        bool has_dynamic = false;
+        for (uint32_t dim : shape) {
+            if (dim == static_cast<uint32_t>(-1)) {
+                has_dynamic = true;
+                break;
             }
+        }
 
-            if (!has_dynamic) {
-                // All dimensions are static - use shape as-is
-                return GetOutputTensor(outputIndex, static_cast<uint32_t>(shape.size()), shape.data(), tensor);
-            } else {
-                // Graph shape has dynamic dimensions - fill them from runtime input
-                // Assumption: dynamic dimensions match corresponding dimensions from input 0
-                const OrtValue* input0 = nullptr;
-                OrtStatus* input_status = ort_api_->KernelContext_GetInput(kernel_context_, 0, &input0);
-                if (input_status == nullptr && input0 != nullptr) {
-                    OrtTensorTypeAndShapeInfo* input_info = nullptr;
-                    input_status = ort_api_->GetTensorTypeAndShape(input0, &input_info);
-                    if (input_status == nullptr) {
-                        size_t input_dim_count = 0;
-                        ort_api_->GetDimensionsCount(input_info, &input_dim_count);
+        if (!has_dynamic) {
+            // All dimensions are static (including scalar with 0 dims) - use shape as-is.
+            // Pass nullptr when shape is empty (scalar) to avoid calling .data() on an empty vector.
+            const uint32_t* dims_ptr = shape.empty() ? nullptr : shape.data();
+            return GetOutputTensor(outputIndex, static_cast<uint32_t>(shape.size()), dims_ptr, tensor);
+        } else {
+            // Graph shape has dynamic dimensions - fill them from runtime input
+            // Assumption: dynamic dimensions match corresponding dimensions from input 0
+            const OrtValue* input0 = nullptr;
+            OrtStatus* input_status = ort_api_->KernelContext_GetInput(kernel_context_, 0, &input0);
+            if (input_status == nullptr && input0 != nullptr) {
+                OrtTensorTypeAndShapeInfo* input_info = nullptr;
+                input_status = ort_api_->GetTensorTypeAndShape(input0, &input_info);
+                if (input_status == nullptr) {
+                    size_t input_dim_count = 0;
+                    ort_api_->GetDimensionsCount(input_info, &input_dim_count);
 
-                        if (input_dim_count == shape.size()) {
-                            std::vector<int64_t> input_dims(input_dim_count);
-                            ort_api_->GetDimensions(input_info, input_dims.data(), input_dim_count);
+                    if (input_dim_count == shape.size()) {
+                        std::vector<int64_t> input_dims(input_dim_count);
+                        ort_api_->GetDimensions(input_info, input_dims.data(), input_dim_count);
 
-                            // Fill dynamic dimensions from input
-                            std::vector<uint32_t> filled_shape(shape.size());
-
-                            for (size_t i = 0; i < shape.size(); ++i) {
-                                if (shape[i] == static_cast<uint32_t>(-1)) {
-                                    filled_shape[i] = static_cast<uint32_t>(input_dims[i]);
-                                } else {
-                                    filled_shape[i] = shape[i];
-                                }
-                            }
-
-                            ort_api_->ReleaseTensorTypeAndShapeInfo(input_info);
-                            return GetOutputTensor(outputIndex, static_cast<uint32_t>(filled_shape.size()), filled_shape.data(), tensor);
+                        // Fill dynamic dimensions from input
+                        std::vector<uint32_t> filled_shape(shape.size());
+                        for (size_t i = 0; i < shape.size(); ++i) {
+                            filled_shape[i] = (shape[i] == static_cast<uint32_t>(-1))
+                                ? static_cast<uint32_t>(input_dims[i]) : shape[i];
                         }
-                        ort_api_->ReleaseTensorTypeAndShapeInfo(input_info);
-                    }
-                    if (input_status) ort_api_->ReleaseStatus(input_status);
-                } else if (input_status) {
-                    ort_api_->ReleaseStatus(input_status);
-                }
 
-                // Fallback: couldn't fill from input, let ONNX Runtime infer
-                // (will fall through to the end of the function)
+                        ort_api_->ReleaseTensorTypeAndShapeInfo(input_info);
+                        return GetOutputTensor(outputIndex, static_cast<uint32_t>(filled_shape.size()), filled_shape.data(), tensor);
+                    }
+                    ort_api_->ReleaseTensorTypeAndShapeInfo(input_info);
+                }
+                if (input_status) ort_api_->ReleaseStatus(input_status);
+            } else if (input_status) {
+                ort_api_->ReleaseStatus(input_status);
             }
+            // Fallback: couldn't fill from input, let ONNX Runtime infer
         }
     }
 
@@ -828,8 +825,8 @@ HRESULT AbiSafeKernelContext::GetOutputTensor(uint32_t outputIndex, IMLOperatorT
         HRESULT hr = shape_inferrer_->InferOutputShapes(inference_context.Get());
         if (SUCCEEDED(hr)) {
             const auto& inferred_shapes = inference_context->GetInferredOutputShapes();
-            if (outputIndex < inferred_shapes.size() && !inferred_shapes[outputIndex].empty()) {
-                const auto& shape = inferred_shapes[outputIndex];
+            if (outputIndex < inferred_shapes.size() && inferred_shapes[outputIndex].has_value()) {
+                const auto& shape = *inferred_shapes[outputIndex];
                 return GetOutputTensor(outputIndex, static_cast<uint32_t>(shape.size()), shape.data(), tensor);
             }
         }
@@ -1745,9 +1742,12 @@ HRESULT AbiSafeShapeInferenceContext::GetInputTensorDimensionCount(
     // Fall back to graph shape from kernel_info (for initializers/constants)
     if (kernel_info_ != nullptr && ort_api_->KernelInfo_GetInputTypeInfo) {
         OrtTypeInfo* type_info = nullptr;
-        if (Ort::Status status{ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info)}; status.IsOK() && type_info != nullptr) {
+        OrtStatus* type_status = ort_api_->KernelInfo_GetInputTypeInfo(kernel_info_, inputIndex, &type_info);
+        Ort::Status status{type_status};
+        if (status.IsOK() && type_info != nullptr) {
             const OrtTensorTypeAndShapeInfo* shape_info = nullptr;
-            if (Ort::Status cast_status{ort_api_->CastTypeInfoToTensorInfo(type_info, &shape_info)}; cast_status.IsOK() && shape_info != nullptr) {
+            Ort::Status cast_status{ort_api_->CastTypeInfoToTensorInfo(type_info, &shape_info)};
+            if (cast_status.IsOK() && shape_info != nullptr) {
                 size_t dim_count = 0;
                 ort_api_->GetDimensionsCount(shape_info, &dim_count);
                 *dimensionCount = static_cast<uint32_t>(dim_count);
@@ -1755,6 +1755,8 @@ HRESULT AbiSafeShapeInferenceContext::GetInputTensorDimensionCount(
                 return S_OK;
             }
             ort_api_->ReleaseTypeInfo(type_info);
+        } else {
+            if (type_info) ort_api_->ReleaseTypeInfo(type_info);
         }
     }
 
@@ -1835,8 +1837,10 @@ HRESULT AbiSafeShapeInferenceContext::SetOutputTensorShape(
         inferred_output_shapes_.resize(outputIndex + 1);
     }
 
-    // Store the inferred shape
-    inferred_output_shapes_[outputIndex].assign(dimensions, dimensions + dimensionCount);
+    // Store the inferred shape. Use make_optional so an empty vector (scalar/0-dim) is
+    // distinguishable from nullopt (never set).
+    inferred_output_shapes_[outputIndex] = std::make_optional(
+        std::vector<uint32_t>(dimensions, dimensions + dimensionCount));
 
     return S_OK;
 }
@@ -2001,7 +2005,8 @@ AbiSafeKernelCreationContext::AbiSafeKernelCreationContext(
     bool is_internal_operator,
     bool requires_input_shapes_at_creation,
     std::unordered_map<std::string, PreFetchedTensorAttr> tensor_attribute_cache,
-    const EdgeShapes* input_shapes_override)
+    const EdgeShapes* input_shapes_override,
+    bool requires_output_shapes_at_creation)
     : kernel_info_(kernel_info)
     , ort_api_(ort_api)
     , default_attributes_(default_attributes)
@@ -2012,6 +2017,7 @@ AbiSafeKernelCreationContext::AbiSafeKernelCreationContext(
     , operator_name_(operator_name)
     , is_internal_operator_(is_internal_operator)
     , requires_input_shapes_at_creation_(requires_input_shapes_at_creation)
+    , requires_output_shapes_at_creation_(requires_output_shapes_at_creation)
     , tensor_attribute_cache_(std::move(tensor_attribute_cache))
     , input_shapes_override_(input_shapes_override)
 {
@@ -2341,12 +2347,12 @@ HRESULT AbiSafeKernelCreationContext::GetInputTensorShape(uint32_t inputIndex, u
 }
 
 bool AbiSafeKernelCreationContext::HasOutputShapeDescription() const noexcept {
-    // Output shapes are only available when they were precomputed by the shape inferrer.
-    // This mirrors OpKernelInfoWrapper::HasOutputShapeDescription() = m_allowOutputShapeQuery
-    // which is set to true only when requiresOutputShapesAtCreation (i.e., a shape inferrer exists).
-    // Returning HasTensorShapeDescription() here was wrong: it would cause output TensorDescs
-    // to be built from graph KernelInfo shapes when no shape inferrer ran, producing wrong strides.
-    return !precomputed_output_shapes_.empty();
+    // Mirrors OpKernelInfoWrapper::HasOutputShapeDescription() = m_allowOutputShapeQuery.
+    // True whenever a shape inferrer was registered (requiresOutputShapesAtCreation), even if it
+    // produced no shapes — scalar outputs cause EdgeShapes::IsUnused() to suppress SetOutputTensorShape,
+    // leaving precomputed_output_shapes_ empty. Without this flag, CreateTensorDescFromOutput would
+    // return an invalid TensorDesc for scalar operators.
+    return requires_output_shapes_at_creation_ || !precomputed_output_shapes_.empty();
 }
 
 HRESULT AbiSafeKernelCreationContext::GetOutputTensorDimensionCount(uint32_t outputIndex, uint32_t* dimensionCount) const noexcept {
@@ -2355,9 +2361,10 @@ HRESULT AbiSafeKernelCreationContext::GetOutputTensorDimensionCount(uint32_t out
     }
 
     // PRIORITY 1: Check precomputed shapes from shape inferrer
-    // These take precedence over graph shapes when available
-    if (outputIndex < precomputed_output_shapes_.size() && !precomputed_output_shapes_[outputIndex].empty()) {
-        *dimensionCount = static_cast<uint32_t>(precomputed_output_shapes_[outputIndex].size());
+    // These take precedence over graph shapes when available.
+    // has_value() distinguishes "explicitly set as scalar" (empty vector) from "never set" (nullopt).
+    if (outputIndex < precomputed_output_shapes_.size() && precomputed_output_shapes_[outputIndex].has_value()) {
+        *dimensionCount = static_cast<uint32_t>(precomputed_output_shapes_[outputIndex]->size());
         return S_OK;
     }
 
@@ -2397,8 +2404,9 @@ HRESULT AbiSafeKernelCreationContext::GetOutputTensorShape(uint32_t outputIndex,
 
     // Use pre-computed output shapes from shape inferrer if available.
     // This mirrors PluginOpKernelInfoWrapper::GetOutputTensorShape which returns m_inferredOutputShapes directly.
-    if (outputIndex < precomputed_output_shapes_.size() && !precomputed_output_shapes_[outputIndex].empty()) {
-        const auto& precomputed_shape = precomputed_output_shapes_[outputIndex];
+    // has_value() distinguishes "explicitly set as scalar" (empty vector) from "never set" (nullopt).
+    if (outputIndex < precomputed_output_shapes_.size() && precomputed_output_shapes_[outputIndex].has_value()) {
+        const auto& precomputed_shape = *precomputed_output_shapes_[outputIndex];
         if (precomputed_shape.size() == dimensionCount) {
             for (uint32_t i = 0; i < dimensionCount; ++i) {
                 dimensions[i] = precomputed_shape[i];
@@ -2986,14 +2994,12 @@ static bool TensorValueHasConcreteDims(const OrtApi* api, const OrtValue* value)
     return true;
 }
 
-// Returns true when all input tensor shapes are known concretely at session-init time.
-// For each input, first checks the proto-level shape via KernelInfo_GetInputTypeInfo.
-// If that reports a dynamic/symbolic dim, falls back to KernelInfoGetConstantInput_tensor:
-// constant/initializer-backed inputs have a materialized OrtValue whose shape is always
-// concrete, even when the proto shape is symbolic (e.g. batch=?). Only returns false when
-// an input is genuinely non-constant with an unresolved shape — meaning it must be deferred
-// to compute time. This matches the effective behavior of the unsafe path's
-// InputTensorShapesDefined(), which sees ORT's internally resolved shapes via OpKernelInfo.
+// Returns true when all input tensor shapes are statically known at session-init time.
+// Checks proto-level shape via KernelInfo_GetInputTypeInfo; falls back to the materialised
+// OrtValue for constant/initializer inputs whose proto shape may be symbolic (e.g. batch=?).
+// Returns false only for genuinely non-constant inputs with unresolved shapes, which must
+// defer kernel creation to compute time. Mirrors InputTensorShapesDefinedOnNode() from the
+// built-in DML EP, which reads the same information directly from the ONNX proto.
 static bool AllInputShapesConcreteInProto(const OrtApi* api, const OrtKernelInfo* kernel_info) {
     size_t input_count = 0;
     OrtStatus* s = api->KernelInfo_GetInputCount(kernel_info, &input_count);
@@ -3016,28 +3022,36 @@ static bool AllInputShapesConcreteInProto(const OrtApi* api, const OrtKernelInfo
                 s = api->GetDimensionsCount(tsi, &dim_count);
                 if (s) { api->ReleaseTypeInfo(type_info); api->ReleaseStatus(s); return false; }
 
-                if (dim_count > 0) {
+                // dim_count == 0 is ambiguous: either a confirmed scalar (rank-0, has_shape()==true
+                // with 0 dims) or no shape at all (has_shape()==false). The C API cannot distinguish
+                // these, so treat it as not concrete and fall through to the constant-input check.
+                // Genuine scalar constants pass via TensorValueHasConcreteDims; inputs with no proto
+                // shape correctly return false and defer to lazy init. This matches
+                // InputTensorShapesDefinedOnNode which checks has_shape() directly on the proto.
+                if (dim_count == 0) {
+                    proto_shape_concrete = false;
+                } else {
                     std::vector<int64_t> dims(dim_count);
                     s = api->GetDimensions(tsi, dims.data(), dim_count);
                     if (s) { api->ReleaseTypeInfo(type_info); api->ReleaseStatus(s); return false; }
                     for (int64_t d : dims) {
                         if (d < 0) { proto_shape_concrete = false; break; }
                     }
-                }
 
-                if (proto_shape_concrete) {
-                    // Also reject named symbolic dims (e.g. "batch_size")
-                    std::vector<const char*> sym_dims(dim_count, nullptr);
-                    s = api->GetSymbolicDimensions(tsi, sym_dims.data(), dim_count);
-                    if (!s) {
-                        for (size_t d = 0; d < dim_count; ++d) {
-                            if (sym_dims[d] && sym_dims[d][0] != '\0') {
-                                proto_shape_concrete = false;
-                                break;
+                    if (proto_shape_concrete) {
+                        // Also reject named symbolic dims (e.g. "batch_size")
+                        std::vector<const char*> sym_dims(dim_count, nullptr);
+                        s = api->GetSymbolicDimensions(tsi, sym_dims.data(), dim_count);
+                        if (!s) {
+                            for (size_t d = 0; d < dim_count; ++d) {
+                                if (sym_dims[d] && sym_dims[d][0] != '\0') {
+                                    proto_shape_concrete = false;
+                                    break;
+                                }
                             }
+                        } else {
+                            api->ReleaseStatus(s);
                         }
-                    } else {
-                        api->ReleaseStatus(s);
                     }
                 }
             }
@@ -3115,7 +3129,9 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
             state->operator_name,
             state->is_internal_operator,
             state->requires_input_shapes_at_creation,
-            std::move(tensor_attr_cache)
+            std::move(tensor_attr_cache),
+            nullptr,  // input_shapes_override
+            state->requires_output_shapes_at_creation
         );
 
         // Use the conservative proto-based shape check to decide whether to create the kernel
@@ -3178,9 +3194,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
                 Microsoft::WRL::ComPtr<IMLOperatorShapeInferenceContext> shape_context_interface;
                 HRESULT shape_hr = shape_inference_context.As(&shape_context_interface);
 
-
                 if (SUCCEEDED(shape_hr)) {
-
                     shape_hr = state->shape_inferrer->InferOutputShapes(shape_context_interface.Get());
 
                     if (SUCCEEDED(shape_hr)) {
@@ -3283,14 +3297,16 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
         // output tensors with wrong sizes at Compute time (old version passes nullptr for outputShapes
         // in that case, forcing the kernel to call GetOutputTensor with explicit runtime dims).
         uint32_t output_count = creation_context->GetOutputCount();
-        abi_kernel->inferred_output_shapes.resize(output_count);
+        abi_kernel->inferred_output_shapes.resize(output_count);  // all nullopt by default
         for (uint32_t i = 0; i < output_count; ++i) {
             if (creation_context->HasOutputShapeDescription()) {
                 uint32_t dim_count = 0;
                 HRESULT hr = creation_context->GetOutputTensorDimensionCount(i, &dim_count);
-                if (SUCCEEDED(hr) && dim_count > 0) {
-                    abi_kernel->inferred_output_shapes[i].resize(dim_count);
-                    creation_context->GetOutputTensorShape(i, dim_count, abi_kernel->inferred_output_shapes[i].data());
+                if (SUCCEEDED(hr)) {
+                    std::vector<uint32_t> shape(dim_count);
+                    if (dim_count == 0 || SUCCEEDED(creation_context->GetOutputTensorShape(i, dim_count, shape.data()))) {
+                        abi_kernel->inferred_output_shapes[i] = std::make_optional(std::move(shape));
+                    }
                 }
             }
         }
@@ -3529,7 +3545,8 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                 kernel->is_internal_operator,
                 kernel->requires_input_shapes_at_creation,
                 std::move(tensor_attr_cache_lazy),
-                &runtime_input_shapes
+                &runtime_input_shapes,
+                kernel->requires_output_shapes_at_creation
             );
 
             if (!creation_context->HasTensorShapeDescription()) {
@@ -3542,7 +3559,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             // When requiresOutputShapesAtCreation=false (e.g. Pad, Resize), the shape inferrer is
             // registered for verification only — do NOT call it here, as required constant inputs may
             // be unavailable to the AbiSafeShapeInferenceContext and will cause null-dereference crashes.
-            std::vector<std::vector<uint32_t>> shape_inferrer_outputs;
+            std::vector<std::optional<std::vector<uint32_t>>> shape_inferrer_outputs;
             if (kernel->shape_inferrer && kernel->requires_output_shapes_at_creation) {
 
                 auto inference_context = Microsoft::WRL::Make<AbiSafeShapeInferenceContext>(
@@ -3556,11 +3573,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                 HRESULT shape_hr = kernel->shape_inferrer->InferOutputShapes(inference_context.Get());
                 if (SUCCEEDED(shape_hr)) {
                     shape_inferrer_outputs = inference_context->GetInferredOutputShapes();
-
-                    // Store inferred shapes in kernel for later use
                     kernel->inferred_output_shapes = shape_inferrer_outputs;
-
-                    // Set precomputed shapes on creation context so GetOutputTensorShape uses them
                     creation_context->SetPrecomputedOutputShapes(shape_inferrer_outputs);
                 }
             }
@@ -3609,18 +3622,15 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             // Mirror old version: m_inferredOutputShapes is only populated when requiresOutputShapesAtCreation.
             if (shape_inferrer_outputs.empty()) {
                 uint32_t creation_context_output_count = creation_context->GetOutputCount();
-                kernel->inferred_output_shapes.resize(creation_context_output_count);
+                kernel->inferred_output_shapes.resize(creation_context_output_count);  // all nullopt by default
                 for (uint32_t i = 0; i < creation_context_output_count; ++i) {
                     if (creation_context->HasOutputShapeDescription()) {
                         uint32_t dim_count = 0;
                         hr = creation_context->GetOutputTensorDimensionCount(i, &dim_count);
                         if (SUCCEEDED(hr)) {
-                            kernel->inferred_output_shapes[i].resize(dim_count);
-                            if (dim_count > 0) {
-                                hr = creation_context->GetOutputTensorShape(i, dim_count, kernel->inferred_output_shapes[i].data());
-                                if (FAILED(hr)) {
-                                    kernel->inferred_output_shapes[i].clear();
-                                }
+                            std::vector<uint32_t> shape(dim_count);
+                            if (dim_count == 0 || SUCCEEDED(creation_context->GetOutputTensorShape(i, dim_count, shape.data()))) {
+                                kernel->inferred_output_shapes[i] = std::make_optional(std::move(shape));
                             }
                         }
                     }
@@ -3732,13 +3742,14 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                     kernel->is_internal_operator,
                     kernel->requires_input_shapes_at_creation,
                     std::move(tensor_attr_cache_tmp),
-                    &current_shapes
+                    &current_shapes,
+                    kernel->requires_output_shapes_at_creation
                 );
 
                 // Run shape inferrer before CreateKernel only when requiresOutputShapesAtCreation=true.
                 // Mirrors unsafe path's inferShapesAndCreateKernel: if (m_requiresOutputShapesAtCreation).
                 // When false (e.g. Pad), the shape inferrer is for verification only — skip it here.
-                std::vector<std::vector<uint32_t>> tmp_output_shapes;
+                std::vector<std::optional<std::vector<uint32_t>>> tmp_output_shapes;
                 if (kernel->shape_inferrer && kernel->requires_output_shapes_at_creation) {
                     auto tmp_inference_context = Microsoft::WRL::Make<AbiSafeShapeInferenceContext>(
                         context,
@@ -3770,13 +3781,15 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                 // Retrieve output shapes from the temporary creation context if not already inferred above.
                 if (tmp_output_shapes.empty()) {
                     uint32_t tmp_output_count = tmp_creation_context->GetOutputCount();
-                    tmp_output_shapes.resize(tmp_output_count);
+                    tmp_output_shapes.resize(tmp_output_count);  // all nullopt by default
                     for (uint32_t i = 0; i < tmp_output_count; ++i) {
                         if (tmp_creation_context->HasOutputShapeDescription()) {
                             uint32_t dim_count = 0;
-                            if (SUCCEEDED(tmp_creation_context->GetOutputTensorDimensionCount(i, &dim_count)) && dim_count > 0) {
-                                tmp_output_shapes[i].resize(dim_count);
-                                tmp_creation_context->GetOutputTensorShape(i, dim_count, tmp_output_shapes[i].data());
+                            if (SUCCEEDED(tmp_creation_context->GetOutputTensorDimensionCount(i, &dim_count))) {
+                                std::vector<uint32_t> shape(dim_count);
+                                if (dim_count == 0 || SUCCEEDED(tmp_creation_context->GetOutputTensorShape(i, dim_count, shape.data()))) {
+                                    tmp_output_shapes[i] = std::make_optional(std::move(shape));
+                                }
                             }
                         }
                     }
