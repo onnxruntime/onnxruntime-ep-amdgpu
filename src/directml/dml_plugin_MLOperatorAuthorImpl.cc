@@ -904,10 +904,10 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
 
             if (m_requiresOutputShapesAtCreation)
             {
-                std::vector<std::vector<uint32_t>> outputShapeVecs(m_inferredOutputShapes.EdgeCount());
+                std::vector<std::optional<std::vector<uint32_t>>> outputShapeVecs(m_inferredOutputShapes.EdgeCount());
                 for (size_t i = 0; i < m_inferredOutputShapes.EdgeCount(); ++i)
                 {
-                    outputShapeVecs[i] = m_inferredOutputShapes.GetShape(i);
+                    outputShapeVecs[i] = std::make_optional(m_inferredOutputShapes.GetShape(i));
                 }
                 kernelCreationContext->SetPrecomputedOutputShapes(outputShapeVecs);
             }
@@ -1052,10 +1052,10 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
 
             if (m_requiresOutputShapesAtCreation)
             {
-                std::vector<std::vector<uint32_t>> outputShapeVecs(outputShapes.EdgeCount());
+                std::vector<std::optional<std::vector<uint32_t>>> outputShapeVecs(outputShapes.EdgeCount());
                 for (size_t i = 0; i < outputShapes.EdgeCount(); ++i)
                 {
-                    outputShapeVecs[i] = outputShapes.GetShape(i);
+                    outputShapeVecs[i] = std::make_optional(outputShapes.GetShape(i));
                 }
                 kernelCreationContext->SetPrecomputedOutputShapes(outputShapeVecs);
             }
@@ -1419,9 +1419,9 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
         const auto& inferredShapes = inferenceContext->GetInferredOutputShapes();
         for (size_t outputIndex = 0; outputIndex < outputShapes.EdgeCount(); ++outputIndex)
         {
-            if (outputIndex < inferredShapes.size() && !inferredShapes[outputIndex].empty())
+            if (outputIndex < inferredShapes.size() && inferredShapes[outputIndex].has_value())
             {
-                outputShapes.GetMutableShape(outputIndex) = inferredShapes[outputIndex];
+                outputShapes.GetMutableShape(outputIndex) = *inferredShapes[outputIndex];
             }
         }
 
