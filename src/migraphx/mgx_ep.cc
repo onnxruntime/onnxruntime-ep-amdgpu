@@ -318,7 +318,9 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
 bool AllNodesAssignedToEp(const Ort::ConstGraph& graph, std::string_view ep_name) {
     const auto nodes{graph.GetNodes()};
     return !nodes.empty() && ranges::all_of(nodes,
-        [&ep_name](const Ort::ConstNode& node) { return node.GetName() == ep_name; });
+        [&ep_name](const Ort::ConstNode& node) { 
+            return node.GetName() == ep_name; 
+        });
 }
 
 bool IsNodeControlFlowOp(const Ort::ConstNode& node) {
@@ -503,6 +505,18 @@ try {
         return STATUS_OK;
     }
 
+    // If this graph is a subgraph of a control flow op (If/Loop/Scan),
+    // do not claim its nodes separately. The parent op will be claimed
+    // by the outer graph's GetCapability and compiled with the original
+    // unfused subgraphs intact
+    const auto parent_node = graph.GetParentNode();
+    if (parent_node) {
+        const auto parent_op_type = parent_node.GetOperatorType();
+        if (parent_op_type == "If" || parent_op_type == "Loop" || parent_op_type == "Scan") {
+            return STATUS_OK;
+        }
+    }
+
     // Check if this graph contains EPContext nodes intended for this EP.
     if (EpContextNodeReader::GraphHasContextNode(graph)) {
         std::vector<Ort::ConstNode> ep_context_nodes;
@@ -547,9 +561,10 @@ try {
                         return AllNodesAssignedToEp(attr.sub_graph, ep_name_);
                     });
             };
-            if (!supported_control_flow(node)) {
-                return STATUS_OK;
-            }
+            // Subgraph nodes are processed in separate prior GetCapability calls.
+            // EP assignment of subgraph nodes cannot be verified through this API
+            // during the parent graph's GetCapability pass. Fall through to the
+            // normal op type check to let MIGraphX claim supported control flow ops.
         }
 
         bool are_types_supported{true};
