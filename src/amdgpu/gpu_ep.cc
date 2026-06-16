@@ -141,6 +141,12 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 get_name(mgx_ep::provider_option::kForceRecompile).c_str(),
                 std::to_string(info.force_recompile.value()).c_str()));
         }
+        if (info.exhaustive_tune.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kExhaustiveTune).c_str(),
+                std::to_string(info.exhaustive_tune.value()).c_str()));
+        }
         if (info.mlss_use_specific_ops.has_value()) {
             THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
                 local_session_options,

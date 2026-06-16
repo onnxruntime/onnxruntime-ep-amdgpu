@@ -21,6 +21,7 @@ struct ProviderInfo {
     std::optional<int> device_id{};
     std::optional<bool> disable_caching{};
     std::optional<bool> force_recompile{};
+    std::optional<bool> exhaustive_tune{};
     std::optional<fs::path> cache_dir{};
     std::optional<std::string> mlss_use_specific_ops{};
 

@@ -32,6 +32,7 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kDisableCaching, disable_caching)
             .AddAssignmentToReference(provider_option::kCacheDir, cache_dir)
             .AddAssignmentToReference(provider_option::kForceRecompile, force_recompile)
+            .AddAssignmentToReference(provider_option::kExhaustiveTune, exhaustive_tune)
             .AddAssignmentToReference(provider_option::kMlssUseSpecificOps, mlss_use_specific_ops)
             .Parse(provider_options));
 }
