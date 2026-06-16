@@ -36,6 +36,7 @@ struct ProviderInfo {
     bool hip_graph_enable{};
     std::size_t max_dynamic_batch{};
     std::string compile_batches{};
+    bool coalesce_io{};
 
     ProviderInfo() = default;
 

@@ -463,6 +463,7 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kHipGraphEnable, hip_graph_enable_);
     PARSE_ENV_VAR(env_var::kMaxDynamicBatch, max_dynamic_batch_);
     PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
+    PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
 
     auto compute_mode{platform::GetEnvironmentVar(env_var::kComputeMode)};
     if (!compute_mode.empty()) {
@@ -502,6 +503,13 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
             hip_graph_enable_ = false;
             /* TODO: log that hipGraph was disabled due to incompatible MIGraphX env. */
         }
+    }
+
+    // Coalesced input H2D rides on the staging path, which only runs when hipGraph
+    // (or dynamic batching) is active.  Without one of those the flag has no effect.
+    if (coalesce_io_enable_ && !hip_graph_enable_ && max_dynamic_batch_ == 0) {
+        /* TODO: log warning that ORT_MIGRAPHX_COALESCE_IO requires hipGraph or
+           dynamic batching (the staging path) to take effect. */
     }
 
     // If compile_batches is set, derive max_dynamic_batch from the spec's max value.
@@ -548,10 +556,19 @@ ExecutionProvider::~ExecutionProvider() {
             entry.captured = false;
         }
         for (auto& [param_name, buf] : cs.staging_inputs) {
-            if (buf.data != nullptr) {
+            // Arena sub-views are not independent allocations; the arena is freed below.
+            if (buf.data != nullptr && !buf.is_arena_view) {
                 (void)hipFree(buf.data);
-                buf.data = nullptr;
             }
+            buf.data = nullptr;
+        }
+        if (cs.in_arena_dev != nullptr) {
+            (void)hipFree(cs.in_arena_dev);
+            cs.in_arena_dev = nullptr;
+        }
+        if (cs.in_staging_host != nullptr) {
+            (void)hipHostFree(cs.in_staging_host);
+            cs.in_staging_host = nullptr;
         }
         for (auto& [param_name, buf] : cs.staging_outputs) {
             if (buf.data != nullptr) {
@@ -877,6 +894,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     compute_state.hip_graph_enable = hip_graph_enable_;
     compute_state.max_dynamic_batch = max_dynamic_batch_;
     compute_state.compile_batches = compile_batches_;
+    compute_state.coalesce_io = coalesce_io_enable_;
 
     node_compute_info = std::make_unique<NodeComputeInfo>(*this).release();
     return STATUS_OK;

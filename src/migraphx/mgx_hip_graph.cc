@@ -7,6 +7,7 @@
 #include <cctype>
 #include <charconv>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <mutex>
 #include <numeric>
@@ -23,10 +24,18 @@ namespace {
 
 constexpr std::string_view kScratchParam{"scratch"};
 
+// Arena slot alignment: every coalesced input sub-view starts on this boundary so
+// the device kernels that consume it stay aligned.
+constexpr std::size_t kArenaAlign = 256;
+
 // Product of a length vector (1 for an empty/scalar shape).
 std::size_t ProductOf(const std::vector<std::size_t>& lengths) {
     return std::accumulate(lengths.begin(), lengths.end(), std::size_t{1},
         std::multiplies<std::size_t>{});
+}
+
+std::size_t AlignUp(std::size_t value, std::size_t alignment) {
+    return (value + alignment - 1) / alignment * alignment;
 }
 
 // Capture warm-in tuning.  A small pre-capture eager phase finalizes MIGraphX's
@@ -297,7 +306,7 @@ void AllocateStaging(ComputeState& cs,
 
     // Batched buffers (batch on axis 0) are sized at max_dynamic_batch so the same
     // allocation serves every compiled bucket; smaller buckets bind a prefix.
-    const auto alloc_buffer{[&](const migraphx::shape& shape) -> StagingBuffer {
+    const auto buffer_bytes{[&](const migraphx::shape& shape) -> std::size_t {
         std::size_t bytes{shape.bytes()};
         if (dyn.active && dyn.target_batch > 0) {
             const auto lens{shape.lengths()};
@@ -307,20 +316,71 @@ void AllocateStaging(ComputeState& cs,
                 bytes = row_bytes * max_batch;
             }
         }
+        return bytes;
+    }};
+
+    const auto alloc_buffer{[&](const migraphx::shape& shape) -> StagingBuffer {
+        const std::size_t bytes{buffer_bytes(shape)};
         void* ptr{nullptr};
         HIP_CALL_THROW(hipMalloc(&ptr, bytes));
         HIP_CALL_THROW(hipMemsetAsync(ptr, 0, bytes, stream));
         return StagingBuffer{ptr, bytes, shape};
     }};
 
+    // ── Coalesced inputs: one device arena + one pinned host staging buffer ───
+    // Inputs become sub-views into the arena so bind/capture paths are unchanged,
+    // and copy gathers them host-side then issues a single H2D for the whole arena.
+    if (cs.coalesce_io) {
+        std::size_t offset{0};
+        for (const auto& name : param_shapes.names()) {
+            const std::string param_name{name};
+            if (std::string_view{name} == kScratchParam ||
+                cs.input_name_indices.count(param_name) == 0) {
+                continue;
+            }
+            const auto shape{param_shapes[name]};
+            const std::size_t bytes{buffer_bytes(shape)};
+            StagingBuffer buf{};
+            buf.size_bytes = bytes;
+            buf.shape = shape;
+            buf.arena_offset = offset;
+            buf.is_arena_view = true;
+            cs.staging_inputs.emplace(param_name, buf);
+            offset += AlignUp(bytes, kArenaAlign);
+        }
+        cs.in_arena_bytes = offset;
+
+        if (cs.in_arena_bytes > 0) {
+            HIP_CALL_THROW(hipMalloc(&cs.in_arena_dev, cs.in_arena_bytes));
+            HIP_CALL_THROW(hipMemsetAsync(cs.in_arena_dev, 0, cs.in_arena_bytes, stream));
+            HIP_CALL_THROW(hipHostMalloc(&cs.in_staging_host, cs.in_arena_bytes, hipHostMallocDefault));
+            std::memset(cs.in_staging_host, 0, cs.in_arena_bytes);
+            for (auto& [param_name, buf] : cs.staging_inputs) {
+                buf.data = static_cast<char*>(cs.in_arena_dev) + buf.arena_offset;
+            }
+        }
+        cs.staging_inputs_coalesced = true;
+    } else {
+        for (const auto& name : param_shapes.names()) {
+            const std::string param_name{name};
+            if (std::string_view{name} == kScratchParam) {
+                continue;  // scratch is owned separately
+            }
+            if (cs.input_name_indices.count(param_name) > 0) {
+                cs.staging_inputs.emplace(param_name, alloc_buffer(param_shapes[name]));
+            }
+        }
+    }
+
+    // Outputs are always per-buffer: each maps to a distinct ORT destination, so
+    // there is no copy-count win from coalescing them at the EP layer.
     for (const auto& name : param_shapes.names()) {
         const std::string param_name{name};
-        if (std::string_view{name} == kScratchParam) {
-            continue;  // scratch is owned separately
+        if (std::string_view{name} == kScratchParam ||
+            cs.input_name_indices.count(param_name) > 0) {
+            continue;
         }
-        if (cs.input_name_indices.count(param_name) > 0) {
-            cs.staging_inputs.emplace(param_name, alloc_buffer(param_shapes[name]));
-        } else if (ComputeOutputIndex(name) != -1) {
+        if (ComputeOutputIndex(name) != -1) {
             cs.staging_outputs.emplace(param_name, alloc_buffer(param_shapes[name]));
         }
     }
@@ -334,6 +394,60 @@ void CopyInputsToStaging(ComputeState& cs,
     const Ort::KernelContext& ctx, hipStream_t stream,
     const DynamicBatchContext& dyn)
 {
+    // ── Coalesced fast path ───────────────────────────────────────────────────
+    // When the input arena is active, there is no padding, and every input is
+    // host-resident, gather all inputs into the pinned staging buffer and issue a
+    // single H2D for the whole arena -- collapsing the per-input launch overhead
+    // that dominates batch-1 many-input models.  Any other case (padding or a
+    // device-resident input) falls through to the per-input loop below, which is
+    // still correct because each staging buffer's data points into the arena.
+    const bool no_padding{!dyn.active || dyn.target_batch == dyn.requested_batch};
+    if (cs.staging_inputs_coalesced && cs.in_staging_host != nullptr && no_padding) {
+        bool all_host{true};
+        for (const auto& name : param_shapes.names()) {
+            const auto idx_it{cs.input_name_indices.find(std::string{name})};
+            if (idx_it == cs.input_name_indices.end()) {
+                continue;
+            }
+            const auto mem{ctx.GetInput(idx_it->second).GetTensorMemoryInfo()};
+            if (mem.GetDeviceType() != OrtMemoryInfoDeviceType_CPU) {
+                all_host = false;
+                break;
+            }
+        }
+
+        if (all_host) {
+            char* host_base{static_cast<char*>(cs.in_staging_host)};
+            for (const auto& name : param_shapes.names()) {
+                const std::string param_name{name};
+                const auto idx_it{cs.input_name_indices.find(param_name)};
+                if (idx_it == cs.input_name_indices.end()) {
+                    continue;
+                }
+                const auto stage_it{cs.staging_inputs.find(param_name)};
+                if (stage_it == cs.staging_inputs.end()) {
+                    continue;
+                }
+                const auto& stage{stage_it->second};
+                const auto input_tensor{ctx.GetInput(idx_it->second)};
+                const void* src{input_tensor.GetTensorRawData()};
+                std::size_t copy_bytes{param_shapes[name].bytes()};
+                if (copy_bytes > stage.size_bytes) {
+                    copy_bytes = stage.size_bytes;
+                }
+                if (copy_bytes > 0) {
+                    std::memcpy(host_base + stage.arena_offset, src, copy_bytes);
+                }
+            }
+            // One transfer for every input.  Copying the whole arena (including the
+            // aligned gaps) keeps it a single contiguous DMA; the program only reads
+            // the bound rows of each sub-view.
+            HIP_CALL_THROW(hipMemcpyAsync(cs.in_arena_dev, cs.in_staging_host,
+                cs.in_arena_bytes, hipMemcpyHostToDevice, stream));
+            return;
+        }
+    }
+
     for (const auto& name : param_shapes.names()) {
         const std::string param_name{name};
         const auto idx_it{cs.input_name_indices.find(param_name)};
@@ -447,11 +561,22 @@ void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
 
 void FreeStaging(ComputeState& cs) {
     for (auto& [name, buf] : cs.staging_inputs) {
-        if (buf.data != nullptr) {
+        // Arena sub-views are not independent allocations; the arena is freed below.
+        if (buf.data != nullptr && !buf.is_arena_view) {
             (void)hipFree(buf.data);
-            buf.data = nullptr;
         }
+        buf.data = nullptr;
     }
+    if (cs.in_arena_dev != nullptr) {
+        (void)hipFree(cs.in_arena_dev);
+        cs.in_arena_dev = nullptr;
+    }
+    if (cs.in_staging_host != nullptr) {
+        (void)hipHostFree(cs.in_staging_host);
+        cs.in_staging_host = nullptr;
+    }
+    cs.in_arena_bytes = 0;
+    cs.staging_inputs_coalesced = false;
     for (auto& [name, buf] : cs.staging_outputs) {
         if (buf.data != nullptr) {
             (void)hipFree(buf.data);

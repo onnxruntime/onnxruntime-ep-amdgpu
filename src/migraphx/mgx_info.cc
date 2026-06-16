@@ -73,6 +73,7 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kForceRecompile, force_recompile)
             .AddAssignmentToReference(provider_option::kHipGraphEnable, hip_graph_enable)
             .AddAssignmentToReference(provider_option::kMaxDynamicBatch, max_dynamic_batch)
+            .AddAssignmentToReference(provider_option::kCoalesceIO, coalesce_io)
             .Parse(provider_options));
 }
 

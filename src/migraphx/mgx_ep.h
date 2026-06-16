@@ -40,6 +40,7 @@ constexpr auto kExhaustiveTune = "ORT_MIGRAPHX_EXHAUSTIVE_TUNE"sv;
 constexpr auto kHipGraphEnable = "ORT_MIGRAPHX_HIP_GRAPH_ENABLE"sv;
 constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
 constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
+constexpr auto kCoalesceIO = "ORT_MIGRAPHX_COALESCE_IO"sv;
 }  // namespace env_vars
 
 // EP-owned device staging buffer (pointer-stable across runs so it can be
@@ -49,6 +50,11 @@ struct StagingBuffer {
     void* data{nullptr};
     std::size_t size_bytes{};
     migraphx::shape shape{};
+    // When the input arena is active (coalesce_io), `data` is a sub-view into the
+    // shared device arena rather than an independent allocation, so it must not be
+    // freed individually.  `arena_offset` is its byte offset within the arena.
+    std::size_t arena_offset{};
+    bool is_arena_view{};
 };
 
 // EP-owned scratch buffer bound to a MIGraphX program's "scratch" parameter.
@@ -122,6 +128,16 @@ struct ComputeState {
     std::vector<std::size_t> compiled_batch_sizes{};
     // Compiled program variants keyed by shape/batch hash.
     Map<migraphx::program> cached_programs{};
+
+    // ── Coalesced input arena (ORT_MIGRAPHX_COALESCE_IO) ─────────────────────
+    // When coalesce_io is set, every input staging buffer's data points into a
+    // single device arena (in_arena_dev) fed by one pinned host staging buffer
+    // (in_staging_host); copying gathers all inputs host-side then issues one H2D.
+    bool coalesce_io{};
+    bool staging_inputs_coalesced{};
+    void* in_arena_dev{nullptr};
+    void* in_staging_host{nullptr};
+    std::size_t in_arena_bytes{};
 
     // ── hipGraph / staging / scratch runtime state (owned device memory) ──────
     // Staging buffers keyed by MIGraphX program parameter name.
@@ -234,6 +250,7 @@ private:
     bool hip_graph_enable_{};
     std::size_t max_dynamic_batch_{};
     std::string compile_batches_{};
+    bool coalesce_io_enable_{};
 
     std::mutex mutex_{};
 };
