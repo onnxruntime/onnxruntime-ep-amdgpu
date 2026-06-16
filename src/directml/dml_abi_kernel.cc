@@ -141,13 +141,13 @@ void DmlPerfWriteLogImpl(std::string_view msg) noexcept {
     std::lock_guard<std::mutex> lock(GetPerfMutex());
     FILE* f = GetOrOpenPerfLogFile();
     if (f == nullptr) return;
-    fmt::print(f, "{}", msg);
+    fmt::println(f, "{}", msg);
     std::fflush(f);
 }
 
 
 void PrintKernelPerfCounters(const DmlAbiKernel& kernel) noexcept {
-    if (kernel.perf != nullptr)
+    if (kernel.perf == nullptr)
     {
         return;
     }
