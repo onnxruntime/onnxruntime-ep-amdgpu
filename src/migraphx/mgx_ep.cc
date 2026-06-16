@@ -458,9 +458,7 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kExhaustiveTune, exhaustive_tune_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
 
-    if (!mlss_use_specific_ops_.empty()) {
-        platform::SetEnvironmentVar("MIGRAPHX_MLSS_USE_SPECIFIC_OPS", mlss_use_specific_ops_);
-    }
+    platform::SetEnvironmentVar("MIGRAPHX_MLSS_USE_SPECIFIC_OPS", mlss_use_specific_ops_);
 
     auto compute_mode{platform::GetEnvironmentVar(env_var::kComputeMode)};
     if (!compute_mode.empty()) {

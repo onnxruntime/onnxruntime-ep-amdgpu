@@ -4,6 +4,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <cstdlib>
+
 #include "parse_string.h"
 #include "platform/windows/env_var.h"
 
@@ -26,7 +28,14 @@ std::string GetEnvironmentVar(const std::string_view name) {
 }
 
 void SetEnvironmentVar(const std::string_view name, const std::string_view value) {
-    ::SetEnvironmentVariable(std::string{name}.c_str(), std::string{value}.c_str());
+    // MIGraphX (and other CRT consumers) read via std::getenv, which uses the CRT
+    // environment block. On Windows that block is separate from the Win32 block that
+    // SetEnvironmentVariable updates, so use _putenv_s to reach getenv. Set both so
+    // Win32-based readers stay consistent too. An empty value clears the variable.
+    const std::string name_str{name};
+    const std::string value_str{value};
+    ::_putenv_s(name_str.c_str(), value_str.c_str());
+    ::SetEnvironmentVariable(name_str.c_str(), value.empty() ? nullptr : value_str.c_str());
 }
 
 }  // namespace platform
