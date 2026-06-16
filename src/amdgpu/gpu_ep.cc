@@ -36,6 +36,8 @@
 namespace gpu_ep {
 
 ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view ep_name,
+        [[maybe_unused]] gsl::span<const OrtHardwareDevice* const> devices,
+        [[maybe_unused]] gsl::span<const OrtKeyValuePairs* const> ep_metadata,
         const Ort::ConstSessionOptions& session_options, const OrtLogger* logger)
     : OrtEp{ORT_API_VERSION},
       ApiPtrs{factory.ort_api, factory.ep_api, factory.model_editor_api},
@@ -116,6 +118,14 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         };
     };
 
+    const auto create_hipep_backend = [&] {
+        // hipep manages allocator/data-transfer at the backend factory level,
+        // reached through the amdgpu Allocator/DataTransfer wrappers — leave
+        // OrtEp::CreateAllocator null so ORT falls back to ep_factory_.CreateAllocator.
+        THROW_IF_ERROR(factory.CreateHipepBackend(devices, ep_metadata, local_session_options,
+            logger, backend_ep_));
+    };
+
     const auto create_migraphx_backend = [&] {
         const auto get_name = [](const std::string_view sv) {
             return std::string{"ep."}.append(kMIGraphXBackend).append(".").append(sv);
@@ -165,6 +175,8 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         create_directml_backend();
     } else if (info.profile == Profile::MIGraphX) {
         create_migraphx_backend();
+    } else if (info.profile == Profile::Llm) {
+        create_hipep_backend();
     } else {
         create_migraphx_backend();
     }

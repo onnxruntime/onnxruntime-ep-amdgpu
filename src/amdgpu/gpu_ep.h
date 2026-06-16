@@ -10,6 +10,8 @@ namespace gpu_ep {
 
 struct ExecutionProvider : OrtEp, ApiPtrs {
     ExecutionProvider(ProviderFactory& factory, std::string_view ep_name,
+        gsl::span<const OrtHardwareDevice* const> devices,
+        gsl::span<const OrtKeyValuePairs* const> ep_metadata,
         const Ort::ConstSessionOptions& session_options, const OrtLogger* logger);
     ~ExecutionProvider();
 

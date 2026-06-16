@@ -47,6 +47,7 @@ namespace gpu_ep {
 namespace {
 constexpr auto directmlBackend{LIBRARY_PREFIX ORT_TSTR("directml-backend") LIBRARY_SUFFIX};
 constexpr auto migraphxBackend{LIBRARY_PREFIX ORT_TSTR("migraphx-backend") LIBRARY_SUFFIX};
+constexpr auto hipepBackend{LIBRARY_PREFIX ORT_TSTR("hipep-backend") LIBRARY_SUFFIX};
 }
 
 ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_api_base, const char* ep_name, const OrtLogger* default_logger)
@@ -145,6 +146,18 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     THROW_IF_ERROR(mgx_create_ep_factories(kMIGraphXBackend, ort_api_base, default_logger,
         &mgx_ep_factory_, 1, &factories_created));
 
+    THROW_IF_ERROR(LoadDynamicLibrary(hipepBackend, &hip_backend_));
+    THROW_IF_ERROR(GetSymbolFromLibrary(hip_backend_,
+        "ReleaseEpFactory", reinterpret_cast<void**>(&hip_release_ep_factory_)));
+
+    CreateEpFactories_t hip_create_ep_factories{};
+    THROW_IF_ERROR(GetSymbolFromLibrary(hip_backend_,
+        "CreateEpFactories", reinterpret_cast<void**>(&hip_create_ep_factories)));
+
+    // Pass ep_name_ so the hipep backend's EP reports the same name ORT sees.
+    THROW_IF_ERROR(hip_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
+        &hip_ep_factory_, 1, &factories_created));
+
     data_transfer_ = std::make_unique<DataTransfer>(*this);
 }
 
@@ -168,6 +181,9 @@ ProviderFactory::~ProviderFactory() {
     }
     if (!UnloadDynamicLibrary(mgx_backend_).IsOK()) {
         /* TODO: log failure while unloading MIGraphX EP library */
+    }
+    if (!UnloadDynamicLibrary(hip_backend_).IsOK()) {
+        /* TODO: log failure while unloading hipep EP library */
     }
 }
 
@@ -222,7 +238,7 @@ Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHar
 }
 
 Ort::Status ProviderFactory::CreateEp(gsl::span<const OrtHardwareDevice* const> devices,
-    gsl::span<const OrtKeyValuePairs* const> /* ep_metadata */,
+    gsl::span<const OrtKeyValuePairs* const> ep_metadata,
     const Ort::ConstSessionOptions& session_options, const OrtLogger* logger, OrtEp* &ep)
 try {
     ep = nullptr;
@@ -230,7 +246,8 @@ try {
         return MAKE_STATUS(ORT_INVALID_ARGUMENT, "only supports selection for a single device");
     }
 
-    ep = std::make_unique<ExecutionProvider>(*this, ep_name_, session_options, logger).release();
+    ep = std::make_unique<ExecutionProvider>(*this, ep_name_, devices, ep_metadata,
+        session_options, logger).release();
     return STATUS_OK;
 } catch (const Ort::Exception& e) {
     return Ort::Status{e};
