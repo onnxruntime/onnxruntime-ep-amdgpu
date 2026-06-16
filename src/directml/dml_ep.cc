@@ -7,6 +7,8 @@
 #include "core/common/inlined_containers_fwd.h"
 #include "core/framework/fuse_nodes_funcs.h"
 #include "dml_abi_kernel.h"
+#include "ep_fusion_manager.h"
+#include "quick_gelu_ep_fusion.h"
 
 namespace dml_ep {
 
@@ -557,10 +559,39 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
     // Get the list of nodes that should stay on the CPU
     std::unordered_set<size_t> cpuPreferredNodes = ep->GetCpuPreferredNodes(graph, graph_support_info, tentativeNodes);
 
+    // Run graph-level fusions in a single greedy pass (largest pattern wins).
+    // Each matched fusion group is submitted to ORT via AddNodesToFuse and
+    // routed through CompileImpl().  Claimed node IDs are collected so that
+    // the single-node loop below can skip them.
+    // Build the anchor index once per session and store it — the IFusionRule
+    // objects it owns are referenced by raw pointer in FusionMatch and must
+    // outlive m_fusionMap.
+    ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex();
+    ep->m_fusionMap.clear();
+
+    std::unordered_set<size_t> fusedNodeIds;
+    EpFusionManager::ApplyFusions(
+        ep->m_anchorIndex,
+        ep->ort_api,
+        ep->ep_api,
+        graph,
+        graph_support_info,
+        ep->m_graphInitializerMap,
+        [ep, graph_support_info](const OrtNode* n, uint32_t mask) {
+            return ep->IsNodeSupportedByDml(n, graph_support_info, mask);
+        },
+        cpuPreferredNodes,
+        deviceDataTypeMask,
+        fusedNodeIds,
+        ep->m_fusionMap);
+
     std::vector<const OrtNode*> supportedNodes;
     for (const OrtNode* node : nodesInTopologicalOrder) {
         size_t nodeID = 0;
         ep->ort_api.Node_GetId(node, &nodeID);
+
+        // Skip nodes already claimed by a fusion group.
+        if (fusedNodeIds.count(nodeID)) continue;
 
         const char* op_type = nullptr;
         ep->ort_api.Node_GetOperatorType(node, &op_type);
@@ -585,6 +616,27 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
                                     _Out_writes_(count) OrtNode** ep_context_nodes) noexcept
 {
     auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+
+    for (size_t i = 0; i < count; ++i) {
+        node_compute_infos[i] = nullptr;
+        ep_context_nodes[i]   = nullptr;
+
+        // Compile the fused subgraph to a self-contained OrtNodeComputeInfo that
+        // builds and executes the DML operator.  DML graph compilation happens
+        // at session initialization; Compute() dispatches each inference call.
+        node_compute_infos[i] = EpFusionManager::CompileFusion(
+            ep->ort_api,
+            graphs[i],
+            ep->m_graphInitializerMap,
+            ep->m_executionProvider.get(),
+            ep->m_fusionMap);
+
+        if (!node_compute_infos[i]) {
+            return ep->ort_api.CreateStatus(ORT_EP_FAIL,
+                "CompileImpl: no fusion rule matched a fused subgraph");
+        }
+    }
+
     return nullptr;
 }
 
@@ -593,8 +645,13 @@ void ORT_API_CALL ExecutionProviderPlugin::ReleaseNodeComputeInfosImpl(
     OrtNodeComputeInfo** node_compute_infos,
     size_t num_node_compute_infos) noexcept
 {
-    auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
     (void)this_ptr;
+    for (size_t i = 0; i < num_node_compute_infos; ++i) {
+        // Each OrtNodeComputeInfo is a heap-allocated QuickGeluNodeComputeInfo.
+        // The destructor releases the compiled state (IDMLCompiledOperator, etc.).
+        delete node_compute_infos[i];
+        node_compute_infos[i] = nullptr;
+    }
 }
 
 OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetPreferredDataLayoutImpl(
