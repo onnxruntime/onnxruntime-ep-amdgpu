@@ -21,5 +21,6 @@ constexpr auto kComputeMode = "compute_mode"sv;
 constexpr auto kCacheDir = "cache_dir"sv;
 constexpr auto kExhaustiveTune = "exhaustive_tune"sv;
 constexpr auto kDumpSubgraphs = "dump_subgraphs"sv;
+constexpr auto kMlssUseSpecificOps = "mlss_use_specific_ops"sv;
 
 }  // namespace mgx_ep::provider_option

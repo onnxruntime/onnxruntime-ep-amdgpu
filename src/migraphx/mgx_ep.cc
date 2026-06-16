@@ -425,6 +425,7 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     enable_fp8_ = info.enable_fp8;
     enable_int8_ = info.enable_int8;
     exhaustive_tune_ = info.exhaustive_tune;
+    mlss_use_specific_ops_ = info.mlss_use_specific_ops;
     cache_dir_ = info.cache_dir;
     int8_use_native_calibration_table_ = info.int8_use_native_calibration_table;
     int8_calibration_table_name_ = info.int8_calibration_table_name;
@@ -455,6 +456,11 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kDumpSubgraphs, dump_subgraphs_);
     PARSE_ENV_VAR(env_var::kDumpEpContextModel, context_enable_);
     PARSE_ENV_VAR(env_var::kExhaustiveTune, exhaustive_tune_);
+    PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
+
+    if (!mlss_use_specific_ops_.empty()) {
+        platform::SetEnvironmentVar("MIGRAPHX_MLSS_USE_SPECIFIC_OPS", mlss_use_specific_ops_);
+    }
 
     auto compute_mode{platform::GetEnvironmentVar(env_var::kComputeMode)};
     if (!compute_mode.empty()) {

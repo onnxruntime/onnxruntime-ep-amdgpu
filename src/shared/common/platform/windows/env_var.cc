@@ -25,4 +25,8 @@ std::string GetEnvironmentVar(const std::string_view name) {
     return {};
 }
 
+void SetEnvironmentVar(const std::string_view name, const std::string_view value) {
+    ::SetEnvironmentVariable(std::string{name}.c_str(), std::string{value}.c_str());
+}
+
 }  // namespace platform

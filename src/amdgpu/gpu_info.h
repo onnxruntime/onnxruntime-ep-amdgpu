@@ -22,6 +22,7 @@ struct ProviderInfo {
     std::optional<bool> disable_caching{};
     std::optional<bool> force_recompile{};
     std::optional<fs::path> cache_dir{};
+    std::optional<std::string> mlss_use_specific_ops{};
 
     ProviderInfo() = default;
 
