@@ -33,6 +33,7 @@ constexpr auto kCacheDir = "ORT_MIGRAPHX_CACHE_DIR"sv;
 constexpr auto kComputeMode = "ORT_MIGRAPHX_COMPUTE_MODE"sv;
 constexpr auto kINT8UseNativeCalibrationTable = "ORT_MIGRAPHX_INT8_USE_NATIVE_CALIBRATION_TABLE"sv;
 constexpr auto kExhaustiveTune = "ORT_MIGRAPHX_EXHAUSTIVE_TUNE"sv;
+constexpr auto kMlssUseSpecificOps = "ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS"sv;
 }  // namespace env_vars
 
 struct ComputeState {
@@ -145,6 +146,7 @@ private:
     bool enable_fp8_{};
     bool enable_int8_{};
     bool exhaustive_tune_{};
+    std::string mlss_use_specific_ops_{};
     bool int8_calibration_cache_available_{};
     bool int8_use_native_calibration_table_{};
     bool dump_subgraphs_{};
