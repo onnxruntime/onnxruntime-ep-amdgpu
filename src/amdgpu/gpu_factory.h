@@ -24,13 +24,8 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
         return STATUS_OK;
     }
 
-    // Unlike DirectML/MIGraphX, the hipep backend requires the selected
-    // hardware device(s) to be forwarded (its CreateEp rejects num_devices == 0).
-    Ort::Status CreateHipepBackend(gsl::span<const OrtHardwareDevice* const> devices,
-            gsl::span<const OrtKeyValuePairs* const> ep_metadata,
-            const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
-        RETURN_IF_ERROR(hip_ep_factory_->CreateEp(hip_ep_factory_, devices.data(),
-            ep_metadata.data(), devices.size(), session_options, logger, &ep));
+    Ort::Status CreateHipepBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
+        RETURN_IF_ERROR(hip_ep_factory_->CreateEp(hip_ep_factory_, nullptr, nullptr, 0, session_options, logger, &ep));
         backend_ep_factory_ = hip_ep_factory_;
         return STATUS_OK;
     }
