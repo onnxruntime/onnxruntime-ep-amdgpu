@@ -39,10 +39,12 @@ endif()
 option(USE_AMDGPU "Build the AMD GPU Execution Provider" OFF)
 option(USE_DML "Build the DirectML Execution Provider" OFF)
 option(USE_MIGRAPHX "Build the MIGraphX Execution Provider" OFF)
+option(USE_HIPEP "Build the HIP (morphizen) backend shim" OFF)
 
 if(USE_AMDGPU)
     set(CACHE{USE_DML} TYPE BOOL FORCE VALUE ON)
     set(CACHE{USE_MIGRAPHX} TYPE BOOL FORCE VALUE ON)
+    set(CACHE{USE_HIPEP} TYPE BOOL FORCE VALUE ON)
 endif()
 
 add_subdirectory(src)
