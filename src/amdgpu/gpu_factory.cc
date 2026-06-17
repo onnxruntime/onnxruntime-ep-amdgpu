@@ -238,7 +238,7 @@ Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHar
 }
 
 Ort::Status ProviderFactory::CreateEp(gsl::span<const OrtHardwareDevice* const> devices,
-    gsl::span<const OrtKeyValuePairs* const> ep_metadata,
+    gsl::span<const OrtKeyValuePairs* const> /* ep_metadata */,
     const Ort::ConstSessionOptions& session_options, const OrtLogger* logger, OrtEp* &ep)
 try {
     ep = nullptr;
@@ -246,8 +246,7 @@ try {
         return MAKE_STATUS(ORT_INVALID_ARGUMENT, "only supports selection for a single device");
     }
 
-    ep = std::make_unique<ExecutionProvider>(*this, ep_name_, devices, ep_metadata,
-        session_options, logger).release();
+    ep = std::make_unique<ExecutionProvider>(*this, ep_name_, session_options, logger).release();
     return STATUS_OK;
 } catch (const Ort::Exception& e) {
     return Ort::Status{e};
