@@ -4,31 +4,41 @@
 #pragma once
 
 // ---------------------------------------------------------------------------
-// Declarative graph pattern matching engine for EP-level fusions.
+// Declarative graph pattern matching engine for execution provider fusions.
 //
-// Usage:
-//   auto pattern = PNode("Sigmoid")
-//       .Upstream(0, PNode("Mul")
-//           .Input(0, PAnyOf("x"))          // capture as "x"
-//           .Input(1, PScalar(/* alpha */))) // scalar constant
-//       .Downstream(0, PNode("Mul")
-//           .Input(0, PSameAs("x"))         // must equal captured "x"
-//           .Input(1, PAny()));
+// Describes fusable subgraph patterns as PNode trees, then searches the model
+// graph for matching subgraphs.  Each PNode specifies an operation type,
+// input constraints, and edges to follow upstream (toward producers) or
+// downstream (toward consumers).
 //
-//   PatternMatch m;
-//   if (MatchPattern(anchor_idx, pattern, gc, initializers, already_matched, m)) {
-//       size_t sigmoid_idx = m.NodeIdx("Sigmoid/0");
-//       float  alpha       = m.ScalarValue("alpha");
-//   }
+// Example — detecting a QuickGelu pattern:
 //
-// Design:
-//   - Each PNode describes one graph node by op type, with constraints on
-//     its inputs and edges to follow upstream/downstream.
-//   - The engine does recursive descent, checking single-consumer invariants
-//     on every traversed edge automatically.
-//   - Longest pattern wins: caller sorts patterns by descending node count
-//     and tries them in order; already_matched prevents re-use of nodes.
-//   - Patterns are value objects — copy freely, no heap allocation at match time.
+//       input
+//         |
+//     Mul(alpha)       upstream of Sigmoid
+//         |
+//      Sigmoid  <---   anchor node (pattern starts here)
+//         |
+//     Mul(input)       downstream of Sigmoid
+//         |
+//       output
+//
+//     auto pattern = PNode("Sigmoid")
+//         .Input(0, PCapture("x"))
+//         .Upstream(0, PNode("Mul").Input(1, PScalar(1.702f)))
+//         .Downstream(0, PNode("Mul").Input(0, PSameAs("x")));
+//
+// MatchPattern() does a single recursive descent from the anchor node,
+// validating all constraints inline (including Predicate lambdas for
+// semantic checks like tensor rank).  On success it returns the indices of
+// matched nodes, captured tensor names, and scalar values.
+//
+// Key design properties:
+//   - Single-consumer invariant enforced automatically on downstream edges.
+//   - Greedy longest match: optional branches are tried on a snapshot and
+//     the longest result wins.
+//   - Rules sharing the same anchor are merged into one PNode tree by
+//     EpFusionManager so shared prefixes are evaluated once.
 // ---------------------------------------------------------------------------
 
 #include <functional>
@@ -47,20 +57,42 @@
 namespace dml_ep {
 
 // ---------------------------------------------------------------------------
-// Input constraint — describes what a node input must satisfy.
+// Input constraint — describes what a node's input must satisfy.
+//
+// Constraints are attached to PNode via .Input(index, constraint).  When
+// index is SIZE_MAX, the engine scans all inputs and passes if any matches.
+//
+// The five kinds form a progression of expressiveness:
+//   Any       — accept anything (no check)
+//   Capture   — accept anything, but record the tensor name for later lookup
+//   SameAs    — must be the same tensor as a previously captured name
+//   Scalar    — must be a constant initializer with a specific numeric value
+//   Predicate — caller-provided lambda for checks the other kinds can't express
+//               (e.g., "must be an initializer with rank <= 1")
 // ---------------------------------------------------------------------------
 struct PInput {
-    enum class Kind {
-        Any,        // no constraint
-        Scalar,     // must be a scalar initializer with value near `scalar_value`
-        SameAs,     // must equal the value name captured under `capture_name`
-        Capture,    // no value constraint; captures the value name
-    };
+    enum class Kind { Any, Scalar, SameAs, Capture, Predicate };
+
+    // Predicate callback signature.  Receives:
+    //   value_name   — name of the input tensor being checked
+    //   value_info   — shape/type metadata for this input (may be null)
+    //   ort_api      — ORT C API handle for querying tensor properties
+    //   initializers — map of constant tensor names to their values
+    //   node         — the graph node owning this input, for cross-input checks
+    //                  (e.g., verifying last-dim match between bias and activation)
+    // Return true to accept, false to reject.
+    using PredicateFn = std::function<bool(
+        const std::string&                                       value_name,
+        const OrtValueInfo*                                      value_info,
+        const OrtApi&                                            ort_api,
+        const std::unordered_map<std::string, const OrtValue*>&  initializers,
+        const OrtNode*                                           node)>;
 
     Kind        kind         = Kind::Any;
-    std::string capture_name;          // for Capture and SameAs
-    float       scalar_value = 0.0f;   // for Scalar
-    float       scalar_tol   = 1e-4f;  // for Scalar
+    std::string capture_name;          // Capture/SameAs/Predicate: key in PatternMatch::value_names
+    float       scalar_value = 0.0f;   // Scalar: expected constant value
+    float       scalar_tol   = 1e-4f;  // Scalar: absolute tolerance for comparison
+    PredicateFn predicate;             // Predicate: the lambda to evaluate
 };
 
 // Convenience constructors
@@ -81,6 +113,67 @@ inline PInput PSameAsAtAny(std::string name) { return {PInput::Kind::SameAs, std
 // Convenience: capture the value name AND require it matches an existing capture.
 // Used when the same tensor must appear in two places.
 inline PInput PSameAsOrCapture(std::string name)   { return {PInput::Kind::SameAs, std::move(name)}; }
+
+// ---------------------------------------------------------------------------
+// Predicate constraints — lambda-based checks for conditions that the
+// built-in constraint kinds (Scalar, SameAs, etc.) cannot express.
+//
+// The predicate receives full context about the input being checked:
+//   - value_name:   tensor name (for initializer map lookup)
+//   - value_info:   OrtValueInfo* with shape/type metadata (may be null)
+//   - ort_api:      ORT C API handle for querying value_info properties
+//   - initializers: map of constant tensor names to their OrtValue* data
+//
+// PPredicate       — check a specific input slot (fixed index)
+// PPredicateAtAny  — scan all inputs, accept first that passes (SIZE_MAX)
+//
+// PInitializerWithMaxRank is a concrete predicate that checks:
+//   1. The tensor is a constant (exists in the initializer map), AND
+//   2. Its number of dimensions (rank) is at most max_rank
+// This is used to validate that a bias weight is 1-dimensional during
+// pattern matching, rather than deferring the check to compile time.
+//
+// Example:
+//   .Input(SIZE_MAX, PInitializerWithMaxRank(1, "BiasGelu.bias_name"))
+//
+//   This scans all inputs of the node.  For each input, it checks if the
+//   tensor is a constant with rank <= 1.  On the first match, it captures
+//   the tensor's name as "BiasGelu.bias_name" in PatternMatch::value_names
+//   so Compile() can retrieve it without re-scanning the graph.
+// ---------------------------------------------------------------------------
+inline PInput PPredicate(PInput::PredicateFn fn) {
+    PInput p;
+    p.kind      = PInput::Kind::Predicate;
+    p.predicate = std::move(fn);
+    return p;
+}
+
+inline PInput PPredicateAtAny(PInput::PredicateFn fn) {
+    return PPredicate(std::move(fn));
+}
+
+inline PInput PInitializerWithMaxRank(size_t max_rank, std::string capture_name = {}) {
+    PInput p = PPredicate(
+        [max_rank](const std::string& name,
+                   const OrtValueInfo* vi,
+                   const OrtApi& ort_api,
+                   const std::unordered_map<std::string, const OrtValue*>& initializers,
+                   const OrtNode* /*node*/) -> bool {
+            if (!initializers.count(name)) return false;
+            if (!vi) return true;  // rank unknown — allow through
+            const OrtTypeInfo* ti = nullptr;
+            OrtStatus* st = ort_api.GetValueInfoTypeInfo(vi, &ti);
+            if (st || !ti) { if (st) ort_api.ReleaseStatus(st); return true; }
+            const OrtTensorTypeAndShapeInfo* si = nullptr;
+            ort_api.CastTypeInfoToTensorInfo(ti, &si);
+            if (!si) return true;
+            size_t rank = 0;
+            ort_api.GetDimensionsCount(si, &rank);
+            return rank == 0 || rank <= max_rank;  // 0 = unknown rank
+        });
+    p.capture_name = std::move(capture_name);
+    return p;
+}
 
 // ---------------------------------------------------------------------------
 // Edge direction for traversal

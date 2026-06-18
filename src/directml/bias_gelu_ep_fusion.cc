@@ -21,58 +21,158 @@ using namespace fusion_utils;
 using Microsoft::WRL::ComPtr;
 
 // ---------------------------------------------------------------------------
-// BiasGelu patterns — raw ONNX expansion of Add(x, bias) + Gelu(x+bias).
+// BiasGelu fusion — detects the raw ONNX expansion of Add(x, bias) + Gelu.
 //
-// Both anchor on Erf (most distinctive node, fewest occurrences in typical models).
-// Pattern 1 (6 nodes): Mul(x,0.5) feeds final Mul alongside the Erf chain.
-// Pattern 2 (6 nodes): Final Mul takes x directly, followed by Mul(0.5).
+// ONNX does not have a native "BiasGelu" operation.  Instead, model exporters
+// expand it into 5-6 primitive operations.  This fusion detects that expansion
+// and replaces it with a single DirectML kernel (DML_ELEMENT_WISE_ADD1 with
+// fused GELU activation), which is significantly faster.
 //
-// Upstream of Erf: Div(√2) ← Add(input, bias[1D])
-// Downstream of Erf: Add(+1) → Mul → Mul(0.5)
+// The expansion follows the mathematical definition of GELU:
+//   Gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
 //
-// The engine tries Pattern 1 first, falls back to Pattern 2.
+// When preceded by a bias addition (Add(x, bias)), the full graph is:
+//
+//   Pattern 1 (6 nodes, upstream half-scale):
+//
+//                input    bias[1D]
+//                  \       /
+//        +---------Add---------+        "BiasGelu.bias_add"
+//        |          |          |
+//        |        Div(sqrt2)   |        "BiasGelu.div"
+//        |          |          |
+//        |         Erf         |        "BiasGelu.erf"  (anchor node)
+//        |          |          |
+//        |        Add(+1)      |        "BiasGelu.add1"
+//        |          |          |
+//        |    Mul(x, 0.5)      |        "BiasGelu.mul_half_p1"
+//        |       \  |          |
+//        +--------Mul----------+        "BiasGelu.mul_x"
+//                  |
+//               output
+//
+//   Pattern 2 (6 nodes, downstream half-scale):
+//
+//                input    bias[1D]
+//                  \       /
+//        +---------Add---------+        "BiasGelu.bias_add"
+//        |          |          |
+//        |        Div(sqrt2)   |        "BiasGelu.div"
+//        |          |          |
+//        |         Erf         |        "BiasGelu.erf"  (anchor node)
+//        |          |          |
+//        |        Add(+1)      |        "BiasGelu.add1"
+//        |          |          |
+//        +--------Mul----------+        "BiasGelu.mul_x"
+//                  |
+//              Mul(0.5)                 "BiasGelu.mul_half_p2"
+//                  |
+//               output
+//
+// Both variants are encoded as optional branches in one PNode tree.  The
+// pattern engine's greedy longest-match strategy picks whichever is present.
+//
+// The pattern anchors on Erf because it is the most distinctive node —
+// most models have far fewer Erf nodes than Add or Mul nodes, so the
+// anchor index has fewer candidates to test.
+//
+// KEY CONSTRAINT: the bias input of the Add node must be a rank-1 constant
+// (a vector).  This is validated at pattern-match time using a predicate
+// constraint (PInitializerWithMaxRank), which prevents claiming nodes that
+// would fail later during compilation.  See ORT's bias_gelu_fusion.cc for
+// the equivalent check.
 // ---------------------------------------------------------------------------
 
-static constexpr float kSqrt2       = 1.41421356237f;
-static constexpr float kSqrt2Approx = 1.41420996189f;
-static constexpr float kSqrt2Tol    = 1e-3f;  // wider to cover both variants
+static constexpr float kSqrt2    = 1.41421356237f;
+static constexpr float kSqrt2Tol = 1e-3f;  // tolerance to cover both float32/float16 representations
 
+// ---------------------------------------------------------------------------
+// Bias input predicate — mirrors ORT's bias_gelu_fusion.cc checks:
+//   1. Must be a constant (in the initializer map)
+//   2. Must be rank 1 (a bias vector)
+//   3. Both Add inputs must have known shapes
+//   4. Last dimension of bias must match last dimension of the other input
 //
-// Pattern 1:
-//   bias_add → Div(√2) → Erf → Add(+1) → Mul(final) ←── Mul(x, 0.5)
-//                                                             ↑
-//                                                         bias_add.output (same x)
-//
-// Single merged pattern tree for both BiasGelu variants.
-// The shared trunk (Erf ← Div ← Add(bias) → Add(+1) → Mul) is evaluated once.
-// At the final Mul, two optional branches diverge — the engine greedily takes
-// whichever extends the match furthest:
-//
-//   Pattern 1: Mul(x, erf_chain) where x comes from upstream Mul(x, 0.5)
-//   Pattern 2: Mul(x, erf_chain) followed downstream by Mul(0.5)
-//
-// Both are optional; if neither matches, the 5-node base still succeeds (Gelu
-// without bias Add — which won't pass Compile() and will be rejected there).
+// Uses the node pointer to inspect the other Add input for cross-input
+// validation.  If shapes are unavailable, the check is skipped (deferred
+// to runtime).
+// ---------------------------------------------------------------------------
+static PInput PBiasInput(std::string capture_name) {
+    PInput p = PPredicate(
+        [](const std::string& name,
+           const OrtValueInfo* vi,
+           const OrtApi& ort_api,
+           const std::unordered_map<std::string, const OrtValue*>& initializers,
+           const OrtNode* node) -> bool {
+
+            if (!initializers.count(name)) return false;
+
+            // Helper: read rank and last dimension from an OrtValueInfo.
+            // Returns {rank, last_dim}.  rank == 0 means shape is unknown.
+            auto get_rank_and_last_dim = [&](const OrtValueInfo* v) -> std::pair<size_t, int64_t> {
+                if (!v) return {0, -1};
+                const OrtTypeInfo* ti = nullptr;
+                OrtStatus* st = ort_api.GetValueInfoTypeInfo(v, &ti);
+                if (st || !ti) { if (st) ort_api.ReleaseStatus(st); return {0, -1}; }
+                const OrtTensorTypeAndShapeInfo* si = nullptr;
+                ort_api.CastTypeInfoToTensorInfo(ti, &si);
+                if (!si) return {0, -1};
+                size_t rank = 0;
+                ort_api.GetDimensionsCount(si, &rank);
+                if (rank == 0) return {0, -1};
+                std::vector<int64_t> dims(rank, -1);
+                ort_api.GetDimensions(si, dims.data(), rank);
+                return {rank, dims[rank - 1]};
+            };
+
+            auto [bias_rank, bias_last_dim] = get_rank_and_last_dim(vi);
+            if (bias_rank == 0) return true;  // shape unknown — defer to runtime
+            if (bias_rank != 1) return false;  // bias must be rank 1
+
+            if (!node) return true;  // can't check other input without node
+
+            // Find the other Add input and verify last-dim match.
+            size_t input_count = 0;
+            ort_api.Node_GetNumInputs(node, &input_count);
+            std::vector<const OrtValueInfo*> inputs(input_count, nullptr);
+            if (input_count > 0) ort_api.Node_GetInputs(node, inputs.data(), input_count);
+
+            for (size_t i = 0; i < input_count; ++i) {
+                if (!inputs[i]) continue;
+                const char* in_name = nullptr;
+                OrtStatus* st = ort_api.GetValueInfoName(inputs[i], &in_name);
+                if (st || !in_name) { if (st) ort_api.ReleaseStatus(st); continue; }
+                if (std::string_view(in_name) == name) continue;  // skip self
+
+                auto [other_rank, other_last_dim] = get_rank_and_last_dim(inputs[i]);
+                if (other_rank == 0) return true;  // other shape unknown — defer
+
+                // Both shapes known — last dimensions must match.
+                if (bias_last_dim >= 0 && other_last_dim >= 0 &&
+                    bias_last_dim != other_last_dim) {
+                    return false;
+                }
+                break;
+            }
+            return true;
+        });
+    p.capture_name = std::move(capture_name);
+    return p;
+}
+
 // ---------------------------------------------------------------------------
 // IFusionRule implementation
 // ---------------------------------------------------------------------------
 
 PNode BiasGeluFusionRule::BuildPattern() const {
-    // Capture names prefixed "BiasGelu." to avoid conflicts when merged with
-    // other rules sharing the "Erf" anchor.
-    //
-    // bias_add inputs: the engine matches the Add node but does NOT capture
-    // its inputs by fixed index because exporters place activation and bias at
-    // either input[0] or input[1].  Compile() identifies which is which by
-    // checking which input name appears in the initializer map (the bias weight)
-    // vs which is a runtime tensor (the activation).
     return PNode("Erf").As("BiasGelu.erf")
         .Upstream(0,
             PNode("Div").As("BiasGelu.div")
                 .Input(0, PCapture("BiasGelu.add_out"))
                 .Input(1, PScalar(kSqrt2, kSqrt2Tol))
                 .Upstream(0,
-                    PNode("Add").As("BiasGelu.bias_add")))
+                    PNode("Add").As("BiasGelu.bias_add")
+                        .Input(SIZE_MAX, PBiasInput("BiasGelu.bias_name"))))
         .Downstream(0,
             PNode("Add").As("BiasGelu.add1")
                 .Input(SIZE_MAX, PScalarAtAny(1.0f))
@@ -91,7 +191,9 @@ PNode BiasGeluFusionRule::BuildPattern() const {
 }
 
 bool BiasGeluFusionRule::MatchesResult(const PatternMatch& m) const {
-    return m.NodeIdx("BiasGelu.erf") != SIZE_MAX && m.NodeIdx("BiasGelu.bias_add") != SIZE_MAX;
+    return m.NodeIdx("BiasGelu.erf")      != SIZE_MAX
+        && m.NodeIdx("BiasGelu.bias_add") != SIZE_MAX
+        && !m.ValueName("BiasGelu.bias_name").empty();
 }
 
 // ---------------------------------------------------------------------------
@@ -385,43 +487,39 @@ OrtNodeComputeInfo* BiasGeluFusionRule::Compile(
     PluginDmlExecutionProviderImpl*  provider,
     const PatternMatch&              match) const
 {
-    // The fused subgraph has:
-    //   - Graph inputs: the main tensor (and possibly scalar constants if ORT
-    //     chose to expose them as inputs rather than initializers)
-    //   - Graph initializers: the bias tensor + scalar constants (sqrt2, 1.0, 0.5)
-    //
-    // Strategy: find the main tensor from graph inputs (rank > 1, not a scalar)
-    // and find the bias from initializers (rank 1).
+    // The pattern matcher captured the bias name via PInitializerWithMaxRank.
+    const std::string bias_name_str = match.ValueName("BiasGelu.bias_name");
+    if (bias_name_str.empty()) {
+        DML_PERF_LOG("[BiasGelu] Compile: missing bias_name capture");
+        return nullptr;
+    }
+    const char* bias_name = bias_name_str.c_str();
+
+    // Find the main (non-bias) runtime tensor from the fused subgraph inputs.
+    // The bias is an initializer; the main tensor is the only non-initializer input.
     size_t num_inputs = 0;
     ort_api.Graph_GetNumInputs(fused_subgraph, &num_inputs);
     if (num_inputs < 1) {
-        DML_PERF_LOG("[BiasGelu] Compile: no graph inputs, skipping");
+        DML_PERF_LOG("[BiasGelu] Compile: no graph inputs");
         return nullptr;
     }
-
     std::vector<const OrtValueInfo*> all_input_vis(num_inputs, nullptr);
     ort_api.Graph_GetInputs(fused_subgraph, all_input_vis.data(), num_inputs);
 
-    // Find the main tensor input (rank > 1, not a scalar).
     const OrtValueInfo* main_vi = nullptr;
     for (const OrtValueInfo* vi : all_input_vis) {
         if (!vi) continue;
-        const OrtTypeInfo* ti = nullptr;
-        OrtStatus* st = ort_api.GetValueInfoTypeInfo(vi, &ti);
-        if (st || !ti) { if (st) ort_api.ReleaseStatus(st); continue; }
-        const OrtTensorTypeAndShapeInfo* si = nullptr;
-        ort_api.CastTypeInfoToTensorInfo(ti, &si);
-        if (!si) continue;
-        size_t elem_count = 0;
-        ort_api.GetTensorShapeElementCount(si, &elem_count);
-        if (elem_count != 1) { main_vi = vi; break; }
+        const char* name = nullptr;
+        OrtStatus* st = ort_api.GetValueInfoName(vi, &name);
+        if (st || !name) { if (st) ort_api.ReleaseStatus(st); continue; }
+        if (std::string_view(name) != bias_name_str) { main_vi = vi; break; }
     }
     if (!main_vi) {
-        DML_PERF_LOG("[BiasGelu] Compile: could not identify main input, skipping");
+        DML_PERF_LOG("[BiasGelu] Compile: could not identify main input");
         return nullptr;
     }
 
-    // Find the bias from initializers (rank 1).
+    // Find the bias value info from subgraph initializers by name.
     const OrtValueInfo* bias_vi = nullptr;
     {
         size_t num_init = 0;
@@ -430,86 +528,15 @@ OrtNodeComputeInfo* BiasGeluFusionRule::Compile(
         if (num_init > 0) ort_api.Graph_GetInitializers(fused_subgraph, init_vis.data(), num_init);
         for (const OrtValueInfo* vi : init_vis) {
             if (!vi) continue;
-            const OrtTypeInfo* ti = nullptr;
-            OrtStatus* st = ort_api.GetValueInfoTypeInfo(vi, &ti);
-            if (st || !ti) { if (st) ort_api.ReleaseStatus(st); continue; }
-            const OrtTensorTypeAndShapeInfo* si = nullptr;
-            ort_api.CastTypeInfoToTensorInfo(ti, &si);
-            if (!si) continue;
-            size_t rank = 0; ort_api.GetDimensionsCount(si, &rank);
-            if (rank == 1) { bias_vi = vi; break; }
+            const char* name = nullptr;
+            OrtStatus* st = ort_api.GetValueInfoName(vi, &name);
+            if (st || !name) { if (st) ort_api.ReleaseStatus(st); continue; }
+            if (std::string_view(name) == bias_name_str) { bias_vi = vi; break; }
         }
     }
     if (!bias_vi) {
-        DML_PERF_LOG("[BiasGelu] Compile: could not identify bias initializer, skipping");
+        DML_PERF_LOG("[BiasGelu] Compile: bias not found in subgraph initializers");
         return nullptr;
-    }
-
-    // Find the bias name by scanning the Add (bias_add) node's inputs in the
-    // fused subgraph. Whichever input is in the initializer map is the bias
-    // weight; the other is the runtime activation. This handles exporters that
-    // place bias at either input[0] or input[1].
-    std::string bias_name_str;
-    {
-        size_t num_nodes = 0;
-        ort_api.Graph_GetNumNodes(fused_subgraph, &num_nodes);
-        std::vector<const OrtNode*> nodes(num_nodes, nullptr);
-        if (num_nodes > 0) ort_api.Graph_GetNodes(fused_subgraph, nodes.data(), num_nodes);
-
-        for (const OrtNode* n : nodes) {
-            const char* op = nullptr;
-            ort_api.Node_GetOperatorType(n, &op);
-            if (!op || std::string_view(op) != "Add") continue;
-
-            size_t input_count = 0;
-            ort_api.Node_GetNumInputs(n, &input_count);
-            std::vector<const OrtValueInfo*> inputs(input_count, nullptr);
-            if (input_count > 0) ort_api.Node_GetInputs(n, inputs.data(), input_count);
-
-            for (const OrtValueInfo* vi : inputs) {
-                if (!vi) continue;
-                const char* name = nullptr;
-                OrtStatus* st = ort_api.GetValueInfoName(vi, &name);
-                if (st || !name) { if (st) ort_api.ReleaseStatus(st); continue; }
-                if (initializers.count(name)) {
-                    bias_name_str = name;
-                    break;
-                }
-            }
-            if (!bias_name_str.empty()) break;
-        }
-    }
-    const char* bias_name = bias_name_str.empty() ? nullptr : bias_name_str.c_str();
-    if (!bias_name) {
-        DML_PERF_LOG("[BiasGelu] Compile: could not identify bias from subgraph Add inputs, skipping");
-        return nullptr;
-    }
-    // Use main_vi and bias_vi for rank/shape validation.
-    std::vector<const OrtValueInfo*> input_vis = { main_vi, bias_vi };
-
-    auto get_rank = [&](const OrtValueInfo* vi) -> int64_t {
-        if (!vi) return -1;
-        const OrtTypeInfo* ti = nullptr;
-        OrtStatus* st = ort_api.GetValueInfoTypeInfo(vi, &ti);
-        if (st || !ti) { if (st) ort_api.ReleaseStatus(st); return -1; }
-        const OrtTensorTypeAndShapeInfo* si = nullptr;
-        ort_api.CastTypeInfoToTensorInfo(ti, &si);
-        if (!si) return -1;
-        size_t r = 0; ort_api.GetDimensionsCount(si, &r);
-        return static_cast<int64_t>(r);
-    };
-
-    int64_t rank0 = get_rank(input_vis[0]);
-    int64_t rank1 = get_rank(input_vis[1]);
-
-    // Validate: one must be 1D, the other higher-dimensional.
-    // If shapes are unknown (rank == -1) proceed anyway — will be confirmed at Compute time.
-    if (rank0 >= 0 && rank1 >= 0) {
-        bool valid = (rank0 > 1 && rank1 == 1) || (rank0 == 1 && rank1 > 1);
-        if (!valid) {
-            DML_PERF_LOG("[BiasGelu] Compile: neither input is 1D, skipping");
-            return nullptr;
-        }
     }
 
     // Read static dimensions for both inputs.
@@ -527,21 +554,17 @@ OrtNodeComputeInfo* BiasGeluFusionRule::Compile(
         return r;
     };
 
-    std::vector<int64_t> dims0, dims1;
-    size_t r0 = get_dims(input_vis[0], dims0);
-    size_t r1 = get_dims(input_vis[1], dims1);
-
-    // Identify which is the main tensor and which is the bias (1D).
-    std::vector<int64_t>* main_dims = &dims0;
-    std::vector<int64_t>* bias_dims = &dims1;
-    size_t main_rank = r0, bias_rank = r1;
-    if (r1 > r0) { std::swap(main_dims, bias_dims); std::swap(main_rank, bias_rank); }
+    std::vector<int64_t> main_dims_v, bias_dims_v;
+    size_t main_rank = get_dims(main_vi, main_dims_v);
+    size_t bias_rank = get_dims(bias_vi, bias_dims_v);
+    std::vector<int64_t>* main_dims = &main_dims_v;
+    std::vector<int64_t>* bias_dims = &bias_dims_v;
 
     // Get element type from the main input.
     ONNXTensorElementDataType elem_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-    if (input_vis[0]) {
+    {
         const OrtTypeInfo* ti = nullptr;
-        OrtStatus* st = ort_api.GetValueInfoTypeInfo(input_vis[0], &ti);
+        OrtStatus* st = ort_api.GetValueInfoTypeInfo(main_vi, &ti);
         if (!st && ti) {
             const OrtTensorTypeAndShapeInfo* si = nullptr;
             ort_api.CastTypeInfoToTensorInfo(ti, &si);
@@ -614,6 +637,7 @@ OrtNodeComputeInfo* BiasGeluFusionRule::Compile(
     // Bias is now on GPU. If all dims are also concrete, compile DML eagerly now.
     // If shapes are dynamic, defer to first Compute() when real dims are known.
     bool has_dynamic = false;
+    if (main_rank == 0 || bias_rank == 0 || bias_rank > main_rank) has_dynamic = true;
     for (auto d : *main_dims) if (d <= 0) { has_dynamic = true; break; }
     for (auto d : *bias_dims) if (!has_dynamic && d <= 0) { has_dynamic = true; break; }
 
