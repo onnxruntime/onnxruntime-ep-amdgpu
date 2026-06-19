@@ -42,20 +42,8 @@ endif()
 target_link_libraries(plugin-ep-utils PUBLIC onnxruntime::onnxruntime
         fmt::fmt Microsoft.GSL::GSL range-v3::range-v3 onnx protobuf::libprotobuf)
 
-if(WIN32)
-    # SHGetKnownFolderPath (Shell32) + CoTaskMemFree (Ole32) for telemetry path
-    # resolution.
-    target_link_libraries(plugin-ep-utils PUBLIC Shell32 Ole32)
-endif()
-
 target_include_directories(plugin-ep-utils PUBLIC
         ${CMAKE_CURRENT_LIST_DIR} ${CMAKE_CURRENT_LIST_DIR}/common)
-
-option(BUILD_TELEMETRY_STRESS_TEST "Build the telemetry locking stress test" OFF)
-if(BUILD_TELEMETRY_STRESS_TEST)
-    add_executable(telemetry-stress-test tests/telemetry_stress_test.cc)
-    target_link_libraries(telemetry-stress-test PRIVATE plugin-ep-utils)
-endif()
 
 if(USE_HIPDNN OR USE_MIGRAPHX OR USE_ROCM)
 

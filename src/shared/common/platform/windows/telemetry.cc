@@ -3,7 +3,6 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <shlobj.h>
 #include <tlhelp32.h>
 
 #include <filesystem>
@@ -18,10 +17,6 @@ namespace telemetry {
 
 namespace {
 
-// We gate concurrent appends with a byte-range lock on a single sentinel byte
-// placed far beyond any realistic file size. Locking a region that never
-// overlaps real data keeps Windows' mandatory locks from blocking a concurrent
-// reader (e.g. the telemetry consumer) while a writer holds the lock.
 constexpr DWORD kLockOffsetLow = 0xFFFFFFFFu;
 constexpr DWORD kLockOffsetHigh = 0x7FFFFFFFu;
 constexpr DWORD kLockBytesLow = 1u;
@@ -38,17 +33,18 @@ struct Handle {
     explicit operator bool() const { return h != INVALID_HANDLE_VALUE; }
 };
 
-PathString KnownFolder(REFKNOWNFOLDERID id) {
-    PWSTR raw = nullptr;
-    if (FAILED(::SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &raw)) || raw == nullptr) {
-        if (raw != nullptr) {
-            ::CoTaskMemFree(raw);
-        }
+PathString EnvVar(const wchar_t* name) {
+    const DWORD len = ::GetEnvironmentVariableW(name, nullptr, 0);
+    if (len == 0) {
         return {};
     }
-    PathString path{raw};
-    ::CoTaskMemFree(raw);
-    return path;
+    std::wstring value(len, L'\0');
+    const DWORD written = ::GetEnvironmentVariableW(name, value.data(), len);
+    if (written == 0 || written >= len) {
+        return {};
+    }
+    value.resize(written);
+    return value;
 }
 
 std::string ImageNameForPid(DWORD pid) {
@@ -84,7 +80,7 @@ DWORD ParentPidOf(DWORD pid) {
 }  // namespace
 
 PathString detail::BaseDirectory() noexcept try {
-    return KnownFolder(kUseProgramFiles ? FOLDERID_ProgramFiles : FOLDERID_ProgramData);
+    return EnvVar(kUseProgramFiles ? L"ProgramFiles" : L"ProgramData");
 } catch (...) {
     return {};
 }

@@ -14,9 +14,6 @@ namespace telemetry {
 
 namespace {
 
-// Replace characters that would break the one-record-per-line format. We use
-// space as the field separator, so any embedded whitespace/newline is turned
-// into '_' to keep a value as a single token.
 std::string Sanitize(std::string_view value) {
     std::string out;
     out.reserve(value.size());
@@ -33,7 +30,6 @@ void AppendField(std::string& line, std::string_view key, const std::optional<st
 }
 
 std::string IsoUtcNow() {
-    // Whole-second ISO-8601 UTC, e.g. 2026-06-19T11:38:02Z.
     const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     return fmt::format("{:%Y-%m-%dT%H:%M:%SZ}", fmt::gmtime(now));
 }

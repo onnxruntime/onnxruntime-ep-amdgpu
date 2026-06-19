@@ -14,17 +14,10 @@
 #include "common/path_string.h"
 #include "common/telemetry.h"
 
-// Linux counterpart of the Windows LockFileEx implementation. The EP is built
-// for both platforms; the locking model maps to fcntl(F_SETLK) advisory write
-// locks plus O_APPEND for atomic appends. POC-level: the base directory differs
-// from Windows and the final location is still to be confirmed with the
-// consumer.
 namespace telemetry {
 
 namespace {
 
-// Same sentinel-byte gating idea as Windows: lock a single byte far past any
-// real data so concurrent readers are never blocked.
 constexpr off_t kLockOffset = 0x7FFFFFFFFFFFFFFEll;
 
 struct Fd {
@@ -40,8 +33,6 @@ struct Fd {
 }  // namespace
 
 PathString detail::BaseDirectory() noexcept try {
-    // %ProgramData% has no Linux equivalent; use a machine-wide path that is
-    // conventionally writable for shared logs. Final location TBD with consumer.
     const char* base_env = std::getenv("AMD_GPUEP_TELEMETRY_DIR");
     return (base_env != nullptr && *base_env != '\0') ? PathString{base_env} : PathString{"/var/log"};
 } catch (...) {
