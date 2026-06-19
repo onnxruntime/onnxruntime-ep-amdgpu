@@ -19,27 +19,43 @@ add_library(plugin-ep-utils STATIC
         common/plugin_ep_utils.cc
         common/plugin_ep_utils.h
         common/provider_options.h
-        common/provider_options_utils.h)
+        common/provider_options_utils.h
+        common/telemetry.cc
+        common/telemetry.h)
 
 if(WIN32)
     target_sources(plugin-ep-utils
         PUBLIC
             common/platform/windows/dynamic_library.cc
             common/platform/windows/env_var.cc
-            common/platform/windows/env_var.h)
+            common/platform/windows/env_var.h
+            common/platform/windows/telemetry.cc)
 else()
     target_sources(plugin-ep-utils
         PUBLIC
             common/platform/linux/dynamic_library.cc
             common/platform/linux/env_var.cc
-            common/platform/linux/env_var.h)
+            common/platform/linux/env_var.h
+            common/platform/linux/telemetry.cc)
 endif()
 
 target_link_libraries(plugin-ep-utils PUBLIC onnxruntime::onnxruntime
         fmt::fmt Microsoft.GSL::GSL range-v3::range-v3 onnx protobuf::libprotobuf)
 
+if(WIN32)
+    # SHGetKnownFolderPath (Shell32) + CoTaskMemFree (Ole32) for telemetry path
+    # resolution.
+    target_link_libraries(plugin-ep-utils PUBLIC Shell32 Ole32)
+endif()
+
 target_include_directories(plugin-ep-utils PUBLIC
         ${CMAKE_CURRENT_LIST_DIR} ${CMAKE_CURRENT_LIST_DIR}/common)
+
+option(BUILD_TELEMETRY_STRESS_TEST "Build the telemetry locking stress test" OFF)
+if(BUILD_TELEMETRY_STRESS_TEST)
+    add_executable(telemetry-stress-test tests/telemetry_stress_test.cc)
+    target_link_libraries(telemetry-stress-test PRIVATE plugin-ep-utils)
+endif()
 
 if(USE_HIPDNN OR USE_MIGRAPHX OR USE_ROCM)
 

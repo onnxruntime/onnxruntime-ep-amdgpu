@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <mutex>
+#include <string>
+
 #include "gpu_info.h"
 #include "gpu_factory.h"
 
@@ -34,10 +37,19 @@ private:
     [[nodiscard]] const char* GetCompiledModelCompatibilityInfo(const OrtGraph* graph) const;
     Ort::Status GetKernelRegistry(const OrtKernelRegistry** kernel_registry) const;
 
+    // Emit a single telemetry record for this session. Only used for the
+    // DirectML path; the MIGraphX backend logs its own (richer) record. Never
+    // throws.
+    void LogTelemetry(const OrtGraph* const* graphs, size_t count) const noexcept;
+
     ProviderFactory& factory_;
     OrtEp* backend_ep_{};
 
     std::string ep_name_;
+    // "MIGraphX" or "DirectML", set once the backend is selected in the ctor.
+    std::string backend_name_;
+    // Guards one-shot telemetry emission across the (possibly multiple) Compile calls.
+    mutable std::once_flag telemetry_once_;
     const Ort::Logger logger_{};
 };
 

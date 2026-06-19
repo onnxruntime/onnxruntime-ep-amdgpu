@@ -1,11 +1,15 @@
 // Copyright (c) Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
+#include <filesystem>
+
 #include "gpu_info.h"
 #include "gpu_ep.h"
 
 #include "gpu_options.h"
 #include "mgx_options.h"
+
+#include "common/telemetry.h"
 
 #define EP_CALL_T(backend, fn, defval, ...)                            \
     do {                                                               \
@@ -103,6 +107,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     }
 
     const ProviderInfo info{provider_options};
+    backend_name_ = (info.profile == Profile::Eager) ? "DirectML" : "MIGraphX";
     if (info.profile == Profile::Eager) {
         THROW_IF_ERROR(factory.CreateDirectMLBackend(local_session_options, logger, backend_ep_));
         // DirectML manages its own per-session GPU allocator (DmlBucketizedBufferAllocator)
@@ -185,7 +190,33 @@ Ort::Status ExecutionProvider::GetCapability(const OrtGraph* graph,
 Ort::Status ExecutionProvider::Compile(const OrtGraph** graphs, const OrtNode** fused_nodes, size_t count,
     OrtNodeComputeInfo** node_compute_infos, OrtNode** ep_context_nodes) const noexcept
 {
+    LogTelemetry(graphs, count);
     EP_CALL_S(backend_ep_, Compile, graphs, fused_nodes, count, node_compute_infos, ep_context_nodes);
+}
+
+void ExecutionProvider::LogTelemetry(const OrtGraph* const* graphs, size_t count) const noexcept try {
+    // The MIGraphX backend logs its own record (with GFX arch and MXR cache
+    // state, which this wrapper cannot see). Only cover the DirectML path here.
+    if (backend_name_ != "DirectML") {
+        return;
+    }
+    std::call_once(telemetry_once_, [&]() noexcept {
+        try {
+            telemetry::Record record;
+            record.ep_version = std::string{factory_.Version()};
+            record.backend = backend_name_;
+            record.parent_process = telemetry::ParentProcessName();
+            if (count > 0 && graphs != nullptr) {
+                const std::filesystem::path model_path{Ort::ConstGraph{graphs[0]}.GetModelPath()};
+                if (model_path.has_filename()) {
+                    record.model_name = model_path.filename().string();
+                }
+            }
+            telemetry::Log(record);
+        } catch (...) {
+        }
+    });
+} catch (...) {
 }
 
 void ExecutionProvider::ReleaseNodeComputeInfos(OrtNodeComputeInfo** node_compute_info,
