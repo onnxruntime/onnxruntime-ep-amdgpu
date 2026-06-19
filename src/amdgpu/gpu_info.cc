@@ -23,6 +23,10 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
                         profile = Profile::Eager;
                     } else if (lower == "optimize" || value == "2") {
                         profile = Profile::Optimized;
+                    } else if (lower == "migraphx" || value == "3") {
+                        profile = Profile::MIGraphX;
+                    } else if (lower == "directml" || value == "4") {
+                        profile = Profile::DirectML;
                     } else {
                         return MAKE_STATUS(ORT_FAIL, "unknown profile: '", value, "'");
                     }

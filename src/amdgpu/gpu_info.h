@@ -13,7 +13,9 @@ namespace gpu_ep {
 enum class Profile {
     Auto,
     Eager,
-    Optimized
+    Optimized,
+    MIGraphX,
+    DirectML
 };
 
 struct ProviderInfo {
