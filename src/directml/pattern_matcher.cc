@@ -11,15 +11,22 @@ namespace dml_ep {
 using namespace fusion_utils;
 
 // ---------------------------------------------------------------------------
-// Internal recursive matcher.
+// Internal recursive matcher — walks the model graph from an anchor node,
+// checking each visited node against its corresponding PNode in the pattern
+// tree.
 //
-// Optional edges implement "greedy longest match": when a branch is optional,
-// we attempt it on a snapshot of the current state and keep whichever outcome
-// has the most matched nodes.  Non-optional edges fail the entire match if
-// they cannot be followed.
+// The traversal follows edges in both directions:
 //
-// Multiple optional branches at the same node are each tried; the one that
-// extends the match furthest wins, ensuring the longest pattern takes priority.
+//   Upstream:   anchor ← producer   (follow input[i] to the node that created it)
+//   Downstream: anchor → consumer   (follow output[i] to the node that reads it)
+//
+// At each node, input constraints (Scalar, SameAs, Predicate, etc.) are
+// validated before the node is committed to the match result.
+//
+// Optional edges implement "greedy longest match": the engine snapshots the
+// current state, attempts the optional branch, and keeps whichever outcome
+// matches more nodes.  Non-optional edges fail the entire match if they
+// cannot be followed.
 // ---------------------------------------------------------------------------
 static bool MatchNode(
     size_t                                                   node_idx,
@@ -44,6 +51,33 @@ static bool MatchNode(
     std::string capture = pattern.node_capture.empty()
         ? pattern.op_type + "/" + std::to_string(out.all_nodes.size())
         : pattern.node_capture;
+
+    // Pre-fetch OrtValueInfo* for all inputs of this node, but only when the
+    // pattern has Predicate constraints that need shape/type metadata.
+    // Built once per node and reused across all constraint evaluations.
+    //
+    // The other constraint kinds (Scalar, SameAs, Capture) only need the
+    // input tensor name (available from NodeInfo::input_names), so this
+    // fetch is skipped entirely when no predicates are present.
+    bool has_predicates = false;
+    for (const auto& [_, c] : pattern.input_constraints) {
+        if (c.kind == PInput::Kind::Predicate) { has_predicates = true; break; }
+    }
+
+    std::unordered_map<std::string, const OrtValueInfo*> input_value_infos;
+    if (has_predicates) {
+        size_t input_count = 0;
+        ort_api.Node_GetNumInputs(ni.node, &input_count);
+        std::vector<const OrtValueInfo*> vis(input_count, nullptr);
+        if (input_count > 0) ort_api.Node_GetInputs(ni.node, vis.data(), input_count);
+        for (size_t i = 0; i < input_count; ++i) {
+            if (!vis[i]) continue;
+            const char* name = nullptr;
+            OrtStatus* st = ort_api.GetValueInfoName(vis[i], &name);
+            if (st || !name) { if (st) ort_api.ReleaseStatus(st); continue; }
+            input_value_infos[name] = vis[i];
+        }
+    }
 
     // Validate per-input constraints.
     for (const auto& [idx, constraint] : pattern.input_constraints) {
@@ -77,6 +111,16 @@ static bool MatchNode(
                         for (const auto& v2 : ni.input_names) {
                             if (v2 == it->second) { any_matched = true; break; }
                         }
+                    }
+                } else if (constraint.kind == PInput::Kind::Predicate) {
+                    auto vi_it = input_value_infos.find(val);
+                    const OrtValueInfo* vi = (vi_it != input_value_infos.end()) ? vi_it->second : nullptr;
+                    if (constraint.predicate &&
+                        constraint.predicate(val, vi, ort_api, initializers, ni.node)) {
+                        if (!constraint.capture_name.empty())
+                            out.value_names[constraint.capture_name] = val;
+                        any_matched = true;
+                        break;
                     }
                 }
             }
@@ -114,6 +158,17 @@ static bool MatchNode(
             if (!constraint.capture_name.empty()) {
                 out.scalar_values[constraint.capture_name] = v;
             }
+            break;
+        }
+
+        case PInput::Kind::Predicate: {
+            auto vi_it = input_value_infos.find(val_name);
+            const OrtValueInfo* vi = (vi_it != input_value_infos.end()) ? vi_it->second : nullptr;
+            if (!constraint.predicate ||
+                !constraint.predicate(val_name, vi, ort_api, initializers, ni.node))
+                return false;
+            if (!constraint.capture_name.empty())
+                out.value_names[constraint.capture_name] = val_name;
             break;
         }
         }

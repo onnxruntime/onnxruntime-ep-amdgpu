@@ -149,6 +149,13 @@ void EpFusionManager::ApplyFusions(
             continue;
         }
 
+        // Find the owning rule before claiming nodes.
+        const IFusionRule* owning_rule = nullptr;
+        for (const auto& rule : it->second.rules) {
+            if (rule->MatchesResult(m)) { owning_rule = rule.get(); break; }
+        }
+        if (!owning_rule) continue;
+
         // Verify all matched nodes are DML-capable and not CPU-preferred.
         bool all_supported = true;
         for (size_t idx : m.all_nodes) {
@@ -182,15 +189,6 @@ void EpFusionManager::ApplyFusions(
             nodes_to_fuse.size(),
             &fusion_options);
         if (st) { ort_api.ReleaseStatus(st); continue; }
-
-        // Find the owning rule for this match.  Every successful MatchPattern
-        // result must map to exactly one rule via MatchesResult — if none is
-        // found the match was produced by a tree whose rules are misconfigured.
-        const IFusionRule* owning_rule = nullptr;
-        for (const auto& rule : it->second.rules) {
-            if (rule->MatchesResult(m)) { owning_rule = rule.get(); break; }
-        }
-        if (!owning_rule) continue;  // guard: skip if no rule claims this match
 
         FusionMatch fm;
         fm.match = std::move(m);
