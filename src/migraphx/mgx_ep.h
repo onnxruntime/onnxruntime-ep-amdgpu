@@ -117,7 +117,9 @@ private:
 
     Ort::Status CreateNodeComputeInfoFromGraph(const Ort::ConstGraph& graph, const Ort::ConstNode& fused_node,
         const Map<size_t>& input_name_indices, const Map<size_t>& output_name_indices, const std::string& mxr_prefix,
-        OrtNodeComputeInfo*& node_compute_info, OrtNode*& ep_context_node);
+        OrtNodeComputeInfo*& node_compute_info, OrtNode*& ep_context_node, bool& loaded_from_cache);
+
+    void LogTelemetry(const fs::path& model_path, bool loaded_from_cache) const noexcept;
 
     Ort::Status CreateNodeComputeInfoFromCache(const Ort::ConstGraph& graph, const Ort::ConstNode& fused_node,
         const Map<size_t>& input_name_indices, const Map<size_t>& output_name_indices,

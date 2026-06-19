@@ -28,6 +28,10 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
         return backend_ep_factory_;
     }
 
+    [[nodiscard]] std::string_view Version() const noexcept {
+        return version_;
+    }
+
 private:
     [[nodiscard]] const char* GetVendor() const;
     [[nodiscard]] const char* GetName() const;
