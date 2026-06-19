@@ -7,15 +7,12 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
-#include <filesystem>
 #include <fstream>
 #include <string>
 #include <thread>
 
 #include "common/path_string.h"
 #include "common/telemetry.h"
-
-namespace fs = std::filesystem;
 
 // Linux counterpart of the Windows LockFileEx implementation. The EP is built
 // for both platforms; the locking model maps to fcntl(F_SETLK) advisory write
@@ -42,17 +39,11 @@ struct Fd {
 
 }  // namespace
 
-PathString LogFilePath() noexcept try {
+PathString detail::BaseDirectory() noexcept try {
     // %ProgramData% has no Linux equivalent; use a machine-wide path that is
     // conventionally writable for shared logs. Final location TBD with consumer.
     const char* base_env = std::getenv("AMD_GPUEP_TELEMETRY_DIR");
-    const fs::path base = (base_env != nullptr && *base_env != '\0')
-        ? fs::path{base_env}
-        : fs::path{"/var/log"};
-    const fs::path dir = base / std::string{kVendorSubdir} / std::string{kProductSubdir};
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    return (dir / std::string{kLogFileName}).native();
+    return (base_env != nullptr && *base_env != '\0') ? PathString{base_env} : PathString{"/var/log"};
 } catch (...) {
     return {};
 }

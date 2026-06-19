@@ -4,6 +4,7 @@
 #include "common/telemetry.h"
 
 #include <chrono>
+#include <filesystem>
 #include <string>
 
 #include <fmt/chrono.h>
@@ -51,6 +52,20 @@ std::string Record::Format() const try {
     AppendField(line, "parent", parent_process);
     line.push_back('\n');
     return line;
+} catch (...) {
+    return {};
+}
+
+PathString LogFilePath() noexcept try {
+    const PathString base = detail::BaseDirectory();
+    if (base.empty()) {
+        return {};
+    }
+    const std::filesystem::path dir =
+        std::filesystem::path{base} / ToPathString(kVendorSubdir) / ToPathString(kProductSubdir);
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);  // ignore ec: append fails gracefully if missing
+    return (dir / ToPathString(kLogFileName)).native();
 } catch (...) {
     return {};
 }

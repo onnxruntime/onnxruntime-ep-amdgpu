@@ -28,8 +28,9 @@ namespace telemetry {
 // Kept here so the location decision can flip with a one-line change after the
 // installer/ACL question is settled. NOTE: %ProgramFiles% is not writable by
 // non-elevated processes unless the installer grants write access via an ACL;
-// otherwise appends fail and are silently dropped (by design).
-inline constexpr bool kUseProgramFiles = true;
+// otherwise appends fail and are silently dropped (by design). %ProgramData%
+// is machine-wide and writable by normal user processes.
+inline constexpr bool kUseProgramFiles = false;
 
 // Subdirectory and file name under the chosen base folder.
 inline constexpr std::string_view kVendorSubdir = "AMD";
@@ -57,8 +58,16 @@ struct Record {
     std::string Format() const;
 };
 
+namespace detail {
+// Platform-specific base directory under which the AMD\GPUEP\telemetry.log tree
+// lives (e.g. %ProgramData% on Windows, /var/log on Linux). Returns empty on
+// failure. The vendor/product/file parts and directory creation are handled in
+// the shared LogFilePath().
+PathString BaseDirectory() noexcept;
+}  // namespace detail
+
 // Absolute path to the telemetry log file, creating the containing directory if
-// needed. Returns an empty path on any failure. Platform-specific.
+// needed. Returns an empty path on any failure.
 PathString LogFilePath() noexcept;
 
 // Image file name of the parent (launching) process, e.g. "python.exe".

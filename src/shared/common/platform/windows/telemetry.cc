@@ -83,15 +83,8 @@ DWORD ParentPidOf(DWORD pid) {
 
 }  // namespace
 
-PathString LogFilePath() noexcept try {
-    const PathString base = KnownFolder(kUseProgramFiles ? FOLDERID_ProgramFiles : FOLDERID_ProgramData);
-    if (base.empty()) {
-        return {};
-    }
-    const fs::path dir = fs::path{base} / ToPathString(kVendorSubdir) / ToPathString(kProductSubdir);
-    std::error_code ec;
-    fs::create_directories(dir, ec);  // ignore ec: open below fails gracefully if missing
-    return (dir / ToPathString(kLogFileName)).native();
+PathString detail::BaseDirectory() noexcept try {
+    return KnownFolder(kUseProgramFiles ? FOLDERID_ProgramFiles : FOLDERID_ProgramData);
 } catch (...) {
     return {};
 }
