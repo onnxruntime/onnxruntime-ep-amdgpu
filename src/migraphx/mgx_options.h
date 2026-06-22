@@ -25,5 +25,6 @@ constexpr auto kHipGraphEnable = "hip_graph_enable"sv;
 constexpr auto kMaxDynamicBatch = "max_dynamic_batch"sv;
 constexpr auto kCompileBatches = "compile_batches"sv;
 constexpr auto kCoalesceIO = "coalesce_io"sv;
+constexpr auto kMlssUseSpecificOps = "mlss_use_specific_ops"sv;
 
 }  // namespace mgx_ep::provider_option

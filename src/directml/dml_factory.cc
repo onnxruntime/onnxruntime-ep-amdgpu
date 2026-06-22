@@ -267,9 +267,8 @@ Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHar
             OrtEpDevice* ep_device{};
             RETURN_IF_ERROR(ep_api.CreateEpDevice(this, device, nullptr, nullptr, &ep_device));
 
-            // currently forced to make allocator info here since the ep device creation is
-            // separate from the EP creation, but the allocator info is needed to create
-            // the EP. In the future we may want to move allocator info creation to EP creation.
+            // Forced to register allocator info here because ep device creation is separate from
+            // EP creation, but ORT needs the memory info before CreateEp is called.
             ep_api.EpDevice_AddAllocatorInfo(ep_device, cpu_input_allocator_);
             ep_api.EpDevice_AddAllocatorInfo(ep_device, bucketized_buffer_memory_info_);
 
@@ -351,10 +350,9 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateAllocatorImpl(OrtEpFactory* this_
                                                               OrtAllocator** allocator) noexcept {
     auto& factory = *static_cast<ProviderFactory*>(this_ptr);
 
-    factory.IsCpuAllocator(memory_info);
-    factory.IsGpuAllocator(memory_info);
-
-    // send passthrough allocator. dml ep allocators defined in dml_ep
+    // Return a passthrough allocator that wraps the memory_info. The real per-session
+    // GPU allocator (DmlBucketizedBufferAllocator) is created by the EP-level
+    // OrtEp::CreateAllocator in ExecutionProviderPlugin::CreateAllocatorImpl.
     *allocator = std::make_unique<CpuAllocator>(memory_info).release();
     return nullptr;
 }
@@ -407,6 +405,7 @@ OrtStatus* ORT_API_CALL ProviderFactory::GetHardwareDeviceIncompatibilityDetails
 
 OrtStatus* ORT_API_CALL ProviderFactory::GetNumCustomOpDomainsImpl(OrtEpFactory* this_ptr,
                                                                  _Out_ size_t* num_domains) noexcept {
+    *num_domains = 0;
     return nullptr;
 }
 
@@ -561,31 +560,17 @@ Microsoft::WRL::ComPtr<IDMLDevice> ProviderFactory::CreateDMLDevice(const Micros
 }
 
 bool ProviderFactory::IsCpuAllocator(const OrtMemoryInfo* memory_info) {
-    if (!memory_info) {
-        return false;
-    }
-
+    if (memory_info == nullptr) return false;
     OrtMemoryInfoDeviceType device_type;
     ort_api.MemoryInfoGetDeviceType(memory_info, &device_type);
-    const char* name = nullptr;
-    ort_api.MemoryInfoGetName(memory_info, &name);
-
-    return (name != nullptr) && (std::strcmp(name, "directML_ep_cpu") == 0) &&
-        (device_type == OrtMemoryInfoDeviceType_CPU);
+    return device_type == OrtMemoryInfoDeviceType_CPU;
 }
 
 bool ProviderFactory::IsGpuAllocator(const OrtMemoryInfo* memory_info) {
-    if (!memory_info) {
-        return false;
-    }
-
+    if (memory_info == nullptr) return false;
     OrtMemoryInfoDeviceType device_type;
     ort_api.MemoryInfoGetDeviceType(memory_info, &device_type);
-    const char* name = nullptr;
-    ort_api.MemoryInfoGetName(memory_info, &name);
-
-    return (name != nullptr) && (std::strcmp(name, "directML_ep_gpu") == 0) &&
-        (device_type == OrtMemoryInfoDeviceType_GPU);
+    return device_type == OrtMemoryInfoDeviceType_GPU;
 }
 
 }  // namespace dml_ep

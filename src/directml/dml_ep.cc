@@ -7,15 +7,21 @@
 #include "core/common/inlined_containers_fwd.h"
 #include "core/framework/fuse_nodes_funcs.h"
 #include "dml_abi_kernel.h"
+#include "ep_fusion_manager.h"
+#include "quick_gelu_ep_fusion.h"
 
 namespace dml_ep {
 
+    // ep_name must match the name under which this EP is registered with ORT.
+    // Kernels stamped with a different name than the running EP's GetName() will never
+    // be dispatched — ORT matches kernel provider strings to EP type strings exactly.
     static void CreateDmlKernelRegistry(
         _In_ const PluginDmlExecutionProviderImpl* executionProvider,
+        std::string_view ep_name,
         _Out_ std::shared_ptr<onnxruntime::KernelRegistry>* registry,
         _Out_ std::shared_ptr<const InternalRegistrationInfoMap>* internalRegInfoMap)
     {
-        Microsoft::WRL::ComPtr<PluginAbiCustomRegistry> abiRegistry = wil::MakeOrThrow<PluginAbiCustomRegistry>(executionProvider);
+        Microsoft::WRL::ComPtr<PluginAbiCustomRegistry> abiRegistry = wil::MakeOrThrow<PluginAbiCustomRegistry>(executionProvider, ep_name);
         RegisterDmlOperators(abiRegistry.Get(), executionProvider);
 
         assert(abiRegistry->GetRegistries().size() == 1);
@@ -24,7 +30,7 @@ namespace dml_ep {
         *registry = customRegistry->GetKernelRegistry();
         *internalRegInfoMap = abiRegistry->GetInternalRegInfoMap();
 
-        RegisterCpuOperatorsAsDml(registry->get());
+        RegisterCpuOperatorsAsDml(registry->get(), ep_name);
     }
     
 ExecutionProviderPlugin::~ExecutionProviderPlugin() {
@@ -72,7 +78,7 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     m_dataTransfer = std::make_unique<DMLDataTransfer>(ApiPtrs{api_ptrs});
     m_dataTransfer->AttachExecutionProvider(m_executionProvider);
 
-    CreateDmlKernelRegistry(m_executionProvider.get(), &m_kernelRegistry, &m_internalRegInfoMap);
+    CreateDmlKernelRegistry(m_executionProvider.get(), name_, &m_kernelRegistry, &m_internalRegInfoMap);
     if(ConvertKernelRegistryToOrtKernelRegistry() != nullptr) {
         throw std::runtime_error("Failed to convert internal kernel registry to OrtKernelRegistry");
     }
@@ -218,6 +224,9 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
             // versions (e.g., inputs vs attributes), so each version needs its own kernelFactory.
             int since_ver_start = 0, since_ver_end = 0;
             def->SinceVersion(&since_ver_start, &since_ver_end);
+            // Key format must match what PluginAbiCustomRegistry::RegisterOperatorKernel writes.
+            // Uses sinceVersion (not sinceVersion+end) because each opset version that changes
+            // a kernel's interface (e.g. Pad, Slice, Clip) is registered as a separate entry.
             std::string regKey{std::string{def->Domain()} + "::" + std::string{def->OpName()} +
                                "::" + std::to_string(since_ver_start)};
 
@@ -244,6 +253,7 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
                 func_state->is_internal_operator = reg_info->isInternalOperator;
                 func_state->dml_execution_provider = m_executionProvider.get();
                 func_state->ep_plugin = this;
+                func_state->ep_name = name_;
 
                 // Populate tensor attribute names by operator name — these are tensor-typed ONNX attributes
                 // that cannot be stored in AttributeMap (which only supports int/float/string).
@@ -378,6 +388,7 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
                 creation_state.dml_execution_provider = state->dml_execution_provider;
                 creation_state.ort_api = state->ort_api_ptr;
                 creation_state.operator_name = state->operator_name.c_str();
+                creation_state.ep_name = state->ep_name;
 
                 // Pass the resolved constants (or empty map for lazy-init case).
                 // DmlAbiKernel_Create sets needs_lazy_init=true when required_constants_available=false,
@@ -547,10 +558,40 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
 
     // Get the list of nodes that should stay on the CPU
     std::unordered_set<size_t> cpuPreferredNodes = ep->GetCpuPreferredNodes(graph, graph_support_info, tentativeNodes);
+
+    // Run graph-level fusions in a single greedy pass (largest pattern wins).
+    // Each matched fusion group is submitted to ORT via AddNodesToFuse and
+    // routed through CompileImpl().  Claimed node IDs are collected so that
+    // the single-node loop below can skip them.
+    // Build the anchor index once per session and store it — the IFusionRule
+    // objects it owns are referenced by raw pointer in FusionMatch and must
+    // outlive m_fusionMap.
+    ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex();
+    ep->m_fusionMap.clear();
+
+    std::unordered_set<size_t> fusedNodeIds;
+    EpFusionManager::ApplyFusions(
+        ep->m_anchorIndex,
+        ep->ort_api,
+        ep->ep_api,
+        graph,
+        graph_support_info,
+        ep->m_graphInitializerMap,
+        [ep, graph_support_info](const OrtNode* n, uint32_t mask) {
+            return ep->IsNodeSupportedByDml(n, graph_support_info, mask);
+        },
+        cpuPreferredNodes,
+        deviceDataTypeMask,
+        fusedNodeIds,
+        ep->m_fusionMap);
+
     std::vector<const OrtNode*> supportedNodes;
     for (const OrtNode* node : nodesInTopologicalOrder) {
         size_t nodeID = 0;
         ep->ort_api.Node_GetId(node, &nodeID);
+
+        // Skip nodes already claimed by a fusion group.
+        if (fusedNodeIds.count(nodeID)) continue;
 
         const char* op_type = nullptr;
         ep->ort_api.Node_GetOperatorType(node, &op_type);
@@ -575,6 +616,27 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
                                     _Out_writes_(count) OrtNode** ep_context_nodes) noexcept
 {
     auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+
+    for (size_t i = 0; i < count; ++i) {
+        node_compute_infos[i] = nullptr;
+        ep_context_nodes[i]   = nullptr;
+
+        // Compile the fused subgraph to a self-contained OrtNodeComputeInfo that
+        // builds and executes the DML operator.  DML graph compilation happens
+        // at session initialization; Compute() dispatches each inference call.
+        node_compute_infos[i] = EpFusionManager::CompileFusion(
+            ep->ort_api,
+            graphs[i],
+            ep->m_graphInitializerMap,
+            ep->m_executionProvider.get(),
+            ep->m_fusionMap);
+
+        if (!node_compute_infos[i]) {
+            return ep->ort_api.CreateStatus(ORT_EP_FAIL,
+                "CompileImpl: no fusion rule matched a fused subgraph");
+        }
+    }
+
     return nullptr;
 }
 
@@ -583,8 +645,13 @@ void ORT_API_CALL ExecutionProviderPlugin::ReleaseNodeComputeInfosImpl(
     OrtNodeComputeInfo** node_compute_infos,
     size_t num_node_compute_infos) noexcept
 {
-    auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
     (void)this_ptr;
+    for (size_t i = 0; i < num_node_compute_infos; ++i) {
+        // Each OrtNodeComputeInfo is a heap-allocated QuickGeluNodeComputeInfo.
+        // The destructor releases the compiled state (IDMLCompiledOperator, etc.).
+        delete node_compute_infos[i];
+        node_compute_infos[i] = nullptr;
+    }
 }
 
 OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetPreferredDataLayoutImpl(
@@ -714,31 +781,18 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::OnSessionInitializationEndImpl(
 
 bool ExecutionProviderPlugin::IsCpuAllocator(const OrtMemoryInfo* memory_info)
 {
-    if (!memory_info) {
-        return false;
-    }
-
+    if (memory_info == nullptr) return false;
     OrtMemoryInfoDeviceType device_type;
     ort_api.MemoryInfoGetDeviceType(memory_info, &device_type);
-    const char* name = nullptr;
-    ort_api.MemoryInfoGetName(memory_info, &name);
-
-    return (name != nullptr) && (std::strcmp(name, "directML_ep_cpu") == 0) && (device_type == OrtMemoryInfoDeviceType_CPU);
+    return device_type == OrtMemoryInfoDeviceType_CPU;
 }
 
 bool ExecutionProviderPlugin::IsGpuAllocator(const OrtMemoryInfo* memory_info)
 {
-    if (!memory_info) {
-        return false;
-    }
-
+    if (memory_info == nullptr) return false;
     OrtMemoryInfoDeviceType device_type;
     ort_api.MemoryInfoGetDeviceType(memory_info, &device_type);
-    const char* name = nullptr;
-    ort_api.MemoryInfoGetName(memory_info, &name);
-
-    return (name != nullptr) && (std::strcmp(name, "directML_ep_gpu") == 0) &&
-        (device_type == OrtMemoryInfoDeviceType_GPU);
+    return device_type == OrtMemoryInfoDeviceType_GPU;
 }
 
 uint32_t ExecutionProviderPlugin::GetSupportedDeviceDataTypeMask() const {
@@ -936,6 +990,13 @@ std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const O
         {
             auto* input = valueInfoInputs[i];
 
+            // Null input = missing optional edge — treat as GPU tensor (don't pull to CPU).
+            // Matches ORT's fallback_cpu_capability.cc which skips null NodeArgs naturally.
+            if (!input || !input->GetTypeInfo() || !input->GetTypeInfo()->tensor_type_info) {
+                place_in_cpu = false;
+                break;
+            }
+
             ONNXTensorElementDataType datatype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
             ort_api.GetTensorElementType(input->GetTypeInfo()->tensor_type_info.get(), &datatype);
 
@@ -953,7 +1014,7 @@ std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const O
             }
 
             // allow placing on CPU if it's a small initializer or graph input
-            if (IsSmallInitializer(graph,input) ||
+            if (IsSmallInitializer(graph, input) ||
                 std::find(graphInputsValueInfo.begin(), graphInputsValueInfo.end(), input) != graphInputsValueInfo.end()) {
                 continue;
             }
@@ -1036,16 +1097,23 @@ bool ExecutionProviderPlugin::IsNodeSupportedByDml(
     }
 
     const char* provider = ep_api.KernelDef_GetExecutionProvider(kernel_def);
-    if (provider == nullptr || std::strcmp(provider, "DirectMLExecutionProvider") != 0)
+    // Compare against the runtime EP name, not a hardcoded string, so kernel lookup works
+    // regardless of the name this EP was registered under (e.g. "directml" via amdgpu-ep).
+    if (provider == nullptr || std::strcmp(provider, name_.c_str()) != 0)
     {
         // Not a DML kernel -> won't be in internal map
         return false;
     }
 
-    // Build key from domain and operator name
+    // Build key from domain, operator name, and since-version — must match the format written
+    // by ConvertKernelRegistryToOrtKernelRegistry: domain::opname::since_version.
     const char* op_name = ep_api.KernelDef_GetOperatorType(kernel_def);
     const char* domain = ep_api.KernelDef_GetDomain(kernel_def);
-    std::string regKey = std::string(domain) + "::" + std::string(op_name);
+    int since_ver = 0, until_ver = 0;
+    OrtStatus* ver_st = ep_api.KernelDef_GetSinceVersion(kernel_def, &since_ver, &until_ver);
+    if (ver_st) { ort_api.ReleaseStatus(ver_st); since_ver = 0; }
+    std::string regKey = std::string(domain) + "::" + std::string(op_name) +
+                         "::" + std::to_string(since_ver);
 
     auto regInfoIter = m_internalRegInfoMap->find(regKey);
     std::shared_ptr<InternalRegistrationInfo> internalRegInfo;
@@ -1063,8 +1131,11 @@ bool ExecutionProviderPlugin::IsNodeSupportedByDml(
     }
 
     // Check whether the node uses any data types which are unsupported by the device.
-    // Pass nullptr for regInfo during graph partitioning - requiredConstantCpuInputs is for kernel creation, not capability checking
-    bool dataTypesSupported = DoesNodeContainSupportedDataTypes(node, nullptr, supportedDeviceDataTypeMask,
+    // Pass internalRegInfo so that requiredConstantCpuInputs are excluded from GPU type validation —
+    // those inputs (e.g. Resize's sizes/scales/roi) are read on CPU and never need GPU type support.
+    // Passing nullptr here was a bug: it caused ops like Resize to be rejected because their
+    // int64 CPU-side inputs failed the device type check, matching ORT's ExecutionProvider.cpp:876.
+    bool dataTypesSupported = DoesNodeContainSupportedDataTypes(node, internalRegInfo.get(), supportedDeviceDataTypeMask,
                                            m_native16BitShaderOpsSupported);
     if (!dataTypesSupported) {
         return false;
@@ -1113,7 +1184,14 @@ bool ExecutionProviderPlugin::DoesNodeContainSupportedDataTypes(
         if (!valueInfo.IsTensor()) {
             // If the model has nodes that use Optional we will arrive here. It's a valid ONNX model but
             // we don't handle Optional.
-            nodeContainsSupportedDataTypes = false;
+            // Exception: if this is a required CPU constant input that is unconnected (missing optional),
+            // skip it rather than rejecting the node. ORT's ForEachDef naturally skips these via
+            // NodeArg::Exists(); our OrtNodeAdapter doesn't have that check, so we replicate it here.
+            bool isMissingConstantCpuInput = isInput &&
+                std::find(constantCpuInputs.begin(), constantCpuInputs.end(), &valueInfo) != constantCpuInputs.end();
+            if (!isMissingConstantCpuInput) {
+                nodeContainsSupportedDataTypes = false;
+            }
             return;
         }
 

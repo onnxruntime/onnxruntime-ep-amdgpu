@@ -41,6 +41,7 @@ constexpr auto kHipGraphEnable = "ORT_MIGRAPHX_HIP_GRAPH_ENABLE"sv;
 constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
 constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
 constexpr auto kCoalesceIO = "ORT_MIGRAPHX_COALESCE_IO"sv;
+constexpr auto kMlssUseSpecificOps = "ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS"sv;
 }  // namespace env_vars
 
 // EP-owned device staging buffer (pointer-stable across runs so it can be
@@ -235,6 +236,7 @@ private:
     bool enable_fp8_{};
     bool enable_int8_{};
     bool exhaustive_tune_{};
+    std::string mlss_use_specific_ops_{};
     bool int8_calibration_cache_available_{};
     bool int8_use_native_calibration_table_{};
     bool dump_subgraphs_{};

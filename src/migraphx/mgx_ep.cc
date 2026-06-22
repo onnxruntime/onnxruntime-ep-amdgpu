@@ -214,10 +214,6 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
                 return true;
             }
         }
-    } else if (op_type == "NonZero") {
-        if (!CanEvalNodeArgument(graph, node, {0})) {
-            return true;
-        }
     } else if (op_type == "OneHot") {
         if (!CanEvalNodeArgument(graph, node, {1})) {
             return true;
@@ -324,7 +320,9 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
 bool AllNodesAssignedToEp(const Ort::ConstGraph& graph, std::string_view ep_name) {
     const auto nodes{graph.GetNodes()};
     return !nodes.empty() && ranges::all_of(nodes,
-        [&ep_name](const Ort::ConstNode& node) { return node.GetName() == ep_name; });
+        [&ep_name](const Ort::ConstNode& node) { 
+            return node.GetName() == ep_name; 
+        });
 }
 
 bool IsNodeControlFlowOp(const Ort::ConstNode& node) {
@@ -416,6 +414,8 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     for (const auto& [key, value] : key_value_pairs.GetKeyValuePairs()) {
         if (key.rfind(ep_prefix, 0) == 0) {
             provider_options.emplace(key.substr(ep_prefix.length()), value);
+        } else if (key.rfind("ep.", 0) == 0) {
+            provider_options.emplace(key, value);
         }
     }
 
@@ -427,6 +427,7 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     enable_fp8_ = info.enable_fp8;
     enable_int8_ = info.enable_int8;
     exhaustive_tune_ = info.exhaustive_tune;
+    mlss_use_specific_ops_ = info.mlss_use_specific_ops;
     cache_dir_ = info.cache_dir;
     int8_use_native_calibration_table_ = info.int8_use_native_calibration_table;
     int8_calibration_table_name_ = info.int8_calibration_table_name;
@@ -464,6 +465,9 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kMaxDynamicBatch, max_dynamic_batch_);
     PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
+    PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
+
+    platform::SetEnvironmentVar("MIGRAPHX_MLSS_USE_SPECIFIC_OPS", mlss_use_specific_ops_);
 
     auto compute_mode{platform::GetEnvironmentVar(env_var::kComputeMode)};
     if (!compute_mode.empty()) {
@@ -592,6 +596,18 @@ try {
         return STATUS_OK;
     }
 
+    // If this graph is a subgraph of a control flow op (If/Loop/Scan),
+    // do not claim its nodes separately. The parent op will be claimed
+    // by the outer graph's GetCapability and compiled with the original
+    // unfused subgraphs intact
+    const auto parent_node = graph.GetParentNode();
+    if (parent_node) {
+        const auto parent_op_type = parent_node.GetOperatorType();
+        if (parent_op_type == "If" || parent_op_type == "Loop" || parent_op_type == "Scan") {
+            return STATUS_OK;
+        }
+    }
+
     // Check if this graph contains EPContext nodes intended for this EP.
     if (EpContextNodeReader::GraphHasContextNode(graph)) {
         std::vector<Ort::ConstNode> ep_context_nodes;
@@ -636,9 +652,10 @@ try {
                         return AllNodesAssignedToEp(attr.sub_graph, ep_name_);
                     });
             };
-            if (!supported_control_flow(node)) {
-                return STATUS_OK;
-            }
+            // Subgraph nodes are processed in separate prior GetCapability calls.
+            // EP assignment of subgraph nodes cannot be verified through this API
+            // during the parent graph's GetCapability pass. Fall through to the
+            // normal op type check to let MIGraphX claim supported control flow ops.
         }
 
         bool are_types_supported{true};

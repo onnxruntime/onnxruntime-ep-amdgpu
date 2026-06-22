@@ -34,14 +34,28 @@ if(WIN32)
     set_property(TARGET migraphx-ep APPEND_STRING
             PROPERTY LINK_FLAGS /DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
 
-    foreach(_file migraphx-hiprtc-driver.exe migraphx.dll migraphx_c.dll migraphx_gpu.dll migraphx_device.dll migraphx_onnx.dll)
-        list(APPEND MGX_FILES "$<TARGET_FILE_DIR:migraphx::migraphx>/${_file}")
-    endforeach()
+    set(MGX_FILES
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/amdmlss.dll"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/amdmlss.pdb"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx.dll"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx.pdb"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx-hiprtc-driver.exe"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx-hiprtc-driver.pdb"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_c.dll"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_c.pdb"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_device.dll"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_device.pdb"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_gpu.dll"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_gpu.pdb"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_onnx.dll"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_onnx.pdb"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_tf.dll"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_tf.pdb")
 
     foreach(_file ${MGX_FILES} ${HIP_FILES})
         add_custom_command(TARGET migraphx-ep
             POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_file} $<TARGET_FILE_DIR:migraphx-ep>)
+            COMMAND ${CMAKE_COMMAND} -P ${PROJECT_SOURCE_DIR}/cmake/CopyIfExists.cmake "${_file}" "$<TARGET_FILE_DIR:migraphx-ep>")
         cmake_path(GET _file FILENAME _name)
         set(_install_file "$<TARGET_FILE_DIR:migraphx-ep>/${_name}")
         list(APPEND _install_files "${_install_file}")
@@ -50,11 +64,8 @@ if(WIN32)
     install(TARGETS migraphx-ep
             DESTINATION ".")
 
-    install(FILES $<TARGET_PDB_FILE:migraphx-ep>
+    install(FILES $<TARGET_PDB_FILE:migraphx-ep> ${_install_files}
             DESTINATION "." OPTIONAL)
-
-    install(FILES ${_install_files}
-            DESTINATION ".")
 else()
     set_property(TARGET migraphx-ep APPEND_STRING
             PROPERTY LINK_FLAGS "-Xlinker --version-script=${PROJECT_SOURCE_DIR}/src/shared/version_script.lds -Xlinker --gc-sections")

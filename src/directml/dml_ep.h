@@ -4,6 +4,7 @@
 #pragma once
 
 #include "dml_client.h"
+#include "ep_fusion_manager.h"
 
 #include "ort_node_adapter.h"
 #include "dml_common.h"
@@ -61,6 +62,7 @@ private:
         std::vector<std::string> tensor_attribute_names;  // Tensor-typed ONNX attribute names (e.g., ConstantOfShape's "value")
         const PluginDmlExecutionProviderImpl* dml_execution_provider = nullptr;
         ExecutionProviderPlugin* ep_plugin = nullptr;  // For m_graphInitializerMap access during constant resolution
+        std::string ep_name;  // Runtime EP name, propagated to DmlKernelCreationState and DmlAbiKernel
 
         // FALLBACK: ABI-UNSAFE PATH (when ABI-safe fails, e.g., E_UNEXPECTED)
         onnxruntime::KernelCreateFn* kernel_create_fn = nullptr;
@@ -225,6 +227,14 @@ private:
     // OrtValue* lifetime is valid for the session lifetime. Used as a fallback constant
     // source in DmlKernelCreateFuncAdapter when KernelInfoGetConstantInput_tensor misses.
     std::unordered_map<std::string, const OrtValue*> m_graphInitializerMap;
+
+    // Anchor index owns the IFusionRule objects whose raw pointers are stored
+    // in FusionMatch.rule — must outlive m_fusionMap.
+    EpFusionManager::AnchorIndex m_anchorIndex;
+
+    // Pattern match results from GetCapabilityImpl, consumed by CompileImpl.
+    // Keyed by hash of sorted node IDs for O(1) lookup in CompileFusion.
+    FusionMatchMap m_fusionMap;
 
     bool m_native16BitShaderOpsSupported = false;
     bool m_isMcdmDevice = false;

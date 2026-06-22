@@ -224,6 +224,13 @@ add_library(directml-ep MODULE
     dml_readback_heap.cc
     dml_utils.cc
 
+    # ---- Graph fusion (ABI-safe, plugin EP only) ----
+    fusion_utils.cc
+    pattern_matcher.cc
+    ep_fusion_manager.cc
+    quick_gelu_ep_fusion.cc
+    bias_gelu_ep_fusion.cc
+
     #---- DirectML EP sources ----
     DmlExecutionProvider/ApiTraits.cc
     DmlExecutionProvider/CommandQueue.cc

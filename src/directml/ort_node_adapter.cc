@@ -16,8 +16,9 @@ namespace dml_ep {
 // OrtValueInfoAdapter Implementation
 //==============================================================================
 
-OrtValueInfoAdapter::OrtValueInfoAdapter(const OrtValueInfo* value_info)
+OrtValueInfoAdapter::OrtValueInfoAdapter(const OrtValueInfo* value_info, const OrtApi* ort_api)
     : value_info_(value_info)
+    , ort_api_(ort_api)
     , type_info_(nullptr)
     , type_info_cached_(false)
     , onnx_type_(ONNX_TYPE_UNKNOWN)
@@ -27,11 +28,20 @@ OrtValueInfoAdapter::OrtValueInfoAdapter(const OrtValueInfo* value_info)
         return;  // Allow nullptr for optional inputs
     }
 
-    // Get name using virtual method
-    name_ = value_info_->GetName();
-
-    // Get type info
-    type_info_ = value_info_->GetTypeInfo();
+    if (ort_api_) {
+        // C API path: value_info lives in onnxruntime.dll; calling its virtual methods
+        // from this plugin DLL is an ABI violation (vtable mismatch). Use the stable C API instead.
+        const char* name_ptr = nullptr;
+        if (ort_api_->GetValueInfoName(value_info_, &name_ptr) == nullptr && name_ptr) {
+            name_ = name_ptr;
+        }
+        ort_api_->GetValueInfoTypeInfo(value_info_, &type_info_);
+    } else {
+        // Internal plugin path: value_info is an OrtNodePlugin-owned object compiled in this DLL.
+        // Virtual dispatch is safe here.
+        name_ = value_info_->GetName();
+        type_info_ = value_info_->GetTypeInfo();
+    }
 }
 
 bool OrtValueInfoAdapter::IsTensor() const {
@@ -76,12 +86,21 @@ void OrtValueInfoAdapter::CacheTypeInfo() const {
         return;
     }
 
-    // Get ONNX type
-    onnx_type_ = type_info_->type;
-
-    // If tensor, get element type from tensor_type_info
-    if (onnx_type_ == ONNX_TYPE_TENSOR && type_info_->tensor_type_info) {
-    tensor_elem_type_ = type_info_->tensor_type_info->GetElementType();
+    if (ort_api_) {
+        // C API path: use stable function pointers to avoid vtable/struct-layout ABI violations.
+        ort_api_->GetOnnxTypeFromTypeInfo(type_info_, &onnx_type_);
+        if (onnx_type_ == ONNX_TYPE_TENSOR) {
+            const OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
+            if (ort_api_->CastTypeInfoToTensorInfo(type_info_, &tensor_info) == nullptr && tensor_info) {
+                ort_api_->GetTensorElementType(tensor_info, &tensor_elem_type_);
+            }
+        }
+    } else {
+        // Internal plugin path: direct field/virtual access is safe within the same DLL.
+        onnx_type_ = type_info_->type;
+        if (onnx_type_ == ONNX_TYPE_TENSOR && type_info_->tensor_type_info) {
+            tensor_elem_type_ = type_info_->tensor_type_info->GetElementType();
+        }
     }
 }
 
@@ -324,7 +343,7 @@ void OrtNodeAdapter::InitializeFromCApi(const OrtNode* node, const OrtApi& ort_a
      ort_api.Node_GetInputs(node, input_ptrs.data(), num_inputs);
         inputs_.reserve(num_inputs);
       for (const OrtValueInfo* input : input_ptrs) {
-            inputs_.push_back(std::make_unique<OrtValueInfoAdapter>(input));
+            inputs_.push_back(std::make_unique<OrtValueInfoAdapter>(input, &ort_api));
         }
     }
 
@@ -338,7 +357,7 @@ void OrtNodeAdapter::InitializeFromCApi(const OrtNode* node, const OrtApi& ort_a
         outputs_.reserve(num_outputs);
         for (const OrtValueInfo* output : output_ptrs)
         {
-            outputs_.push_back(std::make_unique<OrtValueInfoAdapter>(output));
+            outputs_.push_back(std::make_unique<OrtValueInfoAdapter>(output, &ort_api));
         }
     }
 

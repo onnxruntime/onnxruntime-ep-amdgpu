@@ -24,7 +24,9 @@ class OrtGraphAdapter;
 //==============================================================================
 class OrtValueInfoAdapter {
 public:
-    explicit OrtValueInfoAdapter(const OrtValueInfo* value_info);
+    // ort_api must be non-null when value_info comes from onnxruntime.dll (C API / InitializeFromCApi path).
+    // It may be null when value_info is an internal plugin-owned object (InitializeFromPlugin path).
+    explicit OrtValueInfoAdapter(const OrtValueInfo* value_info, const OrtApi* ort_api = nullptr);
     ~OrtValueInfoAdapter() = default;
 
     // Prevent copying, allow moving
@@ -48,6 +50,7 @@ public:
 
 private:
     const OrtValueInfo* value_info_;
+    const OrtApi* ort_api_;  // non-null on C API path; null on internal plugin path
     std::string name_;
     const OrtTypeInfo* type_info_;
 

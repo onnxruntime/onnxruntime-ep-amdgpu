@@ -127,7 +127,11 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
         "CreateEpFactories", reinterpret_cast<void**>(&dml_create_ep_factories)));
 
     size_t factories_created{};
-    THROW_IF_ERROR(dml_create_ep_factories(kDirectMLBackend, ort_api_base, default_logger,
+    // Pass ep_name_ (e.g. "amdgpu") so the directml backend registers its kernels,
+    // allocators, and node assignments under the same name ORT sees for this EP.
+    // Using kDirectMLBackend ("directml") would cause a provider name mismatch:
+    // ORT would look up kernels under "amdgpu" but find them stamped as "directml".
+    THROW_IF_ERROR(dml_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
         &dml_ep_factory_, 1, &factories_created));
 
     THROW_IF_ERROR(LoadDynamicLibrary(migraphxBackend, &mgx_backend_));
@@ -145,6 +149,20 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
 }
 
 ProviderFactory::~ProviderFactory() {
+    // Destroy members that hold backend function pointers before unloading the DLLs.
+    // ~Allocator calls backend_ep_factory_->ReleaseAllocator and ~DataTransfer calls
+    // backend factory methods — both would crash if the DLL is already unloaded.
+    // Session-owned resources (DmlBucketizedBufferAllocator etc.) are already released
+    // by the time the factory is destroyed since sessions are destroyed first.
+    allocator_.reset();
+    data_transfer_.reset();
+
+    if (gpu_memory_info_) {
+        ort_api.ReleaseMemoryInfo(gpu_memory_info_);
+    }
+    if (pinned_memory_info_) {
+        ort_api.ReleaseMemoryInfo(pinned_memory_info_);
+    }
     if (!UnloadDynamicLibrary(dml_backend_).IsOK()) {
         /* TODO: log failure while unloading DirectML EP library */
     }
@@ -174,6 +192,8 @@ Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHar
 
             Ort::ConstKeyValuePairs metadata = ep_device.Device().Metadata();
 
+            // Use DxgiAdapterNumber from device metadata as the device_id when available,
+            // so the memory info device matches what DX12 uses to identify the adapter.
             int device_index = i;
             std::vector<const char*> keys, values;
             metadata.GetKeyValuePairs(keys, values);
@@ -183,13 +203,18 @@ Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHar
                 }
             }
 
-            OrtMemoryInfo* memory_info{};
+            // amdgpu-ep owns these memory info objects for the factory lifetime.
+            // The Allocator wrapper's Info() returns gpu_memory_info_, ensuring that
+            // ORT's plan locations and allocator map keys resolve to the same OrtDevice.
+            // Note: gpu_memory_info_ and pinned_memory_info_ are overwritten on each
+            // iteration, so only the last matched device is retained. This is acceptable
+            // for the common single-GPU case; multi-GPU support would require a per-device map.
             RETURN_IF_ERROR(ort_api.CreateMemoryInfo_V2("default", OrtMemoryInfoDeviceType_GPU,
-                amd::VendorId, device_index, OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator, &memory_info));
-            RETURN_IF_ERROR(ep_api.EpDevice_AddAllocatorInfo(ep_device, memory_info));
+                amd::VendorId, device_index, OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator, &gpu_memory_info_));
+            RETURN_IF_ERROR(ep_api.EpDevice_AddAllocatorInfo(ep_device, gpu_memory_info_));
             RETURN_IF_ERROR(ort_api.CreateMemoryInfo_V2("pinned", OrtMemoryInfoDeviceType_GPU,
-                amd::VendorId, device_index, OrtDeviceMemoryType_HOST_ACCESSIBLE, 0, OrtDeviceAllocator, &memory_info));
-            RETURN_IF_ERROR(ep_api.EpDevice_AddAllocatorInfo(ep_device, memory_info));
+                amd::VendorId, device_index, OrtDeviceMemoryType_HOST_ACCESSIBLE, 0, OrtDeviceAllocator, &pinned_memory_info_));
+            RETURN_IF_ERROR(ep_api.EpDevice_AddAllocatorInfo(ep_device, pinned_memory_info_));
             ep_devices[num_ep_devices++] = ep_device.release();
         }
     }
@@ -204,6 +229,7 @@ try {
     if (devices.size() > 1) {
         return MAKE_STATUS(ORT_INVALID_ARGUMENT, "only supports selection for a single device");
     }
+
     ep = std::make_unique<ExecutionProvider>(*this, ep_name_, session_options, logger).release();
     return STATUS_OK;
 } catch (const Ort::Exception& e) {
@@ -227,6 +253,10 @@ const char* ProviderFactory::GetVersion() const {
 Ort::Status ProviderFactory::CreateAllocator(const OrtMemoryInfo* memory_info,
     const OrtKeyValuePairs* allocator_options, OrtAllocator** allocator)
 {
+    // The Allocator wrapper owns the amdgpu-ep memory info and lazily delegates
+    // actual allocation to whichever backend (DirectML or MIGraphX) is active.
+    // Its Info() returns the amdgpu-owned memory_info_ pointer, ensuring that
+    // the device key in ORT's allocator map matches the plan location device.
     if (allocator_ == nullptr) {
         allocator_ = std::make_unique<Allocator>(*this, memory_info, allocator_options);
     }
@@ -235,7 +265,7 @@ Ort::Status ProviderFactory::CreateAllocator(const OrtMemoryInfo* memory_info,
 }
 
 void ProviderFactory::ReleaseAllocator(OrtAllocator*) const {
-    // no-op. The allocators are shared across sessions.
+    // no-op — the allocator is owned by allocator_ and shared across sessions.
 }
 
 Ort::Status ProviderFactory::CreateDataTransfer(OrtDataTransferImpl** data_transfer) {
@@ -269,11 +299,21 @@ Ort::Status ProviderFactory::GetHardwareDeviceIncompatibilityDetails(const OrtHa
 }
 
 Ort::Status ProviderFactory::GetNumCustomOpDomains(size_t* num_domains) const {
+    // Forward to the directml backend factory so ORT registers com.microsoft schemas
+    // (e.g. GroupNorm, SkipLayerNormalization) that the directml EP claims during GetCapability.
+    // The backend factory is available at factory init time, before any session is created.
+    if (dml_ep_factory_ != nullptr && dml_ep_factory_->GetNumCustomOpDomains != nullptr) {
+        RETURN_IF_ERROR(dml_ep_factory_->GetNumCustomOpDomains(dml_ep_factory_, num_domains));
+        return STATUS_OK;
+    }
     *num_domains = 0;
     return STATUS_OK;
 }
 
 Ort::Status ProviderFactory::GetCustomOpDomains(OrtCustomOpDomain** domains, size_t num_domains) const {
+    if (dml_ep_factory_ != nullptr && dml_ep_factory_->GetCustomOpDomains != nullptr) {
+        RETURN_IF_ERROR(dml_ep_factory_->GetCustomOpDomains(dml_ep_factory_, domains, num_domains));
+    }
     return STATUS_OK;
 }
 
