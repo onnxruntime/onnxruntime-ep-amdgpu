@@ -188,11 +188,45 @@ static bool MatchNode(
                 continue;
             }
             const std::string& out_val = ni.output_names[edge.value_index];
-            if (!gc.HasSingleConsumer(out_val)) {
+
+            // Single-consumer is required for intermediate edges — if the value
+            // connects two internal pattern nodes and we claim the producer, any
+            // external consumer would lose its input.
+            //
+            // Terminal edges (the child has no further edges of its own) are exempt:
+            // the child's output becomes the fused subgraph output and ORT
+            // automatically rewires external consumers to read from it, so multiple
+            // consumers are safe.
+            bool child_is_terminal = edge.child->edges.empty();
+            if (!child_is_terminal && !gc.HasSingleConsumer(out_val)) {
                 if (!edge.optional) { out.all_nodes.pop_back(); out.node_indices.erase(capture); return false; }
                 continue;
             }
-            child_idx = gc.consumer_map.at(out_val)[0];
+
+            {
+                auto cons_it = gc.consumer_map.find(out_val);
+                if (cons_it == gc.consumer_map.end() || cons_it->second.empty()) {
+                    if (!edge.optional) { out.all_nodes.pop_back(); out.node_indices.erase(capture); return false; }
+                    continue;
+                }
+                if (child_is_terminal) {
+                    // Multiple consumers allowed on terminal edge — find any consumer
+                    // matching the child op type.
+                    child_idx = SIZE_MAX;
+                    for (size_t cidx : cons_it->second) {
+                        if (gc.node_infos[cidx].op_type == edge.child->op_type) {
+                            child_idx = cidx;
+                            break;
+                        }
+                    }
+                    if (child_idx == SIZE_MAX) {
+                        if (!edge.optional) { out.all_nodes.pop_back(); out.node_indices.erase(capture); return false; }
+                        continue;
+                    }
+                } else {
+                    child_idx = cons_it->second[0];
+                }
+            }
 
         } else {  // Upstream
             if (edge.value_index >= ni.input_names.size()) {
