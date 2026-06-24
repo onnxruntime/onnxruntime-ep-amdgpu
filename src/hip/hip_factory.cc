@@ -8,13 +8,13 @@
 
 namespace {
 
-// The HIP EP ships as a separate prebuilt DLL. hipep-backend is a thin
+// The HIP EP ships as a separate prebuilt DLL. hip-backend is a thin
 // pass-through: it loads that DLL, forwards CreateEpFactories, and hands back
 // its OrtEpFactory unchanged so the parent EP forwards to it directly. This
 // presents a repo-built backend parallel to directml/migraphx while keeping the
 // HIP EP external. The DLL search directory is set by whoever loads this shim
 // (the AMD GPU umbrella, or the executable that registers it).
-constexpr auto hipepLib{LIBRARY_PREFIX ORT_TSTR("hipep") LIBRARY_SUFFIX};
+constexpr auto hipLib{LIBRARY_PREFIX ORT_TSTR("hipgpu") LIBRARY_SUFFIX};
 
 using CreateEpFactories_t = OrtStatus* (*)(const char*, const OrtApiBase*, const OrtLogger*,
     OrtEpFactory**, size_t, size_t*);
@@ -23,9 +23,9 @@ using ReleaseEpFactory_t = OrtStatus* (*)(OrtEpFactory*);
 // CreateEpFactories may be called more than once (e.g. a real session plus a
 // device-init session in OGA). Reference-count the underlying HIP EP DLL so it
 // is loaded on the first factory and unloaded only after the last is released.
-void* g_hipep_module{};
-CreateEpFactories_t g_hipep_create{};
-ReleaseEpFactory_t g_hipep_release{};
+void* g_hip_module{};
+CreateEpFactories_t g_hip_create{};
+ReleaseEpFactory_t g_hip_release{};
 std::atomic<size_t> g_refcount{0};
 
 }  // namespace
@@ -40,14 +40,14 @@ OrtStatus* CreateEpFactories(const char* registration_name, const OrtApiBase* or
         Ort::InitApi(ort_api);
 
         if (g_refcount++ == 0) {
-            THROW_IF_ERROR(LoadDynamicLibrary(hipepLib, &g_hipep_module));
-            THROW_IF_ERROR(GetSymbolFromLibrary(g_hipep_module, "CreateEpFactories",
-                reinterpret_cast<void**>(&g_hipep_create)));
-            THROW_IF_ERROR(GetSymbolFromLibrary(g_hipep_module, "ReleaseEpFactory",
-                reinterpret_cast<void**>(&g_hipep_release)));
+            THROW_IF_ERROR(LoadDynamicLibrary(hipLib, &g_hip_module));
+            THROW_IF_ERROR(GetSymbolFromLibrary(g_hip_module, "CreateEpFactories",
+                reinterpret_cast<void**>(&g_hip_create)));
+            THROW_IF_ERROR(GetSymbolFromLibrary(g_hip_module, "ReleaseEpFactory",
+                reinterpret_cast<void**>(&g_hip_release)));
         }
 
-        return g_hipep_create(registration_name, ort_api_base, default_logger,
+        return g_hip_create(registration_name, ort_api_base, default_logger,
             factories, max_factories, num_factories);
     }
     catch (const std::exception& e) {
@@ -58,12 +58,12 @@ OrtStatus* CreateEpFactories(const char* registration_name, const OrtApiBase* or
 }
 
 OrtStatus* ReleaseEpFactory(OrtEpFactory* factory) {
-    OrtStatus* status = (g_hipep_release != nullptr) ? g_hipep_release(factory) : nullptr;
-    if (--g_refcount == 0 && g_hipep_module != nullptr) {
-        UnloadDynamicLibrary(g_hipep_module);
-        g_hipep_module = nullptr;
-        g_hipep_create = nullptr;
-        g_hipep_release = nullptr;
+    OrtStatus* status = (g_hip_release != nullptr) ? g_hip_release(factory) : nullptr;
+    if (--g_refcount == 0 && g_hip_module != nullptr) {
+        UnloadDynamicLibrary(g_hip_module);
+        g_hip_module = nullptr;
+        g_hip_create = nullptr;
+        g_hip_release = nullptr;
     }
     return status;
 }
