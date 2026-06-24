@@ -126,7 +126,7 @@ static PInput PBiasInput(std::string capture_name) {
             };
 
             auto [bias_rank, bias_last_dim] = get_rank_and_last_dim(vi);
-            if (bias_rank == 0) return true;  // shape unknown — defer to runtime
+            if (bias_rank == 0) return false;  // shape unknown — reject (ORT also rejects null shapes)
             if (bias_rank != 1) return false;  // bias must be rank 1
 
             if (!node) return true;  // can't check other input without node
@@ -145,7 +145,7 @@ static PInput PBiasInput(std::string capture_name) {
                 if (std::string_view(in_name) == name) continue;  // skip self
 
                 auto [other_rank, other_last_dim] = get_rank_and_last_dim(inputs[i]);
-                if (other_rank == 0) return true;  // other shape unknown — defer
+                if (other_rank == 0) return false;  // other shape unknown — reject
 
                 // Both shapes known — last dimensions must match.
                 if (bias_last_dim >= 0 && other_last_dim >= 0 &&
@@ -334,7 +334,6 @@ static OrtStatus* ORT_API_CALL BiasGelu_Compute(
     if (!state || !state->provider || !state->ort_api) return nullptr;
 
     const OrtApi& api = *state->ort_api;
-
     // The fused kernel receives only the main (non-initializer) input at runtime.
     // The bias is a model weight already on the GPU — its handle is stored in state.
     const OrtValue* input0 = nullptr;

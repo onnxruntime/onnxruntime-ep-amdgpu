@@ -169,7 +169,12 @@ inline PInput PInitializerWithMaxRank(size_t max_rank, std::string capture_name 
             if (!si) return true;
             size_t rank = 0;
             ort_api.GetDimensionsCount(si, &rank);
-            return rank == 0 || rank <= max_rank;  // 0 = unknown rank
+            // rank=0 means shape info unavailable from the EP C API.
+            // For scalar constraints (max_rank=0) reject unknown rank since we
+            // cannot confirm the initializer is truly scalar.  For non-scalar
+            // constraints allow unknown rank as a permissive fallback.
+            if (rank == 0) return max_rank > 0;
+            return rank <= max_rank;
         });
     p.capture_name = std::move(capture_name);
     return p;

@@ -5,6 +5,7 @@
 
 #include "quick_gelu_ep_fusion.h"
 #include "bias_gelu_ep_fusion.h"
+#include "fused_matmul_ep_fusion.h"
 
 #include "dml_execution_provider.h"  // must precede dml_abi_kernel.h
 #include "dml_abi_kernel.h"          // DML_PERF_LOG
@@ -86,6 +87,7 @@ EpFusionManager::AnchorIndex EpFusionManager::BuildAnchorIndex() {
     std::vector<std::unique_ptr<IFusionRule>> all_rules;
     all_rules.push_back(MakeQuickGeluFusionRule());
     all_rules.push_back(MakeBiasGeluFusionRule());
+    all_rules.push_back(MakeFusedMatMulFusionRule());
     // Future rules: insert shortest pattern first within each anchor group.
 
     AnchorIndex index;
@@ -140,6 +142,7 @@ void EpFusionManager::ApplyFusions(
         if (already_consumed.count(anchor_idx)) continue;
 
         const std::string& op = gc.node_infos[anchor_idx].op_type;
+
         auto it = index.find(op);
         if (it == index.end()) continue;
 
@@ -156,6 +159,14 @@ void EpFusionManager::ApplyFusions(
         }
         if (!owning_rule) continue;
 
+        // Let the rule enrich the match with graph-derived data (e.g. trans flags)
+        // before nodes may be excluded from the fused subgraph below.
+        owning_rule->CapturePreFusionData(m, gc, ort_api);
+
+        // Validate the enriched match — allows rules to reject fusions where
+        // static shapes (now available via gc) reveal an invalid GEMM descriptor.
+        if (!owning_rule->ValidateCapture(m, gc, ort_api)) continue;
+
         // Verify all matched nodes are DML-capable and not CPU-preferred.
         bool all_supported = true;
         for (size_t idx : m.all_nodes) {
@@ -168,6 +179,69 @@ void EpFusionManager::ApplyFusions(
             }
         }
         if (!all_supported) continue;
+
+        // For non-anchor nodes that have consumers outside this fusion, exclude
+        // them from the fused subgraph so they remain as standalone nodes
+        // serving those other consumers.  Their capture names stay in the
+        // PatternMatch so Compile() can still read the trans/scale flags —
+        // it just won't receive those nodes as part of the fused subgraph.
+        //
+        // This mirrors ORT's MatmulTransposeFusion behaviour: a Transpose with
+        // multiple consumers is kept in the graph for the other consumers while
+        // the FusedMatMul reads past it directly via TransA/TransB flags.
+        {
+            std::unordered_set<size_t> matched_set(m.all_nodes.begin(), m.all_nodes.end());
+            std::vector<size_t> kept;
+            for (size_t idx : m.all_nodes) {
+                if (idx == anchor_idx) { kept.push_back(idx); continue; }
+
+                // A node is terminal in the fused subgraph if none of its outputs
+                // are consumed by another node inside the match.  Terminal nodes
+                // produce the fused subgraph outputs — ORT automatically rewires
+                // external consumers to read from those outputs, so external
+                // consumers do not require the node to stay standalone.
+                bool is_terminal = true;
+                for (const auto& out_val : gc.node_infos[idx].output_names) {
+                    auto cons_it = gc.consumer_map.find(out_val);
+                    if (cons_it == gc.consumer_map.end()) continue;
+                    for (size_t consumer : cons_it->second) {
+                        if (matched_set.count(consumer) && consumer != idx) {
+                            is_terminal = false;
+                            break;
+                        }
+                    }
+                    if (!is_terminal) break;
+                }
+                if (is_terminal) {
+                    kept.push_back(idx);
+                    continue;
+                }
+
+                bool has_external_consumer = false;
+                for (const auto& out_val : gc.node_infos[idx].output_names) {
+                    if (gc.graph_output_values.count(out_val)) {
+                        has_external_consumer = true;
+                        break;
+                    }
+                    auto cons_it = gc.consumer_map.find(out_val);
+                    if (cons_it == gc.consumer_map.end()) continue;
+                    for (size_t consumer : cons_it->second) {
+                        if (!matched_set.count(consumer) ||
+                            already_consumed.count(consumer)) {
+                            has_external_consumer = true;
+                            break;
+                        }
+                    }
+                    if (has_external_consumer) break;
+                }
+                if (!has_external_consumer) kept.push_back(idx);
+            }
+            m.all_nodes = std::move(kept);
+        }
+
+        // After excluding shared nodes the anchor must still have at least one
+        // neighbour — otherwise there is nothing to fuse.
+        if (m.all_nodes.size() < 2) continue;
 
         // Collect sorted node IDs and compute hash — used as O(1) lookup key.
         std::vector<size_t> node_ids;
