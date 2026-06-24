@@ -61,6 +61,26 @@ struct IFusionRule {
     // rules share the same anchor.
     virtual bool MatchesResult(const PatternMatch& m) const = 0;
 
+    // Optional: enrich the PatternMatch with additional data derived from the
+    // graph (e.g. transpose flags) before nodes are submitted to ORT.
+    // Called after MatchesResult succeeds but before the external-consumer
+    // exclusion pass — so gc and the full matched node set are still available.
+    // Default is a no-op.
+    virtual void CapturePreFusionData(
+        PatternMatch&                            /*match*/,
+        const fusion_utils::GraphConnectivity&   /*gc*/,
+        const OrtApi&                            /*ort_api*/) const {}
+
+    // Optional: validate the fusion after CapturePreFusionData has enriched
+    // the match with graph-derived data.  Return false to reject — e.g. when
+    // static input shapes reveal a GEMM that DML cannot execute.
+    // Mirrors ORT's per-node shape checks in matmul_transpose_fusion.cc.
+    // Default accepts all matches.
+    virtual bool ValidateCapture(
+        const PatternMatch&                            /*match*/,
+        const fusion_utils::GraphConnectivity&         /*gc*/,
+        const OrtApi&                                  /*ort_api*/) const { return true; }
+
     // Compile the fused subgraph.  `match` carries the capture results from
     // the pattern engine so Compile() can read alpha, bias names, etc.
     // without re-running pattern detection.

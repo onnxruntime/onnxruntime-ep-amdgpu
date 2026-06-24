@@ -151,6 +151,24 @@ GraphConnectivity BuildGraphConnectivity(const OrtApi& api, const OrtGraph* grap
         if (st) { api.ReleaseStatus(st); return gc; }
     }
 
+    // Record graph output value names — treated as external consumers so that
+    // any node producing a graph output is not claimed into a fusion.
+    {
+        size_t num_outputs = 0;
+        OrtStatus* st = api.Graph_GetNumOutputs(graph, &num_outputs);
+        if (!st && num_outputs > 0) {
+            std::vector<const OrtValueInfo*> output_vis(num_outputs, nullptr);
+            st = api.Graph_GetOutputs(graph, output_vis.data(), num_outputs);
+            if (!st) {
+                for (const OrtValueInfo* vi : output_vis) {
+                    std::string name = GetValueInfoName(api, vi);
+                    if (!name.empty()) gc.graph_output_values.insert(name);
+                }
+            }
+        }
+        if (st) api.ReleaseStatus(st);
+    }
+
     gc.node_infos.reserve(num_nodes);
     for (const OrtNode* node : topo_nodes) {
         if (!node) continue;
