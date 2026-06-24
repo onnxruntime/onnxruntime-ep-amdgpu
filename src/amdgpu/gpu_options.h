@@ -10,7 +10,7 @@ namespace gpu_ep {
 
 constexpr auto kDirectMLBackend = "directml";
 constexpr auto kMIGraphXBackend = "migraphx";
-constexpr auto kHipepBackend = "hipep";
+constexpr auto kHipBackend = "hip";
 
 namespace provider_option {
 constexpr auto kDeviceId = "device_id"sv;

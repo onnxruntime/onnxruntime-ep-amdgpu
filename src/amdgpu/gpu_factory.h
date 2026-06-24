@@ -24,7 +24,7 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
         return STATUS_OK;
     }
 
-    Ort::Status CreateHipepBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
+    Ort::Status CreateHipBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
         RETURN_IF_ERROR(hip_ep_factory_->CreateEp(hip_ep_factory_, nullptr, nullptr, 0, session_options, logger, &ep));
         backend_ep_factory_ = hip_ep_factory_;
         return STATUS_OK;

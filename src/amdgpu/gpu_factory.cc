@@ -47,7 +47,7 @@ namespace gpu_ep {
 namespace {
 constexpr auto directmlBackend{LIBRARY_PREFIX ORT_TSTR("directml-backend") LIBRARY_SUFFIX};
 constexpr auto migraphxBackend{LIBRARY_PREFIX ORT_TSTR("migraphx-backend") LIBRARY_SUFFIX};
-constexpr auto hipepBackend{LIBRARY_PREFIX ORT_TSTR("hipep-backend") LIBRARY_SUFFIX};
+constexpr auto hipBackend{LIBRARY_PREFIX ORT_TSTR("hip-backend") LIBRARY_SUFFIX};
 }
 
 ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_api_base, const char* ep_name, const OrtLogger* default_logger)
@@ -146,7 +146,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     THROW_IF_ERROR(mgx_create_ep_factories(kMIGraphXBackend, ort_api_base, default_logger,
         &mgx_ep_factory_, 1, &factories_created));
 
-    THROW_IF_ERROR(LoadDynamicLibrary(hipepBackend, &hip_backend_));
+    THROW_IF_ERROR(LoadDynamicLibrary(hipBackend, &hip_backend_));
     THROW_IF_ERROR(GetSymbolFromLibrary(hip_backend_,
         "ReleaseEpFactory", reinterpret_cast<void**>(&hip_release_ep_factory_)));
 
@@ -154,7 +154,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     THROW_IF_ERROR(GetSymbolFromLibrary(hip_backend_,
         "CreateEpFactories", reinterpret_cast<void**>(&hip_create_ep_factories)));
 
-    // Pass ep_name_ so the hipep backend's EP reports the same name ORT sees.
+    // Pass ep_name_ so the hip backend's EP reports the same name ORT sees.
     THROW_IF_ERROR(hip_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
         &hip_ep_factory_, 1, &factories_created));
 
@@ -183,7 +183,7 @@ ProviderFactory::~ProviderFactory() {
         /* TODO: log failure while unloading MIGraphX EP library */
     }
     if (!UnloadDynamicLibrary(hip_backend_).IsOK()) {
-        /* TODO: log failure while unloading hipep EP library */
+        /* TODO: log failure while unloading hip EP library */
     }
 }
 
