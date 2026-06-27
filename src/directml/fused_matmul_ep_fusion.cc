@@ -72,7 +72,7 @@
 #include "ort_node_adapter.h"
 #include "dml_execution_provider.h"   // PluginDmlExecutionProviderImpl
 #include "DmlExecutionProvider/IExecutionProvider.h"
-#include "dml_abi_kernel.h"
+#include "dml_abi_kernel.h"           // DML_PERF_LOG
 
 #include <DirectML.h>
 #include <wrl/client.h>
@@ -729,14 +729,25 @@ static FusedMatMulCompiledKernel CompileFusedMatMulDml(
 {
     FusedMatMulCompiledKernel result;
 
+    DML_PERF_LOG("[FusedMatMul] CompileDml: A=", SizesToString(a_sizes_in),
+                 " B=", SizesToString(b_sizes_in),
+                 " transA=", trans_a, " transB=", trans_b,
+                 " transBatchA=", trans_batch_a, " transBatchB=", trans_batch_b,
+                 " alpha=", alpha, " activation=", ActivationName(activation),
+                 " dtype=", (dml_dtype == DML_TENSOR_DATA_TYPE_FLOAT32 ? "fp32" : "fp16"));
+
     ComPtr<IDMLDevice> dml_device;
-    if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf())))
+    if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf()))) {
+        DML_PERF_LOG("[FusedMatMul] CompileDml: GetDmlDevice FAILED");
         return result;
+    }
 
     GemmShapes g = PrepareGemmShapes(a_sizes_in, b_sizes_in,
                                      trans_a, trans_b, trans_batch_a, trans_batch_b);
-    if (!g.valid)
+    if (!g.valid) {
+        DML_PERF_LOG("[FusedMatMul] CompileDml: PrepareGemmShapes failed");
         return result;
+    }
 
     // TransA/B flags are suppressed for rank-1 inputs (no matrix dims to swap).
     // PrepareGemmShapes already expanded rank-1 to rank-2, so use original rank.
@@ -790,12 +801,16 @@ static FusedMatMulCompiledKernel CompileFusedMatMulDml(
     DML_OPERATOR_DESC gemm_opdesc{ DML_OPERATOR_GEMM, &gemm_desc };
 
     ComPtr<IDMLOperator> gemm_op;
-    if (FAILED(dml_device->CreateOperator(&gemm_opdesc, IID_PPV_ARGS(&gemm_op))))
+    if (FAILED(dml_device->CreateOperator(&gemm_opdesc, IID_PPV_ARGS(&gemm_op)))) {
+        DML_PERF_LOG("[FusedMatMul] CompileDml: CreateOperator FAILED");
         return result;
+    }
 
     if (FAILED(dml_device->CompileOperator(gemm_op.Get(), DML_EXECUTION_FLAG_NONE,
-                                            IID_PPV_ARGS(result.compiled_op.GetAddressOf()))))
+                                            IID_PPV_ARGS(result.compiled_op.GetAddressOf())))) {
+        DML_PERF_LOG("[FusedMatMul] CompileDml: CompileOperator FAILED");
         return result;
+    }
 
     UINT64 persistent_size = result.compiled_op->GetBindingProperties().PersistentResourceSize;
     if (persistent_size > 0) {
@@ -803,6 +818,7 @@ static FusedMatMulCompiledKernel CompileFusedMatMulDml(
                 static_cast<size_t>(persistent_size), AllocatorRoundingMode::Disabled,
                 result.persistent_resource.GetAddressOf(),
                 result.persistent_allocator.GetAddressOf()))) {
+            DML_PERF_LOG("[FusedMatMul] CompileDml: AllocatePooledResource FAILED");
             result.compiled_op.Reset();
             return result;
         }
@@ -815,6 +831,7 @@ static FusedMatMulCompiledKernel CompileFusedMatMulDml(
     if (FAILED(provider->InitializeOperator(
             result.compiled_op.Get(), persistent_ptr,
             gsl::span<const DML_BUFFER_BINDING>{}))) {
+        DML_PERF_LOG("[FusedMatMul] CompileDml: InitializeOperator FAILED");
         result.compiled_op.Reset();
         return result;
     }
@@ -823,6 +840,8 @@ static FusedMatMulCompiledKernel CompileFusedMatMulDml(
     if (result.persistent_allocator)
         provider->QueueReference(result.persistent_allocator.Get());
 
+    DML_PERF_LOG("[FusedMatMul] CompileDml: SUCCESS — output=[",
+                 c_sizes[0], ",", c_sizes[1], ",", c_sizes[2], ",", c_sizes[3], "]");
     return result;
 }
 
@@ -904,12 +923,16 @@ static OrtStatus* ORT_API_CALL FusedMatMul_Compute(
     DML_TENSOR_DATA_TYPE dummy_dtype = DML_TENSOR_DATA_TYPE_UNKNOWN;
 
     if (a_value) {
-        if (!ReadRuntimeShape(api, a_value, dml_dtype, a_sizes, a_bytes))
+        if (!ReadRuntimeShape(api, a_value, dml_dtype, a_sizes, a_bytes)) {
+            DML_PERF_LOG("[FusedMatMul] Compute: failed to read shape of A");
             return api.CreateStatus(ORT_FAIL, "FusedMatMul: failed to read shape of A");
+        }
     }
     if (b_value) {
-        if (!ReadRuntimeShape(api, b_value, dummy_dtype, b_sizes, b_bytes))
+        if (!ReadRuntimeShape(api, b_value, dummy_dtype, b_sizes, b_bytes)) {
+            DML_PERF_LOG("[FusedMatMul] Compute: failed to read shape of B");
             return api.CreateStatus(ORT_FAIL, "FusedMatMul: failed to read shape of B");
+        }
     }
 
     // For the initializer side, use the shape captured at Compile time.
@@ -926,37 +949,48 @@ static OrtStatus* ORT_API_CALL FusedMatMul_Compute(
     if (!state->initialized) {
         std::lock_guard<std::mutex> lock(state->init_mutex);
         if (!state->initialized) {
+            DML_PERF_LOG("[FusedMatMul] Compute: lazy-init A=", SizesToString(a_sizes),
+                         " B=", SizesToString(b_sizes));
             state->kernel = CompileFusedMatMulDml(
                 state->provider, state->trans_a, state->trans_b,
                 state->trans_batch_a, state->trans_batch_b, state->alpha,
                 state->activation, state->act_alpha, state->act_beta, state->act_gamma,
                 dml_dtype, a_sizes, b_sizes, a_bytes, b_bytes);
-            if (!state->kernel.IsValid())
+            if (!state->kernel.IsValid()) {
+                DML_PERF_LOG("[FusedMatMul] Compute: lazy-init FAILED");
                 return api.CreateStatus(ORT_FAIL, "FusedMatMul: DML compilation failed");
+            }
             state->compiled_a_sizes = a_sizes;
             state->compiled_b_sizes = b_sizes;
             state->initialized = true;
+            DML_PERF_LOG("[FusedMatMul] Compute: lazy-init SUCCESS");
         }
     }
 
     const FusedMatMulCompiledKernel* active_kernel = &state->kernel;
     FusedMatMulCompiledKernel temp_kernel;
     if (a_sizes != state->compiled_a_sizes || b_sizes != state->compiled_b_sizes) {
+        DML_PERF_LOG("[FusedMatMul] Compute: shape change A=", SizesToString(a_sizes),
+                     " B=", SizesToString(b_sizes));
         temp_kernel = CompileFusedMatMulDml(
             state->provider, state->trans_a, state->trans_b,
             state->trans_batch_a, state->trans_batch_b, state->alpha,
             state->activation, state->act_alpha, state->act_beta, state->act_gamma,
             dml_dtype, a_sizes, b_sizes, a_bytes, b_bytes);
-        if (!temp_kernel.IsValid())
+        if (!temp_kernel.IsValid()) {
+            DML_PERF_LOG("[FusedMatMul] Compute: temp kernel FAILED");
             return api.CreateStatus(ORT_FAIL, "FusedMatMul: temporary kernel compilation failed");
+        }
         active_kernel = &temp_kernel;
     }
 
     GemmShapes g = PrepareGemmShapes(a_sizes, b_sizes,
                                      state->trans_a, state->trans_b,
                                      state->trans_batch_a, state->trans_batch_b);
-    if (!g.valid)
+    if (!g.valid) {
+        DML_PERF_LOG("[FusedMatMul] Compute: PrepareGemmShapes failed");
         return api.CreateStatus(ORT_FAIL, "FusedMatMul: invalid shapes");
+    }
 
     // PrepareGemmShapes always pads c_sizes to 4D for DML. ORT expects the
     // output at the original logical rank — max(rank_a, rank_b), min 2 —
@@ -998,8 +1032,10 @@ static OrtStatus* ORT_API_CALL FusedMatMul_Compute(
         ? state->initializer_gpu_resource.Get()
         : get_resource(b_value);
     ID3D12Resource* c_resource = get_resource(c_value);
-    if (!a_resource || !b_resource || !c_resource)
+    if (!a_resource || !b_resource || !c_resource) {
+        DML_PERF_LOG("[FusedMatMul] Compute: D3D12 resources null");
         return api.CreateStatus(ORT_FAIL, "FusedMatMul: failed to get D3D12 resources");
+    }
 
     DML_BUFFER_BINDING a_binding{ a_resource, 0, a_bytes };
     DML_BUFFER_BINDING b_binding{ b_resource, 0, b_bytes };
@@ -1022,8 +1058,11 @@ static OrtStatus* ORT_API_CALL FusedMatMul_Compute(
         gsl::make_span(input_descs, 3),
         gsl::make_span(&output_desc, 1));
 
-    if (FAILED(hr))
+    if (FAILED(hr)) {
+        DML_PERF_LOG("[FusedMatMul] Compute: ExecuteOperator FAILED hr=0x",
+                     Hex(static_cast<uint32_t>(hr)));
         return api.CreateStatus(ORT_FAIL, "FusedMatMul: ExecuteOperator failed");
+    }
 
     state->provider->QueueReference(active_kernel->compiled_op.Get());
     return nullptr;
@@ -1176,6 +1215,12 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
         }
     }
 
+    DML_PERF_LOG("[FusedMatMul] Compile: transA=", trans_a, " transB=", trans_b,
+                 " transBatchA=", trans_batch_a, " transBatchB=", trans_batch_b,
+                 " alpha=", alpha,
+                 " activation=", ActivationName(activation),
+                 " nodes=", match.all_nodes.size());
+
     // -------------------------------------------------------------------------
     // Step 4: resolve graph input indices for A and B.
     //
@@ -1190,6 +1235,7 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
         // or intermediate edges ORT did not expose. Both MatMul inputs are constants
         // (ORT constant folding should have eliminated this) or ORT subgraph formation
         // issue. Either way, we cannot compile without a runtime input.
+        DML_PERF_LOG("[FusedMatMul] Compile: no inputs, skipping");
         return nullptr;
     }
 
@@ -1231,6 +1277,10 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
         resolved_b_idx = idx_b;
         initializer_side = 0;  // A is an initializer
     }
+    DML_PERF_LOG("[FusedMatMul] Compile: graph inputs=", num_inputs,
+                 " A=idx[", resolved_a_idx, "] B=idx[", resolved_b_idx, "]",
+                 " initializer_side=", initializer_side);
+
     // -------------------------------------------------------------------------
     // Step 5: determine element type and static shapes for eager compilation.
     // -------------------------------------------------------------------------
@@ -1267,6 +1317,7 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
         case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:   dml_dtype = DML_TENSOR_DATA_TYPE_FLOAT32; break;
         case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: dml_dtype = DML_TENSOR_DATA_TYPE_FLOAT16; break;
         default:
+            DML_PERF_LOG("[FusedMatMul] Compile: unsupported dtype ", static_cast<int>(elem_type));
             return nullptr;
     }
 
@@ -1276,6 +1327,8 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
 
     if (trans_batch_a || trans_batch_b) {
         if (a_rank < 3 || a_rank != b_rank) {
+            DML_PERF_LOG("[FusedMatMul] Compile: transBatch needs same rank >= 3, "
+                         "A=", a_rank, " B=", b_rank, " — disabling");
             trans_batch_a = false;
             trans_batch_b = false;
         }
@@ -1302,6 +1355,7 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
         const std::string& init_name = (initializer_side == 0) ? matmul_a_name : matmul_b_name;
         auto init_it = initializers.find(init_name);
         if (init_it == initializers.end() || !init_it->second) {
+            DML_PERF_LOG("[FusedMatMul] Compile: initializer '", init_name, "' not found");
             delete kernel_state;
             return nullptr;
         }
@@ -1310,6 +1364,7 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
             const_cast<OrtValue*>(init_it->second), &cpu_ptr);
         if (st || !cpu_ptr) {
             if (st) ort_api.ReleaseStatus(st);
+            DML_PERF_LOG("[FusedMatMul] Compile: failed to get initializer CPU data");
             delete kernel_state;
             return nullptr;
         }
@@ -1336,6 +1391,7 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
             kernel_state->initializer_gpu_resource.GetAddressOf(),
             kernel_state->initializer_allocator_ref.GetAddressOf());
         if (FAILED(hr)) {
+            DML_PERF_LOG("[FusedMatMul] Compile: failed to allocate initializer GPU buffer");
             delete kernel_state;
             return nullptr;
         }
@@ -1343,9 +1399,12 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
             kernel_state->initializer_gpu_resource.Get(), cpu_ptr,
             kernel_state->initializer_bytes);
         if (FAILED(hr)) {
+            DML_PERF_LOG("[FusedMatMul] Compile: failed to upload initializer to GPU");
             delete kernel_state;
             return nullptr;
         }
+        DML_PERF_LOG("[FusedMatMul] Compile: uploaded initializer side=", initializer_side,
+                     " name=", init_name, " bytes=", kernel_state->initializer_bytes);
     }
 
     bool has_dynamic = false;
@@ -1353,6 +1412,7 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
     for (auto d : b_dims) if (!has_dynamic && d <= 0) { has_dynamic = true; break; }
 
     if (!has_dynamic && a_rank >= 2 && b_rank >= 2) {
+        DML_PERF_LOG("[FusedMatMul] Compile: eager compilation");
         size_t elem_sz = (dml_dtype == DML_TENSOR_DATA_TYPE_FLOAT32) ? 4 : 2;
 
         std::vector<uint32_t> a_sizes(a_rank), b_sizes(b_rank);
@@ -1367,16 +1427,22 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
             static_cast<uint64_t>(a_elems * elem_sz),
             static_cast<uint64_t>(b_elems * elem_sz));
         if (!kernel_state->kernel.IsValid()) {
+            DML_PERF_LOG("[FusedMatMul] Compile: eager FAILED");
             delete kernel_state;
             return nullptr;
         }
         kernel_state->compiled_a_sizes = a_sizes;
         kernel_state->compiled_b_sizes = b_sizes;
         kernel_state->initialized = true;
+        DML_PERF_LOG("[FusedMatMul] Compile: eager SUCCESS");
+    } else {
+        DML_PERF_LOG("[FusedMatMul] Compile: DEFERRED (A_rank=", a_rank,
+                     " B_rank=", b_rank, " dynamic=", has_dynamic, ")");
     }
 
     auto* info  = new FusedMatMulNodeComputeInfo();
     info->state = kernel_state;
+    DML_PERF_LOG("[FusedMatMul] Compile: OK");
     return info;
 }
 

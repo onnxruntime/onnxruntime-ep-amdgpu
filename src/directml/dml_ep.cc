@@ -400,12 +400,21 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
                     constants_final = std::move(constants_to_pass);
                 }
 
+                DML_PERF_LOG("[ABI_SAFE] DmlAbiKernel_Create entry: op=", state->operator_name,
+                    "  constants_ready=", required_constants_available,
+                    "  passing=", constants_final.size(), " constants\n");
+
                 OrtStatus* abi_safe_status = DmlAbiKernel_Create(
                     &creation_state, info, kernel_out, std::move(constants_final));
 
-                if (abi_safe_status == nullptr && *kernel_out != nullptr)
+                if (abi_safe_status == nullptr && *kernel_out != nullptr) {
+                    DML_PERF_LOG("[ABI_SAFE] success: op=", state->operator_name, "  (kernel=", (void*)*kernel_out, ")\n");
+                    DML_PERF_LOG("[DML_PERF] path=safe  op=", state->operator_name, "\n");
                     return nullptr;
+                }
 
+                DML_PERF_LOG("[ABI_SAFE] FAILED: op=", state->operator_name,
+                    "  status=", (void*)abi_safe_status, "  kernel=", (void*)*kernel_out, "  -> falling to unsafe\n");
                 if (abi_safe_status) {
                     state->ort_api_ptr->ReleaseStatus(abi_safe_status);
                 }
@@ -417,6 +426,9 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
         }
 
         // FALLBACK: ABI-UNSAFE PATH (when ABI-safe fails or isn't available)
+        DML_PERF_LOG("[DML_PERF] path=unsafe op=", state->operator_name,
+            "  (safe path absent or failed)\n[ABI_UNSAFE] entry: op=", state->operator_name, "\n");
+
         if (!state->kernel_create_fn) {
             std::string error_msg = "Kernel registration missing both kernel_factory and kernel_create_fn - cannot create kernel";
             return state->ort_api_ptr->CreateStatus(ORT_FAIL, error_msg.c_str());

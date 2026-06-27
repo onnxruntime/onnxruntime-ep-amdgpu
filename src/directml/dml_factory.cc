@@ -169,12 +169,29 @@ void SortHeterogenousDXCoreAdapterList(std::vector<AdapterInfo>& adapter_infos, 
     std::sort(adapter_infos.begin(), adapter_infos.end(), policy);
 }
 
-D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* /*d3d12_device*/)
+D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* d3d12_device)
 {
-    // Always use the compute queue — DML workloads don't need graphics
-    // pipeline state, and the compute queue has lower dispatch overhead
-    // and better scheduling on AMD GPUs.
-    return D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    D3D12_FEATURE_DATA_FEATURE_LEVELS feature_levels = {};
+
+    D3D_FEATURE_LEVEL feature_levels_list[] = {
+        D3D_FEATURE_LEVEL_1_0_GENERIC,
+        D3D_FEATURE_LEVEL_1_0_CORE,
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_11_1,
+        D3D_FEATURE_LEVEL_12_0,
+        D3D_FEATURE_LEVEL_12_1};
+
+    feature_levels.NumFeatureLevels = ARRAYSIZE(feature_levels_list);
+    feature_levels.pFeatureLevelsRequested = feature_levels_list;
+    THROW_IF_FAILED(d3d12_device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &feature_levels, sizeof(feature_levels)));
+
+    auto use_compute_command_list = (feature_levels.MaxSupportedFeatureLevel <= D3D_FEATURE_LEVEL_1_0_CORE);
+
+    if (use_compute_command_list) {
+        return D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    }
+
+    return D3D12_COMMAND_LIST_TYPE_DIRECT;
 }
 
 }  // namespace
