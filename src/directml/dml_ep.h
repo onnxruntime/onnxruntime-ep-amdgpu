@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "dml_client.h"
 #include "ep_fusion_manager.h"
 
@@ -235,6 +237,14 @@ private:
     // Pattern match results from GetCapabilityImpl, consumed by CompileImpl.
     // Keyed by hash of sorted node IDs for O(1) lookup in CompileFusion.
     FusionMatchMap m_fusionMap;
+
+    // Tier-0 full graph fusion: set when all shapes are static and all
+    // DML-supported nodes are claimed as one fused group.  CompileImpl
+    // routes to FullGraphFusion::Compile when this hash matches.
+    // m_tier0CompiledInfo is pre-compiled during GetCapabilityImpl — if
+    // CompileGraph fails there we simply don't claim the nodes, so CompileImpl
+    // is never called with an uncompilable group (no ORT_EP_FAIL possible).
+    std::optional<size_t>        m_tier0GroupHash;
 
     bool m_native16BitShaderOpsSupported = false;
     bool m_isMcdmDevice = false;
