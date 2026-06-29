@@ -456,6 +456,8 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kDumpSubgraphs, dump_subgraphs_);
     PARSE_ENV_VAR(env_var::kDumpEpContextModel, context_enable_);
     PARSE_ENV_VAR(env_var::kExhaustiveTune, exhaustive_tune_);
+    PARSE_ENV_VAR(env_var::kCoresidentPrograms, coresident_programs_);
+    PARSE_ENV_VAR(env_var::kMaxResidentPrograms, max_resident_programs_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
 
     platform::SetEnvironmentVar("MIGRAPHX_MLSS_USE_SPECIFIC_OPS", mlss_use_specific_ops_);
@@ -798,6 +800,11 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             t_,
             onnx_options,
             program,
+            coresident_programs_,
+            max_resident_programs_,
+            {},  // resident_programs
+            {},  // lru_order
+            {},  // active_shape_key
             enable_fp16_,
             enable_bf16_,
             enable_fp8_,
@@ -1017,6 +1024,50 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         }
     }
 
+    // Registers a program in the resident cache as the most-recently-used entry
+    // and evicts least-recently-used entries until the bound is met. The key just
+    // registered is never the eviction victim.
+    const auto register_resident = [&compute_state](const std::string& key, const migraphx::program& prog) {
+        compute_state.active_shape_key = key;
+        compute_state.resident_programs[key] = prog;
+        compute_state.lru_order.remove(key);
+        compute_state.lru_order.push_back(key);
+        while (compute_state.resident_programs.size() > compute_state.max_resident_programs &&
+               !compute_state.lru_order.empty()) {
+            const auto victim{compute_state.lru_order.front()};
+            compute_state.lru_order.pop_front();
+            if (victim != key) {
+                compute_state.resident_programs.erase(victim);
+            }
+        }
+    };
+
+    // On a shape switch, stash the active program in the resident cache under its
+    // (previous) shape key, then check whether the incoming shape is already
+    // resident. On a hit, restore it and skip the reload entirely (a lookup that
+    // replaces a multi-second reload and finalize). Default off: falls through to
+    // the legacy single-slot overwrite path below.
+    if (!input_shapes_match && compute_state.coresident_programs) {
+        const std::string shape_key{hash::ToHex(input_shapes_hash)};
+        // Save the currently-active program under the previously-active key
+        // (if we have one and it isn't already stored).
+        if (!compute_state.active_shape_key.empty() &&
+            compute_state.resident_programs.find(compute_state.active_shape_key) ==
+                compute_state.resident_programs.end()) {
+            compute_state.resident_programs.emplace(compute_state.active_shape_key, program);
+            compute_state.lru_order.push_back(compute_state.active_shape_key);
+        }
+        if (const auto it{compute_state.resident_programs.find(shape_key)};
+            it != compute_state.resident_programs.end()) {
+            program = it->second;  // shared_ptr handle copy, no reload/finalize
+            param_shapes = program.get_parameter_shapes();
+            input_shapes_match = true;
+            // Mark the restored program most-recently-used and enforce the bound
+            // (the stash above may have pushed the cache one past max).
+            register_resident(shape_key, program);
+        }
+    }
+
     // If the input shapes are different (e.g., LLMs), the EP needs to reparse and recompile the program
     if (!input_shapes_match) {
         migraphx::program_parameters compile_params{};
@@ -1061,6 +1112,12 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             }
         }
         param_shapes = program.get_parameter_shapes();
+
+        // The freshly loaded/compiled program is now the active one; register it
+        // in the resident cache and enforce the LRU bound.
+        if (compute_state.coresident_programs) {
+            register_resident(hash::ToHex(input_shapes_hash), program);
+        }
     }
 
     migraphx::program_parameters compute_params;
