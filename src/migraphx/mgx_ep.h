@@ -4,8 +4,12 @@
 #pragma once
 
 #include <ciso646>
+#include <cstdint>
 #include <set>
 #include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include <hip/hip_runtime_api.h>
 #include <migraphx/migraphx.hpp>
@@ -33,8 +37,60 @@ constexpr auto kCacheDir = "ORT_MIGRAPHX_CACHE_DIR"sv;
 constexpr auto kComputeMode = "ORT_MIGRAPHX_COMPUTE_MODE"sv;
 constexpr auto kINT8UseNativeCalibrationTable = "ORT_MIGRAPHX_INT8_USE_NATIVE_CALIBRATION_TABLE"sv;
 constexpr auto kExhaustiveTune = "ORT_MIGRAPHX_EXHAUSTIVE_TUNE"sv;
+constexpr auto kHipGraphEnable = "ORT_MIGRAPHX_HIP_GRAPH_ENABLE"sv;
+constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
+constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
+constexpr auto kCoalesceIO = "ORT_MIGRAPHX_COALESCE_IO"sv;
 constexpr auto kMlssUseSpecificOps = "ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS"sv;
 }  // namespace env_vars
+
+// EP-owned device staging buffer (pointer-stable across runs so it can be
+// safely baked into a captured hipGraph).  Plain hipMalloc/hipFree owned;
+// freed centrally in ~ExecutionProvider.
+struct StagingBuffer {
+    void* data{nullptr};
+    std::size_t size_bytes{};
+    migraphx::shape shape{};
+    // When the input arena is active (coalesce_io), `data` is a sub-view into the
+    // shared device arena rather than an independent allocation, so it must not be
+    // freed individually.  `arena_offset` is its byte offset within the arena.
+    std::size_t arena_offset{};
+    bool is_arena_view{};
+};
+
+// EP-owned scratch buffer bound to a MIGraphX program's "scratch" parameter.
+// Owning it (instead of letting MIGraphX use its internal arena) lets us zero
+// it before every capture/replay so kernels start from a deterministic
+// baseline.  One per compiled program variant (keyed by shape hash).
+struct ScratchBuffer {
+    void* data{nullptr};
+    std::size_t size_bytes{};
+    migraphx::shape shape{};
+};
+
+// A captured hipGraph plus the metadata needed to replay it correctly.
+struct CapturedHipGraph {
+    hipGraph_t graph{nullptr};
+    hipGraphExec_t exec{nullptr};
+    bool captured{false};
+
+    // MIGraphX outputs not bound to a pre-allocated buffer; their device data
+    // is stable across replays and is copied out after each launch.
+    struct ExtraOutput {
+        std::size_t output_index{};
+        std::vector<std::int64_t> ort_shape{};
+        void* gpu_data{nullptr};
+        std::size_t bytes{};
+    };
+    std::vector<ExtraOutput> extra_outputs{};
+
+    // Scratch pointer baked into the captured kernels; a mismatch forces re-capture.
+    void* captured_scratch_ptr{nullptr};
+
+    // Output buffers (ptr + bytes) that must be zeroed before every replay
+    // because some captured kernels read-modify-write their output.
+    std::vector<std::pair<void*, std::size_t>> captured_output_zeroes{};
+};
 
 struct ComputeState {
     std::mutex& mutex;
@@ -61,6 +117,38 @@ struct ComputeState {
     bool force_recompile{};
     fs::path external_data_dir;
     std::string mxr_prefix;
+
+    // ── Configuration (set at Compile time) ──────────────────────────────────
+    bool hip_graph_enable{};
+    std::size_t max_dynamic_batch{};
+    std::string compile_batches{};
+
+    // ── Dynamic-batch runtime state ──────────────────────────────────────────
+    bool has_dynamic_batch{};
+    bool defer_compilation{};
+    std::vector<std::size_t> compiled_batch_sizes{};
+    // Compiled program variants keyed by shape/batch hash.
+    Map<migraphx::program> cached_programs{};
+
+    // ── Coalesced input arena (ORT_MIGRAPHX_COALESCE_IO) ─────────────────────
+    // When coalesce_io is set, every input staging buffer's data points into a
+    // single device arena (in_arena_dev) fed by one pinned host staging buffer
+    // (in_staging_host); copying gathers all inputs host-side then issues one H2D.
+    bool coalesce_io{};
+    bool staging_inputs_coalesced{};
+    void* in_arena_dev{nullptr};
+    void* in_staging_host{nullptr};
+    std::size_t in_arena_bytes{};
+
+    // ── hipGraph / staging / scratch runtime state (owned device memory) ──────
+    // Staging buffers keyed by MIGraphX program parameter name.
+    Map<StagingBuffer> staging_inputs{};
+    Map<StagingBuffer> staging_outputs{};
+    bool staging_allocated{};
+    // Scratch buffers keyed by shape hash.
+    Map<ScratchBuffer> scratch_bufs{};
+    // Captured graphs keyed by shape hash.
+    Map<CapturedHipGraph> hip_graph_cache{};
 };
 
 struct EpContextComputeState {
@@ -75,6 +163,8 @@ struct EpContextComputeState {
 struct ExecutionProvider : OrtEp, ApiPtrs {
     ExecutionProvider(const ProviderFactory& api_ptrs, std::string_view ep_name,
         Ort::ConstSessionOptions session_options, const Ort::Logger& logger);
+
+    ~ExecutionProvider();
 
     ComputeState& GetComputeState(const std::string& fused_node_name) {
         const auto it{compute_states_.find(fused_node_name)};
@@ -159,6 +249,10 @@ private:
     std::string context_node_name_prefix_{};
     fs::path context_file_path_{};
     fs::path external_initializers_file_name_{};
+    bool hip_graph_enable_{};
+    std::size_t max_dynamic_batch_{};
+    std::string compile_batches_{};
+    bool coalesce_io_enable_{};
 
     std::mutex mutex_{};
 };

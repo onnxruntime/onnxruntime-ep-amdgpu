@@ -7,12 +7,16 @@ add_library(migraphx-ep MODULE
         kernels/kernel.h
         kernels/memcpy.cc
         kernels/memcpy.h
+        mgx_dynamic_batch.cc
+        mgx_dynamic_batch.h
         mgx_ep.cc
         mgx_ep.h
         mgx_ep_ctx.cc
         mgx_ep_ctx.h
         mgx_factory.cc
         mgx_factory.h
+        mgx_hip_graph.cc
+        mgx_hip_graph.h
         mgx_info.cc
         mgx_info.h
         mgx_interop.cc

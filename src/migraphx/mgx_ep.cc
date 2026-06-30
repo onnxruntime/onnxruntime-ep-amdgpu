@@ -20,8 +20,10 @@
 
 #include "hip/stream_support.h"
 
+#include "mgx_dynamic_batch.h"
 #include "mgx_ep.h"
 #include "mgx_ep_ctx.h"
+#include "mgx_hip_graph.h"
 #include "mgx_info.h"
 #include "mgx_utils.h"
 
@@ -438,6 +440,9 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     external_initializers_file_name_ = info.external_initializers_file_name;
     context_file_path_ = info.context_file_path;
     context_node_name_prefix_ = info.context_node_name_prefix;
+    hip_graph_enable_ = info.hip_graph_enable;
+    max_dynamic_batch_ = info.max_dynamic_batch;
+    compile_batches_ = info.compile_batches;
 
     HIP_CALL_THROW(hipSetDevice(device_id_));
     HIP_CALL_THROW(hipGetDeviceProperties(&device_prop_, device_id_));
@@ -456,6 +461,10 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kDumpSubgraphs, dump_subgraphs_);
     PARSE_ENV_VAR(env_var::kDumpEpContextModel, context_enable_);
     PARSE_ENV_VAR(env_var::kExhaustiveTune, exhaustive_tune_);
+    PARSE_ENV_VAR(env_var::kHipGraphEnable, hip_graph_enable_);
+    PARSE_ENV_VAR(env_var::kMaxDynamicBatch, max_dynamic_batch_);
+    PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
+    PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
 
     platform::SetEnvironmentVar("MIGRAPHX_MLSS_USE_SPECIFIC_OPS", mlss_use_specific_ops_);
@@ -484,6 +493,38 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
         /* TODO: log fp8 and int8 are mutually exclusive - ignore both flags. */
     }
 
+    // hipGraph capture requires single-stream MIGraphX execution and a capturable
+    // (non-default, non-tracing) stream.  Disable it when the environment forces
+    // configurations that are incompatible with capture.
+    if (hip_graph_enable_) {
+        const auto nstreams{ParseEnvironmentVariableWithDefault<int>("MIGRAPHX_NSTREAMS", 1)};
+        const auto trace_eval{ParseEnvironmentVariableWithDefault<int>("MIGRAPHX_TRACE_EVAL", 0)};
+        const auto null_stream{ParseEnvironmentVariableWithDefault<int>("MIGRAPHX_ENABLE_NULL_STREAM", 0)};
+        if (nstreams > 1 || trace_eval != 0 || null_stream != 0) {
+            // MIGRAPHX_NSTREAMS>1: multi-stream execution cannot be captured.
+            // MIGRAPHX_TRACE_EVAL: inserts per-instruction hipStreamSynchronize.
+            // MIGRAPHX_ENABLE_NULL_STREAM: default stream is illegal during capture.
+            hip_graph_enable_ = false;
+            /* TODO: log that hipGraph was disabled due to incompatible MIGraphX env. */
+        }
+    }
+
+    // Coalesced input H2D rides on the staging path, which only runs when hipGraph
+    // (or dynamic batching) is active.  Without one of those the flag has no effect.
+    if (coalesce_io_enable_ && !hip_graph_enable_ && max_dynamic_batch_ == 0) {
+        /* TODO: log warning that ORT_MIGRAPHX_COALESCE_IO requires hipGraph or
+           dynamic batching (the staging path) to take effect. */
+    }
+
+    // If compile_batches is set, derive max_dynamic_batch from the spec's max value.
+    if (!compile_batches_.empty()) {
+        if (const auto explicit_sizes{ParseCompileBatches(compile_batches_)}; !explicit_sizes.empty()) {
+            if (const auto derived_max{explicit_sizes.back()}; max_dynamic_batch_ < derived_max) {
+                max_dynamic_batch_ = derived_max;
+            }
+        }
+    }
+
     int8_calibration_cache_available_ =
         (enable_int8_ || enable_fp8_) && !int8_calibration_table_name_.empty();
 
@@ -500,6 +541,52 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
         }
 
     /* TODO: print configured options for the session */
+}
+
+ExecutionProvider::~ExecutionProvider() {
+    // Best-effort teardown of EP-owned device memory and captured graphs.  Errors
+    // are ignored because the HIP context may already be torn down at process exit.
+    (void)hipSetDevice(device_id_);
+    for (auto& [name, cs] : compute_states_) {
+        for (auto& [hash, entry] : cs.hip_graph_cache) {
+            if (entry.exec != nullptr) {
+                (void)hipGraphExecDestroy(entry.exec);
+                entry.exec = nullptr;
+            }
+            if (entry.graph != nullptr) {
+                (void)hipGraphDestroy(entry.graph);
+                entry.graph = nullptr;
+            }
+            entry.captured = false;
+        }
+        for (auto& [param_name, buf] : cs.staging_inputs) {
+            // Arena sub-views are not independent allocations; the arena is freed below.
+            if (buf.data != nullptr && !buf.is_arena_view) {
+                (void)hipFree(buf.data);
+            }
+            buf.data = nullptr;
+        }
+        if (cs.in_arena_dev != nullptr) {
+            (void)hipFree(cs.in_arena_dev);
+            cs.in_arena_dev = nullptr;
+        }
+        if (cs.in_staging_host != nullptr) {
+            (void)hipHostFree(cs.in_staging_host);
+            cs.in_staging_host = nullptr;
+        }
+        for (auto& [param_name, buf] : cs.staging_outputs) {
+            if (buf.data != nullptr) {
+                (void)hipFree(buf.data);
+                buf.data = nullptr;
+            }
+        }
+        for (auto& [hash, buf] : cs.scratch_bufs) {
+            if (buf.data != nullptr) {
+                (void)hipFree(buf.data);
+                buf.data = nullptr;
+            }
+        }
+    }
 }
 
 Ort::Status ExecutionProvider::GetCapability(const Ort::ConstGraph& graph,
@@ -791,7 +878,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             ep_context_node));
     }
 
-    compute_states_.emplace(subgraph_name,
+    auto [state_it, inserted] = compute_states_.emplace(subgraph_name,
         ComputeState{
             mutex_,
             device_id_,
@@ -818,6 +905,13 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             external_data_dir_,
             mxr_prefix,
         });
+
+    // Propagate hipGraph / dynamic-batch configuration onto the compute state.
+    auto& compute_state{state_it->second};
+    compute_state.hip_graph_enable = hip_graph_enable_;
+    compute_state.max_dynamic_batch = max_dynamic_batch_;
+    compute_state.compile_batches = compile_batches_;
+    compute_state.coalesce_io = coalesce_io_enable_;
 
     node_compute_info = std::make_unique<NodeComputeInfo>(*this).release();
     return STATUS_OK;
@@ -972,10 +1066,47 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     migraphx::program_parameter_shapes param_shapes;
     hash::Value input_shapes_hash{};
 
+    // Resolve dynamic-batch bucketing for this call (no-op when disabled).  The
+    // batch is assumed to live on axis 0 of the model inputs.
+    DynamicBatchContext dyn{};
+    if (compute_state.max_dynamic_batch > 0) {
+        if (compute_state.compiled_batch_sizes.empty()) {
+            compute_state.compiled_batch_sizes = GenerateCompiledBatchSizes(
+                compute_state.max_dynamic_batch, compute_state.compile_batches);
+        }
+        bool have_min{false};
+        size_t min_index{0};
+        size_t requested{0};
+        for (const auto& [name, index] : input_name_indices) {
+            const auto shape{kernel_context.GetInput(index).GetTensorTypeAndShapeInfo().GetShape()};
+            if (!shape.empty() && (!have_min || index < min_index)) {
+                have_min = true;
+                min_index = index;
+                requested = static_cast<size_t>(shape.front());
+            }
+        }
+        if (requested > 0) {
+            const auto bucket{FindNearestCompiledBatchSize(requested, compute_state.compiled_batch_sizes)};
+            dyn.requested_batch = requested;
+            dyn.target_batch = bucket > 0 ? bucket : requested;
+            dyn.active = true;
+        }
+    }
+
+    // Map an actual input shape to the shape the program is compiled for: a batched
+    // input (axis-0 extent == requested batch) is bucketed up to the target batch.
+    const auto effective_shape{[&dyn](std::vector<int64_t> shape) {
+        if (dyn.active && !shape.empty() &&
+            static_cast<size_t>(shape.front()) == dyn.requested_batch) {
+            shape.front() = static_cast<int64_t>(dyn.target_batch);
+        }
+        return shape;
+    }};
+
     if (!compute_state.has_input_shapes) {
         for (auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
-            auto shape{value.GetTensorTypeAndShapeInfo().GetShape()};
+            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape())};
             onnx_options.set_input_parameter_shape(name, {shape.begin(), shape.end()});
             hash::Hash(input_shapes_hash, shape);
         }
@@ -996,7 +1127,8 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                         prog_strides.size() == 1 && prog_strides.front() == 0) {
                         prog_lengths.clear();
                     }
-                    std::vector<size_t> lengths{shape.begin(), shape.end()};
+                    const auto eff{effective_shape(shape)};
+                    std::vector<size_t> lengths{eff.begin(), eff.end()};
                     if (prog_lengths != lengths) {
                         onnx_options.set_input_parameter_shape(name, lengths);
                         input_shapes_match = false;
@@ -1012,17 +1144,37 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         // for identical input shapes regardless of which program is currently active.
         for (const auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
-            auto shape{value.GetTensorTypeAndShapeInfo().GetShape()};
+            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape())};
             hash::Hash(input_shapes_hash, shape);
         }
     }
 
     // If the input shapes are different (e.g., LLMs), the EP needs to reparse and recompile the program
     if (!input_shapes_match) {
+        const std::string current_hash{hash::ToHex(input_shapes_hash)};
+        bool loaded_from_cache{false};
+
+        if (dyn.active) {
+            // Bounded bucket set: reuse a previously compiled bucket program to keep
+            // it (and its captured graph) alive and avoid recompilation when batch
+            // sizes alternate between buckets.
+            if (const auto cit{compute_state.cached_programs.find(current_hash)};
+                cit != compute_state.cached_programs.end()) {
+                program = cit->second;
+                loaded_from_cache = true;
+            }
+        } else if (compute_state.hip_graph_enable) {
+            // Unbounded dynamic-shape (e.g. LLM) path: keep only the current shape's
+            // graph/staging, so invalidate before the program changes.
+            DestroyHipGraphs(compute_state);
+            FreeStaging(compute_state);
+        }
+
+        if (!loaded_from_cache) {
         migraphx::program_parameters compile_params{};
         fs::path mxr_path;
         if (!compute_state.cache_dir.empty()) {
-            mxr_path = compute_state.cache_dir / (compute_state.mxr_prefix + hash::ToHex(input_shapes_hash) + ".mxr");
+            mxr_path = compute_state.cache_dir / (compute_state.mxr_prefix + current_hash + ".mxr");
         }
         if (compute_state.force_recompile || !load_compiled_program(program, mxr_path)) {
             const auto external_data_dir{compute_state.external_data_dir.empty() ?
@@ -1060,7 +1212,30 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 save_compiled_program(program, mxr_path);
             }
         }
+            // Keep a copy of the freshly compiled bucket program so it (and any
+            // graph captured against it) survives later bucket switches.
+            if (dyn.active) {
+                compute_state.cached_programs.emplace(current_hash, program);
+            }
+        }
         param_shapes = program.get_parameter_shapes();
+    }
+
+    // Staging path: required for hipGraph capture (pointer stability) and for
+    // dynamic batching (input padding / output slicing).  Stage I/O into EP-owned
+    // buffers, bind scratch, then replay/capture a graph or run eagerly.
+    if ((compute_state.hip_graph_enable || dyn.active) && param_shapes.size() > 0) {
+        const auto shape_hash{hash::ToHex(input_shapes_hash)};
+        const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
+        HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
+        AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
+        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn);
+        auto bind{BindStagingParams(compute_state, param_shapes, shape_hash, hip_stream)};
+        RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
+            bind.params, bind.prog_output_indices, shape_hash, dyn);
+        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn);
+        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        return STATUS_OK;
     }
 
     migraphx::program_parameters compute_params;
