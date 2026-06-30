@@ -8,6 +8,7 @@
 #include "core/framework/fuse_nodes_funcs.h"
 #include "dml_abi_kernel.h"
 #include "ep_fusion_manager.h"
+#include "full_graph_fusion.h"
 #include "quick_gelu_ep_fusion.h"
 
 namespace dml_ep {
@@ -559,50 +560,104 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
     // Get the list of nodes that should stay on the CPU
     std::unordered_set<size_t> cpuPreferredNodes = ep->GetCpuPreferredNodes(graph, graph_support_info, tentativeNodes);
 
-    // Run graph-level fusions in a single greedy pass (largest pattern wins).
-    // Each matched fusion group is submitted to ORT via AddNodesToFuse and
-    // routed through CompileImpl().  Claimed node IDs are collected so that
-    // the single-node loop below can skip them.
-    // Build the anchor index once per session and store it — the IFusionRule
-    // objects it owns are referenced by raw pointer in FusionMatch and must
-    // outlive m_fusionMap.
-    ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex();
-    ep->m_fusionMap.clear();
+    // -----------------------------------------------------------------------
+    // Tier-0 full graph fusion: when all graph inputs have static shapes and
+    // every DML-supported node has an op translator, claim ALL nodes as one
+    // fused group for single-dispatch execution via IDMLDevice1::CompileGraph.
+    // -----------------------------------------------------------------------
+    ep->m_tier0GroupHash.reset();
+    bool tier0_claimed = false;
+    if (AllGraphInputsStatic(ep->ort_api, graph)) {
+        // Collect all claimable nodes (DML-supported, not CPU-preferred).
+        std::vector<const OrtNode*> tier0_candidates;
+        for (const OrtNode* node : tentativeNodes) {
+            size_t nid = 0;
+            ep->ort_api.Node_GetId(node, &nid);
+            if (cpuPreferredNodes.count(nid)) continue;
+            if (!ep->IsNodeSupportedByDml(node, graph_support_info, deviceDataTypeMask)) continue;
+            tier0_candidates.push_back(node);
+        }
 
-    std::unordered_set<size_t> fusedNodeIds;
-    EpFusionManager::ApplyFusions(
-        ep->m_anchorIndex,
-        ep->ort_api,
-        ep->ep_api,
-        graph,
-        graph_support_info,
-        ep->m_graphInitializerMap,
-        [ep, graph_support_info](const OrtNode* n, uint32_t mask) {
-            return ep->IsNodeSupportedByDml(n, graph_support_info, mask);
-        },
-        cpuPreferredNodes,
-        deviceDataTypeMask,
-        fusedNodeIds,
-        ep->m_fusionMap);
+        if (!tier0_candidates.empty()) {
+            OpTranslatorRegistry tier0_registry = BuildOpTranslatorRegistry();
+            if (AllNodesHaveTranslators(ep->ort_api, tier0_registry, tier0_candidates) &&
+                FullGraphFusion::ValidateTier0(ep->ort_api, tier0_candidates) &&
+                FullGraphFusion::TryCompileGraph(ep->ort_api, graph,
+                                                 ep->m_graphInitializerMap,
+                                                 ep->m_executionProvider.get())) {
+                // Feasibility check passed — claim all candidates as one fused group.
+                OrtNodeFusionOptions fusion_options{ORT_API_VERSION, true};
+                OrtStatus* st = ep->ep_api.EpGraphSupportInfo_AddNodesToFuse(
+                    graph_support_info,
+                    tier0_candidates.data(),
+                    tier0_candidates.size(),
+                    &fusion_options);
+                if (!st) {
+                    // Compute hash for CompileImpl routing.
+                    std::vector<size_t> node_ids;
+                    node_ids.reserve(tier0_candidates.size());
+                    for (const OrtNode* n : tier0_candidates) {
+                        size_t nid = 0;
+                        ep->ort_api.Node_GetId(n, &nid);
+                        node_ids.push_back(nid);
+                    }
+                    std::sort(node_ids.begin(), node_ids.end());
+                    ep->m_tier0GroupHash = HashNodeIds(node_ids);
+                    tier0_claimed = true;
+                }
+                if (st) ep->ort_api.ReleaseStatus(st);
+            }
+        }
+    }
 
-    std::vector<const OrtNode*> supportedNodes;
-    for (const OrtNode* node : nodesInTopologicalOrder) {
-        size_t nodeID = 0;
-        ep->ort_api.Node_GetId(node, &nodeID);
+    if (!tier0_claimed) {
+        // Fall through to Tier-2 pattern fusion + Tier-1 single-node claiming.
 
-        // Skip nodes already claimed by a fusion group.
-        if (fusedNodeIds.count(nodeID)) continue;
+        // Run graph-level fusions in a single greedy pass (largest pattern wins).
+        // Each matched fusion group is submitted to ORT via AddNodesToFuse and
+        // routed through CompileImpl().  Claimed node IDs are collected so that
+        // the single-node loop below can skip them.
+        // Build the anchor index once per session and store it — the IFusionRule
+        // objects it owns are referenced by raw pointer in FusionMatch and must
+        // outlive m_fusionMap.
+        ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex();
+        ep->m_fusionMap.clear();
 
-        const char* op_type = nullptr;
-        ep->ort_api.Node_GetOperatorType(node, &op_type);
+        std::unordered_set<size_t> fusedNodeIds;
+        EpFusionManager::ApplyFusions(
+            ep->m_anchorIndex,
+            ep->ort_api,
+            ep->ep_api,
+            graph,
+            graph_support_info,
+            ep->m_graphInitializerMap,
+            [ep, graph_support_info](const OrtNode* n, uint32_t mask) {
+                return ep->IsNodeSupportedByDml(n, graph_support_info, mask);
+            },
+            cpuPreferredNodes,
+            deviceDataTypeMask,
+            fusedNodeIds,
+            ep->m_fusionMap);
 
-        bool isSupported = ep->IsNodeSupportedByDml(node, graph_support_info, deviceDataTypeMask);
-        bool notCpuPreferred = cpuPreferredNodes.find(nodeID) == cpuPreferredNodes.end();
+        std::vector<const OrtNode*> supportedNodes;
+        for (const OrtNode* node : nodesInTopologicalOrder) {
+            size_t nodeID = 0;
+            ep->ort_api.Node_GetId(node, &nodeID);
 
-        if (isSupported && notCpuPreferred)
-        {
-            ep->ep_api.EpGraphSupportInfo_AddSingleNode(graph_support_info, node);
-            supportedNodes.push_back(node);
+            // Skip nodes already claimed by a fusion group.
+            if (fusedNodeIds.count(nodeID)) continue;
+
+            const char* op_type = nullptr;
+            ep->ort_api.Node_GetOperatorType(node, &op_type);
+
+            bool isSupported = ep->IsNodeSupportedByDml(node, graph_support_info, deviceDataTypeMask);
+            bool notCpuPreferred = cpuPreferredNodes.find(nodeID) == cpuPreferredNodes.end();
+
+            if (isSupported && notCpuPreferred)
+            {
+                ep->ep_api.EpGraphSupportInfo_AddSingleNode(graph_support_info, node);
+                supportedNodes.push_back(node);
+            }
         }
     }
 
@@ -621,9 +676,33 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
         node_compute_infos[i] = nullptr;
         ep_context_nodes[i]   = nullptr;
 
-        // Compile the fused subgraph to a self-contained OrtNodeComputeInfo that
-        // builds and executes the DML operator.  DML graph compilation happens
-        // at session initialization; Compute() dispatches each inference call.
+        // Tier-0 route: if GetCapabilityImpl claimed a whole-graph fused group,
+        // check if this subgraph matches and compile via FullGraphFusion.
+        if (ep->m_tier0GroupHash.has_value()) {
+            size_t num_nodes = 0;
+            ep->ort_api.Graph_GetNumNodes(graphs[i], &num_nodes);
+            std::vector<const OrtNode*> sg_nodes(num_nodes, nullptr);
+            if (num_nodes > 0)
+                ep->ort_api.Graph_GetNodes(graphs[i], sg_nodes.data(), num_nodes);
+            std::vector<size_t> sg_ids;
+            sg_ids.reserve(num_nodes);
+            for (const OrtNode* n : sg_nodes) {
+                if (n) sg_ids.push_back(fusion_utils::GetNodeId(ep->ort_api, n));
+            }
+            std::sort(sg_ids.begin(), sg_ids.end());
+            size_t sg_hash = HashNodeIds(sg_ids);
+
+            if (sg_hash == *ep->m_tier0GroupHash) {
+                node_compute_infos[i] = FullGraphFusion::Compile(
+                    ep->ort_api,
+                    graphs[i],
+                    ep->m_graphInitializerMap,
+                    ep->m_executionProvider.get());
+                if (node_compute_infos[i]) continue;
+            }
+        }
+
+        // Tier-2 route: pattern-matched fusions.
         node_compute_infos[i] = EpFusionManager::CompileFusion(
             ep->ort_api,
             graphs[i],
@@ -632,8 +711,26 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
             ep->m_fusionMap);
 
         if (!node_compute_infos[i]) {
-            return ep->ort_api.CreateStatus(ORT_EP_FAIL,
-                "CompileImpl: no fusion rule matched a fused subgraph");
+            // CompileFusion returned null — the matched pattern's Compile failed
+            // (e.g. FusedMatMul with no graph inputs in Mode B). Log for diagnosis.
+            size_t nm = 0;
+            ep->ort_api.Graph_GetNumNodes(graphs[i], &nm);
+            std::vector<const OrtNode*> sg_nodes(nm, nullptr);
+            if (nm > 0) ep->ort_api.Graph_GetNodes(graphs[i], sg_nodes.data(), nm);
+            std::string diag = "CompileImpl: no fusion rule matched (";
+            diag += std::to_string(nm) + " nodes: ";
+            for (const OrtNode* n : sg_nodes) {
+                if (n == nullptr) continue;
+                const char* op = nullptr;
+                ep->ort_api.Node_GetOperatorType(n, &op);
+                size_t nid = 0;
+                ep->ort_api.Node_GetId(n, &nid);
+                if (op != nullptr) { diag += op; diag += "["; diag += std::to_string(nid); diag += "] "; }
+            }
+            diag += ")";
+            // Return ORT_EP_FAIL so ORT can route this subgraph elsewhere.
+            // This is a non-fatal failure — ORT will try CPU or another EP.
+            return ep->ort_api.CreateStatus(ORT_EP_FAIL, diag.c_str());
         }
     }
 
@@ -992,7 +1089,9 @@ std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const O
 
             // Null input = missing optional edge — treat as GPU tensor (don't pull to CPU).
             // Matches ORT's fallback_cpu_capability.cc which skips null NodeArgs naturally.
-            if (!input || !input->GetTypeInfo() || !input->GetTypeInfo()->tensor_type_info) {
+            if (input == nullptr || input->GetTypeInfo() == nullptr
+                || input->GetTypeInfo()->tensor_type_info == nullptr
+                || input->GetTypeInfo()->tensor_type_info.get() == nullptr) {
                 place_in_cpu = false;
                 break;
             }

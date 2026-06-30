@@ -553,7 +553,7 @@ Microsoft::WRL::ComPtr<IDMLDevice> ProviderFactory::CreateDMLDevice(const Micros
     }
 #endif
 
-    THROW_IF_FAILED(DMLCreateDevice1(d3d12_device.Get(), flags, DML_FEATURE_LEVEL_5_0,
+    THROW_IF_FAILED(DMLCreateDevice1(d3d12_device.Get(), flags, DML_FEATURE_LEVEL_6_4,
                                      IID_PPV_ARGS(dml_device.ReleaseAndGetAddressOf())));
 
     return dml_device;
