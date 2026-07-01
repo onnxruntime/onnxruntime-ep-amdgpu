@@ -458,8 +458,6 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kExhaustiveTune, exhaustive_tune_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
 
-    platform::SetEnvironmentVar("MIGRAPHX_MLSS_USE_SPECIFIC_OPS", mlss_use_specific_ops_);
-
     auto compute_mode{platform::GetEnvironmentVar(env_var::kComputeMode)};
     if (!compute_mode.empty()) {
         std::transform(compute_mode.begin(), compute_mode.end(), compute_mode.begin(), ::tolower);
@@ -707,10 +705,12 @@ void calibrate_and_quantize(const migraphx::program& prog, const migraphx::targe
     }
 }
 
-void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune) {
+void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune,
+    const std::string& mlss_use_specific_ops) {
     migraphx::compile_options options;
     options.set_fast_math(false);
     options.set_exhaustive_tune_flag(exhaustive_tune);
+    options.set_mlss_use_specific_ops(mlss_use_specific_ops.c_str());
     prog.compile(target, options);
 }
 
@@ -760,7 +760,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             migraphx::program_parameters params;
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
-            compile_program(program, t_, exhaustive_tune_);
+            compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_);
             if (!disable_compiled_model_caching_) {
                 save_compiled_program(program, mxr_path);
             }
@@ -806,6 +806,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             has_input_shape,
             dump_subgraphs_,
             exhaustive_tune_,
+            mlss_use_specific_ops_,
             dynamic_ranges_,
             input_name_indices,
             output_name_indices,
@@ -1055,7 +1056,8 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 compute_state.enable_fp16, compute_state.enable_bf16, compute_state.enable_int8,
                 compute_state.enable_fp8, compute_state.int8_calibration_cache_available, compute_state.dynamic_ranges);
 
-            compile_program(program, compute_state.t, compute_state.exhaustive_tune);
+            compile_program(program, compute_state.t, compute_state.exhaustive_tune,
+                compute_state.mlss_use_specific_ops);
             if (!compute_state.disable_compiled_model_caching) {
                 save_compiled_program(program, mxr_path);
             }

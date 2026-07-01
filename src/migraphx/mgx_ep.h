@@ -50,6 +50,7 @@ struct ComputeState {
     bool has_input_shapes{};
     bool dump_subgraphs_{};
     bool exhaustive_tune{};
+    std::string mlss_use_specific_ops{};
     const Map<float>& dynamic_ranges;
     Map<size_t> input_name_indices;
     Map<size_t> output_name_indices;
