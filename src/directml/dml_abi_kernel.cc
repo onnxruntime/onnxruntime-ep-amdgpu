@@ -484,6 +484,7 @@ void AbiSafeTensor::GetDataInterface(IUnknown** dataInterface) noexcept {
     *dataInterface = nullptr;
 
     if (!ort_value_ || !ort_api_) {
+        DML_PERF_LOG("[ABI_SAFE] GetDataInterface: null ort_value or ort_api\n");
         return;
     }
 
@@ -500,11 +501,13 @@ void AbiSafeTensor::GetDataInterface(IUnknown** dataInterface) noexcept {
     void* data_ptr = nullptr;
     OrtStatus* status = ort_api_->GetTensorMutableData(const_cast<OrtValue*>(ort_value_), &data_ptr);
     if (status) {
+        DML_PERF_LOG("[ABI_SAFE] GetDataInterface: GetTensorMutableData failed\n");
         ort_api_->ReleaseStatus(status);
         return;
     }
 
     if (!data_ptr) {
+        DML_PERF_LOG("[ABI_SAFE] GetDataInterface: data_ptr is null (GPU tensor with no allocation)\n");
         return;
     }
 
@@ -515,12 +518,18 @@ void AbiSafeTensor::GetDataInterface(IUnknown** dataInterface) noexcept {
     // and binds wrong GPU memory when it gets PluginDmlAllocationInfo* instead.
     IUnknown* allocation = execution_provider_->GetAllocationFromDataPointer(data_ptr);
     if (!allocation) {
+        DML_PERF_LOG("[ABI_SAFE] GetDataInterface: GetAllocationFromDataPointer returned null for data_ptr=",
+            (uintptr_t)data_ptr, "\n");
         return;
     }
 
     // Translate to the ABI object the external operator expects (ID3D12Resource* for non-internal ops).
     execution_provider_->GetABIDataInterface(is_internal_operator_, allocation, dataInterface);
     allocation->Release();  // GetAllocationFromDataPointer already AddRef'd; GetABIDataInterface AddRef's the output
+
+    if (!*dataInterface) {
+        DML_PERF_LOG("[ABI_SAFE] GetDataInterface: GetABIDataInterface returned null\n");
+    }
 }
 
 // ============================================================================
@@ -723,6 +732,41 @@ HRESULT AbiSafeKernelContext::GetOutputTensor(uint32_t outputIndex, IMLOperatorT
 
     if (!kernel_context_ || !ort_api_) return E_FAIL;
 
+#ifdef DML_PERF_PROFILE
+    // Helper: capture input[0] shape for element-count comparison in log output
+    auto logInput0Shape = [&]() -> std::string {
+        const OrtValue* in0 = nullptr;
+        ort_api_->KernelContext_GetInput(kernel_context_, 0, &in0);
+        if (!in0) return "n/a";
+        OrtTensorTypeAndShapeInfo* si = nullptr;
+        ort_api_->GetTensorTypeAndShape(in0, &si);
+        if (!si) return "n/a";
+        size_t dc = 0;
+        ort_api_->GetDimensionsCount(si, &dc);
+        std::vector<int64_t> ds(dc);
+        if (dc > 0) ort_api_->GetDimensions(si, ds.data(), dc);
+        ort_api_->ReleaseTensorTypeAndShapeInfo(si);
+        std::string r;
+        uint64_t elems = 1;
+        for (size_t i = 0; i < dc; ++i) {
+            if (i > 0) r += ",";
+            r += std::to_string(ds[i]);
+            elems *= static_cast<uint64_t>(ds[i]);
+        }
+        return "[" + r + "] elems=" + std::to_string(elems);
+    };
+    auto formatShape = [](const std::vector<uint32_t>& s) -> std::string {
+        std::string r;
+        uint64_t elems = 1;
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (i > 0) r += ",";
+            r += std::to_string(s[i]);
+            elems *= s[i];
+        }
+        return "[" + r + "] elems=" + std::to_string(elems);
+    };
+#endif
+
     // Use pre-inferred output shapes from graph compilation (source of truth)
     // If there are dynamic dimensions, fill them from runtime input shapes
     // Use pre-inferred output shapes from graph compilation (source of truth).
@@ -743,6 +787,8 @@ HRESULT AbiSafeKernelContext::GetOutputTensor(uint32_t outputIndex, IMLOperatorT
         if (!has_dynamic) {
             // All dimensions are static (including scalar with 0 dims) - use shape as-is.
             // Pass nullptr when shape is empty (scalar) to avoid calling .data() on an empty vector.
+            DML_PERF_LOG("[ABI_SAFE] GetOutputTensor[", outputIndex, "] path=inferred_static  output=",
+                formatShape(shape), "  input[0]=", logInput0Shape(), "\n");
             const uint32_t* dims_ptr = shape.empty() ? nullptr : shape.data();
             return GetOutputTensor(outputIndex, static_cast<uint32_t>(shape.size()), dims_ptr, tensor);
         } else {
@@ -769,6 +815,8 @@ HRESULT AbiSafeKernelContext::GetOutputTensor(uint32_t outputIndex, IMLOperatorT
                         }
 
                         ort_api_->ReleaseTensorTypeAndShapeInfo(input_info);
+                        DML_PERF_LOG("[ABI_SAFE] GetOutputTensor[", outputIndex, "] path=inferred_dynamic_filled  output=",
+                            formatShape(filled_shape), "  input[0]=", logInput0Shape(), "\n");
                         return GetOutputTensor(outputIndex, static_cast<uint32_t>(filled_shape.size()), filled_shape.data(), tensor);
                     }
                     ort_api_->ReleaseTensorTypeAndShapeInfo(input_info);
@@ -778,6 +826,7 @@ HRESULT AbiSafeKernelContext::GetOutputTensor(uint32_t outputIndex, IMLOperatorT
                 ort_api_->ReleaseStatus(input_status);
             }
             // Fallback: couldn't fill from input, let ONNX Runtime infer
+            DML_PERF_LOG("[ABI_SAFE] GetOutputTensor[", outputIndex, "] path=inferred_dynamic_FALLTHROUGH  input[0]=", logInput0Shape(), "\n");
         }
     }
 
@@ -827,10 +876,15 @@ HRESULT AbiSafeKernelContext::GetOutputTensor(uint32_t outputIndex, IMLOperatorT
             const auto& inferred_shapes = inference_context->GetInferredOutputShapes();
             if (outputIndex < inferred_shapes.size() && inferred_shapes[outputIndex].has_value()) {
                 const auto& shape = *inferred_shapes[outputIndex];
+                DML_PERF_LOG("[ABI_SAFE] GetOutputTensor[", outputIndex, "] path=runtime_shape_inferrer  output=",
+                    formatShape(shape), "  input[0]=", logInput0Shape(), "\n");
                 return GetOutputTensor(outputIndex, static_cast<uint32_t>(shape.size()), shape.data(), tensor);
             }
         }
+        DML_PERF_LOG("[ABI_SAFE] GetOutputTensor[", outputIndex, "] shape_inferrer failed or no shape, falling through\n");
     }
+
+    DML_PERF_LOG("[ABI_SAFE] GetOutputTensor[", outputIndex, "] path=ort_fallback  input[0]=", logInput0Shape(), "\n");
 
     // Get output without specifying shape - let ONNX Runtime infer at runtime
     // This handles: dynamic shapes, empty inferred shapes, or when shape inference is unavailable
@@ -900,14 +954,53 @@ HRESULT AbiSafeKernelContext::GetOutputTensor(
         &output_value);
 
     if (status) {
+        const char* err_msg = ort_api_->GetErrorMessage(status);
+        std::string req_shape;
+        for (uint32_t i = 0; i < dimensionCount; ++i) {
+            if (i > 0) req_shape += ",";
+            req_shape += std::to_string(dimensionSizes[i]);
+        }
+        DML_PERF_LOG("[ABI_SAFE] GetOutputTensor(dims) FAILED: output[", outputIndex,
+            "]  requested_shape=[", req_shape, "]  error=", (err_msg ? err_msg : "null"), "\n");
         ort_api_->ReleaseStatus(status);
         return E_FAIL;
     }
 
     if (!output_value) {
-        // Optional output
+        DML_PERF_LOG("[ABI_SAFE] GetOutputTensor(dims): output[", outputIndex, "] returned null (optional output)\n");
         return S_OK;
     }
+
+#ifdef DML_PERF_PROFILE
+    {
+        const OrtMemoryInfo* out_mem = nullptr;
+        ort_api_->GetTensorMemoryInfo(output_value, &out_mem);
+        const char* out_mem_name = "?";
+        if (out_mem) ort_api_->MemoryInfoGetName(out_mem, &out_mem_name);
+
+        void* out_data = nullptr;
+        ort_api_->GetTensorMutableData(output_value, &out_data);
+
+        std::string out_shape_str;
+        OrtTensorTypeAndShapeInfo* out_si = nullptr;
+        ort_api_->GetTensorTypeAndShape(output_value, &out_si);
+        if (out_si) {
+            size_t out_dc = 0;
+            ort_api_->GetDimensionsCount(out_si, &out_dc);
+            std::vector<int64_t> out_dims(out_dc);
+            if (out_dc > 0) ort_api_->GetDimensions(out_si, out_dims.data(), out_dc);
+            ort_api_->ReleaseTensorTypeAndShapeInfo(out_si);
+            for (size_t d = 0; d < out_dc; ++d) {
+                if (d > 0) out_shape_str += ",";
+                out_shape_str += std::to_string(out_dims[d]);
+            }
+        }
+
+        DML_PERF_LOG("[ABI_SAFE] GetOutputTensor(dims) allocated: output[", outputIndex,
+            "]  shape=[", out_shape_str, "]  data_ptr=", (uintptr_t)out_data,
+            "  mem=", out_mem_name, "\n");
+    }
+#endif
 
     // Create ABI-safe tensor wrapper and cache it for lifetime + post-op resource transitions
     auto abi_tensor = Microsoft::WRL::Make<AbiSafeTensor>(output_value, ort_api_, execution_provider_, is_internal_operator_);
@@ -3497,6 +3590,49 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             "  resolved=", lazy_constant_tensors.size(),
             " / ", kernel->required_constant_cpu_inputs.size(), " required\n");
 
+#ifdef DML_PERF_PROFILE
+            // Dump the actual constant tensor data values (e.g. Reshape's target shape in input[1])
+            for (auto& [cidx, ctensor] : lazy_constant_tensors) {
+                if (!ctensor) continue;
+                uint32_t cdim_count = ctensor->GetDimensionCount();
+                std::vector<uint32_t> cshape(cdim_count);
+                if (cdim_count > 0) ctensor->GetShape(cdim_count, cshape.data());
+                auto ctype = ctensor->GetTensorDataType();
+                bool is_cpu = ctensor->IsCpuData();
+                uint64_t celems = 1;
+                for (uint32_t d : cshape) celems *= d;
+
+                std::string vals_str;
+                if (is_cpu && ctensor->GetData()) {
+                    if (ctype == MLOperatorTensorDataType::Int64) {
+                        auto* p = static_cast<const int64_t*>(ctensor->GetData());
+                        for (uint64_t vi = 0; vi < std::min(celems, uint64_t(16)); ++vi) {
+                            if (vi > 0) vals_str += ",";
+                            vals_str += std::to_string(p[vi]);
+                        }
+                    } else if (ctype == MLOperatorTensorDataType::Int32) {
+                        auto* p = static_cast<const int32_t*>(ctensor->GetData());
+                        for (uint64_t vi = 0; vi < std::min(celems, uint64_t(16)); ++vi) {
+                            if (vi > 0) vals_str += ",";
+                            vals_str += std::to_string(p[vi]);
+                        }
+                    } else if (ctype == MLOperatorTensorDataType::Float) {
+                        auto* p = static_cast<const float*>(ctensor->GetData());
+                        for (uint64_t vi = 0; vi < std::min(celems, uint64_t(16)); ++vi) {
+                            if (vi > 0) vals_str += ",";
+                            vals_str += std::to_string(p[vi]);
+                        }
+                    } else {
+                        vals_str = "<type=" + std::to_string(static_cast<int>(ctype)) + ">";
+                    }
+                } else {
+                    vals_str = is_cpu ? "<null_data>" : "<gpu_data>";
+                }
+                DML_PERF_LOG("[ABI_SAFE] lazy-init constant[", cidx, "] data: op=", kernel->operator_name,
+                    "  values=[", vals_str, "]  elems=", celems, "  cpu=", is_cpu, "\n");
+            }
+#endif
+
             // Snapshot constant tensor contents BEFORE moving lazy_constant_tensors into creation_context.
             // Mirrors PluginDmlAbiOpKernel lazy init: FillConstantInputs is called before CreateKernel.
             // The AbiSafeTensor OrtValue* pointers are valid for the duration of this Compute call.
@@ -3573,6 +3709,28 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                 HRESULT shape_hr = kernel->shape_inferrer->InferOutputShapes(inference_context.Get());
                 if (SUCCEEDED(shape_hr)) {
                     shape_inferrer_outputs = inference_context->GetInferredOutputShapes();
+
+                    // The shape inferrer may return fewer outputs than the node has
+                    // (e.g. GetOutputShapeAsInputShapeHelper returns 1 shape for
+                    // DynamicQuantizeLinear which has 3 outputs).  Pad with shapes
+                    // from the creation context so all outputs are covered.
+                    uint32_t total_outputs = creation_context->GetOutputCount();
+                    if (shape_inferrer_outputs.size() < total_outputs) {
+                        shape_inferrer_outputs.resize(total_outputs);
+                        for (uint32_t i = 0; i < total_outputs; ++i) {
+                            if (!shape_inferrer_outputs[i].has_value() &&
+                                creation_context->HasOutputShapeDescription()) {
+                                uint32_t dim_count = 0;
+                                if (SUCCEEDED(creation_context->GetOutputTensorDimensionCount(i, &dim_count))) {
+                                    std::vector<uint32_t> shape(dim_count);
+                                    if (dim_count == 0 || SUCCEEDED(creation_context->GetOutputTensorShape(i, dim_count, shape.data()))) {
+                                        shape_inferrer_outputs[i] = std::make_optional(std::move(shape));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     kernel->inferred_output_shapes = shape_inferrer_outputs;
                     creation_context->SetPrecomputedOutputShapes(shape_inferrer_outputs);
                 }
@@ -3587,6 +3745,18 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
 
 
             // Create the actual kernel with runtime shapes
+#ifdef DML_PERF_PROFILE
+            for (size_t ii = 0; ii < runtime_input_shapes.EdgeCount(); ++ii) {
+                const auto& is = runtime_input_shapes.GetShape(ii);
+                std::string idims_str;
+                for (size_t d = 0; d < is.size(); ++d) {
+                    if (d > 0) idims_str += ",";
+                    idims_str += std::to_string(is[d]);
+                }
+                DML_PERF_LOG("[ABI_SAFE] lazy-init pre-create input[", ii, "]: op=", kernel->operator_name,
+                    "  shape=[", idims_str, "]\n");
+            }
+#endif
             Microsoft::WRL::ComPtr<IMLOperatorKernel> ml_kernel;
             hr = kernel->kernel_factory->CreateKernel(context_interface.Get(), &ml_kernel);
 
@@ -3636,6 +3806,36 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                     }
                 }
             }
+
+#ifdef DML_PERF_PROFILE
+            for (uint32_t si = 0; si < kernel->inferred_output_shapes.size(); ++si) {
+                if (kernel->inferred_output_shapes[si].has_value()) {
+                    const auto& s = *kernel->inferred_output_shapes[si];
+                    std::string dims_str;
+                    for (size_t d = 0; d < s.size(); ++d) {
+                        if (d > 0) dims_str += ",";
+                        dims_str += std::to_string(s[d]);
+                    }
+                    DML_PERF_LOG("[ABI_SAFE] lazy-init stored output shape: op=", kernel->operator_name,
+                        "  output[", si, "]=[", dims_str, "]\n");
+                } else {
+                    DML_PERF_LOG("[ABI_SAFE] lazy-init stored output shape: op=", kernel->operator_name,
+                        "  output[", si, "]=nullopt\n");
+                }
+            }
+
+            // Also log the runtime input shapes used for this kernel creation
+            for (size_t ii = 0; ii < runtime_input_shapes.EdgeCount(); ++ii) {
+                const auto& is = runtime_input_shapes.GetShape(ii);
+                std::string idims_str;
+                for (size_t d = 0; d < is.size(); ++d) {
+                    if (d > 0) idims_str += ",";
+                    idims_str += std::to_string(is[d]);
+                }
+                DML_PERF_LOG("[ABI_SAFE] lazy-init input shape: op=", kernel->operator_name,
+                    "  input[", ii, "]=[", idims_str, "]\n");
+            }
+#endif
         }
 
         // Detect input shape changes between calls — mirrors PluginDmlAbiOpKernel::Compute's
@@ -3860,6 +4060,57 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
         kernel_context->TransitionResourcesForOperatorIfRequired(true);
         DMLPERF_ADD(ns_transition_pre, pre);
 
+#ifdef DML_PERF_PROFILE
+        // Log all input tensors before Compute — helps detect upstream corruption
+        {
+            size_t diag_input_count = 0;
+            kernel->ort_api->KernelContext_GetInputCount(context, &diag_input_count);
+            for (size_t di = 0; di < diag_input_count; ++di) {
+                const OrtValue* diag_val = nullptr;
+                kernel->ort_api->KernelContext_GetInput(context, di, &diag_val);
+                if (!diag_val) {
+                    DML_PERF_LOG("[ABI_SAFE] pre-compute input[", di, "]: op=", kernel->operator_name, "  <null>\n");
+                    continue;
+                }
+                OrtTensorTypeAndShapeInfo* diag_si = nullptr;
+                kernel->ort_api->GetTensorTypeAndShape(diag_val, &diag_si);
+                if (!diag_si) {
+                    DML_PERF_LOG("[ABI_SAFE] pre-compute input[", di, "]: op=", kernel->operator_name, "  <no_shape_info>\n");
+                    continue;
+                }
+                size_t diag_dc = 0;
+                kernel->ort_api->GetDimensionsCount(diag_si, &diag_dc);
+                std::vector<int64_t> diag_dims(diag_dc);
+                if (diag_dc > 0) kernel->ort_api->GetDimensions(diag_si, diag_dims.data(), diag_dc);
+                ONNXTensorElementDataType diag_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+                kernel->ort_api->GetTensorElementType(diag_si, &diag_dtype);
+                kernel->ort_api->ReleaseTensorTypeAndShapeInfo(diag_si);
+
+                std::string diag_shape_str;
+                uint64_t diag_elems = 1;
+                for (size_t d = 0; d < diag_dc; ++d) {
+                    if (d > 0) diag_shape_str += ",";
+                    diag_shape_str += std::to_string(diag_dims[d]);
+                    diag_elems *= static_cast<uint64_t>(diag_dims[d]);
+                }
+
+                void* diag_data = nullptr;
+                kernel->ort_api->GetTensorMutableData(const_cast<OrtValue*>(diag_val), &diag_data);
+
+                const OrtMemoryInfo* diag_mem = nullptr;
+                kernel->ort_api->GetTensorMemoryInfo(diag_val, &diag_mem);
+                const char* diag_mem_name = "?";
+                if (diag_mem) kernel->ort_api->MemoryInfoGetName(diag_mem, &diag_mem_name);
+
+                DML_PERF_LOG("[ABI_SAFE] pre-compute input[", di, "]: op=", kernel->operator_name,
+                    "  shape=[", diag_shape_str, "]  elems=", diag_elems,
+                    "  dtype=", static_cast<int>(diag_dtype),
+                    "  data_ptr=", (uintptr_t)diag_data,
+                    "  mem=", diag_mem_name, "\n");
+            }
+        }
+#endif
+
         // Execute the DML operator kernel
         HRESULT hr = E_FAIL;
         DMLPERF_T0(kc);
@@ -3867,10 +4118,13 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             hr = kernel->ml_operator_kernel->Compute(kernel_context.Get());
         } catch (const std::exception& e) {
             DMLPERF_ADD(ns_kernel_compute, kc);
+            DML_PERF_LOG("[ABI_SAFE] Compute EXCEPTION: op=", kernel->operator_name, "  what=", e.what(), "\n");
             kernel_context->TransitionResourcesForOperatorIfRequired(false);
-            return kernel->ort_api->CreateStatus(ORT_FAIL, e.what());
+            return kernel->ort_api->CreateStatus(ORT_FAIL,
+                fmt::format("DML Compute exception: op={} what={}", kernel->operator_name, e.what()).c_str());
         } catch (...) {
             DMLPERF_ADD(ns_kernel_compute, kc);
+            DML_PERF_LOG("[ABI_SAFE] Compute UNKNOWN EXCEPTION: op=", kernel->operator_name, "\n");
             kernel_context->TransitionResourcesForOperatorIfRequired(false);
             return kernel->ort_api->CreateStatus(ORT_FAIL, "Unknown exception during compute");
         }
@@ -3882,8 +4136,12 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
         kernel_context->TransitionResourcesForOperatorIfRequired(false);
         DMLPERF_ADD(ns_transition_post, post);
 
+        DML_PERF_LOG("[ABI_SAFE] Compute: op=", kernel->operator_name, "  HR=", Hex(static_cast<uint32_t>(hr)), "\n");
+
         if (FAILED(hr)) {
-            return kernel->ort_api->CreateStatus(ORT_FAIL, "DML operator Compute failed");
+            return kernel->ort_api->CreateStatus(ORT_FAIL,
+                fmt::format("DML operator Compute failed: op={} HR=0x{:08X}",
+                    kernel->operator_name, static_cast<unsigned>(hr)).c_str());
         }
 
         // Keep the kernel alive until scheduled GPU work completes.
