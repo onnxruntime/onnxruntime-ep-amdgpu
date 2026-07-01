@@ -169,6 +169,30 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
                 }
             }
 
+            // Copy input/output aliases (e.g., Reshape output[0] aliases input[0]).
+            // Without this, ORT's allocation planner allocates separate output buffers and
+            // assigns kReuse based on graph-level shapes. When dynamic dimensions change
+            // between Run() calls (e.g., KV cache sequence length growing), the pre-planned
+            // buffer is too small. With aliases, the output shares the input's buffer directly.
+            if (st == nullptr) {
+                const auto& alias_map = def->Alias();
+                if (!alias_map.empty()) {
+                    std::vector<int> alias_inputs;
+                    std::vector<int> alias_outputs;
+                    alias_inputs.reserve(alias_map.size());
+                    alias_outputs.reserve(alias_map.size());
+                    for (const auto& [input_idx, output_idx] : alias_map) {
+                        alias_inputs.push_back(input_idx);
+                        alias_outputs.push_back(output_idx);
+                    }
+                    st = ep_api.KernelDefBuilder_AddInputOutputAliases(
+                        builder,
+                        alias_inputs.data(),
+                        alias_outputs.data(),
+                        alias_inputs.size());
+                }
+            }
+
             // convert MLDataType constraints to OrtDataType and copy them
             if (st == nullptr) {
                 for (const auto& [constraint_name, ml_types] : create_info.kernel_def.get()->TypeConstraints()) {
@@ -523,11 +547,11 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
 
     for (const OrtNode* node : nodesInTopologicalOrder) {
         const OrtKernelDef* kernel_def = nullptr;
-        // kernel lookup
         OrtStatus* st = ep->ep_api.EpGraphSupportInfo_LookUpKernel(graph_support_info, node, &kernel_def);
         if (kernel_def != nullptr) {
             tentativeNodes.push_back(node);
         }
+        if (st) ep->ort_api.ReleaseStatus(st);
     }
 
     // Build a flat map of all graph initializers keyed by name, used as a fallback in
@@ -1279,13 +1303,18 @@ bool ExecutionProviderPlugin::DoesNodeContainSupportedDataTypes(
         MLOperatorEdgeType edgeType;
         MLOperatorTensorDataType onnxElementType;
 
+        // Skip missing optional inputs/outputs — these have no type info.
+        // ORT's ForEachDef skips them via NodeArg::Exists(); replicate that here.
+        if (!valueInfo.GetTypeInfo()) {
+            return;
+        }
+
         // Check type using OrtValueInfoAdapter
         if (!valueInfo.IsTensor()) {
             // If the model has nodes that use Optional we will arrive here. It's a valid ONNX model but
             // we don't handle Optional.
             // Exception: if this is a required CPU constant input that is unconnected (missing optional),
-            // skip it rather than rejecting the node. ORT's ForEachDef naturally skips these via
-            // NodeArg::Exists(); our OrtNodeAdapter doesn't have that check, so we replicate it here.
+            // skip it rather than rejecting the node.
             bool isMissingConstantCpuInput = isInput &&
                 std::find(constantCpuInputs.begin(), constantCpuInputs.end(), &valueInfo) != constantCpuInputs.end();
             if (!isMissingConstantCpuInput) {
@@ -1316,20 +1345,19 @@ bool ExecutionProviderPlugin::DoesNodeContainSupportedDataTypes(
             return;
         }
 
+        // Succeed if the tensor is CPU-bound, as the CPU-side reading code is generic enough
+        // to handle multiple types regardless of GPU capability (typically these are just
+        // scalars or simple 1D arrays like GQA's int64 total_sequence_length).
+        bool isConstantCpuInput = isInput &&
+            std::find(constantCpuInputs.begin(), constantCpuInputs.end(), &valueInfo) != constantCpuInputs.end();
+        if (isConstantCpuInput) {
+            return;
+        }
+
         // Reject node for unknown DML data types.
         DML_TENSOR_DATA_TYPE dmlElementType = GetDmlDataTypeFromMlDataTypeNoThrow(onnxElementType);
         if (dmlElementType == DML_TENSOR_DATA_TYPE_UNKNOWN) {
             nodeContainsSupportedDataTypes = false;
-            return;
-        }
-
-        // Succeed if the tensor is CPU-bound, as the CPU-side reading code is generic enough
-        // to handle multiple types regardless of GPU capability (typically these are just
-        // scalars or simple 1D arrays).
-        bool isConstantCpuInput = isInput &&
-            std::find(constantCpuInputs.begin(), constantCpuInputs.end(), &valueInfo) != constantCpuInputs.end();
-        if (isConstantCpuInput) {
-            // Leave nodeContainsSupportedDataTypes alone.
             return;
         }
 
