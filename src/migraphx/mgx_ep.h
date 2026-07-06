@@ -4,8 +4,10 @@
 #pragma once
 
 #include <ciso646>
+#include <list>
 #include <set>
 #include <mutex>
+#include <unordered_map>
 
 #include <hip/hip_runtime_api.h>
 #include <migraphx/migraphx.hpp>
@@ -34,6 +36,12 @@ constexpr auto kComputeMode = "ORT_MIGRAPHX_COMPUTE_MODE"sv;
 constexpr auto kINT8UseNativeCalibrationTable = "ORT_MIGRAPHX_INT8_USE_NATIVE_CALIBRATION_TABLE"sv;
 constexpr auto kExhaustiveTune = "ORT_MIGRAPHX_EXHAUSTIVE_TUNE"sv;
 constexpr auto kMlssUseSpecificOps = "ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS"sv;
+// Keep multiple shape-specialized programs (for example an LLM's prefill and
+// decode programs) resident at once so a shape switch is a map lookup instead of
+// a full reload and finalize. Default off (single-slot, legacy overwrite
+// behavior). When on, the cache is bounded by kMaxResidentPrograms.
+constexpr auto kCoresidentPrograms = "ORT_MIGRAPHX_CORESIDENT_PROGRAMS"sv;
+constexpr auto kMaxResidentPrograms = "ORT_MIGRAPHX_MAX_RESIDENT_PROGRAMS"sv;
 }  // namespace env_vars
 
 struct ComputeState {
@@ -41,7 +49,18 @@ struct ComputeState {
     int device_id;
     const migraphx::target& t;
     migraphx::onnx_options onnx_options;
-    migraphx::program program;
+    migraphx::program program;  // currently-active program (last shape run)
+    // shape-hash -> resident program cache. When coresident_programs is on,
+    // programs for distinct input shapes are kept here so switching is a lookup,
+    // not a reload and finalize. lru_order is most-recent-last; on overflow past
+    // max_resident_programs the front (least-recently-used) entry is evicted. The
+    // program run every step stays at the back and so is never the victim.
+    // active_shape_key is the key of the program currently in the `program` slot.
+    bool coresident_programs{};
+    size_t max_resident_programs{4};
+    std::unordered_map<std::string, migraphx::program> resident_programs;
+    std::list<std::string> lru_order;
+    std::string active_shape_key;
     bool enable_fp16{};
     bool enable_bf16{};
     bool enable_fp8{};
@@ -146,6 +165,8 @@ private:
     bool enable_fp8_{};
     bool enable_int8_{};
     bool exhaustive_tune_{};
+    bool coresident_programs_{};
+    size_t max_resident_programs_{4};
     std::string mlss_use_specific_ops_{};
     bool int8_calibration_cache_available_{};
     bool int8_use_native_calibration_table_{};
