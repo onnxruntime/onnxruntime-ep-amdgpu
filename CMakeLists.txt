@@ -37,7 +37,7 @@ if(WIN32)
     option(USE_MSVC_STATIC_RUNTIME "Link MSVC runtime library statically instead of dynamically" OFF)
     if(NOT USE_MSVC_STATIC_RUNTIME)
         set(MSVC_RUNTIME_SUFFIX "DLL")
-    endif
+    endif()
     if(NOT CMAKE_MSVC_RUNTIME_LIBRARY)
         set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>${MSVC_RUNTIME_SUFFIX}")
     endif()
