@@ -107,8 +107,13 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     }
 
     const ProviderInfo info{provider_options};
+<<<<<<< HEAD
     backend_name_ = (info.profile == Profile::Eager) ? "DirectML" : "MIGraphX";
     if (info.profile == Profile::Eager) {
+=======
+
+    const auto create_directml_backend = [&] {
+>>>>>>> main
         THROW_IF_ERROR(factory.CreateDirectMLBackend(local_session_options, logger, backend_ep_));
         // DirectML manages its own per-session GPU allocator (DmlBucketizedBufferAllocator)
         // via EP-level CreateAllocator. Wire it now that we know the backend is DirectML.
@@ -118,7 +123,9 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                                     OrtAllocator** allocator) noexcept {
             API_CALL_S(ExecutionProvider, this_, CreateAllocator, memory_info, allocator);
         };
-    } else {
+    };
+
+    const auto create_migraphx_backend = [&] {
         const auto get_name = [](const std::string_view sv) {
             return std::string{"ep."}.append(kMIGraphXBackend).append(".").append(sv);
         };
@@ -159,6 +166,16 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 info.mlss_use_specific_ops.value().c_str()));
         }
         THROW_IF_ERROR(factory.CreateMIGraphXBackend(local_session_options, logger, backend_ep_));
+    };
+
+    if (info.profile == Profile::Eager) {
+        create_directml_backend();
+    } else if (info.profile == Profile::DirectML) {
+        create_directml_backend();
+    } else if (info.profile == Profile::MIGraphX) {
+        create_migraphx_backend();
+    } else {
+        create_migraphx_backend();
     }
     ort_api.ReleaseSessionOptions(local_session_options);
 }

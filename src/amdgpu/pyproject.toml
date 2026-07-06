@@ -39,3 +39,9 @@ module_name = "onnxruntime_ep_amdgpu"
 [[tool.ep.components]]
 library = "amdgpu-ep"
 ep_name = "AMDGPUExecutionProvider"
+
+[[tool.ep.components]]
+library = "migraphx-backend"
+
+[[tool.ep.components]]
+library = "directml-backend"

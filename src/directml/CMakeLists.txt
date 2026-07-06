@@ -230,6 +230,9 @@ add_library(directml-ep MODULE
     ep_fusion_manager.cc
     quick_gelu_ep_fusion.cc
     bias_gelu_ep_fusion.cc
+    fused_matmul_ep_fusion.cc
+    dml_op_translators.cc
+    full_graph_fusion.cc
 
     #---- DirectML EP sources ----
     DmlExecutionProvider/ApiTraits.cc

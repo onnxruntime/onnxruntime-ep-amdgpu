@@ -34,6 +34,13 @@ if(WIN32)
         message(STATUS "Using Spectre-mitigated libraries")
         add_compiler_options($<$<COMPILE_LANGUAGE:C,CXX>:/Qspectre>)
     endif()
+    option(USE_MSVC_STATIC_RUNTIME "Link MSVC runtime library statically instead of dynamically" OFF)
+    if(NOT USE_MSVC_STATIC_RUNTIME)
+        set(MSVC_RUNTIME_SUFFIX "DLL")
+    endif
+    if(NOT CMAKE_MSVC_RUNTIME_LIBRARY)
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>${MSVC_RUNTIME_SUFFIX}")
+    endif()
 endif()
 
 option(USE_AMDGPU "Build the AMD GPU Execution Provider" OFF)

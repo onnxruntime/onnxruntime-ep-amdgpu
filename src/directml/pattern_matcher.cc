@@ -11,15 +11,22 @@ namespace dml_ep {
 using namespace fusion_utils;
 
 // ---------------------------------------------------------------------------
-// Internal recursive matcher.
+// Internal recursive matcher — walks the model graph from an anchor node,
+// checking each visited node against its corresponding PNode in the pattern
+// tree.
 //
-// Optional edges implement "greedy longest match": when a branch is optional,
-// we attempt it on a snapshot of the current state and keep whichever outcome
-// has the most matched nodes.  Non-optional edges fail the entire match if
-// they cannot be followed.
+// The traversal follows edges in both directions:
 //
-// Multiple optional branches at the same node are each tried; the one that
-// extends the match furthest wins, ensuring the longest pattern takes priority.
+//   Upstream:   anchor ← producer   (follow input[i] to the node that created it)
+//   Downstream: anchor → consumer   (follow output[i] to the node that reads it)
+//
+// At each node, input constraints (Scalar, SameAs, Predicate, etc.) are
+// validated before the node is committed to the match result.
+//
+// Optional edges implement "greedy longest match": the engine snapshots the
+// current state, attempts the optional branch, and keeps whichever outcome
+// matches more nodes.  Non-optional edges fail the entire match if they
+// cannot be followed.
 // ---------------------------------------------------------------------------
 static bool MatchNode(
     size_t                                                   node_idx,
@@ -44,6 +51,33 @@ static bool MatchNode(
     std::string capture = pattern.node_capture.empty()
         ? pattern.op_type + "/" + std::to_string(out.all_nodes.size())
         : pattern.node_capture;
+
+    // Pre-fetch OrtValueInfo* for all inputs of this node, but only when the
+    // pattern has Predicate constraints that need shape/type metadata.
+    // Built once per node and reused across all constraint evaluations.
+    //
+    // The other constraint kinds (Scalar, SameAs, Capture) only need the
+    // input tensor name (available from NodeInfo::input_names), so this
+    // fetch is skipped entirely when no predicates are present.
+    bool has_predicates = false;
+    for (const auto& [_, c] : pattern.input_constraints) {
+        if (c.kind == PInput::Kind::Predicate) { has_predicates = true; break; }
+    }
+
+    std::unordered_map<std::string, const OrtValueInfo*> input_value_infos;
+    if (has_predicates) {
+        size_t input_count = 0;
+        ort_api.Node_GetNumInputs(ni.node, &input_count);
+        std::vector<const OrtValueInfo*> vis(input_count, nullptr);
+        if (input_count > 0) ort_api.Node_GetInputs(ni.node, vis.data(), input_count);
+        for (size_t i = 0; i < input_count; ++i) {
+            if (!vis[i]) continue;
+            const char* name = nullptr;
+            OrtStatus* st = ort_api.GetValueInfoName(vis[i], &name);
+            if (st || !name) { if (st) ort_api.ReleaseStatus(st); continue; }
+            input_value_infos[name] = vis[i];
+        }
+    }
 
     // Validate per-input constraints.
     for (const auto& [idx, constraint] : pattern.input_constraints) {
@@ -77,6 +111,16 @@ static bool MatchNode(
                         for (const auto& v2 : ni.input_names) {
                             if (v2 == it->second) { any_matched = true; break; }
                         }
+                    }
+                } else if (constraint.kind == PInput::Kind::Predicate) {
+                    auto vi_it = input_value_infos.find(val);
+                    const OrtValueInfo* vi = (vi_it != input_value_infos.end()) ? vi_it->second : nullptr;
+                    if (constraint.predicate &&
+                        constraint.predicate(val, vi, ort_api, initializers, ni.node)) {
+                        if (!constraint.capture_name.empty())
+                            out.value_names[constraint.capture_name] = val;
+                        any_matched = true;
+                        break;
                     }
                 }
             }
@@ -116,6 +160,17 @@ static bool MatchNode(
             }
             break;
         }
+
+        case PInput::Kind::Predicate: {
+            auto vi_it = input_value_infos.find(val_name);
+            const OrtValueInfo* vi = (vi_it != input_value_infos.end()) ? vi_it->second : nullptr;
+            if (!constraint.predicate ||
+                !constraint.predicate(val_name, vi, ort_api, initializers, ni.node))
+                return false;
+            if (!constraint.capture_name.empty())
+                out.value_names[constraint.capture_name] = val_name;
+            break;
+        }
         }
     }
 
@@ -133,11 +188,45 @@ static bool MatchNode(
                 continue;
             }
             const std::string& out_val = ni.output_names[edge.value_index];
-            if (!gc.HasSingleConsumer(out_val)) {
+
+            // Single-consumer is required for intermediate edges — if the value
+            // connects two internal pattern nodes and we claim the producer, any
+            // external consumer would lose its input.
+            //
+            // Terminal edges (the child has no further edges of its own) are exempt:
+            // the child's output becomes the fused subgraph output and ORT
+            // automatically rewires external consumers to read from it, so multiple
+            // consumers are safe.
+            bool child_is_terminal = edge.child->edges.empty();
+            if (!child_is_terminal && !gc.HasSingleConsumer(out_val)) {
                 if (!edge.optional) { out.all_nodes.pop_back(); out.node_indices.erase(capture); return false; }
                 continue;
             }
-            child_idx = gc.consumer_map.at(out_val)[0];
+
+            {
+                auto cons_it = gc.consumer_map.find(out_val);
+                if (cons_it == gc.consumer_map.end() || cons_it->second.empty()) {
+                    if (!edge.optional) { out.all_nodes.pop_back(); out.node_indices.erase(capture); return false; }
+                    continue;
+                }
+                if (child_is_terminal) {
+                    // Multiple consumers allowed on terminal edge — find any consumer
+                    // matching the child op type.
+                    child_idx = SIZE_MAX;
+                    for (size_t cidx : cons_it->second) {
+                        if (gc.node_infos[cidx].op_type == edge.child->op_type) {
+                            child_idx = cidx;
+                            break;
+                        }
+                    }
+                    if (child_idx == SIZE_MAX) {
+                        if (!edge.optional) { out.all_nodes.pop_back(); out.node_indices.erase(capture); return false; }
+                        continue;
+                    }
+                } else {
+                    child_idx = cons_it->second[0];
+                }
+            }
 
         } else {  // Upstream
             if (edge.value_index >= ni.input_names.size()) {

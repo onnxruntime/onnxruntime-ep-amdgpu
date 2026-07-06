@@ -7,6 +7,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <onnxruntime_c_api.h>
@@ -54,6 +55,9 @@ struct GraphConnectivity {
     std::unordered_map<std::string, std::vector<size_t>> consumer_map;
     // node id -> index into node_infos
     std::unordered_map<size_t, size_t> id_to_index;
+    // value names that are graph outputs — these count as external consumers
+    // even though no node in the graph consumes them directly.
+    std::unordered_set<std::string> graph_output_values;
 
     // Returns true if the named value has exactly one consumer in the graph.
     bool HasSingleConsumer(const std::string& value_name) const;

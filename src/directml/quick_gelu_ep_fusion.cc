@@ -26,16 +26,53 @@ using Microsoft::WRL::ComPtr;
 PNode QuickGeluFusionRule::BuildPattern() const {
     // Capture names prefixed "QuickGelu." to avoid conflicts when merged with
     // other rules sharing the "Sigmoid" anchor.
+    // QuickGelu: x * sigmoid(alpha * x)
+    //
+    // 2-node variant (alpha=1):   x → Sigmoid(x) → Mul(x, sigmoid_out)
+    // 3-node variant (alpha≠1):   x → Mul(x, alpha) → Sigmoid(alpha*x) → Mul(x, sigmoid_out)
+    //
+    // PSameAs on first use acts as a capture.  The upstream alpha_mul (processed
+    // first when present) captures x from its non-scalar input.  The downstream
+    // output_mul then validates that the same x appears as one of its inputs.
+    // When the upstream branch is absent (2-node variant), the downstream Mul's
+    // PSameAs is the first use and captures x directly.
+    // Alpha predicate: must be a constant initializer with exactly 1 element.
+    // Uses TryReadScalarFloat for validation (handles fp32, fp64, fp16).
+    PInput alpha_input = PPredicate(
+        [](const std::string& name, const OrtValueInfo*,
+           const OrtApi& ort_api,
+           const std::unordered_map<std::string, const OrtValue*>& initializers,
+           const OrtNode*) -> bool {
+            auto it = initializers.find(name);
+            if (it == initializers.end()) return false;
+            float v = 0.0f;
+            return fusion_utils::TryReadScalarFloat(ort_api, it->second, v);
+        });
+    alpha_input.capture_name = "QuickGelu.alpha";
+
+    // 2-node: PCapture on Sigmoid captures x directly. Downstream Mul validates.
+    // 3-node: PCapture on Sigmoid captures alpha*x (wrong). The upstream alpha_mul
+    //         predicate overwrites "QuickGelu.input" with x (the non-scalar input).
+    //         Downstream Mul then validates that x appears as one of its inputs.
+    PInput alpha_mul_x_input = PPredicate(
+        [](const std::string& name, const OrtValueInfo*,
+           const OrtApi&,
+           const std::unordered_map<std::string, const OrtValue*>& initializers,
+           const OrtNode*) -> bool {
+            return initializers.find(name) == initializers.end();
+        });
+    alpha_mul_x_input.capture_name = "QuickGelu.input";
+
     return PNode("Sigmoid").As("QuickGelu.sigmoid")
         .Input(0, PCapture("QuickGelu.input"))
         .Upstream(0,
             PNode("Mul").As("QuickGelu.alpha_mul")
-                .Input(0, PSameAs("QuickGelu.input"))
-                .Input(1, PScalarAs("QuickGelu.alpha", 0.0f, 1e10f)),
+                .Input(SIZE_MAX, std::move(alpha_mul_x_input))
+                .Input(SIZE_MAX, std::move(alpha_input)),
             /*optional=*/true)
         .Downstream(0,
             PNode("Mul").As("QuickGelu.output_mul")
-                .Input(0, PSameAs("QuickGelu.input")));
+                .Input(SIZE_MAX, PSameAs("QuickGelu.input")));
 }
 
 bool QuickGeluFusionRule::MatchesResult(const PatternMatch& m) const {
@@ -233,7 +270,6 @@ static OrtStatus* ORT_API_CALL QuickGelu_Compute(
     if (!state || !state->provider || !state->ort_api) return nullptr;
 
     const OrtApi& api = *state->ort_api;
-
     // Get input and read its concrete runtime shape.
     const OrtValue* input_value = nullptr;
     {
@@ -382,9 +418,18 @@ OrtNodeComputeInfo* QuickGeluFusionRule::Compile(
     PluginDmlExecutionProviderImpl*  provider,
     const PatternMatch&              match) const
 {
-    // Alpha is available directly from the pattern match captures.
+    // Alpha: read from the initializer via the captured name.
     // Default 1.0 when the optional alpha_mul branch wasn't matched.
-    const float alpha = match.ScalarValue("QuickGelu.alpha", 1.0f);
+    float alpha = 1.0f;
+    {
+        std::string alpha_name = match.ValueName("QuickGelu.alpha");
+        if (!alpha_name.empty()) {
+            auto it = initializers.find(alpha_name);
+            if (it != initializers.end()) {
+                fusion_utils::TryReadScalarFloat(ort_api, it->second, alpha);
+            }
+        }
+    }
 
     // Read static input shape from the fused subgraph's type info.
     size_t num_inputs = 0;
@@ -428,7 +473,11 @@ OrtNodeComputeInfo* QuickGeluFusionRule::Compile(
     kernel_state->ort_api  = &ort_api;
 
     // Check for dynamic dims: if any are unknown, defer to first Compute (LAZY_INIT).
-    bool has_dynamic_dims = false;
+    // rank=0 with unknown element count means shape is unavailable from the EP
+    // C API (not a true scalar) — defer to compute time when real shapes arrive.
+    size_t static_elem_count = 0;
+    ort_api.GetTensorShapeElementCount(shape_info, &static_elem_count);
+    bool has_dynamic_dims = (rank == 0 && static_elem_count == 0);
     for (size_t i = 0; i < rank; ++i) {
         if (dims[i] <= 0) { has_dynamic_dims = true; break; }
     }
