@@ -12,6 +12,7 @@
 
 #include "common/path_string.h"
 #include "common/plugin_ep_utils.h"
+#include "common/telemetry.h"
 
 #include "mgx_factory.h"
 #include "mgx_info.h"
@@ -93,6 +94,8 @@ struct ExecutionProvider : OrtEp, ApiPtrs {
         return it->second;
     }
 
+    void CollectTelemetry(telemetry::BackendData& out) const noexcept;
+
 private:
     [[nodiscard]] const char* GetName() const noexcept;
 
@@ -117,9 +120,7 @@ private:
 
     Ort::Status CreateNodeComputeInfoFromGraph(const Ort::ConstGraph& graph, const Ort::ConstNode& fused_node,
         const Map<size_t>& input_name_indices, const Map<size_t>& output_name_indices, const std::string& mxr_prefix,
-        OrtNodeComputeInfo*& node_compute_info, OrtNode*& ep_context_node, bool& loaded_from_cache);
-
-    void LogTelemetry(const fs::path& model_path, bool loaded_from_cache) const noexcept;
+        OrtNodeComputeInfo*& node_compute_info, OrtNode*& ep_context_node);
 
     Ort::Status CreateNodeComputeInfoFromCache(const Ort::ConstGraph& graph, const Ort::ConstNode& fused_node,
         const Map<size_t>& input_name_indices, const Map<size_t>& output_name_indices,
@@ -156,6 +157,7 @@ private:
     std::string int8_calibration_table_name_{};
     fs::path external_data_dir_{};
     std::string compute_capability_{};
+    telemetry::BackendData backend_telemetry_{};
     bool context_embed_mode_{};
     bool context_enable_{};
     std::string context_node_name_prefix_{};

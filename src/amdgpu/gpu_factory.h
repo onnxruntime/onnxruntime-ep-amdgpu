@@ -6,6 +6,8 @@
 #include "gpu_allocator.h"
 #include "gpu_data_transfer.h"
 
+#include "common/telemetry.h"
+
 namespace gpu_ep {
 
 struct ProviderFactory : OrtEpFactory, ApiPtrs {
@@ -15,12 +17,14 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
     Ort::Status CreateDirectMLBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
         RETURN_IF_ERROR(dml_ep_factory_->CreateEp(dml_ep_factory_, nullptr, nullptr, 0, session_options, logger, &ep));
         backend_ep_factory_ = dml_ep_factory_;
+        backend_get_telemetry_ = dml_get_telemetry_;
         return STATUS_OK;
     }
 
     Ort::Status CreateMIGraphXBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
         RETURN_IF_ERROR(mgx_ep_factory_->CreateEp(mgx_ep_factory_, nullptr, nullptr, 0, session_options, logger, &ep));
         backend_ep_factory_ = mgx_ep_factory_;
+        backend_get_telemetry_ = mgx_get_telemetry_;
         return STATUS_OK;
     }
 
@@ -28,9 +32,14 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
         return backend_ep_factory_;
     }
 
-    [[nodiscard]] std::string_view Version() const noexcept {
-        return version_;
+    // Telemetry collector exported by the active backend DLL, or null if that
+    // backend contributes no backend-specific telemetry.
+    [[nodiscard]] telemetry::GetBackendDataFn GetBackendTelemetryFn() const noexcept {
+        return backend_get_telemetry_;
     }
+
+    // Exposes the version string the factory already reports to ORT.
+    [[nodiscard]] const char* GetVersion() const;
 
 private:
     [[nodiscard]] const char* GetVendor() const;
@@ -46,7 +55,6 @@ private:
     void ReleaseEp(OrtEp* ep) const;
 
     [[nodiscard]] uint32_t GetVendorId() const;
-    [[nodiscard]] const char* GetVersion() const;
 
     // Ort::Status ValidateCompiledModelCompatibilityInfo(const std::vector<Ort::ConstHardwareDevice>& devices,
     //      std::string_view compatibility_info, OrtCompiledModelCompatibility* model_compatibility);
@@ -73,6 +81,7 @@ private:
     Ort::Status GetCustomOpDomains(OrtCustomOpDomain** domains, size_t num_domains) const;
 
     OrtEpFactory* backend_ep_factory_{};
+    telemetry::GetBackendDataFn backend_get_telemetry_{};
     const Ort::Logger default_logger_{};
 
     std::string ep_name_;
@@ -85,11 +94,13 @@ private:
     ReleaseEpFactory_t dml_release_ep_factory_{};
 
     OrtEpFactory* dml_ep_factory_{};
+    telemetry::GetBackendDataFn dml_get_telemetry_{};
 
     void* mgx_backend_{};
     ReleaseEpFactory_t mgx_release_ep_factory_{};
 
     OrtEpFactory* mgx_ep_factory_{};
+    telemetry::GetBackendDataFn mgx_get_telemetry_{};
 
     OrtHardwareDevice* virtual_device_{};
 

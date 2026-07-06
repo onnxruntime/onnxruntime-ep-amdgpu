@@ -39,6 +39,23 @@
 
 namespace gpu_ep {
 
+namespace {
+
+telemetry::Backend BackendForProfile(Profile profile) noexcept {
+    switch (profile) {
+        case Profile::Eager:
+        case Profile::DirectML:
+            return telemetry::Backend::DirectML;
+        case Profile::Auto:
+        case Profile::Optimized:
+        case Profile::MIGraphX:
+            return telemetry::Backend::MIGraphX;
+    }
+    return telemetry::Backend::MIGraphX;
+}
+
+}  // namespace
+
 ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view ep_name,
         const Ort::ConstSessionOptions& session_options, const OrtLogger* logger)
     : OrtEp{ORT_API_VERSION},
@@ -107,8 +124,14 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     }
 
     const ProviderInfo info{provider_options};
-    backend_name_ = (info.profile == Profile::Eager) ? "DirectML" : "MIGraphX";
-    if (info.profile == Profile::Eager) {
+    backend_ = BackendForProfile(info.profile);
+
+    telemetry::Config telemetry_config;
+    telemetry_config.enabled = info.telemetry_enable.value_or(true);
+    if (info.telemetry_dir.has_value() && !info.telemetry_dir->empty()) {
+        telemetry_config.directory = ToPathString(*info.telemetry_dir);
+    }
+    telemetry_.emplace(std::move(telemetry_config));
 
     const auto create_directml_backend = [&] {
         THROW_IF_ERROR(factory.CreateDirectMLBackend(local_session_options, logger, backend_ep_));
@@ -165,14 +188,14 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         THROW_IF_ERROR(factory.CreateMIGraphXBackend(local_session_options, logger, backend_ep_));
     };
 
-    if (info.profile == Profile::Eager) {
-        create_directml_backend();
-    } else if (info.profile == Profile::DirectML) {
-        create_directml_backend();
-    } else if (info.profile == Profile::MIGraphX) {
-        create_migraphx_backend();
-    } else {
-        create_migraphx_backend();
+    switch (backend_) {
+        case telemetry::Backend::DirectML:
+            create_directml_backend();
+            break;
+        case telemetry::Backend::MIGraphX:
+        case telemetry::Backend::Unknown:
+            create_migraphx_backend();
+            break;
     }
     ort_api.ReleaseSessionOptions(local_session_options);
 }
@@ -204,33 +227,44 @@ Ort::Status ExecutionProvider::GetCapability(const OrtGraph* graph,
 Ort::Status ExecutionProvider::Compile(const OrtGraph** graphs, const OrtNode** fused_nodes, size_t count,
     OrtNodeComputeInfo** node_compute_infos, OrtNode** ep_context_nodes) const noexcept
 {
-    LogTelemetry(graphs, count);
-    EP_CALL_S(backend_ep_, Compile, graphs, fused_nodes, count, node_compute_infos, ep_context_nodes);
+    if (backend_ep_ == nullptr) {
+        return MAKE_STATUS(ORT_EP_FAIL, "Compile: invalid backend");
+    }
+    if (backend_ep_->Compile != nullptr) {
+        RETURN_IF_ERROR(backend_ep_->Compile(backend_ep_, graphs, fused_nodes, count,
+            node_compute_infos, ep_context_nodes));
+    }
+    if (count > 0 && graphs != nullptr) {
+        LogTelemetry(Ort::ConstGraph{graphs[0]});
+    }
+    return STATUS_OK;
 }
 
-void ExecutionProvider::LogTelemetry(const OrtGraph* const* graphs, size_t count) const noexcept try {
-    // The MIGraphX backend logs its own record (with GFX arch and MXR cache
-    // state, which this wrapper cannot see). Only cover the DirectML path here.
-    if (backend_name_ != "DirectML") {
+void ExecutionProvider::LogTelemetry(const Ort::ConstGraph& graph) const noexcept try {
+    if (!telemetry_ || !telemetry_->IsEnabled()) {
         return;
     }
-    std::call_once(telemetry_once_, [&]() noexcept {
-        try {
-            telemetry::Record record;
-            record.ep_version = std::string{factory_.Version()};
-            record.backend = backend_name_;
-            record.parent_process = telemetry::ParentProcessName();
-            if (count > 0 && graphs != nullptr) {
-                const std::filesystem::path model_path{Ort::ConstGraph{graphs[0]}.GetModelPath()};
-                if (model_path.has_filename()) {
-                    record.model_name = model_path.filename().string();
-                }
-            }
-            telemetry::Log(record);
-        } catch (...) {
+    std::call_once(telemetry_once_, [&] {
+        // Generic, backend-agnostic fields collected by the wrapper.
+        telemetry::Record record;
+        record.SetEpVersion(factory_.GetVersion())
+              .SetBackend(backend_)
+              .SetParentProcess(telemetry::ParentProcessName());
+        const std::filesystem::path model_path{graph.GetModelPath()};
+        if (model_path.has_filename()) {
+            record.SetModelName(model_path.filename().string());
         }
+        if (const telemetry::GetBackendDataFn collect = factory_.GetBackendTelemetryFn();
+                collect != nullptr) {
+            telemetry::BackendData data{};
+            if (collect(backend_ep_, &data)) {
+                record.Merge(data);
+            }
+        }
+        telemetry_->Write(record);
     });
-} catch (...) {
+} catch (const std::exception&) {
+    // Telemetry must never disrupt inference.
 }
 
 void ExecutionProvider::ReleaseNodeComputeInfos(OrtNodeComputeInfo** node_compute_info,

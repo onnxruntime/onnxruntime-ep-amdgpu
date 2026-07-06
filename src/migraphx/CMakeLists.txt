@@ -28,7 +28,7 @@ target_link_libraries(migraphx-ep PRIVATE migraphx::c hip-shared flatbuffers)
 
 if(WIN32)
     set_property(TARGET migraphx-ep APPEND_STRING
-            PROPERTY LINK_FLAGS /DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
+            PROPERTY LINK_FLAGS /DEF:${PROJECT_SOURCE_DIR}/src/migraphx/symbols.def)
 
     set(MGX_FILES
         "$<TARGET_FILE_DIR:migraphx::migraphx>/amdmlss.dll"
@@ -64,7 +64,7 @@ if(WIN32)
             DESTINATION "." OPTIONAL)
 else()
     set_property(TARGET migraphx-ep APPEND_STRING
-            PROPERTY LINK_FLAGS "-Xlinker --version-script=${PROJECT_SOURCE_DIR}/src/shared/version_script.lds -Xlinker --gc-sections")
+            PROPERTY LINK_FLAGS "-Xlinker --version-script=${PROJECT_SOURCE_DIR}/src/migraphx/version_script.lds -Xlinker --gc-sections")
 
     install(TARGETS migraphx-ep
             DESTINATION ${CMAKE_INSTALL_BINDIR})

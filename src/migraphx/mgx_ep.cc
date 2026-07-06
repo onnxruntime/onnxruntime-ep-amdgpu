@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstdio>
 #include <set>
 #include <string>
 #include <string_view>
@@ -717,28 +718,15 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
 
 }  // namespace <anonymous>
 
-void ExecutionProvider::LogTelemetry(const fs::path& model_path, bool loaded_from_cache) const noexcept try {
-    telemetry::Record record;
-    record.ep_version = std::string{factory_.Version()};
-    record.backend = "MIGraphX";
-    if (!compute_capability_.empty()) {
-        record.gfx_arch = compute_capability_;
-    }
-    if (model_path.has_filename()) {
-        record.model_name = model_path.filename().string();
-    }
-    record.loaded_from_cache = loaded_from_cache;
-    record.parent_process = telemetry::ParentProcessName();
-    telemetry::Log(record);
-} catch (...) {
+void ExecutionProvider::CollectTelemetry(telemetry::BackendData& out) const noexcept {
+    out = backend_telemetry_;
 }
 
 Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGraph& graph,
     const Ort::ConstNode& fused_node, const Map<size_t>& input_name_indices, const Map<size_t>& output_name_indices,
-    const std::string& mxr_prefix, OrtNodeComputeInfo*& node_compute_info, OrtNode*& ep_context_node,
-    bool& loaded_from_cache)
+    const std::string& mxr_prefix, OrtNodeComputeInfo*& node_compute_info, OrtNode*& ep_context_node)
 {
-    loaded_from_cache = false;
+    bool loaded_from_cache = false;
     const auto sorted_nodes{GetKahnsVariantTopologicalSortedNodes(graph)};
     Ort::Graph sorted_graph{graph.GetGraphView(sorted_nodes)};
     ONNX_NAMESPACE::ModelProto model_proto{};
@@ -772,6 +760,10 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             mxr_path = cache_dir_ / (mxr_prefix + hash::ToHex(input_shapes_hash) + ".mxr");
         }
         loaded_from_cache = !force_recompile_ && load_compiled_program(program, mxr_path);
+        if (loaded_from_cache) {
+            // Accumulate backend-specific telemetry: a cache hit occurred.
+            backend_telemetry_.loaded_from_cache = true;
+        }
         if (!loaded_from_cache) {
             const auto external_data_dir{external_data_dir_.empty() ?
                 model_path.parent_path() : external_data_dir_};
@@ -891,10 +883,17 @@ Ort::Status ExecutionProvider::Compile(const std::vector<Ort::ConstGraph>& graph
     const std::vector<Ort::ConstNode>& fused_nodes, gsl::span<OrtNodeComputeInfo*> node_compute_infos,
     gsl::span<OrtNode*> ep_context_nodes) noexcept
 try {
-    bool any_loaded_from_cache{false};
-    fs::path model_path;
+    // Reset the backend-specific telemetry gathered for this compile. Generic
+    // fields (model, version, ...) are collected by the wrapper; here we only
+    // record what is specific to MIGraphX (gfx arch and MXR cache state).
+    backend_telemetry_.backend = telemetry::Backend::MIGraphX;
+    backend_telemetry_.has_gfx_arch = !compute_capability_.empty();
+    std::snprintf(backend_telemetry_.gfx_arch, sizeof(backend_telemetry_.gfx_arch),
+        "%s", compute_capability_.c_str());
+    backend_telemetry_.has_loaded_from_cache = true;
+    backend_telemetry_.loaded_from_cache = false;
+
     for (const auto& [graph, fused_node, node_compute_info, ep_context_node] : zip(graphs, fused_nodes, node_compute_infos, ep_context_nodes)) {
-        model_path = graph.GetModelPath();
         const auto inputs{GetValueInfos(fused_node.GetInputs())};
         std::unordered_map<std::string, size_t> input_name_indices;
         input_name_indices.reserve(inputs.size());
@@ -912,20 +911,17 @@ try {
         }
 
         if (EpContextNodeReader::GraphHasContextNode(graph)) {
-            any_loaded_from_cache = true;
+            backend_telemetry_.loaded_from_cache = true;
             RETURN_IF_ERROR(CreateNodeComputeInfoFromCache(graph, fused_node, input_name_indices,
                 output_name_indices, node_compute_info));
         } else {
             const auto mxr_prefix{hash::ToHex(MIGraphX_Version) + "-" + GenerateGraphId(graph) + "-" +
                 hash::ToHex(std::string_view{device_prop_.gcnArchName}) + "-"};
 
-            bool loaded_from_cache{false};
             RETURN_IF_ERROR(CreateNodeComputeInfoFromGraph(graph, fused_node, input_name_indices,
-                output_name_indices, mxr_prefix, node_compute_info, ep_context_node, loaded_from_cache));
-            any_loaded_from_cache = any_loaded_from_cache || loaded_from_cache;
+                output_name_indices, mxr_prefix, node_compute_info, ep_context_node));
         }
     }
-    LogTelemetry(model_path, any_loaded_from_cache);
     return STATUS_OK;
 } catch (const Ort::Exception& e) {
     return Ort::Status{e};
@@ -1251,3 +1247,14 @@ try {
 }
 
 }  // namespace mgx_ep
+
+// Telemetry collector exported for the amdgpu wrapper. The wrapper resolves this
+// by symbol (see telemetry::kGetBackendDataSymbol) and calls it with a live
+// backend EP to pull MIGraphX-specific telemetry.
+extern "C" bool GetBackendTelemetry(const OrtEp* ep, telemetry::BackendData* out) noexcept {
+    if (ep == nullptr || out == nullptr) {
+        return false;
+    }
+    static_cast<const mgx_ep::ExecutionProvider*>(ep)->CollectTelemetry(*out);
+    return true;
+}

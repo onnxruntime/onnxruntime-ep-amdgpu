@@ -7,8 +7,11 @@
 
 #include <filesystem>
 #include <string>
+#include <system_error>
+#include <thread>
 
 #include "common/path_string.h"
+#include "common/platform/windows/env_var.h"
 #include "common/telemetry.h"
 
 namespace fs = std::filesystem;
@@ -22,49 +25,42 @@ constexpr DWORD kLockOffsetHigh = 0x7FFFFFFFu;
 constexpr DWORD kLockBytesLow = 1u;
 constexpr DWORD kLockBytesHigh = 0u;
 
-// RAII handle wrapper.
+// RAII wrapper for a Win32 HANDLE. Handles both failure sentinels: CreateFileW
+// yields INVALID_HANDLE_VALUE, OpenProcess yields nullptr.
 struct Handle {
     HANDLE h{INVALID_HANDLE_VALUE};
+
+    Handle() = default;
+    explicit Handle(HANDLE handle) : h{handle} {}
+    Handle(const Handle&) = delete;
+    Handle& operator=(const Handle&) = delete;
     ~Handle() {
-        if (h != INVALID_HANDLE_VALUE) {
+        if (IsValid()) {
             ::CloseHandle(h);
         }
     }
-    explicit operator bool() const { return h != INVALID_HANDLE_VALUE; }
+
+    [[nodiscard]] bool IsValid() const noexcept {
+        return h != nullptr && h != INVALID_HANDLE_VALUE;
+    }
 };
 
-PathString EnvVar(const wchar_t* name) {
-    const DWORD len = ::GetEnvironmentVariableW(name, nullptr, 0);
-    if (len == 0) {
-        return {};
-    }
-    std::wstring value(len, L'\0');
-    const DWORD written = ::GetEnvironmentVariableW(name, value.data(), len);
-    if (written == 0 || written >= len) {
-        return {};
-    }
-    value.resize(written);
-    return value;
-}
-
 std::string ImageNameForPid(DWORD pid) {
-    const Handle snapshot{::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)};
-    if (!snapshot) {
+    const Handle proc{::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)};
+    if (!proc.IsValid()) {
         return {};
     }
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    for (BOOL ok = ::Process32FirstW(snapshot.h, &entry); ok; ok = ::Process32NextW(snapshot.h, &entry)) {
-        if (entry.th32ProcessID == pid) {
-            return ToUTF8String(std::wstring_view{entry.szExeFile});
-        }
+    wchar_t buffer[MAX_PATH];
+    DWORD size = static_cast<DWORD>(std::size(buffer));
+    if (!::QueryFullProcessImageNameW(proc.h, 0, buffer, &size)) {
+        return {};
     }
-    return {};
+    return ToUTF8String(fs::path{std::wstring_view{buffer, size}}.filename().wstring());
 }
 
 DWORD ParentPidOf(DWORD pid) {
     const Handle snapshot{::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)};
-    if (!snapshot) {
+    if (!snapshot.IsValid()) {
         return 0;
     }
     PROCESSENTRY32W entry{};
@@ -77,15 +73,30 @@ DWORD ParentPidOf(DWORD pid) {
     return 0;
 }
 
-}  // namespace
-
-PathString detail::BaseDirectory() noexcept try {
-    return EnvVar(kUseProgramFiles ? L"ProgramFiles" : L"ProgramData");
-} catch (...) {
-    return {};
+void AcquireAppendLock(HANDLE file, OVERLAPPED& overlapped) {
+    for (unsigned attempt = 1; attempt <= kLockMaxAttempts; ++attempt) {
+        if (::LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
+                kLockBytesLow, kLockBytesHigh, &overlapped)) {
+            return;
+        }
+        const DWORD err = ::GetLastError();
+        if (err != ERROR_LOCK_VIOLATION && err != ERROR_IO_PENDING) {
+            throw std::system_error(static_cast<int>(err), std::system_category(),
+                "telemetry: LockFileEx failed");
+        }
+        std::this_thread::yield();
+    }
+    throw std::system_error(static_cast<int>(ERROR_LOCK_VIOLATION), std::system_category(),
+        "telemetry: log file lock still contended after " + std::to_string(kLockMaxAttempts) + " attempts");
 }
 
-std::string CurrentProcessName() noexcept try {
+}  // namespace
+
+PathString BaseDirectory() {
+    return ToPathString(platform::GetEnvironmentVar("ProgramData"));
+}
+
+std::string CurrentProcessName() {
     std::wstring buffer(MAX_PATH, L'\0');
     for (;;) {
         const DWORD len = ::GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
@@ -99,20 +110,16 @@ std::string CurrentProcessName() noexcept try {
         buffer.resize(buffer.size() * 2);
     }
     return ToUTF8String(fs::path{buffer}.filename().wstring());
-} catch (...) {
-    return {};
 }
 
-std::string ParentProcessName() noexcept try {
+std::string ParentProcessName() {
     const DWORD parent = ParentPidOf(::GetCurrentProcessId());
     return parent == 0 ? std::string{} : ImageNameForPid(parent);
-} catch (...) {
-    return {};
 }
 
-bool AppendLine(const PathString& path, std::string_view line) noexcept try {
+void AppendLine(const PathString& path, std::string_view line) {
     if (path.empty() || line.empty()) {
-        return false;
+        return;
     }
     std::string buffer{line};
     if (buffer.back() != '\n') {
@@ -124,47 +131,34 @@ bool AppendLine(const PathString& path, std::string_view line) noexcept try {
     // first use.
     const Handle file{::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)};
-    if (!file) {
-        return false;
+    if (!file.IsValid()) {
+        throw std::system_error(static_cast<int>(::GetLastError()), std::system_category(),
+            "telemetry: cannot open log file");
     }
 
-    // LockFileEx has no native timeout, so poll with LOCKFILE_FAIL_IMMEDIATELY
-    // until the ~10ms budget elapses. The OVERLAPPED carries the lock offset.
     OVERLAPPED overlapped{};
     overlapped.Offset = kLockOffsetLow;
     overlapped.OffsetHigh = kLockOffsetHigh;
 
-    bool locked = false;
-    const ULONGLONG deadline = ::GetTickCount64() + kLockTimeoutMs;
-    do {
-        if (::LockFileEx(file.h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
-                kLockBytesLow, kLockBytesHigh, &overlapped)) {
-            locked = true;
-            break;
-        }
-        if (::GetTickCount64() >= deadline) {
-            break;
-        }
-        ::Sleep(1);
-    } while (true);
-
-    if (!locked) {
-        return false;  // timed out waiting for the lock; drop the record
-    }
+    AcquireAppendLock(file.h, overlapped);
+    struct Unlock {
+        HANDLE h;
+        OVERLAPPED* ov;
+        ~Unlock() { ::UnlockFileEx(h, 0, kLockBytesLow, kLockBytesHigh, ov); }
+    } unlock{file.h, &overlapped};
 
     // Append at end-of-file under the lock. Seeking + writing is race-free
     // because every writer serializes through the same lock byte.
-    bool ok = false;
-    if (::SetFilePointer(file.h, 0, nullptr, FILE_END) != INVALID_SET_FILE_POINTER) {
-        DWORD written = 0;
-        ok = ::WriteFile(file.h, buffer.data(), static_cast<DWORD>(buffer.size()), &written, nullptr)
-             && written == buffer.size();
+    if (::SetFilePointer(file.h, 0, nullptr, FILE_END) == INVALID_SET_FILE_POINTER) {
+        throw std::system_error(static_cast<int>(::GetLastError()), std::system_category(),
+            "telemetry: seek to end failed");
     }
-
-    ::UnlockFileEx(file.h, 0, kLockBytesLow, kLockBytesHigh, &overlapped);
-    return ok;
-} catch (...) {
-    return false;
+    DWORD written = 0;
+    if (!::WriteFile(file.h, buffer.data(), static_cast<DWORD>(buffer.size()), &written, nullptr)
+            || written != buffer.size()) {
+        throw std::system_error(static_cast<int>(::GetLastError()), std::system_category(),
+            "telemetry: write failed");
+    }
 }
 
 }  // namespace telemetry

@@ -18,8 +18,6 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
 
     Ort::Status GetKernelRegistry(std::string_view ep_name, const OrtKernelRegistry*& kernel_registry) const;
 
-    [[nodiscard]] std::string_view Version() const noexcept { return version_; }
-
 private:
     [[nodiscard]] const char* GetName() const;
     [[nodiscard]] const char* GetVendor() const;

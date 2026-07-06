@@ -126,6 +126,12 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     THROW_IF_ERROR(GetSymbolFromLibrary(dml_backend_,
         "CreateEpFactories", reinterpret_cast<void**>(&dml_create_ep_factories)));
 
+    // Optional: a backend may export a telemetry collector. Absence is fine.
+    if (!GetSymbolFromLibrary(dml_backend_, telemetry::kGetBackendDataSymbol,
+            reinterpret_cast<void**>(&dml_get_telemetry_)).IsOK()) {
+        dml_get_telemetry_ = nullptr;
+    }
+
     size_t factories_created{};
     // Pass ep_name_ (e.g. "amdgpu") so the directml backend registers its kernels,
     // allocators, and node assignments under the same name ORT sees for this EP.
@@ -141,6 +147,12 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     CreateEpFactories_t mgx_create_ep_factories{};
     THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
         "CreateEpFactories", reinterpret_cast<void**>(&mgx_create_ep_factories)));
+
+    // Optional: a backend may export a telemetry collector. Absence is fine.
+    if (!GetSymbolFromLibrary(mgx_backend_, telemetry::kGetBackendDataSymbol,
+            reinterpret_cast<void**>(&mgx_get_telemetry_)).IsOK()) {
+        mgx_get_telemetry_ = nullptr;
+    }
 
     THROW_IF_ERROR(mgx_create_ep_factories(kMIGraphXBackend, ort_api_base, default_logger,
         &mgx_ep_factory_, 1, &factories_created));
