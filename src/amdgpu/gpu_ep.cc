@@ -107,13 +107,10 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     }
 
     const ProviderInfo info{provider_options};
-<<<<<<< HEAD
     backend_name_ = (info.profile == Profile::Eager) ? "DirectML" : "MIGraphX";
     if (info.profile == Profile::Eager) {
-=======
 
     const auto create_directml_backend = [&] {
->>>>>>> main
         THROW_IF_ERROR(factory.CreateDirectMLBackend(local_session_options, logger, backend_ep_));
         // DirectML manages its own per-session GPU allocator (DmlBucketizedBufferAllocator)
         // via EP-level CreateAllocator. Wire it now that we know the backend is DirectML.
