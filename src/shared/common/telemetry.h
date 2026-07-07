@@ -3,9 +3,14 @@
 
 #pragma once
 
+#include <condition_variable>
+#include <deque>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <utility>
 
 #include "common/path_string.h"
 
@@ -62,21 +67,54 @@ private:
     std::optional<std::string> parent_process_;
 };
 
+namespace env_var {
+constexpr auto kDisable = "ORT_AMDGPU_EP_TELEMETRY_DISABLE"sv;
+}  // namespace env_var
+
+[[nodiscard]] bool GloballyDisabled();
+
 struct Config {
-    bool enabled{true};
+    bool enabled{false};
+    bool file{false};
     PathString directory;
+};
+
+class FileWriter {
+public:
+    FileWriter() = default;
+    FileWriter(const FileWriter&) = delete;
+    FileWriter& operator=(const FileWriter&) = delete;
+    ~FileWriter();
+
+    void Enqueue(PathString path, std::string line);
+
+    void Stop();
+
+private:
+    void Run();
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::deque<std::pair<PathString, std::string>> queue_;
+    bool stop_{false};
+    bool started_{false};
+    std::thread thread_;
 };
 
 class Logger {
 public:
-    explicit Logger(Config config) : config_{std::move(config)} {}
+    Logger(Config config, FileWriter* writer) noexcept
+        : config_{std::move(config)}, writer_{writer} {}
 
-    [[nodiscard]] bool IsEnabled() const noexcept { return config_.enabled; }
+    [[nodiscard]] bool IsEnabled() const {
+        return config_.enabled && !GloballyDisabled();
+    }
 
     void Write(const Record& record) const;
 
 private:
     Config config_;
+    FileWriter* writer_{};
 };
 
 PathString BaseDirectory();

@@ -20,6 +20,7 @@ constexpr auto kProfile = "profile"sv;
 constexpr auto kCacheDir = "cache_dir"sv;
 constexpr auto kMlssUseSpecificOps = "mlss_use_specific_ops"sv;
 constexpr auto kTelemetryEnable = "telemetry_enable"sv;
+constexpr auto kTelemetryFile = "telemetry_file"sv;
 constexpr auto kTelemetryDir = "telemetry_dir"sv;
 }  // provider_option
 

@@ -161,6 +161,9 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
 }
 
 ProviderFactory::~ProviderFactory() {
+
+    telemetry_writer_.Stop();
+
     // Destroy members that hold backend function pointers before unloading the DLLs.
     // ~Allocator calls backend_ep_factory_->ReleaseAllocator and ~DataTransfer calls
     // backend factory methods — both would crash if the DLL is already unloaded.

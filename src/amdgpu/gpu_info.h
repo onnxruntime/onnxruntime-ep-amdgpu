@@ -27,6 +27,7 @@ struct ProviderInfo {
     std::optional<fs::path> cache_dir{};
     std::optional<std::string> mlss_use_specific_ops{};
     std::optional<bool> telemetry_enable{};
+    std::optional<bool> telemetry_file{};
     std::optional<std::string> telemetry_dir{};
 
     ProviderInfo() = default;

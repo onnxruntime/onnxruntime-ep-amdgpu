@@ -38,7 +38,8 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
         return backend_get_telemetry_;
     }
 
-    // Exposes the version string the factory already reports to ORT.
+    [[nodiscard]] telemetry::FileWriter& TelemetryWriter() noexcept { return telemetry_writer_; }
+
     [[nodiscard]] const char* GetVersion() const;
 
 private:
@@ -82,6 +83,7 @@ private:
 
     OrtEpFactory* backend_ep_factory_{};
     telemetry::GetBackendDataFn backend_get_telemetry_{};
+    telemetry::FileWriter telemetry_writer_;
     const Ort::Logger default_logger_{};
 
     std::string ep_name_;

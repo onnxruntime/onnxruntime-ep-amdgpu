@@ -3,12 +3,17 @@
 
 #include "common/telemetry.h"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <string>
+#include <system_error>
+#include <utility>
 
 #include <fmt/chrono.h>
 #include <fmt/format.h>
+
+#include "common/env_var.h"
 
 namespace telemetry {
 
@@ -109,22 +114,86 @@ std::string Record::Format() const {
     return line;
 }
 
-void Logger::Write(const Record& record) const {
-    if (!config_.enabled) {
+bool GloballyDisabled() {
+    std::string value = platform::GetEnvironmentVar(env_var::kDisable);
+    std::transform(value.begin(), value.end(), value.begin(), ::tolower);
+    return value == "1" || value == "true" || value == "on";
+}
+
+FileWriter::~FileWriter() {
+    Stop();
+}
+
+void FileWriter::Enqueue(PathString path, std::string line) {
+    if (path.empty() || line.empty()) {
         return;
     }
+    std::lock_guard<std::mutex> lock{mutex_};
+    if (stop_) {
+        return;
+    }
+    if (!started_) {
+        started_ = true;
+        thread_ = std::thread(&FileWriter::Run, this);
+    }
+    queue_.emplace_back(std::move(path), std::move(line));
+    cv_.notify_one();
+}
 
+void FileWriter::Stop() {
+    {
+        std::lock_guard<std::mutex> lock{mutex_};
+        stop_ = true;
+    }
+    cv_.notify_all();
+    if (thread_.joinable()) {
+        thread_.join();
+    }
+}
+
+void FileWriter::Run() {
+    for (;;) {
+        std::deque<std::pair<PathString, std::string>> batch;
+        {
+            std::unique_lock<std::mutex> lock{mutex_};
+            cv_.wait(lock, [this] { return stop_ || !queue_.empty(); });
+            if (queue_.empty()) {
+                return;
+            }
+            batch.swap(queue_);
+        }
+        for (const auto& [path, line] : batch) {
+            try {
+                const std::filesystem::path fs_path{path};
+                if (fs_path.has_parent_path()) {
+                    std::error_code ec;
+                    std::filesystem::create_directories(fs_path.parent_path(), ec);
+                }
+                AppendLine(path, line);
+            } catch (const std::exception&) {
+                // Drop this record; telemetry must never escape the worker
+            }
+        }
+    }
+}
+
+void Logger::Write(const Record& record) const {
+    if (!config_.enabled || GloballyDisabled()) {
+        return;
+    }
+    // The primary sink (ONNX Runtime telemetry/logging API) is added separately,
+    // pending confirmation of which ORT API to use
+    if (!config_.file || writer_ == nullptr) {
+        return;
+    }
     const PathString base = config_.directory.empty() ? BaseDirectory() : config_.directory;
     if (base.empty()) {
         return;
     }
-
     const std::filesystem::path dir =
         std::filesystem::path{base} / ToPathString(kVendorSubdir) / ToPathString(kProductSubdir);
-    std::filesystem::create_directories(dir);
-
     const PathString path = (dir / ToPathString(kLogFileName)).native();
-    AppendLine(path, record.Format());
+    writer_->Enqueue(path, record.Format());
 }
 
 }  // namespace telemetry

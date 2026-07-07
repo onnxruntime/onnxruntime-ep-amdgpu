@@ -127,11 +127,12 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     backend_ = BackendForProfile(info.profile);
 
     telemetry::Config telemetry_config;
-    telemetry_config.enabled = info.telemetry_enable.value_or(true);
+    telemetry_config.enabled = info.telemetry_enable.value_or(false);
+    telemetry_config.file = info.telemetry_file.value_or(info.telemetry_dir.has_value());
     if (info.telemetry_dir.has_value() && !info.telemetry_dir->empty()) {
         telemetry_config.directory = ToPathString(*info.telemetry_dir);
     }
-    telemetry_.emplace(std::move(telemetry_config));
+    telemetry_.emplace(std::move(telemetry_config), &factory_.TelemetryWriter());
 
     const auto create_directml_backend = [&] {
         THROW_IF_ERROR(factory.CreateDirectMLBackend(local_session_options, logger, backend_ep_));
