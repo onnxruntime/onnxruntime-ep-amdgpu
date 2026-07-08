@@ -581,6 +581,35 @@ bool FusedMatMulFusionRule::ValidateCapture(
     // Reject when both MatMul inputs are the same tensor.
     if (matmul_info.input_names[0] == matmul_info.input_names[1]) return false;
 
+    // Reject when both MatMul inputs come from outside the matched pattern AND
+    // neither has a producer node in gc (i.e., both are graph-level initializers
+    // or constants with no runtime component). A fused subgraph with 0 graph
+    // inputs cannot be compiled by FusedMatMul — Compile would bail with
+    // "no inputs" and CompileImpl would fail.
+    {
+        auto is_external_non_produced = [&](const std::string& name) {
+            // Produced by a node in gc but NOT in the matched group → graph input (ok)
+            auto pit = gc.producer_map.find(name);
+            if (pit != gc.producer_map.end()) {
+                // Has a producer — check if it's inside the matched pattern.
+                bool in_match = false;
+                for (size_t idx : match.all_nodes) {
+                    if (idx == pit->second) { in_match = true; break; }
+                }
+                return !in_match;  // outside the pattern → becomes a graph input
+            }
+            // No producer in gc → this is an initializer/constant (no graph input slot)
+            return false;  // initializer: NOT an external runtime input
+        };
+
+        // For each MatMul input: true if it will be a runtime graph input.
+        bool a_is_runtime = is_external_non_produced(matmul_info.input_names[0]);
+        bool b_is_runtime = is_external_non_produced(matmul_info.input_names[1]);
+
+        if (!a_is_runtime && !b_is_runtime)
+            return false;
+    }
+
     // Reject unsupported data types at init time.  DML GEMM only supports
     // fp32 and fp16; double and bfloat16 require different DML feature levels
     // that we do not currently target.  If the type is unknown (rank=0 from
@@ -1202,6 +1231,10 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
     size_t num_inputs = 0;
     ort_api.Graph_GetNumInputs(fused_subgraph, &num_inputs);
     if (num_inputs < 1) {
+        // The fused subgraph has no graph inputs — all data comes from initializers
+        // or intermediate edges ORT did not expose. Both MatMul inputs are constants
+        // (ORT constant folding should have eliminated this) or ORT subgraph formation
+        // issue. Either way, we cannot compile without a runtime input.
         DML_PERF_LOG("[FusedMatMul] Compile: no inputs, skipping");
         return nullptr;
     }
