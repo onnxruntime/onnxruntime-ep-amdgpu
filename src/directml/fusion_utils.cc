@@ -131,6 +131,8 @@ bool TryReadScalarFloat(const OrtApi& api, const OrtValue* val, float& out_value
 }
 
 bool GraphConnectivity::HasSingleConsumer(const std::string& value_name) const {
+    if (graph_output_values.count(value_name))
+        return false;
     auto it = consumer_map.find(value_name);
     return (it != consumer_map.end()) && (it->second.size() == 1);
 }
