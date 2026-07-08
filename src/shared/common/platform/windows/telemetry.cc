@@ -93,7 +93,15 @@ void AcquireAppendLock(HANDLE file, OVERLAPPED& overlapped) {
 }  // namespace
 
 PathString BaseDirectory() {
-    return ToPathString(platform::GetEnvironmentVar("ProgramData"));
+    // Per-user, low-integrity-writable location: writable without elevation and
+    // even from sandboxed / Low-IL host processes (browser renderers, etc.), where
+    // machine-wide %ProgramData% is not writable. There is no environment variable
+    // for LocalLow, so derive it from the user profile.
+    const std::string profile = platform::GetEnvironmentVar("USERPROFILE");
+    if (profile.empty()) {
+        return {};
+    }
+    return (fs::path{ToPathString(profile)} / L"AppData" / L"LocalLow").native();
 }
 
 std::string CurrentProcessName() {

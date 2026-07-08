@@ -18,8 +18,7 @@ struct OrtEp;
 
 namespace telemetry {
 
-inline constexpr std::string_view kVendorSubdir = "AMD";
-inline constexpr std::string_view kProductSubdir = "GPUEP";
+inline constexpr std::string_view kAppSubdir = "AMDGPUEP";
 inline constexpr std::string_view kLogFileName = "telemetry.log";
 
 inline constexpr int kSchemaVersion = 1;

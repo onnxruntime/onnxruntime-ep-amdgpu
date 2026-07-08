@@ -190,8 +190,7 @@ void Logger::Write(const Record& record) const {
     if (base.empty()) {
         return;
     }
-    const std::filesystem::path dir =
-        std::filesystem::path{base} / ToPathString(kVendorSubdir) / ToPathString(kProductSubdir);
+    const std::filesystem::path dir = std::filesystem::path{base} / ToPathString(kAppSubdir);
     const PathString path = (dir / ToPathString(kLogFileName)).native();
     writer_->Enqueue(path, record.Format());
 }
