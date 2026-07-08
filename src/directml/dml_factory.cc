@@ -185,7 +185,11 @@ D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* d3d12_device)
     feature_levels.pFeatureLevelsRequested = feature_levels_list;
     THROW_IF_FAILED(d3d12_device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &feature_levels, sizeof(feature_levels)));
 
-    auto use_compute_command_list = (feature_levels.MaxSupportedFeatureLevel <= D3D_FEATURE_LEVEL_1_0_CORE);
+    // Use compute queue whenever possible to avoid TDR and maintain UI QoS.
+    // Core/generic devices only have compute queues, DX12 devices have both.
+    // Only DX11-level devices (11.0, 11.1) fall back to the direct/graphics queue.
+    auto use_compute_command_list = (feature_levels.MaxSupportedFeatureLevel <= D3D_FEATURE_LEVEL_1_0_CORE) ||
+                                    (feature_levels.MaxSupportedFeatureLevel >= D3D_FEATURE_LEVEL_12_0);
 
     if (use_compute_command_list) {
         return D3D12_COMMAND_LIST_TYPE_COMPUTE;
