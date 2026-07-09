@@ -711,7 +711,20 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
     options.set_fast_math(false);
     options.set_exhaustive_tune_flag(exhaustive_tune);
     if (!mlss_use_specific_ops.empty()) {
-        options.set_advance_backend_option("mlss_use_specific_ops", mlss_use_specific_ops);
+        // MIGraphX expects a list of op names; split the comma-separated value.
+        std::vector<std::string> ops;
+        std::string_view rest{mlss_use_specific_ops};
+        while (!rest.empty()) {
+            const auto pos{rest.find(',')};
+            if (const auto op{rest.substr(0, pos)}; !op.empty()) {
+                ops.emplace_back(op);
+            }
+            if (pos == std::string_view::npos) {
+                break;
+            }
+            rest.remove_prefix(pos + 1);
+        }
+        options.set_advance_backend_option("mlss_use_specific_ops", ops);
     }
     prog.compile(target, options);
 }
