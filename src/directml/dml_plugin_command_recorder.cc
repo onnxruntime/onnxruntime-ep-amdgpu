@@ -4,6 +4,7 @@
 #include "dml_plugin_command_recorder.h"
 #include "DmlExecutionProvider/CommandQueue.h"
 #include "dml_bucketized_buffer_allocator.h"
+#include "dml_perf_timer.h"
 
 namespace dml_ep {
 
@@ -111,10 +112,19 @@ void PluginDmlCommandRecorder::ExecuteOperator(
 {
     DML_BINDING_PROPERTIES execBindingProps = op->GetBindingProperties();
 
+#ifdef DML_PERF_PROFILE
+    uint64_t _rec_t0 = PerfNowUs();
+    uint64_t _rec_last = _rec_t0;
+#endif
+
     const uint32_t numDescriptors = execBindingProps.RequiredDescriptorCount;
     DescriptorRange descriptorRange = m_descriptorPool.AllocDescriptors(
         numDescriptors,
         m_queue->GetNextCompletionEvent());
+
+#ifdef DML_PERF_PROFILE
+    { uint64_t _t = PerfNowUs(); PERF_TIMER_LOG("[PERF] Recorder::ExecuteOp descriptors(", numDescriptors, "): ", _t, " us (+", _t - _rec_last, ")\n"); _rec_last = _t; }
+#endif
 
     // Create a binding table for execution.
     DML_BINDING_TABLE_DESC bindingTableDesc = {};
@@ -125,6 +135,10 @@ void PluginDmlCommandRecorder::ExecuteOperator(
 
     Microsoft::WRL::ComPtr<IDMLBindingTable> bindingTable;
     ORT_THROW_IF_FAILED(m_dmlDevice->CreateBindingTable(&bindingTableDesc, IID_PPV_ARGS(&bindingTable)));
+
+#ifdef DML_PERF_PROFILE
+    { uint64_t _t = PerfNowUs(); PERF_TIMER_LOG("[PERF] Recorder::ExecuteOp bind_table: ", _t, " us (+", _t - _rec_last, ")\n"); _rec_last = _t; }
+#endif
 
     // Create a temporary resource for executing the op, if it's required.
     UINT64 temporaryResourceSize = execBindingProps.TemporaryResourceSize;
@@ -149,6 +163,10 @@ void PluginDmlCommandRecorder::ExecuteOperator(
         bindingTable->BindTemporaryResource(&bindingDesc);
     }
 
+#ifdef DML_PERF_PROFILE
+    { uint64_t _t = PerfNowUs(); PERF_TIMER_LOG("[PERF] Recorder::ExecuteOp temp_resource(", temporaryResourceSize, "): ", _t, " us (+", _t - _rec_last, ")\n"); _rec_last = _t; }
+#endif
+
     if (persistentResourceBinding.Type != DML_BINDING_TYPE_NONE)
     {
         bindingTable->BindPersistentResource(&persistentResourceBinding);
@@ -161,6 +179,10 @@ void PluginDmlCommandRecorder::ExecuteOperator(
     SetDescriptorHeap(descriptorRange.heap);
     m_recorder->RecordDispatch(m_currentCommandList.Get(), op, bindingTable.Get());
     m_operationsRecordedInCurrentCommandList = true;
+
+#ifdef DML_PERF_PROFILE
+    { uint64_t _t = PerfNowUs(); PERF_TIMER_LOG("[PERF] Recorder::ExecuteOp dispatch: ", _t, " us (+", _t - _rec_last, ", ", _t - _rec_t0, " total)\n"); }
+#endif
 
     // Barrier all outputs.
 #pragma warning(push)
@@ -328,8 +350,17 @@ void PluginDmlCommandRecorder::CloseAndExecute()
 }
 
 void PluginDmlCommandRecorder::CloseAndExecute(_In_opt_ ID3D12GraphicsCommandList* commandList)
-{   
+{
+#ifdef DML_PERF_PROFILE
+    uint64_t _cae_t0 = PerfNowUs();
+#endif
+
     ORT_THROW_IF_FAILED(m_currentCommandList->Close());
+
+#ifdef DML_PERF_PROFILE
+    uint64_t _cae_t_close = PerfNowUs();
+    PERF_TIMER_LOG("[PERF] CloseAndExecute cmd_list_close: ", _cae_t_close, " us (+", _cae_t_close - _cae_t0, ")\n");
+#endif
 
     ID3D12GraphicsCommandList* commandListsToExecute[2] = {};
     uint32_t commandListsToExecuteCount = 0;
@@ -349,7 +380,12 @@ void PluginDmlCommandRecorder::CloseAndExecute(_In_opt_ ID3D12GraphicsCommandLis
         m_queue->ExecuteCommandLists(
                 gsl::span<ID3D12CommandList*>(reinterpret_cast<ID3D12CommandList**>(commandListsToExecute), commandListsToExecuteCount));
     }
-    
+
+#ifdef DML_PERF_PROFILE
+    uint64_t _cae_t_exec = PerfNowUs();
+    PERF_TIMER_LOG("[PERF] CloseAndExecute ExecuteCommandLists(", commandListsToExecuteCount, "): ", _cae_t_exec, " us (+", _cae_t_exec - _cae_t_close, ")\n");
+#endif
+
     m_cachedCommandList = m_currentCommandList;
     m_currentCommandList = nullptr;
     m_operationsRecordedInCurrentCommandList = false;
@@ -360,6 +396,10 @@ void PluginDmlCommandRecorder::CloseAndExecute(_In_opt_ ID3D12GraphicsCommandLis
     // Fail early if something horrifying happens
     ORT_THROW_IF_FAILED(m_dmlDevice->GetDeviceRemovedReason());
     ORT_THROW_IF_FAILED(m_d3dDevice->GetDeviceRemovedReason());
+
+#ifdef DML_PERF_PROFILE
+    { uint64_t _t = PerfNowUs(); PERF_TIMER_LOG("[PERF] CloseAndExecute TOTAL: ", _t, " us (+", _t - _cae_t0, " total)\n"); }
+#endif
 }
 
 void PluginDmlCommandRecorder::SetDescriptorHeap(ID3D12DescriptorHeap* descriptorHeap)

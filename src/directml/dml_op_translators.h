@@ -45,6 +45,12 @@ struct SubNode {
     // -1 means the primary node's output.
     std::vector<std::pair<int, int>>           input_from;
 
+    // Direct wiring from ONNX graph inputs to this sub_node.
+    // Each pair is {onnx_input_idx, to_node_input_idx}.
+    // The graph builder creates DML_INPUT_GRAPH_EDGE_DESC entries for these,
+    // routing the ONNX input directly to this sub_node (not the primary).
+    std::vector<std::pair<size_t, size_t>>     graph_inputs;
+
     using FixupFn = std::function<void(SubNode& self)>;
     FixupFn fixup;
     void FixupPointers() { if (fixup) fixup(*this); }
@@ -70,6 +76,28 @@ struct TranslatedOp {
     // Additional DML operators for multi-op expansion (e.g. GroupNorm+SiLU).
     // When non-empty, the graph output comes from the last sub_node.
     std::vector<SubNode> sub_nodes;
+
+    // Maps DML input slot → ONNX input index.  Empty = identity mapping.
+    // Used when ONNX input order differs from DML operator schema order
+    // (e.g. MatMulInteger: ONNX=[A,B,AZP,BZP], DML=[A,AZP,B,BZP]).
+    std::vector<size_t> input_name_reorder;
+
+    // Maps packed input index (0..N-1) → DML schema slot index for ToNodeInputIndex.
+    // Empty = identity (packed index == schema slot, true for dense operators).
+    // Required for sparse operators like MultiHeadAttention where schema slots
+    // are non-contiguous (Query=0, Key=1, Value=2, Bias=6, Mask=7, ...).
+    std::vector<size_t> dml_input_slot_indices;
+
+    // How many inputs wire to the primary node.  0 = input_tensors.size().
+    // When >0, only the first N inputs create edges to the primary; the
+    // remaining inputs are available for sub_node graph_inputs wiring.
+    size_t primary_input_count = 0;
+
+    // Per-output sub_node routing.  Maps ONNX output index →
+    // {sub_node_index, output_slot}.  When empty (default), all outputs
+    // route from the last sub_node using slot k for output k.
+    // sub_node_index: -1 = primary node, >= 0 = sub_nodes[index].
+    std::vector<std::pair<int, int>> output_source;
 
     // Re-links internal pointers (DML_TENSOR_DESC → DML_BUFFER_TENSOR_DESC,
     // operator desc fields → tensor descs) after the struct has been moved

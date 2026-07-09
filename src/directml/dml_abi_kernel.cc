@@ -12,6 +12,7 @@
 #include "dml_execution_provider.h"
 #include "dml_abi_kernel.h"
 #include "dml_plugin_MLOperatorAuthorImpl.h"
+#include "dml_perf_timer.h"
 
 namespace dml_ep {
 
@@ -4113,6 +4114,15 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
 
         // Execute the DML operator kernel
         HRESULT hr = E_FAIL;
+
+#ifdef DML_PERF_PROFILE
+        bool _is_memcpy_op = (kernel->operator_name == "MemcpyToHost" || kernel->operator_name == "MemcpyFromHost");
+        uint64_t _memcpy_t0 = _is_memcpy_op ? PerfNowUs() : 0;
+        if (_is_memcpy_op) {
+            DML_PERF_LOG("[PERF] ", kernel->operator_name, " ENTER: ", _memcpy_t0, " us\n");
+        }
+#endif
+
         DMLPERF_T0(kc);
         try {
             hr = kernel->ml_operator_kernel->Compute(kernel_context.Get());
@@ -4129,6 +4139,15 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             return kernel->ort_api->CreateStatus(ORT_FAIL, "Unknown exception during compute");
         }
         DMLPERF_ADD(ns_kernel_compute, kc);
+
+#ifdef DML_PERF_PROFILE
+        if (_is_memcpy_op) {
+            uint64_t _memcpy_t1 = PerfNowUs();
+            uint64_t _memcpy_delta = _memcpy_t1 - _memcpy_t0;
+            DML_PERF_LOG("[PERF] ", kernel->operator_name, " EXIT: ", _memcpy_t1, " us (+", _memcpy_delta, " total)",
+                (_memcpy_delta > 1000 ? " *** STALL ***" : ""), "\n");
+        }
+#endif
 
         // Transition resources back to UAV state after execution.
         // Mirrors PluginOpKernelContextWrapper::Close() which calls TransitionResourcesForOperatorIfRequired(false).

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "dml_readback_heap.h"
+#include "dml_perf_timer.h"
 
 namespace dml_ep {
 
@@ -72,6 +73,11 @@ namespace dml_ep {
     {
         EnsureReadbackHeap(dst.size());
 
+#ifdef DML_PERF_PROFILE
+        uint64_t _rb_t0 = PerfNowUs();
+        PERF_TIMER_LOG("[PERF] ReadbackFromGpu ENTER (single, ", dst.size(), " bytes): ", _rb_t0, " us\n");
+#endif
+
         // Copy from the source resource into the readback heap
         m_executionContext->CopyBufferRegion(
             m_readbackHeap.Get(),
@@ -82,9 +88,28 @@ namespace dml_ep {
             srcState,
             dst.size());
 
+#ifdef DML_PERF_PROFILE
+        uint64_t _rb_t_copy = PerfNowUs();
+        PERF_TIMER_LOG("[PERF] ReadbackFromGpu CopyBufferRegion: ", _rb_t_copy, " us (+", _rb_t_copy - _rb_t0, ")\n");
+#endif
+
         // Wait for completion and map the result
         m_executionContext->Flush();
+
+#ifdef DML_PERF_PROFILE
+        uint64_t _rb_t_flush = PerfNowUs();
+        PERF_TIMER_LOG("[PERF] ReadbackFromGpu flush: ", _rb_t_flush, " us (+", _rb_t_flush - _rb_t_copy, ")\n");
+#endif
+
         m_executionContext->GetCurrentCompletionEvent().WaitForSignal(m_executionContext->CpuSyncSpinningEnabled());
+
+#ifdef DML_PERF_PROFILE
+        uint64_t _rb_t_wait = PerfNowUs();
+        uint64_t _rb_wait_delta = _rb_t_wait - _rb_t_flush;
+        PERF_TIMER_LOG("[PERF] ReadbackFromGpu wait: ", _rb_t_wait, " us (+", _rb_wait_delta, ")",
+            (_rb_wait_delta > 1000 ? " *** STALL ***" : ""), "\n");
+#endif
+
         m_executionContext->ReleaseCompletedReferences();
 
         // Map the readback heap and copy it into the destination
@@ -92,6 +117,10 @@ namespace dml_ep {
         ORT_THROW_IF_FAILED(m_readbackHeap->Map(0, nullptr, &readbackHeapData));
         memcpy(dst.data(), readbackHeapData, dst.size());
         m_readbackHeap->Unmap(0, nullptr);
+
+#ifdef DML_PERF_PROFILE
+        { uint64_t _t = PerfNowUs(); PERF_TIMER_LOG("[PERF] ReadbackFromGpu EXIT: ", _t, " us (+", _t - _rb_t0, " total)\n"); }
+#endif
     }
 
     void PluginDmlReadbackHeap::ReadbackFromGpu(
@@ -113,6 +142,11 @@ namespace dml_ep {
 
         EnsureReadbackHeap(totalSize);
 
+#ifdef DML_PERF_PROFILE
+        uint64_t _rb_t0 = PerfNowUs();
+        PERF_TIMER_LOG("[PERF] ReadbackFromGpu ENTER (batched, ", dst.size(), " tensors, ", totalSize, " bytes): ", _rb_t0, " us\n");
+#endif
+
         // Copy from the source resource into the readback heap
         uint32_t offset = 0;
         for (uint32_t i = 0; i < dst.size(); ++i)
@@ -129,9 +163,28 @@ namespace dml_ep {
             offset += dstSizes[i];
         }
 
+#ifdef DML_PERF_PROFILE
+        uint64_t _rb_t_copy = PerfNowUs();
+        PERF_TIMER_LOG("[PERF] ReadbackFromGpu CopyBufferRegion: ", _rb_t_copy, " us (+", _rb_t_copy - _rb_t0, ")\n");
+#endif
+
         // Wait for completion and map the result
         m_executionContext->Flush();
+
+#ifdef DML_PERF_PROFILE
+        uint64_t _rb_t_flush = PerfNowUs();
+        PERF_TIMER_LOG("[PERF] ReadbackFromGpu flush: ", _rb_t_flush, " us (+", _rb_t_flush - _rb_t_copy, ")\n");
+#endif
+
         m_executionContext->GetCurrentCompletionEvent().WaitForSignal(m_executionContext->CpuSyncSpinningEnabled());
+
+#ifdef DML_PERF_PROFILE
+        uint64_t _rb_t_wait = PerfNowUs();
+        uint64_t _rb_wait_delta = _rb_t_wait - _rb_t_flush;
+        PERF_TIMER_LOG("[PERF] ReadbackFromGpu wait: ", _rb_t_wait, " us (+", _rb_wait_delta, ")",
+            (_rb_wait_delta > 1000 ? " *** STALL ***" : ""), "\n");
+#endif
+
         m_executionContext->ReleaseCompletedReferences();
 
         // Map the readback heap and copy it into the destination
@@ -147,6 +200,10 @@ namespace dml_ep {
         }
 
         m_readbackHeap->Unmap(0, nullptr);
+
+#ifdef DML_PERF_PROFILE
+        { uint64_t _t = PerfNowUs(); PERF_TIMER_LOG("[PERF] ReadbackFromGpu EXIT: ", _t, " us (+", _t - _rb_t0, " total)\n"); }
+#endif
     }
 
 }  // namespace dml_ep

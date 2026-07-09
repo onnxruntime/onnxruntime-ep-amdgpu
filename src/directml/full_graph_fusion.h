@@ -73,7 +73,8 @@ public:
     // translators or touch DML.
     static bool ValidateTier0(
         const OrtApi&                                            ort_api,
-        const std::vector<const OrtNode*>&                       nodes);
+        const std::vector<const OrtNode*>&                       nodes,
+        const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes = {});
 
     // Compile a Tier-0 fused subgraph.  Returns an OrtNodeComputeInfo on
     // success, or nullptr if compilation fails (caller falls back to Tier-2/1).
@@ -81,7 +82,8 @@ public:
         const OrtApi&                                            ort_api,
         const OrtGraph*                                          fused_subgraph,
         const std::unordered_map<std::string, const OrtValue*>&  initializers,
-        PluginDmlExecutionProviderImpl*                          provider);
+        PluginDmlExecutionProviderImpl*                          provider,
+        const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes = {});
 
     // Lightweight feasibility check — runs translation + CreateOperator +
     // CompileGraph against the main graph. Returns true if CompileGraph
@@ -95,7 +97,37 @@ public:
         const OrtApi&                                            ort_api,
         const OrtGraph*                                          main_graph,
         const std::unordered_map<std::string, const OrtValue*>&  initializers,
-        PluginDmlExecutionProviderImpl*                          provider);
+        PluginDmlExecutionProviderImpl*                          provider,
+        const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes = {});
+
+    // Translator-only feasibility check for a partition node subset.
+    // Runs the translator for each node using the main graph's shape info.
+    // Returns false if any translator returns nullopt (unsupported attribute
+    // combination, missing input, etc.) without touching DML or GPU resources.
+    // Used by GetCapabilityImpl to pre-screen partition groups before claiming.
+    static bool TryTranslateNodes(
+        const OrtApi&                                            ort_api,
+        const OrtGraph*                                          main_graph,
+        const std::unordered_map<std::string, const OrtValue*>&  initializers,
+        const std::vector<const OrtNode*>&                       nodes,
+        const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes = {},
+        std::unordered_map<std::string, std::vector<int64_t>>*   out_shapes = nullptr);
+
+    // Full DML compilation pre-flight for a partition node subset.
+    // Runs the complete Compile pipeline (translate, CreateOperator, CompileGraph)
+    // using the main graph's shape info, then discards the result.
+    // Catches E_INVALIDARG from CompileGraph (e.g. graph topology errors,
+    // DML graph size limits) that TryTranslateNodes cannot catch.
+    // Called from GetCapabilityImpl; groups that fail are not claimed and
+    // fall through to Tier-1 single-node dispatch.
+    static bool TryCompilePartition(
+        const OrtApi&                                            ort_api,
+        const OrtGraph*                                          main_graph,
+        const std::unordered_map<std::string, const OrtValue*>&  initializers,
+        PluginDmlExecutionProviderImpl*                          provider,
+        const std::vector<const OrtNode*>&                       nodes,
+        const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes = {});
+
 };
 
 }  // namespace dml_ep

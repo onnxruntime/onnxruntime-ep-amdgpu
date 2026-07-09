@@ -185,6 +185,8 @@ TensorDesc::TensorDesc(
         }
     }
 
+    m_bufferTensorDesc.Sizes = m_sizes;
+
     if (useStrides)
     {
         m_bufferTensorDesc.Strides = m_strides;
@@ -198,7 +200,8 @@ TensorDesc::TensorDesc(
         m_sizes,
         useStrides ? m_strides : nullptr
         );
-    assert(m_bufferTensorDesc.TotalTensorSizeInBytes >= ComputeByteSizeFromDimensions(nonBroadcastDimensions, dataType));
+    ML_CHECK_VALID_ARGUMENT(m_bufferTensorDesc.TotalTensorSizeInBytes >= ComputeByteSizeFromDimensions(nonBroadcastDimensions, dataType),
+        "Tensor broadcast shape is smaller than physical shape - input dimensions are incompatible for broadcasting");
 }
 
 gsl::span<const uint32_t> TensorDesc::GetStrides() const noexcept
