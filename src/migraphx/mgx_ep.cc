@@ -710,7 +710,9 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
     migraphx::compile_options options;
     options.set_fast_math(false);
     options.set_exhaustive_tune_flag(exhaustive_tune);
-    options.set_mlss_use_specific_ops(mlss_use_specific_ops.c_str());
+    if (!mlss_use_specific_ops.empty()) {
+        options.set_advance_backend_option("mlss_use_specific_ops", mlss_use_specific_ops);
+    }
     prog.compile(target, options);
 }
 
