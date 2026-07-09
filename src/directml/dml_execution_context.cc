@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "dml_execution_context.h"
+#include "dml_perf_timer.h"
 
 namespace dml_ep {
 
@@ -77,9 +78,17 @@ void ExecutionContext::ExecuteOperator(IDMLCompiledOperator* op,
                                                 const DML_BINDING_DESC& persistentResourceBinding,
                                        gsl::span<const DML_BINDING_DESC> inputBindings,
                                        gsl::span<const DML_BINDING_DESC> outputBindings) {
+#ifdef DML_PERF_PROFILE
+    uint64_t _ec_t0 = PerfNowUs();
+#endif
+
     SetCommandRecorder(&m_dmlRecorder);
 
     m_dmlRecorder.ExecuteOperator(op, persistentResourceBinding, inputBindings, outputBindings);
+
+#ifdef DML_PERF_PROFILE
+    { uint64_t _t = PerfNowUs(); PERF_TIMER_LOG("[PERF] ExecCtx::ExecuteOperator: ", _t, " us (+", _t - _ec_t0, ")\n"); }
+#endif
 }
 
 void ExecutionContext::AddUAVBarrier() {
@@ -117,8 +126,15 @@ void ExecutionContext::SetCommandRecorder(ICommandRecorder* newRecorder) {
 void ExecutionContext::Flush() {
     if (!m_currentRecorder || !m_currentRecorder->HasUnsubmittedWork()) {
         // Nothing to flush
+#ifdef DML_PERF_PROFILE
+        PERF_TIMER_LOG("[PERF] ExecCtx::Flush no-op (nothing to flush)\n");
+#endif
         return;
     }
+
+#ifdef DML_PERF_PROFILE
+    uint64_t _fl_t0 = PerfNowUs();
+#endif
 
     m_currentRecorder->CloseAndExecute();
     ReleaseCompletedReferences();
@@ -128,6 +144,10 @@ void ExecutionContext::Flush() {
     // a point where it's going to be parallelized with GPU work.
     m_currentRecorder = nullptr;
     SetCommandRecorder(&m_dmlRecorder);
+
+#ifdef DML_PERF_PROFILE
+    { uint64_t _t = PerfNowUs(); PERF_TIMER_LOG("[PERF] ExecCtx::Flush: ", _t, " us (+", _t - _fl_t0, " total)\n"); }
+#endif
 }
 
 void ExecutionContext::QueueReference(IUnknown* object) {

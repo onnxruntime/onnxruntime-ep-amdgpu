@@ -546,7 +546,6 @@ Microsoft::WRL::ComPtr<ID3D12CommandQueue> ProviderFactory::CreateCommandQueue(c
 Microsoft::WRL::ComPtr<IDMLDevice> ProviderFactory::CreateDMLDevice(const Microsoft::WRL::ComPtr<ID3D12Device>& d3d12_device) {
     DML_CREATE_DEVICE_FLAGS flags = DML_CREATE_DEVICE_FLAG_NONE;
     Microsoft::WRL::ComPtr<IDMLDevice> dml_device;
-    // In debug builds, enable the DML debug layer if the D3D12 debug layer is also enabled
 #if _DEBUG
     Microsoft::WRL::ComPtr<ID3D12DebugDevice> debug_device;
     (void)d3d12_device->QueryInterface(IID_PPV_ARGS(&debug_device)); // ignore failure
