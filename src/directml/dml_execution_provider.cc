@@ -788,9 +788,12 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
         bool isInternalOperator
     )
     {
-        // External operators receive resources in Common state, while internal operators receive
-        // them in UAV state. Resources are otherwise kept in UAV state (or are promotable to UAV).
-        return !isInternalOperator;
+        // All DML resources are buffers with D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.
+        // D3D12 buffers implicitly promote COMMON→UAV on first use and decay UAV→COMMON
+        // at ExecuteCommandLists boundaries. The null UAV barrier inserted after each
+        // DML dispatch (DmlCommandRecorder::ExecuteOperator) handles inter-op ordering.
+        // Explicit UAV↔COMMON transitions are therefore redundant for pure buffer workloads.
+        return false;
     }
 
     void PluginDmlExecutionProviderImpl::TransitionResourcesForOperator(
@@ -807,8 +810,8 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
             Microsoft::WRL::ComPtr<ID3D12Resource> resource;
             ORT_THROW_IF_FAILED(resources[i]->QueryInterface(resource.GetAddressOf()));
 
-            // Custom operators receive resources in Common state and must return them to Common
-            // state when finished.  Resources are otherwise kept in UAV state (or are promotable to UAV).
+            // Retained for IWinmlExecutionProvider interface compliance.
+            // Not called in practice — TransitionsRequiredForOperator returns false.
             barriers.push_back(CD3DX12_RESOURCE_BARRIER::Transition(
                 resource.Get(),
                 isBeforeOp ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_COMMON,
