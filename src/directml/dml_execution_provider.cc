@@ -5,6 +5,7 @@
 
 #include "dml_execution_provider.h"
 #include "DmlExecutionProvider/DmlCommittedResourceAllocator.h"
+#include "dml_perf_timer.h"
 
 namespace dml_ep {
 
@@ -953,6 +954,11 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
 
     Ort::Status PluginDmlExecutionProviderImpl::OnRunEnd()
     {
+#ifdef DML_PERF_PROFILE
+        uint64_t _ore_t0 = PerfNowUs();
+        PERF_TIMER_LOG("[PERF] OnRunEnd ENTER: ", _ore_t0, " us\n");
+#endif
+
         if (GraphCaptureEnabled() && m_currentGraphAnnotationId != -1)
         {
             m_graphCapturingDone.insert(m_currentGraphAnnotationId);
@@ -961,6 +967,11 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
         // Flush any pending work to the GPU, but don't block for completion, permitting it
         // to overlap other work.
         Flush();
+
+#ifdef DML_PERF_PROFILE
+        { uint64_t _t = PerfNowUs(); PERF_TIMER_LOG("[PERF] OnRunEnd EXIT: ", _t, " us (+", _t - _ore_t0, " total)\n"); }
+#endif
+
         return STATUS_OK;
     }
 

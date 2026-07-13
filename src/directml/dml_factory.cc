@@ -185,7 +185,11 @@ D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* d3d12_device)
     feature_levels.pFeatureLevelsRequested = feature_levels_list;
     THROW_IF_FAILED(d3d12_device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &feature_levels, sizeof(feature_levels)));
 
-    auto use_compute_command_list = (feature_levels.MaxSupportedFeatureLevel <= D3D_FEATURE_LEVEL_1_0_CORE);
+    // Use compute queue whenever possible to avoid TDR and maintain UI QoS.
+    // Core/generic devices only have compute queues, DX12 devices have both.
+    // Only DX11-level devices (11.0, 11.1) fall back to the direct/graphics queue.
+    auto use_compute_command_list = (feature_levels.MaxSupportedFeatureLevel <= D3D_FEATURE_LEVEL_1_0_CORE) ||
+                                    (feature_levels.MaxSupportedFeatureLevel >= D3D_FEATURE_LEVEL_12_0);
 
     if (use_compute_command_list) {
         return D3D12_COMMAND_LIST_TYPE_COMPUTE;
@@ -542,7 +546,6 @@ Microsoft::WRL::ComPtr<ID3D12CommandQueue> ProviderFactory::CreateCommandQueue(c
 Microsoft::WRL::ComPtr<IDMLDevice> ProviderFactory::CreateDMLDevice(const Microsoft::WRL::ComPtr<ID3D12Device>& d3d12_device) {
     DML_CREATE_DEVICE_FLAGS flags = DML_CREATE_DEVICE_FLAG_NONE;
     Microsoft::WRL::ComPtr<IDMLDevice> dml_device;
-    // In debug builds, enable the DML debug layer if the D3D12 debug layer is also enabled
 #if _DEBUG
     Microsoft::WRL::ComPtr<ID3D12DebugDevice> debug_device;
     (void)d3d12_device->QueryInterface(IID_PPV_ARGS(&debug_device)); // ignore failure
@@ -553,7 +556,7 @@ Microsoft::WRL::ComPtr<IDMLDevice> ProviderFactory::CreateDMLDevice(const Micros
     }
 #endif
 
-    THROW_IF_FAILED(DMLCreateDevice1(d3d12_device.Get(), flags, DML_FEATURE_LEVEL_5_0,
+    THROW_IF_FAILED(DMLCreateDevice1(d3d12_device.Get(), flags, DML_FEATURE_LEVEL_6_4,
                                      IID_PPV_ARGS(dml_device.ReleaseAndGetAddressOf())));
 
     return dml_device;

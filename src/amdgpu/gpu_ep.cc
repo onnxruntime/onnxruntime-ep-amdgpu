@@ -116,6 +116,13 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         };
     };
 
+    const auto create_hip_backend = [&] {
+        // hip backend manages allocator/data-transfer at the backend factory level,
+        // reached through the amdgpu Allocator/DataTransfer wrappers — leave
+        // OrtEp::CreateAllocator null so ORT falls back to ep_factory_.CreateAllocator.
+        THROW_IF_ERROR(factory.CreateHipBackend(local_session_options, logger, backend_ep_));
+    };
+
     const auto create_migraphx_backend = [&] {
         const auto get_name = [](const std::string_view sv) {
             return std::string{"ep."}.append(kMIGraphXBackend).append(".").append(sv);
@@ -165,6 +172,8 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         create_directml_backend();
     } else if (info.profile == Profile::MIGraphX) {
         create_migraphx_backend();
+    } else if (info.profile == Profile::Llm) {
+        create_hip_backend();
     } else {
         create_migraphx_backend();
     }

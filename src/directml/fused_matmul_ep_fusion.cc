@@ -243,11 +243,45 @@ PNode FusedMatMulFusionRule::BuildPattern() const {
                                   const OrtValueInfo* /*vi*/,
                                   const OrtApi& ort_api,
                                   const std::unordered_map<std::string, const OrtValue*>& initializers,
-                                  const OrtNode* /*node*/) -> bool {
+                                  const OrtNode* node) -> bool {
         auto it = initializers.find(name);
         if (it == initializers.end()) return false;
         float v = 0.0f;
-        return fusion_utils::TryReadScalarFloat(ort_api, it->second, v);
+        if (!fusion_utils::TryReadScalarFloat(ort_api, it->second, v)) return false;
+
+        // Mirror ORT's GetScalarConstantInitializer: reject scalars whose rank
+        // exceeds the other Mul/Div input's rank to avoid broadcasting side effects.
+        OrtTensorTypeAndShapeInfo* scalar_info = nullptr;
+        ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(it->second), &scalar_info);
+        if (scalar_info) {
+            size_t scalar_rank = 0;
+            ort_api.GetDimensionsCount(scalar_info, &scalar_rank);
+            ort_api.ReleaseTensorTypeAndShapeInfo(scalar_info);
+            if (scalar_rank > 0) {
+                size_t input_count = 0;
+                ort_api.Node_GetNumInputs(node, &input_count);
+                std::vector<const OrtValueInfo*> vis(input_count, nullptr);
+                if (input_count > 0) ort_api.Node_GetInputs(node, vis.data(), input_count);
+                for (size_t i = 0; i < input_count; ++i) {
+                    if (!vis[i]) continue;
+                    const char* vi_name = nullptr;
+                    OrtStatus* st = ort_api.GetValueInfoName(vis[i], &vi_name);
+                    if (st) { ort_api.ReleaseStatus(st); continue; }
+                    if (vi_name && std::string(vi_name) == name) continue;
+                    const OrtTypeInfo* ti = nullptr;
+                    st = ort_api.GetValueInfoTypeInfo(vis[i], &ti);
+                    if (st || !ti) { if (st) ort_api.ReleaseStatus(st); continue; }
+                    const OrtTensorTypeAndShapeInfo* si = nullptr;
+                    ort_api.CastTypeInfoToTensorInfo(ti, &si);
+                    if (!si) continue;
+                    size_t other_rank = 0;
+                    ort_api.GetDimensionsCount(si, &other_rank);
+                    if (other_rank > 0 && scalar_rank > other_rank) return false;
+                    break;
+                }
+            }
+        }
+        return true;
     };
 
     // Scale Mul: any input must be a scalar constant initializer.
@@ -581,6 +615,35 @@ bool FusedMatMulFusionRule::ValidateCapture(
     // Reject when both MatMul inputs are the same tensor.
     if (matmul_info.input_names[0] == matmul_info.input_names[1]) return false;
 
+    // Reject when both MatMul inputs come from outside the matched pattern AND
+    // neither has a producer node in gc (i.e., both are graph-level initializers
+    // or constants with no runtime component). A fused subgraph with 0 graph
+    // inputs cannot be compiled by FusedMatMul — Compile would bail with
+    // "no inputs" and CompileImpl would fail.
+    {
+        auto is_external_non_produced = [&](const std::string& name) {
+            // Produced by a node in gc but NOT in the matched group → graph input (ok)
+            auto pit = gc.producer_map.find(name);
+            if (pit != gc.producer_map.end()) {
+                // Has a producer — check if it's inside the matched pattern.
+                bool in_match = false;
+                for (size_t idx : match.all_nodes) {
+                    if (idx == pit->second) { in_match = true; break; }
+                }
+                return !in_match;  // outside the pattern → becomes a graph input
+            }
+            // No producer in gc → this is an initializer/constant (no graph input slot)
+            return false;  // initializer: NOT an external runtime input
+        };
+
+        // For each MatMul input: true if it will be a runtime graph input.
+        bool a_is_runtime = is_external_non_produced(matmul_info.input_names[0]);
+        bool b_is_runtime = is_external_non_produced(matmul_info.input_names[1]);
+
+        if (!a_is_runtime && !b_is_runtime)
+            return false;
+    }
+
     // Reject unsupported data types at init time.  DML GEMM only supports
     // fp32 and fp16; double and bfloat16 require different DML feature levels
     // that we do not currently target.  If the type is unknown (rank=0 from
@@ -609,13 +672,26 @@ bool FusedMatMulFusionRule::ValidateCapture(
         }
     }
 
-    // When absorbing a downstream scale Mul/Div, the MatMul output must have
-    // exactly one consumer (the scale node).  Multiple consumers would cause
-    // the other consumers to receive the scaled result instead of the unscaled
-    // MatMul output.
-    bool has_scale = match.NodeIdx("FusedMatMul.scale_mul") != SIZE_MAX
-                  || match.NodeIdx("FusedMatMul.scale_div") != SIZE_MAX;
-    if (has_scale && !matmul_info.output_names.empty()) {
+    // When absorbing a downstream node (scale Mul/Div or activation), the
+    // MatMul output must have exactly one consumer (the absorbed node).
+    // Multiple consumers would lose access to the raw MatMul output after
+    // fusion — the fused node only produces the post-activation/scaled result.
+    // This is the SwiGLU bug: SiLU decomposes as x*sigmoid(x), so the MatMul
+    // output feeds both the Sigmoid AND a Mul.  Fusing MatMul+Sigmoid removes
+    // the raw MatMul output that the Mul needs.
+    bool has_downstream = match.NodeIdx("FusedMatMul.scale_mul") != SIZE_MAX
+                       || match.NodeIdx("FusedMatMul.scale_div") != SIZE_MAX
+                       || match.NodeIdx("FusedMatMul.relu")      != SIZE_MAX
+                       || match.NodeIdx("FusedMatMul.sigmoid")   != SIZE_MAX
+                       || match.NodeIdx("FusedMatMul.tanh")      != SIZE_MAX
+                       || match.NodeIdx("FusedMatMul.leaky")     != SIZE_MAX
+                       || match.NodeIdx("FusedMatMul.elu")       != SIZE_MAX
+                       || match.NodeIdx("FusedMatMul.hsig")      != SIZE_MAX
+                       || match.NodeIdx("FusedMatMul.selu")      != SIZE_MAX
+                       || match.NodeIdx("FusedMatMul.splus")     != SIZE_MAX
+                       || match.NodeIdx("FusedMatMul.ssign")     != SIZE_MAX
+                       || match.NodeIdx("FusedMatMul.threlu")    != SIZE_MAX;
+    if (has_downstream && !matmul_info.output_names.empty()) {
         if (!gc.HasSingleConsumer(matmul_info.output_names[0])) return false;
     }
 
@@ -1202,6 +1278,10 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
     size_t num_inputs = 0;
     ort_api.Graph_GetNumInputs(fused_subgraph, &num_inputs);
     if (num_inputs < 1) {
+        // The fused subgraph has no graph inputs — all data comes from initializers
+        // or intermediate edges ORT did not expose. Both MatMul inputs are constants
+        // (ORT constant folding should have eliminated this) or ORT subgraph formation
+        // issue. Either way, we cannot compile without a runtime input.
         DML_PERF_LOG("[FusedMatMul] Compile: no inputs, skipping");
         return nullptr;
     }

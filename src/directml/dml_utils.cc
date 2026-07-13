@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "dml_utils.h"
+#include "dml_perf_timer.h"
 
 namespace dml_ep {
 
@@ -11,6 +12,10 @@ namespace dml_ep {
         ID3D12CommandAllocator* commandAllocator,
         ID3D12GraphicsCommandList* commandList)
     {
+#ifdef DML_PERF_PROFILE
+        uint64_t _cerw_t0 = PerfNowUs();
+#endif
+
         ID3D12CommandList* commandlists[] = {commandList};
 
         ThrowIfFailed(commandList->Close());
@@ -21,6 +26,11 @@ namespace dml_ep {
         Microsoft::WRL::ComPtr<ID3D12Fence> d3D12Fence;
         ThrowIfFailed(d3d12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(d3D12Fence.GetAddressOf())));
 
+#ifdef DML_PERF_PROFILE
+        uint64_t _cerw_t_fence = PerfNowUs();
+        PERF_TIMER_LOG("[PERF] CloseExecuteResetWait CreateFence: ", _cerw_t_fence, " us (+", _cerw_t_fence - _cerw_t0, ") *** NEW FENCE ***\n");
+#endif
+
         wil::unique_handle fenceEventHandle(::CreateEvent(nullptr, true, false, nullptr));
         THROW_LAST_ERROR_IF_NULL(fenceEventHandle);
 
@@ -28,6 +38,13 @@ namespace dml_ep {
         ThrowIfFailed(d3D12Fence->SetEventOnCompletion(1, fenceEventHandle.get()));
 
         ::WaitForSingleObjectEx(fenceEventHandle.get(), INFINITE, FALSE);
+
+#ifdef DML_PERF_PROFILE
+        { uint64_t _t = PerfNowUs(); uint64_t _d = _t - _cerw_t_fence;
+          PERF_TIMER_LOG("[PERF] CloseExecuteResetWait wait: ", _t, " us (+", _d, ")",
+              (_d > 1000 ? " *** STALL ***" : ""), "\n");
+          PERF_TIMER_LOG("[PERF] CloseExecuteResetWait TOTAL: ", _t, " us (+", _t - _cerw_t0, " total)\n"); }
+#endif
 
         ThrowIfFailed(commandAllocator->Reset());
         ThrowIfFailed(commandList->Reset(commandAllocator, nullptr));
