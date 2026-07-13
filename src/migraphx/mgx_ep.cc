@@ -467,6 +467,14 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
 
+    // Force conv onto AMDMLSS on gfx1201.
+    if (compute_capability_.rfind("gfx1201", 0) == 0) {
+        if (!mlss_use_specific_ops_.empty()) {
+            mlss_use_specific_ops_ += ",";
+        }
+        mlss_use_specific_ops_ += "conv";
+    }
+
     auto compute_mode{platform::GetEnvironmentVar(env_var::kComputeMode)};
     if (!compute_mode.empty()) {
         std::transform(compute_mode.begin(), compute_mode.end(), compute_mode.begin(), ::tolower);
