@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <set>
 #include <string>
@@ -467,12 +468,23 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
 
-    // Force conv onto AMDMLSS on gfx1201.
-    if (compute_capability_.rfind("gfx1201", 0) == 0) {
-        if (!mlss_use_specific_ops_.empty()) {
-            mlss_use_specific_ops_ += ",";
+    // Per-architecture ops to force onto AMDMLSS.
+    // Add a row here to enable specific ops on additional architectures.
+    struct arch_mlss_ops {
+        std::string_view arch;
+        std::string_view ops;  // comma-separated op names
+    };
+    static constexpr std::array<arch_mlss_ops, 1> kArchMlssOps{{
+        {"gfx1201", "conv"},
+    }};
+
+    for (const auto& [arch, ops] : kArchMlssOps) {
+        if (compute_capability_.rfind(arch, 0) == 0) {
+            if (!mlss_use_specific_ops_.empty()) {
+                mlss_use_specific_ops_ += ",";
+            }
+            mlss_use_specific_ops_ += ops;
         }
-        mlss_use_specific_ops_ += "conv";
     }
 
     auto compute_mode{platform::GetEnvironmentVar(env_var::kComputeMode)};
