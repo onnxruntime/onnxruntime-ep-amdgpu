@@ -15,8 +15,7 @@ enum class Profile {
     Eager,
     Optimized,
     MIGraphX,
-    DirectML,
-    Llm
+    DirectML
 };
 
 struct ProviderInfo {
