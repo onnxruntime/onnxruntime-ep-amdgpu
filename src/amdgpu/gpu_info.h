@@ -16,7 +16,7 @@ enum class Profile {
     Optimized,
     MIGraphX,
     DirectML,
-    Llm
+    HipEp
 };
 
 struct ProviderInfo {

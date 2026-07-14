@@ -172,7 +172,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         create_directml_backend();
     } else if (info.profile == Profile::MIGraphX) {
         create_migraphx_backend();
-    } else if (info.profile == Profile::Llm) {
+    } else if (info.profile == Profile::HipEp) {
         create_hip_backend();
     } else {
         create_migraphx_backend();
