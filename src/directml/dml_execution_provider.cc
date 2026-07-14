@@ -473,9 +473,25 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
         OrtSyncStream** streams_ptr,
         size_t num_tensors)
     {
-            //const DMLDataTransfer& impl = *static_cast<const DMLDataTransfer*>(this_ptr);
         auto src_tensors = gsl::make_span<const OrtValue*>(src_tensors_ptr, num_tensors);
         auto dst_tensors = gsl::make_span<OrtValue*>(dst_tensors_ptr, num_tensors);
+
+        // Process tensors in array order to preserve dependencies. GPU->CPU copies
+        // are accumulated into a batch for a single flush+wait. Any non-GPU->CPU
+        // operation flushes the pending batch first, so ordering is maintained.
+        std::vector<ID3D12Resource*> readbackSrcResources;
+        std::vector<void*> readbackDstPtrs;
+        std::vector<uint32_t> readbackSizes;
+
+        auto flushPendingReadbacks = [&]() {
+            if (!readbackSrcResources.empty()) {
+                const auto srcState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                m_readbackHeap->ReadbackFromGpu(readbackDstPtrs, readbackSizes, readbackSrcResources, srcState);
+                readbackSrcResources.clear();
+                readbackDstPtrs.clear();
+                readbackSizes.clear();
+            }
+        };
 
         for (size_t i = 0; i < num_tensors; ++i)
         {
@@ -504,35 +520,37 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
 
             if (dst_device_type == OrtMemoryInfoDeviceType_GPU)
             {
+                flushPendingReadbacks();
                 if (src_device_type == OrtMemoryInfoDeviceType_GPU)
-                {
-                    // GPU -> GPU copy
                     GpuToGpuCopy(&srcInternal, &destInternal);
-                }
                 else
-                {
-                    // CPU -> GPU (upload)
                     CpuToGpuCopy(&srcInternal, &destInternal);
-                }
             }
             else if (src_device_type == OrtMemoryInfoDeviceType_GPU)
             {
-                // GPU -> CPU copy (readback)
-                GpuToCpuCopy(&srcInternal, &destInternal);
+                // GPU -> CPU: accumulate for batched readback
+                void* dstData = destInternal.GetData();
+                const PluginDmlAllocationInfo* srcAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(&srcInternal).GetDataInterface().Get());
+                if (srcAllocInfo) {
+                    readbackSrcResources.push_back(srcAllocInfo->GetResource());
+                    readbackDstPtrs.push_back(dstData);
+                    readbackSizes.push_back(static_cast<uint32_t>(dataSizeInBytes));
+                }
             }
             else
             {
+                flushPendingReadbacks();
                 const void* src_data = nullptr;
                 void* dst_data = nullptr;
                 size_t bytes;
-
                 RETURN_IF_ERROR(ort_api.GetTensorData(src_tensors[i], &src_data));
                 RETURN_IF_ERROR(ort_api.GetTensorMutableData(dst_tensors[i], &dst_data));
                 RETURN_IF_ERROR(ort_api.GetTensorSizeInBytes(src_tensors[i], &bytes));
-                // CPU -> CPU. may involve copy a to/from host accessible memory and a synchronize may be required first
                 memcpy(dst_data, src_data, bytes);
             }
         }
+
+        flushPendingReadbacks();
         return nullptr;
     }
 
