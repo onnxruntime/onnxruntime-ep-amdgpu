@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <set>
 #include <string>
@@ -467,7 +468,24 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
 
-    platform::SetEnvironmentVar("MIGRAPHX_MLSS_USE_SPECIFIC_OPS", mlss_use_specific_ops_);
+    // Per-architecture ops to force onto AMDMLSS.
+    // Add a row here to enable specific ops on additional architectures.
+    struct arch_mlss_ops {
+        std::string_view arch;
+        std::string_view ops;  // comma-separated op names
+    };
+    static constexpr std::array<arch_mlss_ops, 1> kArchMlssOps{{
+        {"gfx1201", "conv"},
+    }};
+
+    for (const auto& [arch, ops] : kArchMlssOps) {
+        if (compute_capability_.rfind(arch, 0) == 0) {
+            if (!mlss_use_specific_ops_.empty()) {
+                mlss_use_specific_ops_ += ",";
+            }
+            mlss_use_specific_ops_ += ops;
+        }
+    }
 
     auto compute_mode{platform::GetEnvironmentVar(env_var::kComputeMode)};
     if (!compute_mode.empty()) {
@@ -794,10 +812,27 @@ void calibrate_and_quantize(const migraphx::program& prog, const migraphx::targe
     }
 }
 
-void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune) {
+void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune,
+    const std::string& mlss_use_specific_ops) {
     migraphx::compile_options options;
     options.set_fast_math(false);
     options.set_exhaustive_tune_flag(exhaustive_tune);
+    if (!mlss_use_specific_ops.empty()) {
+        // MIGraphX expects a list of op names; split the comma-separated value.
+        std::vector<std::string> ops;
+        std::string_view rest{mlss_use_specific_ops};
+        while (!rest.empty()) {
+            const auto pos{rest.find(',')};
+            if (const auto op{rest.substr(0, pos)}; !op.empty()) {
+                ops.emplace_back(op);
+            }
+            if (pos == std::string_view::npos) {
+                break;
+            }
+            rest.remove_prefix(pos + 1);
+        }
+        options.set_advance_backend_option("mlss_use_specific_ops", ops);
+    }
     prog.compile(target, options);
 }
 
@@ -847,7 +882,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             migraphx::program_parameters params;
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
-            compile_program(program, t_, exhaustive_tune_);
+            compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_);
             if (!disable_compiled_model_caching_) {
                 save_compiled_program(program, mxr_path);
             }
@@ -893,6 +928,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             has_input_shape,
             dump_subgraphs_,
             exhaustive_tune_,
+            mlss_use_specific_ops_,
             dynamic_ranges_,
             input_name_indices,
             output_name_indices,
@@ -1207,7 +1243,8 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 compute_state.enable_fp16, compute_state.enable_bf16, compute_state.enable_int8,
                 compute_state.enable_fp8, compute_state.int8_calibration_cache_available, compute_state.dynamic_ranges);
 
-            compile_program(program, compute_state.t, compute_state.exhaustive_tune);
+            compile_program(program, compute_state.t, compute_state.exhaustive_tune,
+                compute_state.mlss_use_specific_ops);
             if (!compute_state.disable_compiled_model_caching) {
                 save_compiled_program(program, mxr_path);
             }
