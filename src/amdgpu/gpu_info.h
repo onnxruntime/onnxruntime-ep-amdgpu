@@ -27,6 +27,7 @@ struct ProviderInfo {
     std::optional<bool> exhaustive_tune{};
     std::optional<fs::path> cache_dir{};
     std::optional<std::string> mlss_use_specific_ops{};
+    std::optional<std::string> model_arch{};
 
     ProviderInfo() = default;
 
