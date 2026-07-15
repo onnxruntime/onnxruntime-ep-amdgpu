@@ -28,7 +28,7 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
         // null when not built with hip support.
         if (hip_ep_factory_ == nullptr) {
             return MAKE_STATUS(ORT_FAIL,
-                "hip backend requested (profile=hipep), but the AMDGPU EP was not built with hip support");
+                "hip backend requested (profile=hip), but the AMDGPU EP was not built with hip support");
         }
         RETURN_IF_ERROR(hip_ep_factory_->CreateEp(hip_ep_factory_, nullptr, nullptr, 0, session_options, logger, &ep));
         backend_ep_factory_ = hip_ep_factory_;

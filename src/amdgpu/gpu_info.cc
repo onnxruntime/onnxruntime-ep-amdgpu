@@ -27,8 +27,8 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
                         profile = Profile::MIGraphX;
                     } else if (lower == "directml" || value == "4") {
                         profile = Profile::DirectML;
-                    } else if (lower == "hipep" || value == "5") {
-                        profile = Profile::HipEp;
+                    } else if (lower == "hip" || value == "5") {
+                        profile = Profile::Hip;
                     } else {
                         return MAKE_STATUS(ORT_FAIL, "unknown profile: '", value, "'");
                     }
