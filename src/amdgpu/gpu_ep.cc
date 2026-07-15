@@ -156,6 +156,12 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 get_name(mgx_ep::provider_option::kMlssUseSpecificOps).c_str(),
                 info.mlss_use_specific_ops.value().c_str()));
         }
+        if (info.model_arch.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kModelArch).c_str(),
+                info.model_arch.value().c_str()));
+        }
         THROW_IF_ERROR(factory.CreateMIGraphXBackend(local_session_options, logger, backend_ep_));
     };
 
