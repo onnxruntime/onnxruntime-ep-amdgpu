@@ -37,12 +37,12 @@ Ort::Status DataTransfer::CopyTensors(const std::vector<Ort::ConstValue>& src_te
         const auto src_memory_info{src.GetTensorMemoryInfo()};
         const auto dst_memory_info{dst.GetTensorMemoryInfo()};
 
-        if (stream == nullptr) {
-            // MIGraphX handles the allocation and copying of initializers to a GPU memory.
-            continue;
-        }
-
-        const auto stream_handle{static_cast<hipStream_t>(stream.GetHandle())};
+        // A null stream = synchronous copy request (e.g. OGA device-input staging). Fall
+        // through with a null handle to the sync branches below rather than skipping; the
+        // unbacked-buffer guard keeps the MIGraphX-initializer skip. See PR for details.
+        const hipStream_t stream_handle{stream == nullptr
+            ? static_cast<hipStream_t>(nullptr)
+            : static_cast<hipStream_t>(stream.GetHandle())};
 
         const auto src_device_type{src_memory_info.GetDeviceType()};
         const auto dst_device_type{dst_memory_info.GetDeviceType()};
@@ -51,6 +51,11 @@ Ort::Status DataTransfer::CopyTensors(const std::vector<Ort::ConstValue>& src_te
         const void* src_data{src.GetTensorData<const void*>()};
 
         const size_t bytes{src.GetTensorSizeInBytes()};
+
+        if (dst_data == nullptr || src_data == nullptr || bytes == 0) {
+            // Nothing valid to copy (e.g. MIGraphX-owned initializer not backed here).
+            continue;
+        }
 
         if (dst_device_type == OrtMemoryInfoDeviceType_GPU) {
             if (src_device_type == OrtMemoryInfoDeviceType_GPU) {
