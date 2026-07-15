@@ -21,6 +21,9 @@ add_library(amdgpu-ep MODULE
 
 target_link_libraries(amdgpu-ep PRIVATE plugin-ep-utils flatbuffers)
 
+# Expose USE_HIP so the source can gate the optional hip backend load.
+target_compile_definitions(amdgpu-ep PRIVATE $<$<BOOL:${USE_HIP}>:USE_HIP>)
+
 target_include_directories(amdgpu-ep PRIVATE
         $<TARGET_PROPERTY:migraphx-ep,INTERFACE_INCLUDE_DIRECTORIES>)
 
