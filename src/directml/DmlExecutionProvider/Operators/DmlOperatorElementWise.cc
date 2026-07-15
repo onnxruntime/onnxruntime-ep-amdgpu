@@ -601,6 +601,21 @@ public:
             );
         }
 
+        // Standalone CompileOperator does not support all-zero-stride scalar broadcasting
+        // on all DML runtimes. Detect this case and compile via a single-node DML graph
+        // (CompileGraph) instead, which handles strided tensors correctly.
+        bool hasScalarBroadcast = false;
+        for (uint32_t index = 1, inputCount = gsl::narrow_cast<uint32_t>(m_inputTensorDescs.size()); index < inputCount; ++index)
+        {
+            if (!kernelInfo.IsInputValid(index)) continue;
+            auto strides = m_inputTensorDescs[index].GetStrides();
+            if (!strides.empty() && std::all_of(strides.begin(), strides.end(), [](uint32_t s) { return s == 0; }))
+            {
+                hasScalarBroadcast = true;
+                break;
+            }
+        }
+
         std::vector<DML_TENSOR_DESC> inputDescs = GetDmlInputDescs();
         std::vector<DML_TENSOR_DESC> outputDescs = GetDmlOutputDescs();
 
@@ -609,7 +624,42 @@ public:
         opDesc.ScaleTensor = &inputDescs[1];
         opDesc.ZeroPointTensor = hasZeroPointTensor ? &inputDescs[2] : nullptr;
         opDesc.OutputTensor = &outputDescs[0];
-        SetDmlOperatorDesc({ApiTraits::OperatorDescTraits<TOperatorDesc>::Type, &opDesc}, kernelInfo);
+        const DML_OPERATOR_DESC dmlOpDesc = {ApiTraits::OperatorDescTraits<TOperatorDesc>::Type, &opDesc};
+
+        if (hasScalarBroadcast)
+        {
+            // Wrap in a single-node DML graph so CompileGraph handles the stride-based
+            // scalar broadcast correctly (matching ORT's DmlGraphFusionTransformer behavior).
+            std::vector<DML_INPUT_GRAPH_EDGE_DESC> inputEdges;
+            uint32_t inputCount = hasZeroPointTensor ? 3u : 2u;
+            for (uint32_t i = 0; i < inputCount; ++i)
+            {
+                DML_INPUT_GRAPH_EDGE_DESC edge = {};
+                edge.GraphInputIndex = i;
+                edge.ToNodeIndex = 0;
+                edge.ToNodeInputIndex = i;
+                inputEdges.push_back(edge);
+            }
+
+            DML_OUTPUT_GRAPH_EDGE_DESC outputEdge = {};
+            outputEdge.FromNodeIndex = 0;
+            outputEdge.FromNodeOutputIndex = 0;
+            outputEdge.GraphOutputIndex = 0;
+
+            const DML_OPERATOR_DESC* dmlOpDescPtr = &dmlOpDesc;
+            MLOperatorGraphDesc graphDesc = {};
+            graphDesc.nodeCount = 1;
+            graphDesc.nodes = &dmlOpDescPtr;
+            graphDesc.inputEdgeCount = gsl::narrow_cast<uint32_t>(inputEdges.size());
+            graphDesc.inputEdges = inputEdges.data();
+            graphDesc.outputEdgeCount = 1;
+            graphDesc.outputEdges = &outputEdge;
+            SetDmlOperatorGraphDesc(std::move(graphDesc), kernelInfo);
+        }
+        else
+        {
+            SetDmlOperatorDesc(dmlOpDesc, kernelInfo);
+        }
     }
 };
 

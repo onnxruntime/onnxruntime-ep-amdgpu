@@ -146,6 +146,8 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     THROW_IF_ERROR(mgx_create_ep_factories(kMIGraphXBackend, ort_api_base, default_logger,
         &mgx_ep_factory_, 1, &factories_created));
 
+    // hip (morphizen) backend: optional, only present when built with USE_HIP.
+#ifdef USE_HIP
     THROW_IF_ERROR(LoadDynamicLibrary(hipBackend, &hip_backend_));
     THROW_IF_ERROR(GetSymbolFromLibrary(hip_backend_,
         "ReleaseEpFactory", reinterpret_cast<void**>(&hip_release_ep_factory_)));
@@ -154,9 +156,9 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     THROW_IF_ERROR(GetSymbolFromLibrary(hip_backend_,
         "CreateEpFactories", reinterpret_cast<void**>(&hip_create_ep_factories)));
 
-    // Pass ep_name_ so the hip backend's EP reports the same name ORT sees.
     THROW_IF_ERROR(hip_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
         &hip_ep_factory_, 1, &factories_created));
+#endif
 
     data_transfer_ = std::make_unique<DataTransfer>(*this);
 }
