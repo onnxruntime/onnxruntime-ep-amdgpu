@@ -171,7 +171,7 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
             return true;
         }
         for (const auto& input : inputs) {
-            if (!IsInt8Tensor(input) || !IsUint8Tensor(input)) {
+            if (!IsInt8Tensor(input) && !IsUint8Tensor(input)) {
                 return true;
             }
         }
@@ -211,7 +211,7 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
         }
         // only support int8 and uint8 type
         for (const auto& input : inputs) {
-            if (!IsInt8Tensor(input) || !IsUint8Tensor(input)) {
+            if (!IsInt8Tensor(input) && !IsUint8Tensor(input)) {
                 return true;
             }
         }
