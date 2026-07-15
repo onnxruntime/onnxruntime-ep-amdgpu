@@ -27,8 +27,8 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
                         profile = Profile::MIGraphX;
                     } else if (lower == "directml" || value == "4") {
                         profile = Profile::DirectML;
-                    } else if (lower == "llm" || value == "5") {
-                        profile = Profile::Llm;
+                    } else if (lower == "hip" || value == "5") {
+                        profile = Profile::Hip;
                     } else {
                         return MAKE_STATUS(ORT_FAIL, "unknown profile: '", value, "'");
                     }
@@ -40,6 +40,7 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kForceRecompile, force_recompile)
             .AddAssignmentToReference(provider_option::kExhaustiveTune, exhaustive_tune)
             .AddAssignmentToReference(provider_option::kMlssUseSpecificOps, mlss_use_specific_ops)
+            .AddAssignmentToReference(provider_option::kModelArch, model_arch)
             .Parse(provider_options));
 }
 

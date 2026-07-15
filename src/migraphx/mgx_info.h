@@ -25,6 +25,7 @@ struct ProviderInfo {
     bool exhaustive_tune{};
     bool dump_subgraphs{};
     std::string mlss_use_specific_ops{};
+    std::string model_arch{};
     ComputeMode compute_mode{};
     fs::path cache_dir{};
     bool disable_caching{};

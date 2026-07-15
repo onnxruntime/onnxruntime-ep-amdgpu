@@ -429,6 +429,7 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     enable_int8_ = info.enable_int8;
     exhaustive_tune_ = info.exhaustive_tune;
     mlss_use_specific_ops_ = info.mlss_use_specific_ops;
+    model_arch_ = info.model_arch;
     cache_dir_ = info.cache_dir;
     int8_use_native_calibration_table_ = info.int8_use_native_calibration_table;
     int8_calibration_table_name_ = info.int8_calibration_table_name;
@@ -467,6 +468,7 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
+    PARSE_ENV_VAR(env_var::kModelArch, model_arch_);
 
     // Per-architecture ops to force onto AMDMLSS.
     // Add a row here to enable specific ops on additional architectures.
@@ -474,7 +476,8 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
         std::string_view arch;
         std::string_view ops;  // comma-separated op names
     };
-    static constexpr std::array<arch_mlss_ops, 1> kArchMlssOps{{
+    static constexpr std::array<arch_mlss_ops, 2> kArchMlssOps{{
+        {"gfx1200", "conv"},
         {"gfx1201", "conv"},
     }};
 

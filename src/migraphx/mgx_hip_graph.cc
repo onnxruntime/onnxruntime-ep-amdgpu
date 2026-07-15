@@ -231,7 +231,11 @@ int ComputeOutputIndex(std::string_view name) {
     if (pos == std::string_view::npos) {
         return -1;
     }
-    const auto digits{name.substr(pos + prefix.size())};
+    auto digits{name.substr(pos + prefix.size())};
+    // MIGraphX pads output index >= 10 as "#output_:00056" (colon + zero-pad); skip the ':'.
+    if (!digits.empty() && digits.front() == ':') {
+        digits.remove_prefix(1);
+    }
     const auto* begin{digits.data()};
     const auto* end{digits.data() + digits.size()};
     const auto* last{begin};
