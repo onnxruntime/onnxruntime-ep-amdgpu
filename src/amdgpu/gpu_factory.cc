@@ -47,6 +47,7 @@ namespace gpu_ep {
 namespace {
 constexpr auto directmlBackend{LIBRARY_PREFIX ORT_TSTR("directml-backend") LIBRARY_SUFFIX};
 constexpr auto migraphxBackend{LIBRARY_PREFIX ORT_TSTR("migraphx-backend") LIBRARY_SUFFIX};
+constexpr auto hipBackend{LIBRARY_PREFIX ORT_TSTR("hip-backend") LIBRARY_SUFFIX};
 }
 
 ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_api_base, const char* ep_name, const OrtLogger* default_logger)
@@ -157,6 +158,20 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     THROW_IF_ERROR(mgx_create_ep_factories(kMIGraphXBackend, ort_api_base, default_logger,
         &mgx_ep_factory_, 1, &factories_created));
 
+    // hip (morphizen) backend: optional, only present when built with USE_HIP.
+#ifdef USE_HIP
+    THROW_IF_ERROR(LoadDynamicLibrary(hipBackend, &hip_backend_));
+    THROW_IF_ERROR(GetSymbolFromLibrary(hip_backend_,
+        "ReleaseEpFactory", reinterpret_cast<void**>(&hip_release_ep_factory_)));
+
+    CreateEpFactories_t hip_create_ep_factories{};
+    THROW_IF_ERROR(GetSymbolFromLibrary(hip_backend_,
+        "CreateEpFactories", reinterpret_cast<void**>(&hip_create_ep_factories)));
+
+    THROW_IF_ERROR(hip_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
+        &hip_ep_factory_, 1, &factories_created));
+#endif
+
     data_transfer_ = std::make_unique<DataTransfer>(*this);
 }
 
@@ -169,7 +184,8 @@ ProviderFactory::~ProviderFactory() {
     // backend factory methods — both would crash if the DLL is already unloaded.
     // Session-owned resources (DmlBucketizedBufferAllocator etc.) are already released
     // by the time the factory is destroyed since sessions are destroyed first.
-    allocator_.reset();
+    gpu_allocator_.reset();
+    pinned_allocator_.reset();
     data_transfer_.reset();
 
     if (gpu_memory_info_) {
@@ -183,6 +199,9 @@ ProviderFactory::~ProviderFactory() {
     }
     if (!UnloadDynamicLibrary(mgx_backend_).IsOK()) {
         /* TODO: log failure while unloading MIGraphX EP library */
+    }
+    if (!UnloadDynamicLibrary(hip_backend_).IsOK()) {
+        /* TODO: log failure while unloading hip EP library */
     }
 }
 
@@ -269,18 +288,37 @@ Ort::Status ProviderFactory::CreateAllocator(const OrtMemoryInfo* memory_info,
     const OrtKeyValuePairs* allocator_options, OrtAllocator** allocator)
 {
     // The Allocator wrapper owns the amdgpu-ep memory info and lazily delegates
-    // actual allocation to whichever backend (DirectML or MIGraphX) is active.
-    // Its Info() returns the amdgpu-owned memory_info_ pointer, ensuring that
-    // the device key in ORT's allocator map matches the plan location device.
-    if (allocator_ == nullptr) {
-        allocator_ = std::make_unique<Allocator>(*this, memory_info, allocator_options);
+    // actual allocation to whichever backend is currently selected. Its Info()
+    // returns the amdgpu-owned memory_info_ pointer, so ORT's allocator map key
+    // resolves to the same OrtDevice as the plan location.
+    //
+    // One wrapper per device memory type: ORT registers a separate shared
+    // allocator for the default and host-accessible memory infos and unregisters
+    // them by the device each allocator's Info() reports. Returning a single
+    // wrapper for both would report only the default device, leaving the pinned
+    // shared allocator unmatched at unload -> use-after-free on this factory
+    // during teardown. Both wrappers still delegate to the selected backend, so
+    // backend virtualization / dynamic switching is unaffected.
+    const auto mem_type = Ort::ConstMemoryInfo{memory_info}.GetDeviceMemoryType();
+    std::unique_ptr<Allocator>* slot = nullptr;
+    if (mem_type == OrtDeviceMemoryType_DEFAULT) {
+        slot = &gpu_allocator_;
+    } else if (mem_type == OrtDeviceMemoryType_HOST_ACCESSIBLE) {
+        slot = &pinned_allocator_;
+    } else {
+        return MAKE_STATUS(ORT_INVALID_ARGUMENT, "unsupported device memory type");
     }
-    *allocator = allocator_.get();
+
+    if (*slot == nullptr) {
+        *slot = std::make_unique<Allocator>(*this, memory_info, allocator_options);
+    }
+    *allocator = slot->get();
     return STATUS_OK;
 }
 
 void ProviderFactory::ReleaseAllocator(OrtAllocator*) const {
-    // no-op — the allocator is owned by allocator_ and shared across sessions.
+    // no-op — the allocators are owned by the factory (gpu_allocator_ /
+    // pinned_allocator_) and shared across sessions.
 }
 
 Ort::Status ProviderFactory::CreateDataTransfer(OrtDataTransferImpl** data_transfer) {

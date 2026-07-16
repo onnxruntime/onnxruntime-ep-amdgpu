@@ -238,13 +238,17 @@ private:
     // Keyed by hash of sorted node IDs for O(1) lookup in CompileFusion.
     FusionMatchMap m_fusionMap;
 
-    // Tier-0 full graph fusion: set when all shapes are static and all
-    // DML-supported nodes are claimed as one fused group.  CompileImpl
-    // routes to FullGraphFusion::Compile when this hash matches.
-    // m_tier0CompiledInfo is pre-compiled during GetCapabilityImpl — if
-    // CompileGraph fails there we simply don't claim the nodes, so CompileImpl
-    // is never called with an uncompilable group (no ORT_EP_FAIL possible).
-    std::optional<size_t>        m_tier0GroupHash;
+    // Tier-0 multi-partition graph fusion: populated during GetCapabilityImpl when
+    // all graph inputs are static-shaped. Each entry is the hash of one claimed
+    // DML partition (sorted node IDs). CompileImpl routes to FullGraphFusion::Compile
+    // when a subgraph hash matches any entry. Empty means no Tier-0 partitions were
+    // claimed (all fall through to Tier-2/1).
+    std::unordered_set<size_t>   m_tier0GroupHashes;
+
+    // Shapes resolved during GetCapabilityImpl for tensors ORT left dynamic
+    // (e.g. Upsample outputs). Keyed by tensor name. Passed into Compile so
+    // BuildSubgraphInfo can seed value_shapes for translators.
+    std::unordered_map<std::string, std::vector<int64_t>> m_resolvedShapes;
 
     bool m_native16BitShaderOpsSupported = false;
     bool m_isMcdmDevice = false;

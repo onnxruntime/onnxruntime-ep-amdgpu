@@ -146,6 +146,13 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         };
     };
 
+    const auto create_hip_backend = [&] {
+        // hip backend manages allocator/data-transfer at the backend factory level,
+        // reached through the amdgpu Allocator/DataTransfer wrappers — leave
+        // OrtEp::CreateAllocator null so ORT falls back to ep_factory_.CreateAllocator.
+        THROW_IF_ERROR(factory.CreateHipBackend(local_session_options, logger, backend_ep_));
+    };
+
     const auto create_migraphx_backend = [&] {
         const auto get_name = [](const std::string_view sv) {
             return std::string{"ep."}.append(kMIGraphXBackend).append(".").append(sv);
@@ -185,6 +192,12 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 local_session_options,
                 get_name(mgx_ep::provider_option::kMlssUseSpecificOps).c_str(),
                 info.mlss_use_specific_ops.value().c_str()));
+        }
+        if (info.model_arch.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kModelArch).c_str(),
+                info.model_arch.value().c_str()));
         }
         THROW_IF_ERROR(factory.CreateMIGraphXBackend(local_session_options, logger, backend_ep_));
     };

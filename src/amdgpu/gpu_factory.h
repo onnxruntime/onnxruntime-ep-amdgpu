@@ -28,6 +28,17 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
         return STATUS_OK;
     }
 
+    Ort::Status CreateHipBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
+        // null when not built with hip support.
+        if (hip_ep_factory_ == nullptr) {
+            return MAKE_STATUS(ORT_FAIL,
+                "hip backend requested (profile=hip), but the AMDGPU EP was not built with hip support");
+        }
+        RETURN_IF_ERROR(hip_ep_factory_->CreateEp(hip_ep_factory_, nullptr, nullptr, 0, session_options, logger, &ep));
+        backend_ep_factory_ = hip_ep_factory_;
+        return STATUS_OK;
+    }
+
     OrtEpFactory* GetBackendFactory() const noexcept {
         return backend_ep_factory_;
     }
@@ -104,6 +115,11 @@ private:
     OrtEpFactory* mgx_ep_factory_{};
     telemetry::GetBackendDataFn mgx_get_telemetry_{};
 
+    void* hip_backend_{};
+    ReleaseEpFactory_t hip_release_ep_factory_{};
+
+    OrtEpFactory* hip_ep_factory_{};
+
     OrtHardwareDevice* virtual_device_{};
 
     // Owned memory infos for the GPU and pinned device slots, registered with OrtEpDevice.
@@ -112,7 +128,13 @@ private:
     OrtMemoryInfo* pinned_memory_info_{};
 
     std::unique_ptr<DataTransfer> data_transfer_{};
-    std::unique_ptr<Allocator> allocator_{};
+    // One allocator per device memory type. ORT registers a separate shared
+    // allocator per OrtMemoryInfo (default vs host-accessible) and matches them
+    // by the device reported from each allocator's Info(); a single shared
+    // instance would report only one device, leaving the other unmatched at
+    // unload (use-after-free on the factory during teardown).
+    std::unique_ptr<Allocator> gpu_allocator_{};     // OrtDeviceMemoryType_DEFAULT
+    std::unique_ptr<Allocator> pinned_allocator_{};  // OrtDeviceMemoryType_HOST_ACCESSIBLE
 };
 
 }  // namespace gpu_ep

@@ -25,6 +25,7 @@ struct ProviderInfo {
     bool exhaustive_tune{};
     bool dump_subgraphs{};
     std::string mlss_use_specific_ops{};
+    std::string model_arch{};
     ComputeMode compute_mode{};
     fs::path cache_dir{};
     bool disable_caching{};
@@ -34,6 +35,10 @@ struct ProviderInfo {
     fs::path external_initializers_file_name{};
     fs::path context_file_path{};
     std::string context_node_name_prefix{};
+    bool hip_graph_enable{};
+    std::size_t max_dynamic_batch{};
+    std::string compile_batches{};
+    bool coalesce_io{};
 
     ProviderInfo() = default;
 
