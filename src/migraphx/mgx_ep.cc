@@ -445,6 +445,10 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     hip_graph_enable_ = info.hip_graph_enable;
     max_dynamic_batch_ = info.max_dynamic_batch;
     compile_batches_ = info.compile_batches;
+    static_pad_seq_ = info.static_pad_seq;
+    static_pad_seq_len_ = info.static_pad_seq_len;
+    static_pad_inputs_ = info.static_pad_inputs;
+    static_pad_outputs_ = info.static_pad_outputs;
 
     HIP_CALL_THROW(hipSetDevice(device_id_));
     HIP_CALL_THROW(hipGetDeviceProperties(&device_prop_, device_id_));
@@ -467,6 +471,10 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kMaxDynamicBatch, max_dynamic_batch_);
     PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
+    PARSE_ENV_VAR(env_var::kStaticPadSeq, static_pad_seq_);
+    PARSE_ENV_VAR(env_var::kStaticPadSeqLen, static_pad_seq_len_);
+    PARSE_ENV_VAR(env_var::kStaticPadInputs, static_pad_inputs_);
+    PARSE_ENV_VAR(env_var::kStaticPadOutputs, static_pad_outputs_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
     PARSE_ENV_VAR(env_var::kModelArch, model_arch_);
 
@@ -951,6 +959,24 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     compute_state.max_dynamic_batch = max_dynamic_batch_;
     compute_state.compile_batches = compile_batches_;
     compute_state.coalesce_io = coalesce_io_enable_;
+    compute_state.static_pad_seq = static_pad_seq_;
+    compute_state.static_pad_seq_len = static_pad_seq_len_;
+    if (static_pad_seq_) {
+        compute_state.static_pad_input_axes = ParseNameAxisSpec(static_pad_inputs_);
+        // Outputs: MIGraphX program params are named "#output_N", not their ONNX
+        // names, so resolve the user's "logits:1" spec to (ORT output index -> axis)
+        // via output_name_indices; the runtime slice matches on index.
+        compute_state.static_pad_output_axes_by_index.clear();
+        for (const auto& [oname, axis] : ParseNameAxisSpec(static_pad_outputs_)) {
+            if (const auto it{output_name_indices.find(oname)}; it != output_name_indices.end()) {
+                compute_state.static_pad_output_axes_by_index.emplace(it->second, axis);
+            }
+        }
+        // No named inputs -> nothing to pad; keep the feature inert.
+        if (compute_state.static_pad_input_axes.empty()) {
+            compute_state.static_pad_seq = false;
+        }
+    }
 
     node_compute_info = std::make_unique<NodeComputeInfo>(*this).release();
     return STATUS_OK;
@@ -1132,12 +1158,51 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         }
     }
 
+    // Resolve static seq-padding for this call (no-op when disabled).  A named input
+    // is padded on its token axis to the fixed target length, only for prefill: the
+    // axis extent must be in (1, target).  decode (extent == 1) and already-max
+    // prompts are left alone.  Inert when static_pad_seq_len == 0.
+    StaticSeqContext seq{};
+    if (compute_state.static_pad_seq && compute_state.static_pad_seq_len > 0) {
+        const auto target{compute_state.static_pad_seq_len};
+        for (const auto& [name, axis] : compute_state.static_pad_input_axes) {
+            const auto it{input_name_indices.find(name)};
+            if (it == input_name_indices.end()) {
+                continue;
+            }
+            const auto shape{kernel_context.GetInput(it->second).GetTensorTypeAndShapeInfo().GetShape()};
+            if (axis < 0 || static_cast<size_t>(axis) >= shape.size()) {
+                continue;
+            }
+            const auto extent{static_cast<size_t>(shape[axis])};
+            if (extent > 1 && extent < target) {
+                seq.active = true;
+                seq.real_len = extent;
+                seq.target_len = target;
+                seq.input_axes = &compute_state.static_pad_input_axes;
+                seq.output_axes_by_index = &compute_state.static_pad_output_axes_by_index;
+                break;  // all named inputs share the same token length this call
+            }
+        }
+    }
+
     // Map an actual input shape to the shape the program is compiled for: a batched
-    // input (axis-0 extent == requested batch) is bucketed up to the target batch.
-    const auto effective_shape{[&dyn](std::vector<int64_t> shape) {
+    // input (axis-0 extent == requested batch) is bucketed up to the target batch,
+    // and a named seq input has its token axis padded up to the static target length.
+    const auto effective_shape{[&dyn, &seq](std::vector<int64_t> shape,
+                                            const std::string& name) {
         if (dyn.active && !shape.empty() &&
             static_cast<size_t>(shape.front()) == dyn.requested_batch) {
             shape.front() = static_cast<int64_t>(dyn.target_batch);
+        }
+        if (seq.active && seq.input_axes != nullptr) {
+            if (const auto it{seq.input_axes->find(name)}; it != seq.input_axes->end()) {
+                const int axis{it->second};
+                if (axis >= 0 && static_cast<size_t>(axis) < shape.size() &&
+                    static_cast<size_t>(shape[axis]) == seq.real_len) {
+                    shape[axis] = static_cast<int64_t>(seq.target_len);
+                }
+            }
         }
         return shape;
     }};
@@ -1145,7 +1210,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     if (!compute_state.has_input_shapes) {
         for (auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
-            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape())};
+            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape(), name)};
             onnx_options.set_input_parameter_shape(name, {shape.begin(), shape.end()});
             hash::Hash(input_shapes_hash, shape);
         }
@@ -1166,7 +1231,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                         prog_strides.size() == 1 && prog_strides.front() == 0) {
                         prog_lengths.clear();
                     }
-                    const auto eff{effective_shape(shape)};
+                    const auto eff{effective_shape(shape, name)};
                     std::vector<size_t> lengths{eff.begin(), eff.end()};
                     if (prog_lengths != lengths) {
                         onnx_options.set_input_parameter_shape(name, lengths);
@@ -1183,7 +1248,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         // for identical input shapes regardless of which program is currently active.
         for (const auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
-            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape())};
+            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape(), name)};
             hash::Hash(input_shapes_hash, shape);
         }
     }
@@ -1261,19 +1326,20 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         param_shapes = program.get_parameter_shapes();
     }
 
-    // Staging path: required for hipGraph capture (pointer stability) and for
-    // dynamic batching (input padding / output slicing).  Stage I/O into EP-owned
-    // buffers, bind scratch, then replay/capture a graph or run eagerly.
-    if ((compute_state.hip_graph_enable || dyn.active) && param_shapes.size() > 0) {
+    // Staging path: required for hipGraph capture (pointer stability), for dynamic
+    // batching (batch-axis pad/slice), and for static seq-padding (token-axis
+    // pad/slice).  Stage I/O into EP-owned buffers, bind scratch, then replay/capture
+    // a graph or run eagerly.
+    if ((compute_state.hip_graph_enable || dyn.active || seq.active) && param_shapes.size() > 0) {
         const auto shape_hash{hash::ToHex(input_shapes_hash)};
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
-        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn);
+        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn, seq);
         auto bind{BindStagingParams(compute_state, param_shapes, shape_hash, hip_stream)};
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
             bind.params, bind.prog_output_indices, shape_hash, dyn);
-        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn);
+        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn, seq);
         HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
         return STATUS_OK;
     }

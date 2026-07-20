@@ -39,6 +39,44 @@ std::vector<std::size_t> ParseCompileBatches(std::string_view spec) {
     return batch_sizes;
 }
 
+std::unordered_map<std::string, int> ParseNameAxisSpec(std::string_view spec) {
+    std::unordered_map<std::string, int> result;
+    if (spec.empty()) {
+        return result;
+    }
+
+    std::istringstream iss{std::string{spec}};
+    std::string token;
+    while (std::getline(iss, token, ',')) {
+        if (token.empty()) {
+            continue;
+        }
+        const auto colon{token.find(':')};
+        std::string name{colon == std::string::npos ? token : token.substr(0, colon)};
+        // Trim surrounding whitespace so "a:1, b:1" parses "b", not " b" (which would
+        // silently never match a parameter name and drop the entry).
+        const auto ws_begin{name.find_first_not_of(" \t\r\n")};
+        if (ws_begin == std::string::npos) {
+            continue;
+        }
+        name = name.substr(ws_begin, name.find_last_not_of(" \t\r\n") - ws_begin + 1);
+        int axis{1};  // default token axis
+        if (colon != std::string::npos) {
+            const std::string axis_str{token.substr(colon + 1)};
+            std::size_t parsed{};
+            const auto* begin{axis_str.data()};
+            const auto* end{axis_str.data() + axis_str.size()};
+            if (const auto [ptr, ec]{std::from_chars(begin, end, parsed)};
+                ec != std::errc{} || ptr != end) {
+                continue;  // unparseable axis -> skip this entry
+            }
+            axis = static_cast<int>(parsed);
+        }
+        result.emplace(std::move(name), axis);
+    }
+    return result;
+}
+
 std::vector<std::size_t> GeneratePowerOfTwoBatchSizes(std::size_t max_batch_size) {
     std::vector<std::size_t> batch_sizes;
     if (max_batch_size == 0) {
@@ -104,6 +142,38 @@ void PadInputTensor(const void* src_data, void* dst_data,
             HIP_CALL_THROW(hipMemcpyAsync(pad_start + filled * bytes_per_batch, pad_start,
                 chunk * bytes_per_batch, hipMemcpyDeviceToDevice, stream));
             filled += chunk;
+        }
+    }
+}
+
+void PadSeqTensor(const void* src_data, void* dst_data,
+    std::size_t outer_count, std::size_t real_len, std::size_t target_len,
+    std::size_t inner_count, std::size_t element_size_bytes,
+    hipStream_t stream)
+{
+    if (target_len < real_len) {
+        return;  // caller guarantees target_len >= real_len; nothing sensible to do otherwise
+    }
+    const std::size_t elem{element_size_bytes};
+    const std::size_t src_slice_bytes{real_len * inner_count * elem};
+    const std::size_t dst_slice_bytes{target_len * inner_count * elem};
+    const std::size_t real_bytes{real_len * inner_count * elem};
+    const std::size_t pad_bytes{(target_len - real_len) * inner_count * elem};
+
+    const char* src{static_cast<const char*>(src_data)};
+    char* dst{static_cast<char*>(dst_data)};
+
+    // Fast path: a single outer slice (batch=1) is one contiguous copy + one memset.
+    // The general path handles outer_count > 1 with per-slice copy/zero so that the
+    // real tokens of each slice land at the start of that slice's padded region.
+    for (std::size_t o{0}; o < outer_count; ++o) {
+        if (real_bytes > 0) {
+            HIP_CALL_THROW(hipMemcpyAsync(dst + o * dst_slice_bytes, src + o * src_slice_bytes,
+                real_bytes, hipMemcpyDefault, stream));
+        }
+        if (pad_bytes > 0) {
+            HIP_CALL_THROW(hipMemsetAsync(dst + o * dst_slice_bytes + real_bytes, 0,
+                pad_bytes, stream));
         }
     }
 }

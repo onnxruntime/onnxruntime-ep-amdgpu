@@ -13,6 +13,7 @@
 #include <numeric>
 #include <optional>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "hip/utils.h"
@@ -396,7 +397,8 @@ void AllocateStaging(ComputeState& cs,
 void CopyInputsToStaging(ComputeState& cs,
     const migraphx::program_parameter_shapes& param_shapes,
     const Ort::KernelContext& ctx, hipStream_t stream,
-    const DynamicBatchContext& dyn)
+    const DynamicBatchContext& dyn,
+    const StaticSeqContext& seq)
 {
     // ── Coalesced fast path ───────────────────────────────────────────────────
     // When the input arena is active, there is no padding, and every input is
@@ -405,7 +407,11 @@ void CopyInputsToStaging(ComputeState& cs,
     // that dominates batch-1 many-input models.  Any other case (padding or a
     // device-resident input) falls through to the per-input loop below, which is
     // still correct because each staging buffer's data points into the arena.
-    const bool no_padding{!dyn.active || dyn.target_batch == dyn.requested_batch};
+    // Both batch padding AND seq padding disqualify the fast path: the memcpy below
+    // copies only the real bytes and would skip the pad tail-zero / prefix stride.
+    const bool batch_no_pad{!dyn.active || dyn.target_batch == dyn.requested_batch};
+    const bool seq_no_pad{!seq.active || seq.target_len == seq.real_len};
+    const bool no_padding{batch_no_pad && seq_no_pad};
     if (cs.staging_inputs_coalesced && cs.in_staging_host != nullptr && no_padding) {
         bool all_host{true};
         for (const auto& name : param_shapes.names()) {
@@ -476,7 +482,31 @@ void CopyInputsToStaging(ComputeState& cs,
             !actual_shape.empty() &&
             static_cast<std::size_t>(actual_shape.front()) == dyn.requested_batch};
 
-        if (batched) {
+        // A named seq input arrives with real_len tokens but the program expects
+        // target_len; copy the real tokens per slice and zero-fill the pad tail.
+        int seq_axis{-1};
+        if (seq.active && seq.input_axes != nullptr && !batched) {
+            if (const auto it{seq.input_axes->find(param_name)}; it != seq.input_axes->end()) {
+                const int axis{it->second};
+                if (axis >= 0 && static_cast<std::size_t>(axis) < prog_lens.size() &&
+                    prog_lens[axis] == seq.target_len && axis < static_cast<int>(actual_shape.size()) &&
+                    static_cast<std::size_t>(actual_shape[axis]) == seq.real_len) {
+                    seq_axis = axis;
+                }
+            }
+        }
+
+        if (seq_axis >= 0) {
+            const std::size_t total_elems{ProductOf(prog_lens)};
+            const std::size_t element_size{total_elems > 0 ? prog_shape.bytes() / total_elems : 0};
+            std::size_t outer{1};
+            for (int a{0}; a < seq_axis; ++a) outer *= prog_lens[a];
+            std::size_t inner{1};
+            for (std::size_t a{static_cast<std::size_t>(seq_axis) + 1}; a < prog_lens.size(); ++a)
+                inner *= prog_lens[a];
+            PadSeqTensor(src, stage.data, outer, seq.real_len, seq.target_len,
+                inner, element_size, stream);
+        } else if (batched) {
             const std::size_t total_elems{ProductOf(prog_lens)};
             const std::size_t elements_per_row{total_elems / dyn.target_batch};
             const std::size_t element_size{total_elems > 0 ? prog_shape.bytes() / total_elems : 0};
@@ -527,13 +557,15 @@ StagingBindResult BindStagingParams(ComputeState& cs,
 
 void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
     const Ort::KernelContext& ctx, hipStream_t stream,
-    const DynamicBatchContext& dyn)
+    const DynamicBatchContext& dyn,
+    const StaticSeqContext& seq)
 {
     for (std::size_t i{}; i < bind.prog_output_indices.size() &&
         i < bind.bound_output_names.size() && i < bind.bound_output_shapes.size(); ++i)
     {
         const auto oi{bind.prog_output_indices[i]};
-        const auto stage_it{cs.staging_outputs.find(bind.bound_output_names[i])};
+        const auto& param_name{bind.bound_output_names[i]};
+        const auto stage_it{cs.staging_outputs.find(param_name)};
         if (stage_it == cs.staging_outputs.end()) {
             continue;
         }
@@ -546,18 +578,65 @@ void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
         std::size_t bytes{out_shape.bytes()};
 
         // Slice a batched output down to the requested batch.
-        if (dyn.active && dyn.target_batch > dyn.requested_batch &&
+        const bool batch_sliced{dyn.active && dyn.target_batch > dyn.requested_batch &&
             !ort_shape.empty() &&
-            static_cast<std::size_t>(ort_shape.front()) == dyn.target_batch)
+            static_cast<std::size_t>(ort_shape.front()) == dyn.target_batch};
+        if (batch_sliced)
         {
             const std::size_t row_bytes{bytes / dyn.target_batch};
             ort_shape.front() = static_cast<std::int64_t>(dyn.requested_batch);
             bytes = row_bytes * dyn.requested_batch;
         }
 
-        auto output_tensor{ctx.GetOutput(oi, ort_shape.data(), ort_shape.size())};
+        // Slice a named seq output (e.g. logits) down to the real token length on
+        // its token axis.  The padded (target_len) rows are contiguous per outer
+        // slice, so for a single outer slice this is one prefix copy of real_len
+        // rows; the general path copies each outer slice's real-token prefix.
+        // Mutually exclusive with batch-slicing: element_size below is derived from
+        // the (batch-shrunk) `bytes`, so the two must not both apply to one output.
+        int seq_axis{-1};
+        if (seq.active && seq.output_axes_by_index != nullptr && seq.target_len > seq.real_len &&
+            !batch_sliced) {
+            if (const auto it{seq.output_axes_by_index->find(oi)}; it != seq.output_axes_by_index->end()) {
+                const int axis{it->second};
+                if (axis >= 0 && static_cast<std::size_t>(axis) < ort_shape.size() &&
+                    static_cast<std::size_t>(ort_shape[axis]) == seq.target_len) {
+                    seq_axis = axis;
+                }
+            }
+        }
+
+        auto output_tensor{[&]() {
+            if (seq_axis < 0) {
+                return ctx.GetOutput(oi, ort_shape.data(), ort_shape.size());
+            }
+            // Report the sliced (real_len) shape to ORT.
+            std::vector<std::int64_t> real_shape{ort_shape};
+            real_shape[seq_axis] = static_cast<std::int64_t>(seq.real_len);
+            return ctx.GetOutput(oi, real_shape.data(), real_shape.size());
+        }()};
         void* dst{output_tensor.GetTensorMutableRawData()};
-        if (bytes > 0) {
+
+        if (seq_axis >= 0) {
+            // Per outer slice, copy the first real_len rows (inner_count elems each).
+            std::size_t outer{1};
+            for (int a{0}; a < seq_axis; ++a) outer *= static_cast<std::size_t>(ort_shape[a]);
+            std::size_t inner{1};
+            for (std::size_t a{static_cast<std::size_t>(seq_axis) + 1}; a < ort_shape.size(); ++a)
+                inner *= static_cast<std::size_t>(ort_shape[a]);
+            const std::size_t total_elems{ProductOf({lengths.begin(), lengths.end()})};
+            const std::size_t element_size{total_elems > 0 ? bytes / total_elems : 0};
+            const std::size_t src_slice_bytes{seq.target_len * inner * element_size};
+            const std::size_t dst_slice_bytes{seq.real_len * inner * element_size};
+            for (std::size_t o{0}; o < outer; ++o) {
+                if (dst_slice_bytes > 0) {
+                    HIP_CALL_THROW(hipMemcpyAsync(
+                        static_cast<char*>(dst) + o * dst_slice_bytes,
+                        static_cast<const char*>(stage.data) + o * src_slice_bytes,
+                        dst_slice_bytes, hipMemcpyDefault, stream));
+                }
+            }
+        } else if (bytes > 0) {
             HIP_CALL_THROW(hipMemcpyAsync(dst, stage.data, bytes, hipMemcpyDefault, stream));
         }
     }
