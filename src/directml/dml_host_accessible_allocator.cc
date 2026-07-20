@@ -88,6 +88,7 @@ void DmlHostAccessibleAllocator::FreeImpl(void* cpu_ptr)
 
 ID3D12Resource* DmlHostAccessibleAllocator::TryGetResource(void* cpu_ptr) const
 {
+    // Exact-match only: assumes callers bind the Alloc() base pointer, not a base+offset sub-view.
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_allocations.find(cpu_ptr);
     if (it == m_allocations.end()) {

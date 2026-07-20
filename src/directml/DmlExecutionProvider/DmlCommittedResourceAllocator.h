@@ -12,9 +12,7 @@ namespace dml_ep {
     class DmlCommittedResourceAllocator : public DmlSubAllocator
     {
     public:
-        // Defaults to DEFAULT heap (GPU-exclusive VRAM). Pass CUSTOM/L0/WRITE_COMBINE heap props for
-        // CPU-writable, GPU-readable buffers (host-accessible decode inputs) — works WITHOUT ReBAR,
-        // unlike GPU_UPLOAD. Read cost for KB-sized inputs measured ~= VRAM (dmlmembench).
+        // Defaults to DEFAULT heap (VRAM). Pass CUSTOM/L0 heap props for host-accessible buffers.
         DmlCommittedResourceAllocator(ID3D12Device* device,
                                       D3D12_HEAP_PROPERTIES heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT))
             : m_device(device), m_heapProps(heapProps) {}

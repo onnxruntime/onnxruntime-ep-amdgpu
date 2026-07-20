@@ -354,12 +354,9 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateAllocatorImpl(OrtEpFactory* this_
                                                               OrtAllocator** allocator) noexcept {
     auto& factory = *static_cast<ProviderFactory*>(this_ptr);
 
-    // HOST_ACCESSIBLE (decode inputs): return the EP-owned host-accessible allocator (CUSTOM/L0,
-    // persistently mapped) so the umbrella path allocates a CPU-writable pointer backed by a real
-    // D3D12 resource that DecodeResource can map for binding. Without this the umbrella would get a
-    // CpuAllocator (plain malloc) with no resource -> DecodeResource fails -> E_INVALIDARG at bind.
-    // The EP is created before ORT drives allocation (CreateEp precedes CreateAllocator), so
-    // m_ep_raw is valid here. DEFAULT keeps the CpuAllocator passthrough (unchanged).
+    // HOST_ACCESSIBLE: serve the EP-owned host-accessible allocator (a CpuAllocator stub would have
+    // no D3D12 resource to bind). m_ep_raw is valid here (CreateEp precedes CreateAllocator).
+    // DEFAULT keeps the CpuAllocator passthrough (unchanged).
     if (factory.ort_api.MemoryInfoGetDeviceMemType(memory_info) == OrtDeviceMemoryType_HOST_ACCESSIBLE &&
         factory.m_ep_raw != nullptr) {
         if (auto internal = factory.m_ep_raw->GetInternalExecutionProvider()) {

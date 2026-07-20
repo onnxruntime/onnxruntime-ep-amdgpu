@@ -223,10 +223,7 @@ namespace dml_ep {
         std::unique_ptr<PluginDmlReadbackHeap> m_readbackHeap;
         std::shared_ptr<DmlBucketizedBufferAllocator> m_allocator;
         std::shared_ptr<CpuAllocator> m_cpuInputAllocator;
-        // Host-accessible (CPU-writable, GPU-readable via CUSTOM/L0/WRITE_COMBINE system memory)
-        // allocator for decode inputs. Works without ReBAR (unlike GPU_UPLOAD). Non-pooled, persistent
-        // Map; Alloc returns a CPU pointer that decodes back to its resource via TryGetResource.
-        // Read cost for KB-sized inputs measured ~= VRAM (dmlmembench). See CreatePreferredAllocators.
+        // Host-accessible (CPU-writable) allocator for decode inputs; null when unsupported.
         std::shared_ptr<DmlHostAccessibleAllocator> m_hostAccessibleAllocator;
         bool m_hostAccessibleSupported = false;
         std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;

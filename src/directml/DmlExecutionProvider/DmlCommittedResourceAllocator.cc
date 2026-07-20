@@ -12,9 +12,7 @@ namespace dml_ep {
     {
         Microsoft::WRL::ComPtr<ID3D12Resource> resource;
         auto buffer = CD3DX12_RESOURCE_DESC::Buffer(size, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-        // Buffers may be created in COMMON on any heap type (incl. CUSTOM/L0); they auto-promote to
-        // the state the first GPU op needs. CUSTOM/L0/WRITE_COMBINE yields a CPU-writable,
-        // system-memory buffer the GPU reads without ReBAR.
+        // COMMON is valid on any heap type (incl. CUSTOM/L0) and auto-promotes on first GPU use.
         ORT_THROW_IF_FAILED(m_device->CreateCommittedResource(
             &m_heapProps,
             D3D12_HEAP_FLAG_NONE,

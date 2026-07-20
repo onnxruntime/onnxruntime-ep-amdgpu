@@ -16,6 +16,9 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
     if (m_gpuMemInfo != nullptr) {
         ort_api.ReleaseMemoryInfo(m_gpuMemInfo);
     }
+    if (m_hostAccessibleMemInfo != nullptr) {
+        ort_api.ReleaseMemoryInfo(m_hostAccessibleMemInfo);
+    }
 }
 
     void PluginDmlExecutionProviderImpl::Close()
