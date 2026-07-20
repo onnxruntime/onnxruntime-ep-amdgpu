@@ -9,6 +9,7 @@
 #include "dml_readback_heap.h"
 #include "dml_pooled_upload_heap.h"
 #include "dml_bucketized_buffer_allocator.h"
+#include "dml_host_accessible_allocator.h"
 #include "dml_common.h"
 #include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
 #include "DmlExecutionProvider/IExecutionProvider.h"
@@ -169,6 +170,8 @@ namespace dml_ep {
         bool CpuSyncSpinningEnabled() const noexcept;
         std::shared_ptr<OrtAllocator> GetGpuAllocator();
         std::shared_ptr<OrtAllocator> GetCpuInputAllocator();
+        // Host-accessible (CPU-writable, CUSTOM/L0 system-memory) allocator for decode inputs.
+        std::shared_ptr<OrtAllocator> GetHostAccessibleAllocator();
 
         std::shared_ptr<const InternalRegistrationInfoMap>
         GetInternalRegistrationInfoMap() const;
@@ -220,6 +223,12 @@ namespace dml_ep {
         std::unique_ptr<PluginDmlReadbackHeap> m_readbackHeap;
         std::shared_ptr<DmlBucketizedBufferAllocator> m_allocator;
         std::shared_ptr<CpuAllocator> m_cpuInputAllocator;
+        // Host-accessible (CPU-writable, GPU-readable via CUSTOM/L0/WRITE_COMBINE system memory)
+        // allocator for decode inputs. Works without ReBAR (unlike GPU_UPLOAD). Non-pooled, persistent
+        // Map; Alloc returns a CPU pointer that decodes back to its resource via TryGetResource.
+        // Read cost for KB-sized inputs measured ~= VRAM (dmlmembench). See CreatePreferredAllocators.
+        std::shared_ptr<DmlHostAccessibleAllocator> m_hostAccessibleAllocator;
+        bool m_hostAccessibleSupported = false;
         std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;
         std::shared_ptr<const InternalRegistrationInfoMap> m_internalRegInfoMap;
         mutable uint64_t m_partitionKernelPrefixVal = 0;
@@ -228,6 +237,7 @@ namespace dml_ep {
 
         static constexpr std::chrono::milliseconds m_batchFlushInterval = std::chrono::milliseconds(10);
         OrtMemoryInfo* m_gpuMemInfo{};
+        OrtMemoryInfo* m_hostAccessibleMemInfo{};
     };
 
 }  // namespace dml_ep

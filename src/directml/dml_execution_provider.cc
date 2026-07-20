@@ -58,6 +58,14 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
     {
         ORT_TRY
         {
+            // Host-accessible decode inputs return a mapped CPU pointer from Alloc (not an allocInfo
+            // handle). Check that allocator first; if it owns the pointer, return its resource. Else
+            // fall through to the DEFAULT allocator's handle decode (unchanged behavior).
+            if (m_hostAccessibleAllocator) {
+                if (ID3D12Resource* res = m_hostAccessibleAllocator->TryGetResource(allocation)) {
+                    return res;
+                }
+            }
             const PluginDmlAllocationInfo* allocInfo = m_allocator->DecodeDataHandle(allocation);
             return allocInfo->GetResource();
         }
@@ -150,6 +158,29 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
         THROW_IF_ERROR(ort_api.CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeCPU, &m_cpuMemInfo));
         THROW_IF_ERROR(ort_api.CreateMemoryInfo_V2("GPU", OrtMemoryInfoDeviceType_GPU, amd::VendorId,
             0, OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator, &m_gpuMemInfo));
+
+        // CUSTOM/L0/WRITE_COMBINE heaps (CPU-writable, GPU-readable, system-memory) let decode inputs
+        // be updated by the CPU in place and read by the GPU with no per-step copy — and, unlike
+        // GPU_UPLOAD, need NO ReBAR. Capability is checked empirically (plain CUSTOM/L0 works even
+        // when OPTIONS19 ComputeOnlyCustomHeapSupported=0) by trying a tiny allocation.
+        {
+            D3D12_HEAP_PROPERTIES hp{};
+            hp.Type = D3D12_HEAP_TYPE_CUSTOM;
+            hp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+            hp.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+            hp.CreationNodeMask = 1;
+            hp.VisibleNodeMask = 1;
+            auto probeBuf = CD3DX12_RESOURCE_DESC::Buffer(256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+            Microsoft::WRL::ComPtr<ID3D12Resource> probe;
+            m_hostAccessibleSupported = SUCCEEDED(m_d3d12Device->CreateCommittedResource(
+                &hp, D3D12_HEAP_FLAG_NONE, &probeBuf, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                IID_PPV_ARGS(probe.GetAddressOf())));
+        }
+        if (m_hostAccessibleSupported) {
+            THROW_IF_ERROR(ort_api.CreateMemoryInfo_V2("GPUHostAccessible", OrtMemoryInfoDeviceType_GPU,
+                amd::VendorId, 0, OrtDeviceMemoryType_HOST_ACCESSIBLE, 0, OrtDeviceAllocator,
+                &m_hostAccessibleMemInfo));
+        }
     }
 
     std::vector<OrtAllocator*> PluginDmlExecutionProviderImpl::CreatePreferredAllocators() {
@@ -168,6 +199,24 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
                 std::make_unique<DmlCommittedResourceAllocator>(m_d3d12Device.Get()));
             m_context->SetAllocator(m_allocator);
             m_cpuInputAllocator = std::make_shared<CpuAllocator>(m_cpuMemInfo);
+
+            // Host-accessible (CUSTOM/L0/WRITE_COMBINE) allocator for decode inputs — additive, only
+            // when supported. It does NOT replace m_allocator: KV/scratch/tensors stay on the DEFAULT
+            // heap. CreateAllocatorImpl routes HOST_ACCESSIBLE requests here.
+            if (m_hostAccessibleSupported) {
+                D3D12_HEAP_PROPERTIES hostHeap{};
+                hostHeap.Type = D3D12_HEAP_TYPE_CUSTOM;
+                hostHeap.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+                hostHeap.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+                hostHeap.CreationNodeMask = 1;
+                hostHeap.VisibleNodeMask = 1;
+                // Non-pooled: Alloc persistently Map()s the CUSTOM/L0 resource and returns a CPU
+                // pointer OGA writes in place; it decodes back to the resource on bind (DecodeResource).
+                m_hostAccessibleAllocator = std::make_shared<DmlHostAccessibleAllocator>(
+                    m_hostAccessibleMemInfo,
+                    m_d3d12Device.Get(),
+                    std::make_unique<DmlCommittedResourceAllocator>(m_d3d12Device.Get(), hostHeap));
+            }
         }
 
         return std::vector<OrtAllocator*>{m_allocator.get(), m_cpuInputAllocator.get()};
@@ -892,6 +941,14 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
             return nullptr;
         }
 
+        // Host-accessible decode inputs return a mapped CPU pointer, not a bucketized allocation
+        // handle. Check that allocator first; it hands back an AddRef'd PluginDmlAllocationInfo.
+        if (m_hostAccessibleAllocator) {
+            if (IUnknown* host_alloc = m_hostAccessibleAllocator->TryGetAllocation(data_ptr)) {
+                return host_alloc;  // already AddRef'd
+            }
+        }
+
         // Use the allocator's DecodeDataHandle to get the PluginDmlAllocationInfo
         // This is safe because we're using the same allocator instance, not crossing DLL boundaries
         const PluginDmlAllocationInfo* alloc_info = m_allocator->DecodeDataHandle(data_ptr);
@@ -913,6 +970,10 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
     std::shared_ptr<OrtAllocator> PluginDmlExecutionProviderImpl::GetCpuInputAllocator()
     {
         return m_cpuInputAllocator;
+    }
+    std::shared_ptr<OrtAllocator> PluginDmlExecutionProviderImpl::GetHostAccessibleAllocator()
+    {
+        return m_hostAccessibleAllocator;  // null when CUSTOM/L0 unsupported -> caller falls back
     }
 
     Ort::Status PluginDmlExecutionProviderImpl::OnSessionInitializationEnd()
