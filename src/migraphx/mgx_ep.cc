@@ -962,6 +962,12 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     compute_state.static_pad_seq = static_pad_seq_;
     compute_state.static_pad_seq_len = static_pad_seq_len_;
     if (static_pad_seq_) {
+        // static-pad and dynamic batching both rewrite shapes; combined, the staging copies
+        // collide. Unsupported together.
+        if (max_dynamic_batch_ > 0) {
+            return Ort::Status{"static seq-padding is not supported with dynamic batching "
+                "(max_dynamic_batch > 0); disable one", ORT_EP_FAIL};
+        }
         compute_state.static_pad_input_axes = ParseNameAxisSpec(static_pad_inputs_);
         // Outputs: MIGraphX program params are named "#output_N", not their ONNX
         // names, so resolve the user's "logits:1" spec to (ORT output index -> axis)

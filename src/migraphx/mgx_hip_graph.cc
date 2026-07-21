@@ -588,12 +588,8 @@ void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
             bytes = row_bytes * dyn.requested_batch;
         }
 
-        // Slice a named seq output (e.g. logits) down to the real token length on
-        // its token axis.  The padded (target_len) rows are contiguous per outer
-        // slice, so for a single outer slice this is one prefix copy of real_len
-        // rows; the general path copies each outer slice's real-token prefix.
-        // Mutually exclusive with batch-slicing: element_size below is derived from
-        // the (batch-shrunk) `bytes`, so the two must not both apply to one output.
+        // Slice a named seq output (e.g. logits) back to real_len on its token axis.
+        // Excludes batch-slicing: element_size below uses the un-shrunk `bytes`.
         int seq_axis{-1};
         if (seq.active && seq.output_axes_by_index != nullptr && seq.target_len > seq.real_len &&
             !batch_sliced) {
@@ -694,13 +690,37 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
     const std::string& shape_hash,
     const DynamicBatchContext& dyn)
 {
-    const auto eager_run{[&]() {
-        std::lock_guard<std::mutex> lock{cs.mutex};
-        program.run_async(params, stream);
+    // Eager run + copy non-pre-bound outputs (KV present) to ORT tensors; without this the KV is
+    // lost (only the hipGraph path's MaterializeExtraOutputs copies them).
+    const auto eager_run_with_extras{[&]() {
+        std::optional<migraphx::arguments> outputs;
+        {
+            std::lock_guard<std::mutex> lock{cs.mutex};
+            outputs = program.run_async(params, stream);
+        }
+        if (!outputs) {
+            return;
+        }
+        const std::unordered_set<std::size_t> pre_bound{
+            prog_output_indices.begin(), prog_output_indices.end()};
+        for (std::size_t i{0}; i < outputs->size(); ++i) {
+            if (pre_bound.count(i) > 0) {
+                continue;
+            }
+            const auto out{(*outputs)[i]};
+            const auto shape{out.get_shape()};
+            const auto lens{shape.lengths()};
+            std::vector<std::int64_t> ort_shape{lens.begin(), lens.end()};
+            auto dst{ctx.GetOutput(i, ort_shape.data(), ort_shape.size())};
+            if (shape.bytes() > 0) {
+                HIP_CALL_THROW(hipMemcpyWithStream(dst.GetTensorMutableRawData(), out.data(),
+                    shape.bytes(), hipMemcpyDeviceToDevice, stream));
+            }
+        }
     }};
 
     if (!cs.hip_graph_enable) {
-        eager_run();
+        eager_run_with_extras();
         return;
     }
 
@@ -728,7 +748,7 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
     }
 
     if (!WarmupAndCaptureHipGraph(cs, stream, program, params, prog_output_indices, shape_hash)) {
-        eager_run();
+        eager_run_with_extras();
         return;
     }
     MaterializeExtraOutputs(ctx, stream, cs.hip_graph_cache.at(shape_hash).extra_outputs, dyn);

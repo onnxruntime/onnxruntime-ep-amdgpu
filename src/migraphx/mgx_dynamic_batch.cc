@@ -51,18 +51,21 @@ std::unordered_map<std::string, int> ParseNameAxisSpec(std::string_view spec) {
         if (token.empty()) {
             continue;
         }
+        // Trim surrounding whitespace so "a:1, b: 1" parses cleanly instead of silently
+        // dropping entries on a mismatched name (" b") or unparseable axis (" 1").
+        const auto trim{[](std::string s) {
+            const auto b{s.find_first_not_of(" \t\r\n")};
+            if (b == std::string::npos) return std::string{};
+            return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
+        }};
         const auto colon{token.find(':')};
-        std::string name{colon == std::string::npos ? token : token.substr(0, colon)};
-        // Trim surrounding whitespace so "a:1, b:1" parses "b", not " b" (which would
-        // silently never match a parameter name and drop the entry).
-        const auto ws_begin{name.find_first_not_of(" \t\r\n")};
-        if (ws_begin == std::string::npos) {
+        std::string name{trim(colon == std::string::npos ? token : token.substr(0, colon))};
+        if (name.empty()) {
             continue;
         }
-        name = name.substr(ws_begin, name.find_last_not_of(" \t\r\n") - ws_begin + 1);
         int axis{1};  // default token axis
         if (colon != std::string::npos) {
-            const std::string axis_str{token.substr(colon + 1)};
+            const std::string axis_str{trim(token.substr(colon + 1))};
             std::size_t parsed{};
             const auto* begin{axis_str.data()};
             const auto* end{axis_str.data() + axis_str.size()};
