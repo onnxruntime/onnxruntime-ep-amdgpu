@@ -38,6 +38,7 @@ struct ProviderInfo {
     std::size_t max_dynamic_batch{};
     std::string compile_batches{};
     bool coalesce_io{};
+    bool cpu_control_flow{};
 
     ProviderInfo() = default;
 

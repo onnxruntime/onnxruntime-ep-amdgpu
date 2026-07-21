@@ -18,6 +18,8 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
 
     Ort::Status GetKernelRegistry(std::string_view ep_name, const OrtKernelRegistry*& kernel_registry) const;
 
+    void EnableCpuControlFlow() const { cpu_control_flow_ = true; }
+
 private:
     [[nodiscard]] const char* GetName() const;
     [[nodiscard]] const char* GetVendor() const;
@@ -75,6 +77,9 @@ private:
     AllocatorMap<hip::Allocator> gpu_allocators_;
 
     std::unique_ptr<hip::DataTransfer> data_transfer_;
+
+    // Set when any session enables cpu_control_flow (see ExecutionProvider ctor).
+    mutable bool cpu_control_flow_{false};
 };
 
 }  // namespace mgx_ep

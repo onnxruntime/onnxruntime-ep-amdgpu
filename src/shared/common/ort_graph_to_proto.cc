@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <algorithm>
+#include <set>
 #include <string>
 #include <string_view>
 #include <map>
@@ -300,6 +301,26 @@ try {
                 node_proto->add_output("");
             }
         }
+    }
+
+    // Promote outer-scope branch feeds to graph inputs for MIGraphX compile.
+    std::set<std::string> declared_inputs;
+    for (const auto& value_info : GetValueInfos(graph_inputs)) {
+        declared_inputs.insert(value_info.GetName());
+    }
+    for (const auto& [name, value_info] : value_infos) {
+        if (!value_info.IsFromOuterScope()) {
+            continue;
+        }
+        if (declared_inputs.count(name) != 0) {
+            continue;
+        }
+        if (initializer_value_infos.count(name) != 0) {
+            continue;
+        }
+        auto value_info_proto{graph_proto.mutable_input()->Add()};
+        ValueInfoToProto(value_info, *value_info_proto);
+        declared_inputs.insert(name);
     }
 
     // Add value_infos to GraphProto as ValueInfoProto objects.

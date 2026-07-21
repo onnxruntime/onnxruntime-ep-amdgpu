@@ -40,7 +40,8 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kForceRecompile, force_recompile)
             .AddAssignmentToReference(provider_option::kExhaustiveTune, exhaustive_tune)
             .AddAssignmentToReference(provider_option::kMlssUseSpecificOps, mlss_use_specific_ops)
+            .AddAssignmentToReference(provider_option::kCpuControlFlow, cpu_control_flow)
             .Parse(provider_options));
 }
 
-}  // namespace mgx_ep
+}  // namespace gpu_ep

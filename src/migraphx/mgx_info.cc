@@ -75,6 +75,7 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kMaxDynamicBatch, max_dynamic_batch)
             .AddAssignmentToReference(provider_option::kCoalesceIO, coalesce_io)
             .AddAssignmentToReference(provider_option::kMlssUseSpecificOps, mlss_use_specific_ops)
+            .AddAssignmentToReference(provider_option::kCpuControlFlow, cpu_control_flow)
             .Parse(provider_options));
 }
 

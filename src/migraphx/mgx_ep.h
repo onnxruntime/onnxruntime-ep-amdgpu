@@ -42,6 +42,8 @@ constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
 constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
 constexpr auto kCoalesceIO = "ORT_MIGRAPHX_COALESCE_IO"sv;
 constexpr auto kMlssUseSpecificOps = "ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS"sv;
+// When set, If/Loop/Scan (+ bool condition ops) run on CPU; MIGraphX compiles the rest.
+constexpr auto kCpuControlFlow = "ORT_MIGRAPHX_CPU_CONTROL_FLOW"sv;
 }  // namespace env_vars
 
 // EP-owned device staging buffer (pointer-stable across runs so it can be
@@ -149,6 +151,8 @@ struct ComputeState {
     Map<ScratchBuffer> scratch_bufs{};
     // Captured graphs keyed by shape hash.
     Map<CapturedHipGraph> hip_graph_cache{};
+    // Host inputs (e.g. scalar alpha) staged to device before run_async.
+    Map<StagingBuffer> cpu_input_upload_bufs{};
 };
 
 struct EpContextComputeState {
@@ -253,6 +257,7 @@ private:
     std::size_t max_dynamic_batch_{};
     std::string compile_batches_{};
     bool coalesce_io_enable_{};
+    bool cpu_control_flow_enable_{};
 
     std::mutex mutex_{};
 };
