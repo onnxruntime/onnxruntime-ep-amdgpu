@@ -226,7 +226,6 @@ private:
     Map<EpContextComputeState> ep_context_compute_states_;
     Map<ComputeState> compute_states_;
 
-    hipStream_t stream_{};
     hipDeviceProp_t device_prop_{};
 
     int device_id_{};

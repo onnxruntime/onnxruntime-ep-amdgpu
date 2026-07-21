@@ -1051,17 +1051,15 @@ try {
     return Ort::Status{e.what(), ORT_EP_FAIL};
 }
 
-Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* /* run_options */, bool /* sync_stream */) noexcept
-try {
-    HIP_RETURN_IF_ERROR(hipSetDevice(device_id_));
-    if (const auto status{hipStreamQuery(stream_)}; status != hipSuccess) {
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(stream_));
-    }
+Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* /* run_options */, bool /* sync_stream */) noexcept {
+    // Nothing to synchronize here.  Compute runs on ORT's per-run device stream
+    // (created in CreateSyncStreamForDevice and handed to the kernel via
+    // GetGPUComputeStream()), and ORT flushes that stream at run end through
+    // DeviceStreamCollection::CleanUp -> SyncStream::Flush, honoring the run's
+    // sync_stream setting.  The previous implementation synchronized the EP's
+    // default stream, which never carried any compute work, so it was both
+    // incorrect and a redundant CPU/GPU serialization point.
     return STATUS_OK;
-} catch (const Ort::Exception& e) {
-    return Ort::Status{e};
-} catch (const std::exception& e) {
-    return Ort::Status{e.what(), ORT_EP_FAIL};
 }
 
 Ort::Status ExecutionProvider::CreateSyncStreamForDevice(const OrtMemoryDevice* memory_device, OrtSyncStreamImpl** stream)
@@ -1274,7 +1272,11 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
             bind.params, bind.prog_output_indices, shape_hash, dyn);
         CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn);
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        // No per-Compute sync: all work above is enqueued on ORT's compute stream,
+        // which ORT flushes at run end (DeviceStreamCollection::CleanUp ->
+        // SyncStream::Flush) honoring the run's sync_stream setting.  Cross-stream
+        // consumers are ordered via ORT notifications.  Syncing here would only
+        // serialize CPU/GPU and defeat that overlap.
         return STATUS_OK;
     }
 
@@ -1323,7 +1325,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        // Enqueue only; ORT flushes the compute stream at run end (see OnRunEnd).
 
         if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
             for (size_t i{}; i < output_size; ++i) {
@@ -1339,7 +1341,6 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 HIP_CALL_THROW(hipMemcpyWithStream(output_data, gpu_resource.data(), resource_shape.bytes(),
                     hipMemcpyDeviceToDevice, hip_stream));
             }
-            HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
         }
     }
     return STATUS_OK;
@@ -1412,7 +1413,7 @@ try {
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        // Enqueue only; ORT flushes the compute stream at run end (see OnRunEnd).
 
         if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
             for (size_t i{}; i < output_size; ++i) {
@@ -1428,7 +1429,6 @@ try {
                 HIP_CALL_THROW(hipMemcpyWithStream(output_data, gpu_resource.data(), resource_shape.bytes(),
                     hipMemcpyDeviceToDevice, hip_stream));
             }
-            HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
         }
     }
     return STATUS_OK;
