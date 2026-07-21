@@ -15,20 +15,13 @@
 #include <algorithm>
 #include <numeric>
 #include <unordered_set>
-#include <fstream>
 #include "dml_perf_timer.h"
 
 namespace dml_ep {
 
-// Unconditional log to dml_perf.log — bypasses DML_PERF_LOG macro guard so
-// diagnostic messages appear regardless of DML_PERF_PROFILE build flag.
-static void DiagLog(std::string_view msg) noexcept {
+static void DiagLog([[maybe_unused]] std::string_view msg) noexcept {
 #ifdef DML_PERF_PROFILE
     DmlPerfWriteLogImpl(msg);
-#else
-    static std::ofstream s_log("dml_perf.log", std::ios::app);
-    s_log << msg;
-    s_log.flush();
 #endif
 }
 
@@ -1430,6 +1423,25 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     if (compiled_nodes.size() >= kMinNodeCountForDescriptorsVolatile)
         exec_flags |= DML_EXECUTION_FLAG_DESCRIPTORS_VOLATILE;
 
+    // Match ORT's DmlOperator::GetExecutionFlags(): allow half precision when all
+    // tensors in the graph are fp16 (no fp32).  This enables metacommand fast-paths
+    // on hardware that supports them.
+    {
+        bool has_fp16 = false, has_fp32 = false;
+        for (size_t i = 0; i < compiled_nodes.size(); ++i) {
+            if (!node_is_live[i]) continue;
+            const auto& cn = compiled_nodes[i];
+            for (const auto& t : cn.translated->input_tensors)
+                if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT16) has_fp16 = true;
+                else if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT32) has_fp32 = true;
+            for (const auto& t : cn.translated->output_tensors)
+                if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT16) has_fp16 = true;
+                else if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT32) has_fp32 = true;
+        }
+        if (has_fp16 && !has_fp32)
+            exec_flags |= DML_EXECUTION_FLAG_ALLOW_HALF_PRECISION_COMPUTATION;
+    }
+
     DML_PERF_LOG("[Compile] CompileGraph: nodes=", graph_desc.NodeCount,
         " inputs=", graph_desc.InputCount,
         " outputs=", graph_desc.OutputCount,
@@ -2067,6 +2079,19 @@ bool FullGraphFusion::TryCompilePartition(
 
     DML_EXECUTION_FLAGS flags = compiled_nodes.size()>=5
         ? DML_EXECUTION_FLAG_DESCRIPTORS_VOLATILE : DML_EXECUTION_FLAG_NONE;
+    {
+        bool has_fp16 = false, has_fp32 = false;
+        for (const auto& cn : compiled_nodes) {
+            for (const auto& t : cn.translated->input_tensors)
+                if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT16) has_fp16 = true;
+                else if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT32) has_fp32 = true;
+            for (const auto& t : cn.translated->output_tensors)
+                if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT16) has_fp16 = true;
+                else if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT32) has_fp32 = true;
+        }
+        if (has_fp16 && !has_fp32)
+            flags |= DML_EXECUTION_FLAG_ALLOW_HALF_PRECISION_COMPUTATION;
+    }
     ComPtr<IDMLCompiledOperator> op;
     HRESULT hr = dml_device1->CompileGraph(&gd, flags, IID_PPV_ARGS(op.GetAddressOf()));
     if (FAILED(hr)) {
@@ -2097,6 +2122,7 @@ bool FullGraphFusion::TryCompilePartition(
                     " — DML debug layer not active\n");
             }
         }
+
         return false;
     }
     return true;
