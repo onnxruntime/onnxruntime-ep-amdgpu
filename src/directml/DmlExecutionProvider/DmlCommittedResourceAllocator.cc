@@ -12,8 +12,9 @@ namespace dml_ep {
     {
         Microsoft::WRL::ComPtr<ID3D12Resource> resource;
         auto buffer = CD3DX12_RESOURCE_DESC::Buffer(size, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        // COMMON is valid on any heap type (incl. CUSTOM/L0) and auto-promotes on first GPU use.
         ORT_THROW_IF_FAILED(m_device->CreateCommittedResource(
-            unmove_ptr(CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT)),
+            &m_heapProps,
             D3D12_HEAP_FLAG_NONE,
             &buffer,
             D3D12_RESOURCE_STATE_COMMON,
