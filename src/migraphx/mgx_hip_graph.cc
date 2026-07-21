@@ -590,6 +590,9 @@ void FreeStaging(ComputeState& cs) {
     cs.staging_inputs.clear();
     cs.staging_outputs.clear();
     cs.staging_allocated = false;
+    // Cached bindings reference the staging buffers just freed; drop them so they
+    // are rebuilt against the next allocation.
+    cs.staging_bind_cache.clear();
 }
 
 void DestroyHipGraphs(ComputeState& cs) {

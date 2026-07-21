@@ -1140,7 +1140,24 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         return shape;
     }};
 
-    if (!compute_state.has_input_shapes) {
+    // Item 4: gather the actual input shapes once.  If they are identical to the
+    // previous call we can skip both the shape-compare loop and the rehash loop:
+    // identical actual shapes imply an identical effective shape, dyn bucket, and
+    // hash, and (since the program was already compiled for them last time) a match.
+    std::vector<std::int64_t> current_input_shapes;
+    current_input_shapes.reserve(input_name_indices.size() * 4);
+    for (const auto& [name, index] : input_name_indices) {
+        const auto shape{kernel_context.GetInput(index).GetTensorTypeAndShapeInfo().GetShape()};
+        current_input_shapes.insert(current_input_shapes.end(), shape.begin(), shape.end());
+    }
+    const bool shapes_unchanged{compute_state.has_last_input_shapes &&
+                                current_input_shapes == compute_state.last_input_shapes};
+
+    if (shapes_unchanged) {
+        input_shapes_hash = compute_state.last_input_shapes_hash;
+        input_shapes_match = true;
+        param_shapes = program.get_parameter_shapes();
+    } else if (!compute_state.has_input_shapes) {
         for (auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
             auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape())};
@@ -1255,8 +1272,20 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             if (dyn.active) {
                 compute_state.cached_programs.emplace(current_hash, program);
             }
+            // The program for this hash was (re)built, so any binding cached
+            // against the previous program for the same hash is stale.
+            compute_state.staging_bind_cache.erase(current_hash);
         }
         param_shapes = program.get_parameter_shapes();
+    }
+
+    // Item 4: remember these shapes so the next identical call takes the fast path.
+    // Set only after the (possible) recompile above, so the recorded hash always
+    // corresponds to a program that is compiled and ready for these shapes.
+    if (!shapes_unchanged) {
+        compute_state.last_input_shapes = std::move(current_input_shapes);
+        compute_state.last_input_shapes_hash = input_shapes_hash;
+        compute_state.has_last_input_shapes = true;
     }
 
     // Staging path: required for hipGraph capture (pointer stability) and for
@@ -1268,7 +1297,17 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
         CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn);
-        auto bind{BindStagingParams(compute_state, param_shapes, shape_hash, hip_stream)};
+        // Item 3: reuse a cached binding for this shape hash.  Staging buffers and
+        // scratch are pointer-stable until FreeStaging, so binding once and replaying
+        // avoids re-doing N program_parameters.add() calls, string work, and a
+        // scratch lookup on every inference.
+        auto bind_it{compute_state.staging_bind_cache.find(shape_hash)};
+        if (bind_it == compute_state.staging_bind_cache.end()) {
+            bind_it = compute_state.staging_bind_cache.emplace(
+                shape_hash,
+                BindStagingParams(compute_state, param_shapes, shape_hash, hip_stream)).first;
+        }
+        auto& bind{bind_it->second};
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
             bind.params, bind.prog_output_indices, shape_hash, dyn);
         CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn);
