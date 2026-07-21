@@ -1557,12 +1557,23 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CreateAllocatorImpl(_In_ OrtEp*
     if (is_cpu_input_allocator) {
         *allocator = allocators[1];
         return nullptr;
-    } else {
-        // is gpu allocator
-        *allocator = allocators[0];
-        return nullptr;
     }
 
+    // GPU request. Distinguish DEFAULT (VRAM, GPU-exclusive) from HOST_ACCESSIBLE (CPU-writable):
+    // both report DeviceType_GPU, so branch on the memory type. A HOST_ACCESSIBLE request gets the
+    // CUSTOM/L0-backed allocator when supported, so OGA can update decode inputs in place with no
+    // per-step copy. If it is unsupported the host-accessible allocator is null; fall back to the
+    // DEFAULT allocator (today's copy path) rather than silently mis-serve it.
+    OrtDeviceMemoryType mem_type = impl.ort_api.MemoryInfoGetDeviceMemType(memory_info);
+    if (mem_type == OrtDeviceMemoryType_HOST_ACCESSIBLE) {
+        if (auto host_alloc = impl.m_executionProvider.get()->GetHostAccessibleAllocator()) {
+            *allocator = host_alloc.get();
+            return nullptr;
+        }
+    }
+
+    // is gpu allocator (DEFAULT, or host-accessible fallback)
+    *allocator = allocators[0];
     return nullptr;
 }
 

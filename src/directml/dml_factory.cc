@@ -354,6 +354,19 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateAllocatorImpl(OrtEpFactory* this_
                                                               OrtAllocator** allocator) noexcept {
     auto& factory = *static_cast<ProviderFactory*>(this_ptr);
 
+    // HOST_ACCESSIBLE: serve the EP-owned host-accessible allocator (a CpuAllocator stub would have
+    // no D3D12 resource to bind). m_ep_raw is valid here (CreateEp precedes CreateAllocator).
+    // DEFAULT keeps the CpuAllocator passthrough (unchanged).
+    if (factory.ort_api.MemoryInfoGetDeviceMemType(memory_info) == OrtDeviceMemoryType_HOST_ACCESSIBLE &&
+        factory.m_ep_raw != nullptr) {
+        if (auto internal = factory.m_ep_raw->GetInternalExecutionProvider()) {
+            if (auto host_alloc = internal->GetHostAccessibleAllocator()) {
+                *allocator = host_alloc.get();
+                return nullptr;
+            }
+        }
+    }
+
     // Return a passthrough allocator that wraps the memory_info. The real per-session
     // GPU allocator (DmlBucketizedBufferAllocator) is created by the EP-level
     // OrtEp::CreateAllocator in ExecutionProviderPlugin::CreateAllocatorImpl.
