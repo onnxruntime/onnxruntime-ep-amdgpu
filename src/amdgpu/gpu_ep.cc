@@ -162,6 +162,31 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 get_name(mgx_ep::provider_option::kModelArch).c_str(),
                 info.model_arch.value().c_str()));
         }
+        // Relay static seq-padding options to the backend, which implements pad/slice.
+        if (info.static_pad_seq.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kStaticPadSeq).c_str(),
+                info.static_pad_seq.value().c_str()));
+        }
+        if (info.static_pad_seq_len.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kStaticPadSeqLen).c_str(),
+                info.static_pad_seq_len.value().c_str()));
+        }
+        if (info.static_pad_inputs.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kStaticPadInputs).c_str(),
+                info.static_pad_inputs.value().c_str()));
+        }
+        if (info.static_pad_outputs.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kStaticPadOutputs).c_str(),
+                info.static_pad_outputs.value().c_str()));
+        }
         THROW_IF_ERROR(factory.CreateMIGraphXBackend(local_session_options, logger, backend_ep_));
     };
 
