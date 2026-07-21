@@ -174,18 +174,19 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     } else {
         create_migraphx_backend();
     }
+    // Capture per-EP now: the shared factory_ backend field is overwritten by a later
+    // umbrella EP (different backend). See PR for the cross-backend UAF details.
+    backend_ep_factory_ = factory_.GetBackendFactory();
     ort_api.ReleaseSessionOptions(local_session_options);
 }
 
 ExecutionProvider::~ExecutionProvider() {
-    // Release the backend EP through the backend factory that created it.
-    // This frees all session-scoped resources: GPU allocator, D3D12/DML devices,
-    // execution context, upload/readback heaps, and kernel registry.
-    // Without this, each session leaks the entire directml EP chain.
+    // Release backend_ep_ via the factory that created THIS EP (backend_ep_factory_), not the
+    // shared factory_ field. Frees all session-scoped resources (allocator, D3D12/DML devices,
+    // execution context, heaps, kernel registry).
     if (backend_ep_ != nullptr) {
-        const auto backend_factory = factory_.GetBackendFactory();
-        if (backend_factory != nullptr && backend_factory->ReleaseEp != nullptr) {
-            backend_factory->ReleaseEp(backend_factory, backend_ep_);
+        if (backend_ep_factory_ != nullptr && backend_ep_factory_->ReleaseEp != nullptr) {
+            backend_ep_factory_->ReleaseEp(backend_ep_factory_, backend_ep_);
         }
         backend_ep_ = nullptr;
     }
