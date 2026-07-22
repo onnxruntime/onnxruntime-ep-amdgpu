@@ -4542,37 +4542,39 @@ static std::optional<TranslatedOp> TranslateQLinearMatMul(
     };
     auto storage = std::make_shared<QLMMStorage>();
 
+    // DML schema: ATensor(0), AScaleTensor(1), AZeroPointTensor(2),
+    //   BTensor(3), BScaleTensor(4), BZeroPointTensor(5),
+    //   OutputScaleTensor(6), OutputZeroPointTensor(7).
     TranslatedOp result;
-    // Build input_tensors in DML schema order, skipping absent optional inputs.
-    // input_name_reorder maps each DML slot to the ONNX input index.
-    auto push_input = [&](const DmlTensorInfo& t, size_t onnx_idx) {
+    auto push_input = [&](const DmlTensorInfo& t, size_t onnx_idx, size_t dml_slot) {
         result.input_tensors.push_back(t);
         result.input_buffer_descs.push_back(t.ToBufferDesc());
         result.input_name_reorder.push_back(onnx_idx);
+        result.dml_input_slot_indices.push_back(dml_slot);
     };
 
-    push_input(a_tensor, 0);        // A
-    push_input(a_scale_tensor, 1);  // A_scale
+    push_input(a_tensor, 0, 0);        // A
+    push_input(a_scale_tensor, 1, 1);  // A_scale
     DmlTensorInfo a_zp_tensor{};
     if (has_a_zp) {
         a_zp_tensor = MakeTensorInfo(LookupShape(value_shapes, inputs[2])->sizes,
                                      LookupShape(value_shapes, inputs[2])->data_type);
-        push_input(a_zp_tensor, 2); // A_zp
+        push_input(a_zp_tensor, 2, 2); // A_zp
     }
-    push_input(b_tensor, 3);        // B
-    push_input(b_scale_tensor, 4);  // B_scale
+    push_input(b_tensor, 3, 3);        // B
+    push_input(b_scale_tensor, 4, 4);  // B_scale
     DmlTensorInfo b_zp_tensor{};
     if (has_b_zp) {
         b_zp_tensor = MakeTensorInfo(LookupShape(value_shapes, inputs[5])->sizes,
                                      LookupShape(value_shapes, inputs[5])->data_type);
-        push_input(b_zp_tensor, 5); // B_zp
+        push_input(b_zp_tensor, 5, 5); // B_zp
     }
-    push_input(y_scale_tensor, 6);  // Y_scale
+    push_input(y_scale_tensor, 6, 6);  // Y_scale
     DmlTensorInfo y_zp_tensor{};
     if (has_y_zp) {
         y_zp_tensor = MakeTensorInfo(LookupShape(value_shapes, inputs[7])->sizes,
                                      LookupShape(value_shapes, inputs[7])->data_type);
-        push_input(y_zp_tensor, 7); // Y_zp
+        push_input(y_zp_tensor, 7, 7); // Y_zp
     }
 
     result.input_tensor_descs.resize(result.input_tensors.size());
@@ -4668,10 +4670,12 @@ static std::optional<TranslatedOp> TranslateMatMulInteger(
     };
     auto storage = std::make_shared<MMIStorage>();
 
+    // DML schema: ATensor(0), AZeroPointTensor(1), BTensor(2), BZeroPointTensor(3).
     TranslatedOp result;
     result.input_tensors = { a_tensor };
     result.input_buffer_descs = { a_tensor.ToBufferDesc() };
-    result.input_name_reorder = { 0 };  // DML slot 0 → ONNX input 0 (A)
+    result.input_name_reorder = { 0 };
+    result.dml_input_slot_indices = { 0 };
 
     DmlTensorInfo a_zp_tensor{}, b_zp_tensor{};
     if (has_a_zp) {
@@ -4679,19 +4683,22 @@ static std::optional<TranslatedOp> TranslateMatMulInteger(
                                      LookupShape(value_shapes, inputs[2])->data_type);
         result.input_tensors.push_back(a_zp_tensor);
         result.input_buffer_descs.push_back(a_zp_tensor.ToBufferDesc());
-        result.input_name_reorder.push_back(2);  // DML slot 1 → ONNX input 2 (a_zp)
+        result.input_name_reorder.push_back(2);
+        result.dml_input_slot_indices.push_back(1);
     }
 
     result.input_tensors.push_back(b_tensor);
     result.input_buffer_descs.push_back(b_tensor.ToBufferDesc());
-    result.input_name_reorder.push_back(1);  // DML slot 2 (or 1) → ONNX input 1 (B)
+    result.input_name_reorder.push_back(1);
+    result.dml_input_slot_indices.push_back(2);
 
     if (has_b_zp) {
         b_zp_tensor = MakeTensorInfo(LookupShape(value_shapes, inputs[3])->sizes,
                                      LookupShape(value_shapes, inputs[3])->data_type);
         result.input_tensors.push_back(b_zp_tensor);
         result.input_buffer_descs.push_back(b_zp_tensor.ToBufferDesc());
-        result.input_name_reorder.push_back(3);  // DML slot 3 → ONNX input 3 (b_zp)
+        result.input_name_reorder.push_back(3);
+        result.dml_input_slot_indices.push_back(3);
     }
 
     result.input_tensor_descs.resize(result.input_tensors.size());
@@ -4779,23 +4786,26 @@ static std::optional<TranslatedOp> TranslateMatMulIntegerToFloat(
     struct Storage { DML_MATRIX_MULTIPLY_INTEGER_TO_FLOAT_OPERATOR_DESC desc{}; };
     auto storage = std::make_shared<Storage>();
 
+    // DML schema: ATensor(0), AScaleTensor(1), AZeroPointTensor(2),
+    //   BTensor(3), BScaleTensor(4), BZeroPointTensor(5), BiasTensor(6).
     TranslatedOp result;
-    auto push = [&](const DmlTensorInfo& t, size_t onnx_idx) {
+    auto push = [&](const DmlTensorInfo& t, size_t onnx_idx, size_t dml_slot) {
         result.input_tensors.push_back(t);
         result.input_buffer_descs.push_back(t.ToBufferDesc());
         result.input_name_reorder.push_back(onnx_idx);
+        result.dml_input_slot_indices.push_back(dml_slot);
     };
 
-    push(a_tensor, 0);
-    push(a_scale_tensor, 2);
+    push(a_tensor, 0, 0);
+    push(a_scale_tensor, 2, 1);
     DmlTensorInfo a_zp_t{};
-    if (has_a_zp) { a_zp_t = MakeTensorInfo(LookupShape(value_shapes, inputs[4])->sizes, LookupShape(value_shapes, inputs[4])->data_type); push(a_zp_t, 4); }
-    push(b_tensor, 1);
-    push(b_scale_tensor, 3);
+    if (has_a_zp) { a_zp_t = MakeTensorInfo(LookupShape(value_shapes, inputs[4])->sizes, LookupShape(value_shapes, inputs[4])->data_type); push(a_zp_t, 4, 2); }
+    push(b_tensor, 1, 3);
+    push(b_scale_tensor, 3, 4);
     DmlTensorInfo b_zp_t{};
-    if (has_b_zp) { b_zp_t = MakeTensorInfo(LookupShape(value_shapes, inputs[5])->sizes, LookupShape(value_shapes, inputs[5])->data_type); push(b_zp_t, 5); }
+    if (has_b_zp) { b_zp_t = MakeTensorInfo(LookupShape(value_shapes, inputs[5])->sizes, LookupShape(value_shapes, inputs[5])->data_type); push(b_zp_t, 5, 5); }
     DmlTensorInfo bias_t{};
-    if (has_bias) { bias_t = MakeTensorInfo(LookupShape(value_shapes, inputs[6])->sizes, LookupShape(value_shapes, inputs[6])->data_type); push(bias_t, 6); }
+    if (has_bias) { bias_t = MakeTensorInfo(LookupShape(value_shapes, inputs[6])->sizes, LookupShape(value_shapes, inputs[6])->data_type); push(bias_t, 6, 6); }
 
     result.input_tensor_descs.resize(result.input_tensors.size());
     result.output_tensors = { y_tensor };
@@ -8671,44 +8681,45 @@ static std::optional<TranslatedOp> TranslateQLinearConv(
 
     TranslatedOp result;
     int idx = 0;
-    auto push = [&](const DmlTensorInfo& t, size_t onnx_idx) {
+    auto push = [&](const DmlTensorInfo& t, size_t onnx_idx, size_t dml_schema_slot) {
         result.input_tensors.push_back(t);
         result.input_buffer_descs.push_back(t.ToBufferDesc());
         result.input_name_reorder.push_back(onnx_idx);
+        result.dml_input_slot_indices.push_back(dml_schema_slot);
         return idx++;
     };
 
-    // DML order: x, x_scale, x_zp, w, w_scale, w_zp, bias, y_scale, y_zp
+    // DML schema: InputTensor(0), InputScaleTensor(1), InputZeroPointTensor(2),
+    //   FilterTensor(3), FilterScaleTensor(4), FilterZeroPointTensor(5),
+    //   BiasTensor(6), OutputScaleTensor(7), OutputZeroPointTensor(8).
     auto x_tensor = MakeTensorInfo(x_sizes, x_info->data_type);
-    push(x_tensor, xIdx);
+    push(x_tensor, xIdx, 0);
 
     auto* xs_info = LookupShape(value_shapes, inputs[xScaleIdx]);
     if (!xs_info) return std::nullopt;
-    push(MakeTensorInfo(xs_info->sizes, xs_info->data_type), xScaleIdx);
+    push(MakeTensorInfo(xs_info->sizes, xs_info->data_type), xScaleIdx, 1);
 
     int slot_x_zp = -1;
     if (has_x_zp) {
         auto* xzp_info = LookupShape(value_shapes, inputs[xZpIdx]);
         if (!xzp_info) return std::nullopt;
-        slot_x_zp = push(MakeTensorInfo(xzp_info->sizes, xzp_info->data_type), xZpIdx);
+        slot_x_zp = push(MakeTensorInfo(xzp_info->sizes, xzp_info->data_type), xZpIdx, 2);
     }
 
     auto w_tensor = MakeTensorInfo(w_sizes, w_info->data_type);
-    push(w_tensor, wIdx);
+    push(w_tensor, wIdx, 3);
 
     auto* ws_info = LookupShape(value_shapes, inputs[wScaleIdx]);
     if (!ws_info) return std::nullopt;
     uint32_t dml_dim_count = static_cast<uint32_t>(x_sizes.size());
-    // Per-channel filter scale: place at C-axis (axis 1) with LeftAligned padding.
-    // ORT: TensorAxis::C, TensorAxis::LeftAligned → [C_out, 1, 1, ...]
     {
         auto ws_orig_sizes = ws_info->sizes;
         uint32_t ws_orig_rank = ws_info->original_rank ? ws_info->original_rank
                               : static_cast<uint32_t>(ws_orig_sizes.size());
         if (ws_orig_rank == 1) {
-            push(MakeTensorInfoAtAxis({ws_orig_sizes.back()}, ws_info->data_type, 0, dml_dim_count), wScaleIdx);
+            push(MakeTensorInfoAtAxis({ws_orig_sizes.back()}, ws_info->data_type, 1, dml_dim_count), wScaleIdx, 4);
         } else {
-            push(MakeTensorInfo(ws_info->sizes, ws_info->data_type), wScaleIdx);
+            push(MakeTensorInfo(ws_info->sizes, ws_info->data_type), wScaleIdx, 4);
         }
     }
 
@@ -8719,9 +8730,9 @@ static std::optional<TranslatedOp> TranslateQLinearConv(
         uint32_t wzp_orig_rank = wzp_info->original_rank ? wzp_info->original_rank
                                : static_cast<uint32_t>(wzp_info->sizes.size());
         if (wzp_orig_rank == 1) {
-            slot_w_zp = push(MakeTensorInfoAtAxis({wzp_info->sizes.back()}, wzp_info->data_type, 0, dml_dim_count), wZpIdx);
+            slot_w_zp = push(MakeTensorInfoAtAxis({wzp_info->sizes.back()}, wzp_info->data_type, 1, dml_dim_count), wZpIdx, 5);
         } else {
-            slot_w_zp = push(MakeTensorInfo(wzp_info->sizes, wzp_info->data_type), wZpIdx);
+            slot_w_zp = push(MakeTensorInfo(wzp_info->sizes, wzp_info->data_type), wZpIdx, 5);
         }
     }
 
@@ -8732,20 +8743,19 @@ static std::optional<TranslatedOp> TranslateQLinearConv(
         uint32_t b_orig_rank = b_info->original_rank ? b_info->original_rank
                              : static_cast<uint32_t>(b_info->sizes.size());
         if (b_orig_rank == 1) {
-            // Broadcast bias [C_out] to C-axis: [C_out, 1, 1, ...] matching ORT.
-            slot_bias = push(MakeTensorInfoAtAxis({b_info->sizes.back()}, b_info->data_type, 0, dml_dim_count), biasIdx);
+            slot_bias = push(MakeTensorInfoAtAxis({b_info->sizes.back()}, b_info->data_type, 1, dml_dim_count), biasIdx, 6);
         } else {
-            slot_bias = push(MakeTensorInfo(b_info->sizes, b_info->data_type), biasIdx);
+            slot_bias = push(MakeTensorInfo(b_info->sizes, b_info->data_type), biasIdx, 6);
         }
     }
 
     auto* ys_info = LookupShape(value_shapes, inputs[yScaleIdx]);
     if (!ys_info) return std::nullopt;
-    push(MakeTensorInfo(ys_info->sizes, ys_info->data_type), yScaleIdx);
+    push(MakeTensorInfo(ys_info->sizes, ys_info->data_type), yScaleIdx, 7);
 
     auto* yzp_info = LookupShape(value_shapes, inputs[yZpIdx]);
     if (!yzp_info) return std::nullopt;
-    push(MakeTensorInfo(yzp_info->sizes, yzp_info->data_type), yZpIdx);
+    push(MakeTensorInfo(yzp_info->sizes, yzp_info->data_type), yZpIdx, 8);
 
     auto out_tensor = MakeTensorInfo(out_sizes, yzp_info->data_type);
     result.input_tensor_descs.resize(result.input_tensors.size());
@@ -8861,11 +8871,18 @@ static std::optional<TranslatedOp> TranslateConvInteger(
     storage->end_pad   = k.end_padding;
 
     TranslatedOp result;
-    // DML order: x, x_zp, w, w_zp → input_name_reorder = {0, 2, 1, 3}
+    // DML schema order: InputTensor(0), InputZeroPointTensor(1),
+    //                   FilterTensor(2), FilterZeroPointTensor(3).
+    // ONNX order: x(0), w(1), x_zp(2), w_zp(3).
+    // input_name_reorder maps packed DML slot → ONNX input index.
+    // dml_input_slot_indices maps packed index → DML schema slot
+    // (needed when optional zero points are absent and packed indices
+    // no longer match schema slots).
     auto x_tensor = MakeTensorInfo(x_sizes, x_info->data_type);
     result.input_tensors.push_back(x_tensor);
     result.input_buffer_descs.push_back(x_tensor.ToBufferDesc());
     result.input_name_reorder.push_back(xIdx);
+    result.dml_input_slot_indices.push_back(0);   // InputTensor
 
     if (has_x_zp) {
         auto* xzp_info = LookupShape(value_shapes, inputs[xZpIdx]);
@@ -8874,12 +8891,14 @@ static std::optional<TranslatedOp> TranslateConvInteger(
         result.input_tensors.push_back(t);
         result.input_buffer_descs.push_back(t.ToBufferDesc());
         result.input_name_reorder.push_back(xZpIdx);
+        result.dml_input_slot_indices.push_back(1);   // InputZeroPointTensor
     }
 
     auto w_tensor = MakeTensorInfo(w_sizes, w_info->data_type);
     result.input_tensors.push_back(w_tensor);
     result.input_buffer_descs.push_back(w_tensor.ToBufferDesc());
     result.input_name_reorder.push_back(wIdx);
+    result.dml_input_slot_indices.push_back(2);   // FilterTensor
 
     if (has_w_zp) {
         auto* wzp_info = LookupShape(value_shapes, inputs[wZpIdx]);
@@ -8889,13 +8908,15 @@ static std::optional<TranslatedOp> TranslateConvInteger(
         uint32_t ci_dml_dim = static_cast<uint32_t>(x_sizes.size());
         DmlTensorInfo t;
         if (wzp_orig_rank == 1) {
-            t = MakeTensorInfoAtAxis({wzp_info->sizes.back()}, wzp_info->data_type, 0, ci_dml_dim);
+            // 1D filter ZP goes at axis C (index 1) per DML spec.
+            t = MakeTensorInfoAtAxis({wzp_info->sizes.back()}, wzp_info->data_type, 1, ci_dml_dim);
         } else {
             t = MakeTensorInfo(wzp_info->sizes, wzp_info->data_type);
         }
         result.input_tensors.push_back(t);
         result.input_buffer_descs.push_back(t.ToBufferDesc());
         result.input_name_reorder.push_back(wZpIdx);
+        result.dml_input_slot_indices.push_back(3);   // FilterZeroPointTensor
     }
 
     auto out_tensor = MakeTensorInfo(out_sizes, DML_TENSOR_DATA_TYPE_INT32);

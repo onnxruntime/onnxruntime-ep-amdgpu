@@ -1302,7 +1302,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         // Build the anchor index once per session and store it — the IFusionRule
         // objects it owns are referenced by raw pointer in FusionMatch and must
         // outlive m_fusionMap.
-        ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex();
+        ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex(ep->m_executionProvider->IsMcdmDevice());
         ep->m_fusionMap.clear();
 
         std::unordered_set<size_t> fusedNodeIds;
@@ -1354,7 +1354,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         tier0AndCpuExcluded.insert(tier0ClaimedNodeIds.begin(),
                                    tier0ClaimedNodeIds.end());
 
-        ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex();
+        ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex(ep->m_executionProvider->IsMcdmDevice());
         ep->m_fusionMap.clear();
 
         std::unordered_set<size_t> fusedNodeIds;

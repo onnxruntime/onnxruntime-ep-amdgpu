@@ -221,7 +221,10 @@ static QuickGeluCompiledKernel CompileQuickGeluDml(
     graph_desc.IntermediateEdgeCount = static_cast<UINT>(intermediate_edge_descs.size());
     graph_desc.IntermediateEdges     = intermediate_edge_descs.data();
 
-    if (FAILED(dml_device1->CompileGraph(&graph_desc, DML_EXECUTION_FLAG_NONE,
+    DML_EXECUTION_FLAGS exec_flags = (dml_dtype == DML_TENSOR_DATA_TYPE_FLOAT16)
+        ? DML_EXECUTION_FLAG_ALLOW_HALF_PRECISION_COMPUTATION
+        : DML_EXECUTION_FLAG_NONE;
+    if (FAILED(dml_device1->CompileGraph(&graph_desc, exec_flags,
                                          IID_PPV_ARGS(result.compiled_op.GetAddressOf())))) {
         DML_PERF_LOG("[QuickGelu] CompileQuickGeluDml: CompileGraph FAILED");
         return result;
