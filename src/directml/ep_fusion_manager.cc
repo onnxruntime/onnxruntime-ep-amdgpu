@@ -6,6 +6,7 @@
 #include "quick_gelu_ep_fusion.h"
 #include "bias_gelu_ep_fusion.h"
 #include "fused_matmul_ep_fusion.h"
+#include "op_activation_ep_fusion.h"
 
 #include "dml_execution_provider.h"  // must precede dml_abi_kernel.h
 #include "dml_abi_kernel.h"          // DML_PERF_LOG
@@ -83,11 +84,17 @@ static void MergePatterns(PNode& base, PNode& additional) {
 // be unique (e.g. prefix with rule name) to prevent PSameAs cross-contamination
 // across merged branches.
 // ---------------------------------------------------------------------------
-EpFusionManager::AnchorIndex EpFusionManager::BuildAnchorIndex() {
+EpFusionManager::AnchorIndex EpFusionManager::BuildAnchorIndex(bool isMcdmDevice) {
     std::vector<std::unique_ptr<IFusionRule>> all_rules;
     all_rules.push_back(MakeQuickGeluFusionRule());
     all_rules.push_back(MakeBiasGeluFusionRule());
     all_rules.push_back(MakeFusedMatMulFusionRule());
+
+    // Op+Activation rules: Add, Sum, Gemm, Conv, ConvTranspose,
+    // BatchNorm, InstanceNorm, MVN (norm ops gated off on MCDM devices).
+    for (auto& r : MakeAllOpActivationFusionRules(isMcdmDevice))
+        all_rules.push_back(std::move(r));
+
     // Future rules: insert shortest pattern first within each anchor group.
 
     AnchorIndex index;

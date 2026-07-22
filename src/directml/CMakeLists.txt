@@ -232,6 +232,7 @@ add_library(directml-ep MODULE
     quick_gelu_ep_fusion.cc
     bias_gelu_ep_fusion.cc
     fused_matmul_ep_fusion.cc
+    op_activation_ep_fusion.cc
     dml_op_translators.cc
     full_graph_fusion.cc
 

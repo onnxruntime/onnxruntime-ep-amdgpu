@@ -5,6 +5,7 @@
 #include "DmlExecutionProvider/CommandQueue.h"
 #include "dml_bucketized_buffer_allocator.h"
 #include "dml_perf_timer.h"
+#include <cstdio>
 
 namespace dml_ep {
 
@@ -393,9 +394,24 @@ void PluginDmlCommandRecorder::CloseAndExecute(_In_opt_ ID3D12GraphicsCommandLis
     // The descriptor heap must be set on the command list the next time it's opened.
     m_currentDescriptorHeap = nullptr;
 
-    // Fail early if something horrifying happens
-    ORT_THROW_IF_FAILED(m_dmlDevice->GetDeviceRemovedReason());
-    ORT_THROW_IF_FAILED(m_d3dDevice->GetDeviceRemovedReason());
+    // Fail early if something horrifying happens. Capture the reason first so
+    // logs distinguish suspended (887A0005) vs. hung (887A0006) vs. driver
+    // fault (887A0001/887A0020) without a debugger. Behavior is unchanged: a
+    // failed reason still throws.
+    HRESULT dmlRemovedReason = m_dmlDevice->GetDeviceRemovedReason();
+    HRESULT d3dRemovedReason = m_d3dDevice->GetDeviceRemovedReason();
+#ifdef DML_PERF_PROFILE
+    if (FAILED(dmlRemovedReason) || FAILED(d3dRemovedReason)) {
+        char _reasonBuf[96];
+        std::snprintf(_reasonBuf, sizeof(_reasonBuf),
+            "[Recorder] DEVICE REMOVED: dmlReason=0x%08X d3dReason=0x%08X\n",
+            static_cast<uint32_t>(dmlRemovedReason),
+            static_cast<uint32_t>(d3dRemovedReason));
+        PERF_TIMER_LOG(_reasonBuf);
+    }
+#endif
+    ORT_THROW_IF_FAILED(dmlRemovedReason);
+    ORT_THROW_IF_FAILED(d3dRemovedReason);
 
 #ifdef DML_PERF_PROFILE
     { uint64_t _t = PerfNowUs(); PERF_TIMER_LOG("[PERF] CloseAndExecute TOTAL: ", _t, " us (+", _t - _cae_t0, " total)\n"); }

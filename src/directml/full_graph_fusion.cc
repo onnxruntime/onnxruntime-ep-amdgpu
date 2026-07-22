@@ -15,20 +15,13 @@
 #include <algorithm>
 #include <numeric>
 #include <unordered_set>
-#include <fstream>
 #include "dml_perf_timer.h"
 
 namespace dml_ep {
 
-// Unconditional log to dml_perf.log — bypasses DML_PERF_LOG macro guard so
-// diagnostic messages appear regardless of DML_PERF_PROFILE build flag.
-static void DiagLog(std::string_view msg) noexcept {
+static void DiagLog([[maybe_unused]] std::string_view msg) noexcept {
 #ifdef DML_PERF_PROFILE
     DmlPerfWriteLogImpl(msg);
-#else
-    static std::ofstream s_log("dml_perf.log", std::ios::app);
-    s_log << msg;
-    s_log.flush();
 #endif
 }
 
@@ -714,10 +707,25 @@ static DmlInputMapResult BuildDmlInputMap(
         OrtStatus* st = ort_api.GetTensorMutableData(
             const_cast<OrtValue*>(init_it->second), &cpu_ptr);
         if (!st && cpu_ptr) {
+            // Get actual tensor byte count to avoid reading past the ORT tensor.
+            OrtTensorTypeAndShapeInfo* tsi = nullptr;
+            ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(init_it->second), &tsi);
+            size_t elem_count = 0;
+            ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+            if (tsi) {
+                ort_api.GetTensorShapeElementCount(tsi, &elem_count);
+                ort_api.GetTensorElementType(tsi, &dt);
+                ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
+            }
+            uint64_t actual_bytes = elem_count * DmlDataTypeSize(OnnxDtypeToDml(dt));
+            // DataSize = min(actualTensorBytes, totalTensorSizeInBytes) to
+            // avoid reading past the ORT tensor's allocation.
+            uint64_t data_size = (actual_bytes > 0 && actual_bytes < bytes) ? actual_bytes : bytes;
+
             ConstantNodeInfo cni;
             cni.name = init_name;
-            cni.data.assign(static_cast<uint8_t*>(cpu_ptr),
-                            static_cast<uint8_t*>(cpu_ptr) + bytes);
+            cni.data.resize(static_cast<size_t>(data_size), 0);
+            std::memcpy(cni.data.data(), cpu_ptr, static_cast<size_t>(data_size));
             result.constant_node_map[init_name] = result.constant_nodes.size();
             result.constant_nodes.push_back(std::move(cni));
         }
@@ -808,15 +816,15 @@ static bool UploadInitializers(
         if (bytes == 0) return true;
         uint64_t upload_bytes = std::min(bytes, actual_bytes > 0 ? actual_bytes : bytes);
 
-        InitBinding ib;
+        InitBinding init_binding;
         if (FAILED(provider->AllocatePooledResource(
                 static_cast<size_t>(bytes), AllocatorRoundingMode::Disabled,
-                ib.gpu_resource.GetAddressOf(), ib.allocator_ref.GetAddressOf())))
+                init_binding.gpu_resource.GetAddressOf(), init_binding.allocator_ref.GetAddressOf())))
             return false;
-        if (FAILED(provider->UploadToResource(ib.gpu_resource.Get(), cpu_ptr, upload_bytes)))
+        if (FAILED(provider->UploadToResource(init_binding.gpu_resource.Get(), cpu_ptr, upload_bytes)))
             return false;
-        ib.bytes = bytes;
-        const_graph_input_bindings[dml_idx] = std::move(ib);
+        init_binding.bytes = bytes;
+        const_graph_input_bindings[dml_idx] = std::move(init_binding);
         return true;
     };
 
@@ -840,6 +848,48 @@ static bool UploadInitializers(
     return true;
 }
 
+// Resolve a name through passthrough aliases and check if the original or
+// resolved name is an initializer. Returns the initializer name if found,
+// or empty string if not an initializer.
+static std::string ResolveToInitializer(
+    const std::string& name,
+    const std::unordered_map<std::string, std::string>& aliases,
+    const std::unordered_map<std::string, const OrtValue*>& initializers) {
+    if (initializers.count(name)) return name;
+    auto resolved = name;
+    while (aliases.count(resolved))
+        resolved = aliases.at(resolved);
+    if (initializers.count(resolved)) return resolved;
+    return {};
+}
+
+// Drain the D3D12 info queue for DML debug-layer validation messages. These
+// appear when DML_CREATE_DEVICE_FLAG_DEBUG is set and describe exactly which
+// tensor, edge, descriptor, or binding parameter is invalid. Gated behind
+// DML_PERF_LOG (compiles to nothing without DML_PERF_PROFILE).
+static void DrainDmlDebugMessages(PluginDmlExecutionProviderImpl* provider,
+                                  const char* stage) {
+    ComPtr<ID3D12Device> d3d12_device_for_iq;
+    if (SUCCEEDED(provider->GetD3DDevice(d3d12_device_for_iq.GetAddressOf()))) {
+        ComPtr<ID3D12InfoQueue> info_queue;
+        if (SUCCEEDED(d3d12_device_for_iq.As(&info_queue))) {
+            UINT64 msg_count = info_queue->GetNumStoredMessages();
+            DML_PERF_LOG("[Compile] D3D12InfoQueue (", stage, "): ", msg_count, " messages\n");
+            for (UINT64 mi = 0; mi < msg_count; ++mi) {
+                SIZE_T msg_len = 0;
+                if (FAILED(info_queue->GetMessage(mi, nullptr, &msg_len))) continue;
+                std::vector<uint8_t> buf(msg_len);
+                auto* msg = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+                if (FAILED(info_queue->GetMessage(mi, msg, &msg_len))) continue;
+                if (msg->pDescription) {
+                    DML_PERF_LOG("[D3D12InfoQueue] ", msg->pDescription, "\n");
+                }
+            }
+            info_queue->ClearStoredMessages();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // FullGraphFusion::Compile
 // ---------------------------------------------------------------------------
@@ -855,9 +905,9 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     // Step 1–3: Enumerate subgraph I/O, merge initializers, pre-seed shapes.
     // -----------------------------------------------------------------------
 
-    SubgraphInfo sg = BuildSubgraphInfo(ort_api, fused_subgraph, initializers, resolved_shapes);
-    const size_t num_graph_inputs  = sg.graph_input_vis.size();
-    const size_t num_graph_outputs = sg.graph_output_vis.size();
+    SubgraphInfo subgraph = BuildSubgraphInfo(ort_api, fused_subgraph, initializers, resolved_shapes);
+    const size_t num_graph_inputs  = subgraph.graph_input_vis.size();
+    const size_t num_graph_outputs = subgraph.graph_output_vis.size();
 
     // -----------------------------------------------------------------------
     // Step 4: Translate each node.
@@ -902,7 +952,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
             "  inputs=[", [&]{ std::string s; for (auto& n : input_names) s += n + ","; return s; }(),
             "]  outputs=[", [&]{ std::string s; for (auto& n : output_names) s += n + ","; return s; }(), "]\n");
 
-        auto translated = reg_it->second(ort_api, node, sg.value_shapes, sg.all_initializers);
+        auto translated = reg_it->second(ort_api, node, subgraph.value_shapes, subgraph.all_initializers);
         if (!translated) {
             DML_PERF_LOG("[Compile] FAIL: translator returned nullopt for op=", op_type, "\n");
             return nullptr;
@@ -912,12 +962,8 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
 
         // Write-back: translator computed output shapes; seed them for downstream.
         for (size_t k = 0; k < output_names.size() && k < translated->output_tensors.size(); ++k) {
-            if (!sg.value_shapes.count(output_names[k])) {
-                sg.value_shapes[output_names[k]] = translated->output_tensors[k];
-                auto& t = translated->output_tensors[k];
-                DML_PERF_LOG("[Compile] write-back '", output_names[k], "' sizes=[");
-                for (size_t d = 0; d < t.sizes.size(); ++d) DML_PERF_LOG(d>0?",":"", t.sizes[d]);
-                DML_PERF_LOG("] dtype=", static_cast<int>(t.data_type), "\n");
+            if (!subgraph.value_shapes.count(output_names[k])) {
+                subgraph.value_shapes[output_names[k]] = translated->output_tensors[k];
             }
         }
 
@@ -949,21 +995,26 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         // Inputs beyond that limit (e.g. Clip's min/max at slots 1,2) are consumed
         // at translation time only and won't have edges in the DML graph.
         size_t dml_input_count = translated_ptr->input_tensors.size();
-        size_t npi = translated_ptr->primary_input_count > 0
+        size_t num_primary_inputs = translated_ptr->primary_input_count > 0
             ? translated_ptr->primary_input_count : dml_input_count;
-        for (size_t s = 0; s < input_names.size() && s < npi; ++s) {
+        for (size_t s = 0; s < input_names.size() && s < num_primary_inputs; ++s) {
             size_t name_idx = translated_ptr->input_name_reorder.empty()
                 ? s : translated_ptr->input_name_reorder[s];
             if (name_idx >= input_names.size()) continue;
             const auto& in_name = input_names[name_idx];
             dml_consumed_names.insert(in_name);
-            if (sg.all_initializers.count(in_name))
-                consumed_initializer_names.insert(in_name);
+            auto init_name = ResolveToInitializer(in_name, graph_input_aliases, subgraph.all_initializers);
+            if (!init_name.empty())
+                consumed_initializer_names.insert(init_name);
         }
         for (const auto& sn : translated_ptr->sub_nodes) {
             for (const auto& [onnx_idx, _] : sn.graph_inputs) {
-                if (onnx_idx < input_names.size())
+                if (onnx_idx < input_names.size()) {
                     dml_consumed_names.insert(input_names[onnx_idx]);
+                    auto init_name = ResolveToInitializer(input_names[onnx_idx], graph_input_aliases, subgraph.all_initializers);
+                    if (!init_name.empty())
+                        consumed_initializer_names.insert(init_name);
+                }
             }
         }
 
@@ -973,12 +1024,12 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         for (size_t k = 0; k < output_names.size(); ++k)
             value_producer[output_names[k]] = { producer_compiled_idx, k };
 
-        CompiledNode cn;
-        cn.translated = std::move(translated_ptr);
-        cn.input_names = std::move(input_names);
-        cn.output_names = std::move(output_names);
-        cn.op_type = op_type;
-        compiled_nodes.push_back(std::move(cn));
+        CompiledNode compiled_node;
+        compiled_node.translated = std::move(translated_ptr);
+        compiled_node.input_names = std::move(input_names);
+        compiled_node.output_names = std::move(output_names);
+        compiled_node.op_type = op_type;
+        compiled_nodes.push_back(std::move(compiled_node));
     }
 
     // Strip dead compiled_nodes: nodes whose outputs are never consumed as a
@@ -992,7 +1043,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     // cascades. Single O(N) pass via work queue.
     std::vector<bool> node_is_live(compiled_nodes.size(), true);
     {
-        for (const auto& [name, _] : sg.graph_output_map)
+        for (const auto& [name, _] : subgraph.graph_output_map)
             dml_consumed_names.insert(name);
 
         // Refcount: how many names in dml_consumed_names each node produces.
@@ -1005,20 +1056,20 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         // Collect wired input names per node (for decrementing producers on death).
         std::vector<std::vector<std::string>> wired_inputs(compiled_nodes.size());
         for (size_t i = 0; i < compiled_nodes.size(); ++i) {
-            const auto& cn = compiled_nodes[i];
-            size_t npi = cn.translated->primary_input_count > 0
-                ? cn.translated->primary_input_count
-                : cn.translated->input_tensors.size();
-            for (size_t s = 0; s < cn.input_names.size() && s < npi; ++s) {
-                size_t ni = cn.translated->input_name_reorder.empty()
-                    ? s : cn.translated->input_name_reorder[s];
-                if (ni < cn.input_names.size())
-                    wired_inputs[i].push_back(cn.input_names[ni]);
+            const auto& compiled_node = compiled_nodes[i];
+            size_t num_primary_inputs = compiled_node.translated->primary_input_count > 0
+                ? compiled_node.translated->primary_input_count
+                : compiled_node.translated->input_tensors.size();
+            for (size_t s = 0; s < compiled_node.input_names.size() && s < num_primary_inputs; ++s) {
+                size_t name_idx = compiled_node.translated->input_name_reorder.empty()
+                    ? s : compiled_node.translated->input_name_reorder[s];
+                if (name_idx < compiled_node.input_names.size())
+                    wired_inputs[i].push_back(compiled_node.input_names[name_idx]);
             }
-            for (const auto& sn : cn.translated->sub_nodes) {
+            for (const auto& sn : compiled_node.translated->sub_nodes) {
                 for (const auto& [onnx_idx, _] : sn.graph_inputs) {
-                    if (onnx_idx < cn.input_names.size())
-                        wired_inputs[i].push_back(cn.input_names[onnx_idx]);
+                    if (onnx_idx < compiled_node.input_names.size())
+                        wired_inputs[i].push_back(compiled_node.input_names[onnx_idx]);
                 }
             }
         }
@@ -1057,29 +1108,29 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     // -----------------------------------------------------------------------
 
     uint32_t owned_count = 0;
-    for (size_t ci = 0; ci < compiled_nodes.size(); ++ci) {
-        if (!node_is_live[ci]) continue;
-        auto& cn = compiled_nodes[ci];
-        size_t dml_input_count = cn.translated->input_tensors.size();
-        for (size_t s = 0; s < cn.input_names.size() && s < dml_input_count; ++s) {
-            size_t name_idx = cn.translated->input_name_reorder.empty()
-                ? s : cn.translated->input_name_reorder[s];
-            if (name_idx >= cn.input_names.size()) continue;
-            auto resolved = cn.input_names[name_idx];
+    for (size_t node_idx = 0; node_idx < compiled_nodes.size(); ++node_idx) {
+        if (!node_is_live[node_idx]) continue;
+        auto& compiled_node = compiled_nodes[node_idx];
+        size_t dml_input_count = compiled_node.translated->input_tensors.size();
+        for (size_t s = 0; s < compiled_node.input_names.size() && s < dml_input_count; ++s) {
+            size_t name_idx = compiled_node.translated->input_name_reorder.empty()
+                ? s : compiled_node.translated->input_name_reorder[s];
+            if (name_idx >= compiled_node.input_names.size()) continue;
+            auto resolved = compiled_node.input_names[name_idx];
             while (graph_input_aliases.count(resolved))
                 resolved = graph_input_aliases[resolved];
-            if (!sg.all_initializers.count(cn.input_names[name_idx]) && !sg.all_initializers.count(resolved))
+            if (!subgraph.all_initializers.count(compiled_node.input_names[name_idx]) && !subgraph.all_initializers.count(resolved))
                 continue;
 
-            auto shape_it = sg.value_shapes.find(
-                sg.all_initializers.count(resolved) ? resolved : cn.input_names[name_idx]);
-            uint64_t bytes = (shape_it != sg.value_shapes.end()) ? shape_it->second.total_bytes : 0;
+            auto shape_it = subgraph.value_shapes.find(
+                subgraph.all_initializers.count(resolved) ? resolved : compiled_node.input_names[name_idx]);
+            uint64_t bytes = (shape_it != subgraph.value_shapes.end()) ? shape_it->second.total_bytes : 0;
             if (bytes >= kMaxConstNodeDataSize) {
-                cn.translated->input_buffer_descs[s].Flags |= DML_TENSOR_FLAG_OWNED_BY_DML;
+                compiled_node.translated->input_buffer_descs[s].Flags |= DML_TENSOR_FLAG_OWNED_BY_DML;
                 ++owned_count;
             }
         }
-        cn.translated->FixupPointers();
+        compiled_node.translated->FixupPointers();
     }
     (void)owned_count;
 
@@ -1114,23 +1165,23 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
 
     for (size_t i = 0; i < compiled_nodes.size(); ++i) {
         if (!node_is_live[i]) continue;
-        auto& cn = compiled_nodes[i];
+        auto& compiled_node = compiled_nodes[i];
         HRESULT hr = dml_device->CreateOperator(
-            &cn.translated->op_desc, IID_PPV_ARGS(cn.translated->dml_operator.GetAddressOf()));
+            &compiled_node.translated->op_desc, IID_PPV_ARGS(compiled_node.translated->dml_operator.GetAddressOf()));
         if (FAILED(hr)) {
             DML_PERF_LOG("[Compile] FAIL: CreateOperator HR=", Hex(static_cast<uint32_t>(hr)),
-                " op=", cn.op_type, "\n");
+                " op=", compiled_node.op_type, "\n");
             return nullptr;
         }
-        DML_PERF_LOG("[Compile] CreateOperator OK: op=", cn.op_type, "\n");
+        DML_PERF_LOG("[Compile] CreateOperator OK: op=", compiled_node.op_type, "\n");
 
-        for (size_t s = 0; s < cn.translated->sub_nodes.size(); ++s) {
-            auto& sn = cn.translated->sub_nodes[s];
+        for (size_t s = 0; s < compiled_node.translated->sub_nodes.size(); ++s) {
+            auto& sn = compiled_node.translated->sub_nodes[s];
             hr = dml_device->CreateOperator(
                 &sn.op_desc, IID_PPV_ARGS(sn.dml_operator.GetAddressOf()));
             if (FAILED(hr)) {
                 DML_PERF_LOG("[Compile] FAIL: CreateOperator sub_node[", s, "] HR=",
-                    Hex(static_cast<uint32_t>(hr)), " op=", cn.op_type, "\n");
+                    Hex(static_cast<uint32_t>(hr)), " op=", compiled_node.op_type, "\n");
                 return nullptr;
             }
         }
@@ -1152,23 +1203,26 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     // BuildDmlInputMap handles both modes and assigns compact DML index slots.
     // -----------------------------------------------------------------------
 
-    DmlInputMapResult im = BuildDmlInputMap(
-        ort_api, sg.graph_input_vis,
-        consumed_initializer_names, sg.value_shapes, sg.all_initializers);
+    DmlInputMapResult input_map = BuildDmlInputMap(
+        ort_api, subgraph.graph_input_vis,
+        consumed_initializer_names, subgraph.value_shapes, subgraph.all_initializers);
 
     // Build owned_graph_input_indices: DML graph input indices whose tensors
-    // carry DML_TENSOR_FLAG_OWNED_BY_DML. Uses im.dml_input_map so both Mode A
+    // carry DML_TENSOR_FLAG_OWNED_BY_DML. Uses input_map.dml_input_map so both Mode A
     // and Mode B initializers are covered.
     std::unordered_set<size_t> owned_graph_input_indices;
-    for (auto& cn : compiled_nodes) {
-        size_t dml_input_count = cn.translated->input_tensors.size();
-        for (size_t s = 0; s < cn.input_names.size() && s < dml_input_count; ++s) {
-            if (cn.translated->input_buffer_descs[s].Flags & DML_TENSOR_FLAG_OWNED_BY_DML) {
-                auto resolved_name = cn.input_names[s];
+    for (auto& compiled_node : compiled_nodes) {
+        size_t dml_input_count = compiled_node.translated->input_tensors.size();
+        for (size_t s = 0; s < compiled_node.input_names.size() && s < dml_input_count; ++s) {
+            if (compiled_node.translated->input_buffer_descs[s].Flags & DML_TENSOR_FLAG_OWNED_BY_DML) {
+                size_t name_idx = compiled_node.translated->input_name_reorder.empty()
+                    ? s : compiled_node.translated->input_name_reorder[s];
+                if (name_idx >= compiled_node.input_names.size()) continue;
+                auto resolved_name = compiled_node.input_names[name_idx];
                 while (graph_input_aliases.count(resolved_name))
                     resolved_name = graph_input_aliases[resolved_name];
-                auto di_it = im.dml_input_map.find(resolved_name);
-                if (di_it != im.dml_input_map.end())
+                auto di_it = input_map.dml_input_map.find(resolved_name);
+                if (di_it != input_map.dml_input_map.end())
                     owned_graph_input_indices.insert(di_it->second);
             }
         }
@@ -1203,10 +1257,10 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     }
 
     // Append constant graph nodes for small initializers (inline data).
-    std::vector<DML_CONSTANT_DATA_GRAPH_NODE_DESC> const_node_descs(im.constant_nodes.size());
-    for (size_t c = 0; c < im.constant_nodes.size(); ++c) {
-        const_node_descs[c].Data = im.constant_nodes[c].data.data();
-        const_node_descs[c].DataSize = im.constant_nodes[c].data.size();
+    std::vector<DML_CONSTANT_DATA_GRAPH_NODE_DESC> const_node_descs(input_map.constant_nodes.size());
+    for (size_t c = 0; c < input_map.constant_nodes.size(); ++c) {
+        const_node_descs[c].Data = input_map.constant_nodes[c].data.data();
+        const_node_descs[c].DataSize = input_map.constant_nodes[c].data.size();
         graph_nodes.push_back({ DML_GRAPH_NODE_TYPE_CONSTANT, &const_node_descs[c] });
     }
     size_t const_node_base = total_dml_nodes; // operator nodes before constants
@@ -1221,35 +1275,35 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
 
     for (size_t node_idx = 0; node_idx < compiled_nodes.size(); ++node_idx) {
         if (!node_is_live[node_idx]) continue;
-        const auto& cn = compiled_nodes[node_idx];
+        const auto& compiled_node = compiled_nodes[node_idx];
         size_t primary_dml_idx = dml_node_offset[node_idx];
 
         // Only wire edges for as many inputs as the primary DML operator has.
         // When primary_input_count > 0, only that many inputs go to the primary
         // node; remaining inputs are available for sub_node graph_inputs wiring.
-        size_t num_primary_inputs = cn.translated->primary_input_count > 0
-            ? cn.translated->primary_input_count : cn.translated->input_tensors.size();
-        for (size_t input_slot = 0; input_slot < cn.input_names.size() && input_slot < num_primary_inputs; ++input_slot) {
-            size_t name_idx = cn.translated->input_name_reorder.empty()
-                ? input_slot : cn.translated->input_name_reorder[input_slot];
-            if (name_idx >= cn.input_names.size()) continue;
-            auto name = cn.input_names[name_idx];
+        size_t num_primary_inputs = compiled_node.translated->primary_input_count > 0
+            ? compiled_node.translated->primary_input_count : compiled_node.translated->input_tensors.size();
+        for (size_t input_slot = 0; input_slot < compiled_node.input_names.size() && input_slot < num_primary_inputs; ++input_slot) {
+            size_t name_idx = compiled_node.translated->input_name_reorder.empty()
+                ? input_slot : compiled_node.translated->input_name_reorder[input_slot];
+            if (name_idx >= compiled_node.input_names.size()) continue;
+            auto name = compiled_node.input_names[name_idx];
             if (name.empty()) continue;
 
             // Resolve the DML schema slot for this edge. For dense operators the
             // packed input_slot equals the schema slot. For sparse operators (e.g.
             // MultiHeadAttention with non-contiguous slots) dml_input_slot_indices
             // maps packed position → schema slot so ToNodeInputIndex is correct.
-            const size_t dml_schema_slot = cn.translated->dml_input_slot_indices.empty()
-                ? input_slot : cn.translated->dml_input_slot_indices[input_slot];
+            const size_t dml_schema_slot = compiled_node.translated->dml_input_slot_indices.empty()
+                ? input_slot : compiled_node.translated->dml_input_slot_indices[input_slot];
 
             // Resolve passthrough aliases (e.g. Reshape output → original input).
             while (graph_input_aliases.count(name))
                 name = graph_input_aliases[name];
 
             // Small constant inlined as a constant node.
-            auto const_it = im.constant_node_map.find(name);
-            if (const_it != im.constant_node_map.end()) {
+            auto const_it = input_map.constant_node_map.find(name);
+            if (const_it != input_map.constant_node_map.end()) {
                 DML_INTERMEDIATE_GRAPH_EDGE_DESC edge{};
                 edge.FromNodeIndex = static_cast<UINT>(const_node_base + const_it->second);
                 edge.FromNodeOutputIndex = 0;
@@ -1260,8 +1314,8 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
             }
 
             // DML graph input (runtime tensor or large initializer).
-            auto dml_in_it = im.dml_input_map.find(name);
-            if (dml_in_it != im.dml_input_map.end()) {
+            auto dml_in_it = input_map.dml_input_map.find(name);
+            if (dml_in_it != input_map.dml_input_map.end()) {
                 DML_INPUT_GRAPH_EDGE_DESC edge{};
                 edge.GraphInputIndex = static_cast<UINT>(dml_in_it->second);
                 edge.ToNodeIndex = static_cast<UINT>(primary_dml_idx);
@@ -1301,13 +1355,13 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
             }
 
             DML_PERF_LOG("[Compile] FAIL: unresolved input '", name,
-                "' for op=", cn.op_type, " slot=", input_slot, "\n");
+                "' for op=", compiled_node.op_type, " slot=", input_slot, "\n");
             return nullptr; // unresolved input
         }
 
         // Wire internal edges for sub_nodes.
-        for (size_t s = 0; s < cn.translated->sub_nodes.size(); ++s) {
-            const auto& sn = cn.translated->sub_nodes[s];
+        for (size_t s = 0; s < compiled_node.translated->sub_nodes.size(); ++s) {
+            const auto& sn = compiled_node.translated->sub_nodes[s];
             size_t sn_dml_idx = primary_dml_idx + 1 + s;
             for (size_t inp = 0; inp < sn.input_from.size(); ++inp) {
                 auto [src_sub, src_slot] = sn.input_from[inp];
@@ -1325,13 +1379,13 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
 
             // Wire DML graph inputs directly to this sub_node.
             for (auto& [onnx_idx, to_input] : sn.graph_inputs) {
-                if (onnx_idx >= cn.input_names.size()) continue;
-                auto gi_name = cn.input_names[onnx_idx];
+                if (onnx_idx >= compiled_node.input_names.size()) continue;
+                auto gi_name = compiled_node.input_names[onnx_idx];
                 while (graph_input_aliases.count(gi_name))
                     gi_name = graph_input_aliases[gi_name];
 
-                auto const_it = im.constant_node_map.find(gi_name);
-                if (const_it != im.constant_node_map.end()) {
+                auto const_it = input_map.constant_node_map.find(gi_name);
+                if (const_it != input_map.constant_node_map.end()) {
                     DML_INTERMEDIATE_GRAPH_EDGE_DESC edge{};
                     edge.FromNodeIndex = static_cast<UINT>(const_node_base + const_it->second);
                     edge.FromNodeOutputIndex = 0;
@@ -1340,8 +1394,8 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
                     intermediate_edge_storage.push_back(edge);
                     continue;
                 }
-                auto dml_in_it = im.dml_input_map.find(gi_name);
-                if (dml_in_it != im.dml_input_map.end()) {
+                auto dml_in_it = input_map.dml_input_map.find(gi_name);
+                if (dml_in_it != input_map.dml_input_map.end()) {
                     DML_INPUT_GRAPH_EDGE_DESC edge{};
                     edge.GraphInputIndex = static_cast<UINT>(dml_in_it->second);
                     edge.ToNodeIndex = static_cast<UINT>(sn_dml_idx);
@@ -1353,7 +1407,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     }
 
     // Output edges.
-    for (const auto& [name, out_idx] : sg.graph_output_map) {
+    for (const auto& [name, out_idx] : subgraph.graph_output_map) {
         auto resolved = name;
         while (graph_input_aliases.count(resolved))
             resolved = graph_input_aliases[resolved];
@@ -1413,7 +1467,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     // -----------------------------------------------------------------------
 
     DML_GRAPH_DESC graph_desc{};
-    graph_desc.InputCount = static_cast<UINT>(im.total_dml_inputs);
+    graph_desc.InputCount = static_cast<UINT>(input_map.total_dml_inputs);
     graph_desc.OutputCount = static_cast<UINT>(num_graph_outputs);
     graph_desc.NodeCount = static_cast<UINT>(graph_nodes.size());
     graph_desc.Nodes = graph_nodes.data();
@@ -1429,6 +1483,25 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     DML_EXECUTION_FLAGS exec_flags = DML_EXECUTION_FLAG_NONE;
     if (compiled_nodes.size() >= kMinNodeCountForDescriptorsVolatile)
         exec_flags |= DML_EXECUTION_FLAG_DESCRIPTORS_VOLATILE;
+
+    // Match ORT's DmlOperator::GetExecutionFlags(): allow half precision when all
+    // tensors in the graph are fp16 (no fp32).  This enables metacommand fast-paths
+    // on hardware that supports them.
+    {
+        bool has_fp16 = false, has_fp32 = false;
+        for (size_t i = 0; i < compiled_nodes.size(); ++i) {
+            if (!node_is_live[i]) continue;
+            const auto& compiled_node = compiled_nodes[i];
+            for (const auto& t : compiled_node.translated->input_tensors)
+                if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT16) has_fp16 = true;
+                else if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT32) has_fp32 = true;
+            for (const auto& t : compiled_node.translated->output_tensors)
+                if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT16) has_fp16 = true;
+                else if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT32) has_fp32 = true;
+        }
+        if (has_fp16 && !has_fp32)
+            exec_flags |= DML_EXECUTION_FLAG_ALLOW_HALF_PRECISION_COMPUTATION;
+    }
 
     DML_PERF_LOG("[Compile] CompileGraph: nodes=", graph_desc.NodeCount,
         " inputs=", graph_desc.InputCount,
@@ -1467,29 +1540,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     if (FAILED(hr)) {
         DML_PERF_LOG("[Compile] FAIL: CompileGraph returned HR=0x", Hex(static_cast<uint32_t>(hr)),
             "  nodes=", compiled_nodes.size(), "\n");
-
-        // Drain the D3D12 info queue for DML debug layer validation messages.
-        // These appear when DML_CREATE_DEVICE_FLAG_DEBUG is set and describe
-        // exactly which tensor, edge, or descriptor is invalid.
-        ComPtr<ID3D12Device> d3d12_device_for_iq;
-        if (SUCCEEDED(provider->GetD3DDevice(d3d12_device_for_iq.GetAddressOf()))) {
-            ComPtr<ID3D12InfoQueue> info_queue;
-            if (SUCCEEDED(d3d12_device_for_iq.As(&info_queue))) {
-                UINT64 msg_count = info_queue->GetNumStoredMessages();
-                DML_PERF_LOG("[Compile] D3D12InfoQueue: ", msg_count, " messages\n");
-                for (UINT64 mi = 0; mi < msg_count; ++mi) {
-                    SIZE_T msg_len = 0;
-                    if (FAILED(info_queue->GetMessage(mi, nullptr, &msg_len))) continue;
-                    std::vector<uint8_t> buf(msg_len);
-                    auto* msg = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
-                    if (FAILED(info_queue->GetMessage(mi, msg, &msg_len))) continue;
-                    if (msg->pDescription) {
-                        DML_PERF_LOG("[D3D12InfoQueue] ", msg->pDescription, "\n");
-                    }
-                }
-                info_queue->ClearStoredMessages();
-            }
-        }
+        DrainDmlDebugMessages(provider, "CompileGraph");
         return nullptr;
     }
 
@@ -1516,19 +1567,19 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
             persistent_resource.Get(), 0, persistent_size };
     }
 
-    std::vector<InitBinding> const_graph_input_bindings(im.total_dml_inputs);
+    std::vector<InitBinding> const_graph_input_bindings(input_map.total_dml_inputs);
     if (!UploadInitializers(
-            ort_api, provider, im, owned_graph_input_indices,
-            sg.graph_input_vis, sg.value_shapes, sg.all_initializers,
+            ort_api, provider, input_map, owned_graph_input_indices,
+            subgraph.graph_input_vis, subgraph.value_shapes, subgraph.all_initializers,
             const_graph_input_bindings))
         return nullptr;
 
     // Build init input bindings array indexed by DML graph input index.
-    std::vector<DML_BUFFER_BINDING> init_input_bindings(im.total_dml_inputs, DML_BUFFER_BINDING{});
+    std::vector<DML_BUFFER_BINDING> init_input_bindings(input_map.total_dml_inputs, DML_BUFFER_BINDING{});
     for (size_t i = 0; i < const_graph_input_bindings.size(); ++i) {
         if (const_graph_input_bindings[i].gpu_resource) {
-            auto& ib = const_graph_input_bindings[i];
-            init_input_bindings[i] = { ib.gpu_resource.Get(), 0, ib.bytes };
+            auto& init_binding = const_graph_input_bindings[i];
+            init_input_bindings[i] = { init_binding.gpu_resource.Get(), 0, init_binding.bytes };
         }
     }
 
@@ -1537,17 +1588,31 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
 
     if (FAILED(provider->InitializeOperator(
             compiled_op.Get(), persistent_ptr,
-            gsl::make_span(init_input_bindings))))
+            gsl::make_span(init_input_bindings)))) {
+        DrainDmlDebugMessages(provider, "InitializeOperator");
         return nullptr;
+    }
 
-    // Flush to surface any deferred GPU errors from InitializeOperator.
-    provider->Flush();
+    // Flush to execute pending GPU work. If the device was removed (e.g. due
+    // to an invalid binding), GetDeviceRemovedReason throws. Catch it so one
+    // bad partition returns nullptr (per-op fallback) instead of aborting.
+    ORT_TRY {
+        provider->Flush();
+        DrainDmlDebugMessages(provider, "Flush");
+    }
+    ORT_CATCH(const std::exception& e) {
+        ORT_HANDLE_EXCEPTION([&]() {
+            DML_PERF_LOG("[Compile] FAIL: init/flush threw (device removed?): ", e.what(), "\n");
+        });
+        DrainDmlDebugMessages(provider, "Flush-threw");
+        return nullptr;
+    }
 
     provider->QueueReference(compiled_op.Get());
     if (persistent_allocator)
         provider->QueueReference(persistent_allocator.Get());
-    for (auto& ib : const_graph_input_bindings) {
-        if (ib.gpu_resource) provider->QueueReference(ib.gpu_resource.Get());
+    for (auto& init_binding : const_graph_input_bindings) {
+        if (init_binding.gpu_resource) provider->QueueReference(init_binding.gpu_resource.Get());
     }
     const_graph_input_bindings.clear();
 
@@ -1566,35 +1631,35 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     // The Compute path maps ORT KernelContext input indices (subgraph ordering,
     // 0..num_graph_inputs-1) to DML graph input indices (renumbered, excluding
     // inlined constants). subgraph_to_dml_input stores this mapping.
-    kernel_state->num_runtime_inputs = im.total_dml_inputs;
+    kernel_state->num_runtime_inputs = input_map.total_dml_inputs;
     kernel_state->num_subgraph_inputs = num_graph_inputs;
-    kernel_state->subgraph_to_dml_input = im.subgraph_to_dml_input;
+    kernel_state->subgraph_to_dml_input = input_map.subgraph_to_dml_input;
     kernel_state->dml_inputs_with_edges = dml_inputs_with_edges;
-    kernel_state->runtime_input_bytes.resize(im.total_dml_inputs);
-    kernel_state->runtime_input_is_owned.resize(im.total_dml_inputs, false);
+    kernel_state->runtime_input_bytes.resize(input_map.total_dml_inputs);
+    kernel_state->runtime_input_is_owned.resize(input_map.total_dml_inputs, false);
     kernel_state->num_initializers = 0;
 
     // Mode A: populate from subgraph graph inputs (runtime + initializers).
     for (size_t i = 0; i < num_graph_inputs; ++i) {
-        if (im.subgraph_to_dml_input[i] == SIZE_MAX) continue;
-        size_t dml_idx = im.subgraph_to_dml_input[i];
-        std::string name = ReadValueInfoName(ort_api, sg.graph_input_vis[i]);
-        auto it = sg.value_shapes.find(name);
+        if (input_map.subgraph_to_dml_input[i] == SIZE_MAX) continue;
+        size_t dml_idx = input_map.subgraph_to_dml_input[i];
+        std::string name = ReadValueInfoName(ort_api, subgraph.graph_input_vis[i]);
+        auto it = subgraph.value_shapes.find(name);
         kernel_state->runtime_input_bytes[dml_idx] =
-            (it != sg.value_shapes.end()) ? it->second.total_bytes : 0;
+            (it != subgraph.value_shapes.end()) ? it->second.total_bytes : 0;
         if (owned_graph_input_indices.count(dml_idx))
             kernel_state->runtime_input_is_owned[dml_idx] = true;
     }
 
     // Mode B: populate for initializers added as extra DML inputs.
     // These are always OWNED (large initializers baked into persistent resource).
-    for (const auto& name : im.ordered_initializer_names) {
-        auto di_it = im.dml_input_map.find(name);
-        if (di_it == im.dml_input_map.end()) continue;
+    for (const auto& name : input_map.ordered_initializer_names) {
+        auto di_it = input_map.dml_input_map.find(name);
+        if (di_it == input_map.dml_input_map.end()) continue;
         size_t dml_idx = di_it->second;
-        auto it = sg.value_shapes.find(name);
+        auto it = subgraph.value_shapes.find(name);
         kernel_state->runtime_input_bytes[dml_idx] =
-            (it != sg.value_shapes.end()) ? it->second.total_bytes : 0;
+            (it != subgraph.value_shapes.end()) ? it->second.total_bytes : 0;
         if (owned_graph_input_indices.count(dml_idx))
             kernel_state->runtime_input_is_owned[dml_idx] = true;
     }
@@ -1604,9 +1669,9 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     kernel_state->output_bytes.resize(num_graph_outputs);
 
     for (size_t i = 0; i < num_graph_outputs; ++i) {
-        std::string name = ReadValueInfoName(ort_api, sg.graph_output_vis[i]);
-        auto it = sg.value_shapes.find(name);
-        if (it == sg.value_shapes.end()) continue;
+        std::string name = ReadValueInfoName(ort_api, subgraph.graph_output_vis[i]);
+        auto it = subgraph.value_shapes.find(name);
+        if (it == subgraph.value_shapes.end()) continue;
 
         // Use ORT shape inference (value_shapes) for output dims and bytes.
         // The producer node's translated output shape can differ from the
@@ -1615,7 +1680,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         // through passthrough nodes, but the graph output shape reflects
         // the final reshaped dimensions.
         const auto& vs = it->second;
-        const OrtValueInfo* out_vi = sg.graph_output_vis[i];
+        const OrtValueInfo* out_vi = subgraph.graph_output_vis[i];
         size_t orig_rank = 0;
         if (out_vi && out_vi->GetTypeInfo() && out_vi->GetTypeInfo()->tensor_type_info
             && out_vi->GetTypeInfo()->tensor_type_info->HasShape()) {
@@ -1642,7 +1707,7 @@ bool FullGraphFusion::TryTranslateNodes(
     const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes,
     std::unordered_map<std::string, std::vector<int64_t>>*   out_shapes)
 {
-    SubgraphInfo sg = BuildSubgraphInfo(ort_api, main_graph, initializers, resolved_shapes);
+    SubgraphInfo subgraph = BuildSubgraphInfo(ort_api, main_graph, initializers, resolved_shapes);
 
     OpTranslatorRegistry registry = BuildOpTranslatorRegistry();
     bool all_translated = true;
@@ -1662,11 +1727,11 @@ bool FullGraphFusion::TryTranslateNodes(
         }
         auto input_names  = fusion_utils::GetNodeInputNames(ort_api, node);
         auto output_names = fusion_utils::GetNodeOutputNames(ort_api, node);
-        auto translated = reg_it->second(ort_api, node, sg.value_shapes, sg.all_initializers);
+        auto translated = reg_it->second(ort_api, node, subgraph.value_shapes, subgraph.all_initializers);
         if (!translated) {
             DML_PERF_LOG("[TryTranslateNodes] FAIL: op=", op_type);
             for (size_t i = 0; i < input_names.size(); ++i) {
-                DML_PERF_LOG(" in", i, "='", input_names[i], "'(", sg.value_shapes.count(input_names[i]), ")");
+                DML_PERF_LOG(" in", i, "='", input_names[i], "'(", subgraph.value_shapes.count(input_names[i]), ")");
             }
             DML_PERF_LOG(" out0=", (output_names.empty() ? "?" : output_names[0]), "\n");
             all_translated = false;
@@ -1676,8 +1741,8 @@ bool FullGraphFusion::TryTranslateNodes(
             " out0=", (output_names.empty() ? "?" : output_names[0]), "\n");
         // Write-back: translator computed output shapes; seed them for downstream.
         for (size_t k = 0; k < output_names.size() && k < translated->output_tensors.size(); ++k) {
-            if (!sg.value_shapes.count(output_names[k])) {
-                sg.value_shapes[output_names[k]] = translated->output_tensors[k];
+            if (!subgraph.value_shapes.count(output_names[k])) {
+                subgraph.value_shapes[output_names[k]] = translated->output_tensors[k];
                 auto& t = translated->output_tensors[k];
                 DML_PERF_LOG("[TryTranslateNodes] write-back '", output_names[k], "' sizes=[");
                 for (size_t d = 0; d < t.sizes.size(); ++d) DML_PERF_LOG(d>0?",":"", t.sizes[d]);
@@ -1724,7 +1789,7 @@ bool FullGraphFusion::TryTranslateNodes(
             (*out_shapes)[name] = std::move(dims);
         };
 
-        for (const auto& [name, info] : sg.value_shapes) {
+        for (const auto& [name, info] : subgraph.value_shapes) {
             ExportDims(name, info);
         }
 
@@ -1742,16 +1807,16 @@ bool FullGraphFusion::TryTranslateNodes(
                 if (!ivis[k]) continue;
                 auto vi_name = fusion_utils::GetValueInfoName(ort_api, ivis[k]);
                 // Try: consumer input name is directly in value_shapes.
-                auto vs_it = sg.value_shapes.find(in_names[k]);
-                if (vs_it != sg.value_shapes.end()) {
+                auto vs_it = subgraph.value_shapes.find(in_names[k]);
+                if (vs_it != subgraph.value_shapes.end()) {
                     ExportDims(in_names[k], vs_it->second);
                     continue;
                 }
                 // Try: VI name → producer output name → value_shapes.
                 auto prod_it = producer_output_name.find(vi_name);
                 if (prod_it != producer_output_name.end()) {
-                    vs_it = sg.value_shapes.find(prod_it->second);
-                    if (vs_it != sg.value_shapes.end()) {
+                    vs_it = subgraph.value_shapes.find(prod_it->second);
+                    if (vs_it != subgraph.value_shapes.end()) {
                         ExportDims(in_names[k], vs_it->second);
                     }
                 }
@@ -1769,7 +1834,7 @@ bool FullGraphFusion::TryCompilePartition(
     const std::vector<const OrtNode*>&                       nodes,
     const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes)
 {
-    SubgraphInfo sg = BuildSubgraphInfo(ort_api, main_graph, initializers, resolved_shapes);
+    SubgraphInfo subgraph = BuildSubgraphInfo(ort_api, main_graph, initializers, resolved_shapes);
     OpTranslatorRegistry registry = BuildOpTranslatorRegistry();
 
     // Translate nodes (same logic as Compile's step 4).
@@ -1787,12 +1852,12 @@ bool FullGraphFusion::TryCompilePartition(
         if (reg_it == registry.end()) return false;
         auto input_names  = fusion_utils::GetNodeInputNames(ort_api, node);
         auto output_names = fusion_utils::GetNodeOutputNames(ort_api, node);
-        auto translated = reg_it->second(ort_api, node, sg.value_shapes, sg.all_initializers);
+        auto translated = reg_it->second(ort_api, node, subgraph.value_shapes, subgraph.all_initializers);
         if (!translated) return false;
         // Write-back: translator computed output shapes; seed them for downstream.
         for (size_t k = 0; k < output_names.size() && k < translated->output_tensors.size(); ++k) {
-            if (!sg.value_shapes.count(output_names[k]))
-                sg.value_shapes[output_names[k]] = translated->output_tensors[k];
+            if (!subgraph.value_shapes.count(output_names[k]))
+                subgraph.value_shapes[output_names[k]] = translated->output_tensors[k];
         }
         auto translated_ptr = std::make_unique<TranslatedOp>(std::move(*translated));
         translated_ptr->FixupPointers();
@@ -1813,18 +1878,18 @@ bool FullGraphFusion::TryCompilePartition(
             size_t name_idx = translated_ptr->input_name_reorder.empty()
                 ? s : translated_ptr->input_name_reorder[s];
             if (name_idx >= input_names.size()) continue;
-            if (sg.all_initializers.count(input_names[name_idx]))
+            if (subgraph.all_initializers.count(input_names[name_idx]))
                 consumed_initializer_names.insert(input_names[name_idx]);
         }
         size_t idx = compiled_nodes.size();
         for (size_t k = 0; k < output_names.size(); ++k)
             value_producer[output_names[k]] = {idx, k};
-        CompiledNode cn;
-        cn.translated = std::move(translated_ptr);
-        cn.input_names = std::move(input_names);
-        cn.output_names = std::move(output_names);
-        cn.op_type = op_type;
-        compiled_nodes.push_back(std::move(cn));
+        CompiledNode compiled_node;
+        compiled_node.translated = std::move(translated_ptr);
+        compiled_node.input_names = std::move(input_names);
+        compiled_node.output_names = std::move(output_names);
+        compiled_node.op_type = op_type;
+        compiled_nodes.push_back(std::move(compiled_node));
     }
     if (compiled_nodes.empty()) return true;
 
@@ -1833,10 +1898,10 @@ bool FullGraphFusion::TryCompilePartition(
     if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf()))) return false;
     ComPtr<IDMLDevice1> dml_device1;
     if (FAILED(dml_device.As(&dml_device1))) return false;
-    for (auto& cn : compiled_nodes) {
-        if (FAILED(dml_device->CreateOperator(&cn.translated->op_desc,
-                IID_PPV_ARGS(cn.translated->dml_operator.GetAddressOf())))) return false;
-        for (auto& sn : cn.translated->sub_nodes)
+    for (auto& compiled_node : compiled_nodes) {
+        if (FAILED(dml_device->CreateOperator(&compiled_node.translated->op_desc,
+                IID_PPV_ARGS(compiled_node.translated->dml_operator.GetAddressOf())))) return false;
+        for (auto& sn : compiled_node.translated->sub_nodes)
             if (FAILED(dml_device->CreateOperator(&sn.op_desc,
                     IID_PPV_ARGS(sn.dml_operator.GetAddressOf())))) return false;
     }
@@ -1846,7 +1911,7 @@ bool FullGraphFusion::TryCompilePartition(
     // TryCompilePartition operates on the main graph, but the DML graph being
     // compiled covers only `nodes` (a partition). Its inputs are the partition
     // boundary: values consumed inside `nodes` but not produced by any node in
-    // `nodes`. Using sg.graph_input_vis (the full model's inputs) here would
+    // `nodes`. Using subgraph.graph_input_vis (the full model's inputs) here would
     // set the wrong InputCount and produce E_INVALIDARG from CompileGraph.
     //
     // Compute boundary inputs: walk each *non-passthrough* partition node's inputs
@@ -1854,25 +1919,25 @@ bool FullGraphFusion::TryCompilePartition(
     // names that are not produced inside the partition (value_producer) and not
     // initializers (handled separately via consumed_initializer_names below).
     // boundary_input_names holds alias-resolved names — the same names that the
-    // edge-wiring loop will look up in im.dml_input_map after calling
+    // edge-wiring loop will look up in input_map.dml_input_map after calling
     //   while (graph_input_aliases.count(name)) name = graph_input_aliases[name];
     // So we must key the map on the resolved name, not the raw input name.
     std::vector<std::string> boundary_input_names;
     {
         std::unordered_set<std::string> seen;
-        for (const auto& cn : compiled_nodes) {
-            size_t npi = cn.translated->primary_input_count > 0
-                ? cn.translated->primary_input_count : cn.translated->input_tensors.size();
-            for (size_t s = 0; s < cn.input_names.size() && s < npi; ++s) {
-                size_t ni = cn.translated->input_name_reorder.empty()
-                    ? s : cn.translated->input_name_reorder[s];
-                if (ni >= cn.input_names.size()) continue;
-                const auto& raw_name = cn.input_names[ni];
+        for (const auto& compiled_node : compiled_nodes) {
+            size_t num_primary_inputs = compiled_node.translated->primary_input_count > 0
+                ? compiled_node.translated->primary_input_count : compiled_node.translated->input_tensors.size();
+            for (size_t s = 0; s < compiled_node.input_names.size() && s < num_primary_inputs; ++s) {
+                size_t name_idx = compiled_node.translated->input_name_reorder.empty()
+                    ? s : compiled_node.translated->input_name_reorder[s];
+                if (name_idx >= compiled_node.input_names.size()) continue;
+                const auto& raw_name = compiled_node.input_names[name_idx];
                 if (raw_name.empty()) continue;
                 std::string name = raw_name;
                 while (graph_input_aliases.count(name)) name = graph_input_aliases.at(name);
                 if (value_producer.count(name)) continue;
-                if (sg.all_initializers.count(name)) { consumed_initializer_names.insert(name); continue; }
+                if (subgraph.all_initializers.count(name)) { consumed_initializer_names.insert(name); continue; }
                 if (seen.insert(name).second) boundary_input_names.push_back(name);
             }
         }
@@ -1880,25 +1945,37 @@ bool FullGraphFusion::TryCompilePartition(
 
     // Build a minimal DmlInputMapResult equivalent for the partition boundary.
     // We replicate BuildDmlInputMap's logic without needing OrtValueInfo* pointers.
-    DmlInputMapResult im;
-    im.subgraph_to_dml_input.assign(boundary_input_names.size(), SIZE_MAX);
+    DmlInputMapResult input_map;
+    input_map.subgraph_to_dml_input.assign(boundary_input_names.size(), SIZE_MAX);
     // Pass 1: inline small consumed initializers as DML constant nodes.
     for (const auto& init_name : consumed_initializer_names) {
-        auto shape_it = sg.value_shapes.find(init_name);
-        uint64_t bytes = (shape_it != sg.value_shapes.end()) ? shape_it->second.total_bytes : 0;
+        auto shape_it = subgraph.value_shapes.find(init_name);
+        uint64_t bytes = (shape_it != subgraph.value_shapes.end()) ? shape_it->second.total_bytes : 0;
         if (bytes == 0 || bytes >= kMaxConstNodeDataSize) continue;
-        auto init_it = sg.all_initializers.find(init_name);
-        if (init_it == sg.all_initializers.end() || !init_it->second) continue;
+        auto init_it = subgraph.all_initializers.find(init_name);
+        if (init_it == subgraph.all_initializers.end() || !init_it->second) continue;
         void* cpu_ptr = nullptr;
         OrtStatus* st = ort_api.GetTensorMutableData(
             const_cast<OrtValue*>(init_it->second), &cpu_ptr);
         if (!st && cpu_ptr) {
+            OrtTensorTypeAndShapeInfo* tsi = nullptr;
+            ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(init_it->second), &tsi);
+            size_t elem_count = 0;
+            ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+            if (tsi) {
+                ort_api.GetTensorShapeElementCount(tsi, &elem_count);
+                ort_api.GetTensorElementType(tsi, &dt);
+                ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
+            }
+            uint64_t actual_bytes = elem_count * DmlDataTypeSize(OnnxDtypeToDml(dt));
+            uint64_t data_size = (actual_bytes > 0 && actual_bytes < bytes) ? actual_bytes : bytes;
+
             ConstantNodeInfo cni;
             cni.name = init_name;
-            cni.data.assign(static_cast<uint8_t*>(cpu_ptr),
-                            static_cast<uint8_t*>(cpu_ptr) + bytes);
-            im.constant_node_map[init_name] = im.constant_nodes.size();
-            im.constant_nodes.push_back(std::move(cni));
+            cni.data.resize(static_cast<size_t>(data_size), 0);
+            std::memcpy(cni.data.data(), cpu_ptr, static_cast<size_t>(data_size));
+            input_map.constant_node_map[init_name] = input_map.constant_nodes.size();
+            input_map.constant_nodes.push_back(std::move(cni));
         }
         if (st) ort_api.ReleaseStatus(st);
     }
@@ -1906,19 +1983,19 @@ bool FullGraphFusion::TryCompilePartition(
     size_t dml_input_idx = 0;
     for (size_t i = 0; i < boundary_input_names.size(); ++i) {
         const auto& n = boundary_input_names[i];
-        if (im.constant_node_map.count(n)) continue; // inlined — no slot
-        im.dml_input_map[n] = dml_input_idx;
-        im.subgraph_to_dml_input[i] = dml_input_idx;
+        if (input_map.constant_node_map.count(n)) continue; // inlined — no slot
+        input_map.dml_input_map[n] = dml_input_idx;
+        input_map.subgraph_to_dml_input[i] = dml_input_idx;
         ++dml_input_idx;
     }
     // Pass 3: large consumed initializers not in boundary_input_names.
     for (const auto& init_name : consumed_initializer_names) {
-        if (im.constant_node_map.count(init_name)) continue;
-        if (im.dml_input_map.count(init_name)) continue;
-        im.dml_input_map[init_name] = dml_input_idx++;
-        im.ordered_initializer_names.push_back(init_name);
+        if (input_map.constant_node_map.count(init_name)) continue;
+        if (input_map.dml_input_map.count(init_name)) continue;
+        input_map.dml_input_map[init_name] = dml_input_idx++;
+        input_map.ordered_initializer_names.push_back(init_name);
     }
-    im.total_dml_inputs = dml_input_idx;
+    input_map.total_dml_inputs = dml_input_idx;
 
     size_t total_dml_nodes = 0;
     std::vector<size_t> dml_node_offset(compiled_nodes.size());
@@ -1937,10 +2014,10 @@ bool FullGraphFusion::TryCompilePartition(
             graph_nodes[base+1+s] = {DML_GRAPH_NODE_TYPE_OPERATOR, &op_descs[base+1+s]};
         }
     }
-    std::vector<DML_CONSTANT_DATA_GRAPH_NODE_DESC> const_descs(im.constant_nodes.size());
-    for (size_t c = 0; c < im.constant_nodes.size(); ++c) {
-        const_descs[c].Data = im.constant_nodes[c].data.data();
-        const_descs[c].DataSize = im.constant_nodes[c].data.size();
+    std::vector<DML_CONSTANT_DATA_GRAPH_NODE_DESC> const_descs(input_map.constant_nodes.size());
+    for (size_t c = 0; c < input_map.constant_nodes.size(); ++c) {
+        const_descs[c].Data = input_map.constant_nodes[c].data.data();
+        const_descs[c].DataSize = input_map.constant_nodes[c].data.size();
         graph_nodes.push_back({DML_GRAPH_NODE_TYPE_CONSTANT, &const_descs[c]});
     }
     size_t const_node_base = total_dml_nodes;
@@ -1950,24 +2027,24 @@ bool FullGraphFusion::TryCompilePartition(
     std::vector<DML_INTERMEDIATE_GRAPH_EDGE_DESC> me;
     std::vector<DML_OUTPUT_GRAPH_EDGE_DESC> oe;
 
-    for (size_t ci = 0; ci < compiled_nodes.size(); ++ci) {
-        const auto& cn = compiled_nodes[ci];
-        size_t pdml = dml_node_offset[ci];
-        size_t npi = cn.translated->primary_input_count > 0
-            ? cn.translated->primary_input_count : cn.translated->input_tensors.size();
-        for (size_t s = 0; s < cn.input_names.size() && s < npi; ++s) {
-            size_t ni = cn.translated->input_name_reorder.empty()
-                ? s : cn.translated->input_name_reorder[s];
-            if (ni >= cn.input_names.size()) continue;
-            auto name = cn.input_names[ni];
+    for (size_t node_idx = 0; node_idx < compiled_nodes.size(); ++node_idx) {
+        const auto& compiled_node = compiled_nodes[node_idx];
+        size_t pdml = dml_node_offset[node_idx];
+        size_t num_primary_inputs = compiled_node.translated->primary_input_count > 0
+            ? compiled_node.translated->primary_input_count : compiled_node.translated->input_tensors.size();
+        for (size_t s = 0; s < compiled_node.input_names.size() && s < num_primary_inputs; ++s) {
+            size_t name_idx = compiled_node.translated->input_name_reorder.empty()
+                ? s : compiled_node.translated->input_name_reorder[s];
+            if (name_idx >= compiled_node.input_names.size()) continue;
+            auto name = compiled_node.input_names[name_idx];
             if (name.empty()) continue;
             while (graph_input_aliases.count(name)) name = graph_input_aliases[name];
-            size_t dml_slot = cn.translated->dml_input_slot_indices.empty()
-                ? s : cn.translated->dml_input_slot_indices[s];
-            if (im.constant_node_map.count(name)) {
-                me.push_back({(UINT)(const_node_base+im.constant_node_map[name]),0,(UINT)pdml,(UINT)dml_slot});
-            } else if (im.dml_input_map.count(name)) {
-                ie.push_back({(UINT)im.dml_input_map[name],(UINT)pdml,(UINT)dml_slot});
+            size_t dml_slot = compiled_node.translated->dml_input_slot_indices.empty()
+                ? s : compiled_node.translated->dml_input_slot_indices[s];
+            if (input_map.constant_node_map.count(name)) {
+                me.push_back({(UINT)(const_node_base+input_map.constant_node_map[name]),0,(UINT)pdml,(UINT)dml_slot});
+            } else if (input_map.dml_input_map.count(name)) {
+                ie.push_back({(UINT)input_map.dml_input_map[name],(UINT)pdml,(UINT)dml_slot});
             } else if (value_producer.count(name)) {
                 auto [pci, pos] = value_producer[name];
                 size_t pdi = dml_node_offset[pci];
@@ -1989,8 +2066,8 @@ bool FullGraphFusion::TryCompilePartition(
         }
 
         // Wire internal edges for sub_nodes (mirrors Compile step 9 sub-node section).
-        for (size_t s = 0; s < cn.translated->sub_nodes.size(); ++s) {
-            const auto& sn = cn.translated->sub_nodes[s];
+        for (size_t s = 0; s < compiled_node.translated->sub_nodes.size(); ++s) {
+            const auto& sn = compiled_node.translated->sub_nodes[s];
             size_t sn_dml_idx = pdml + 1 + s;
             for (size_t inp = 0; inp < sn.input_from.size(); ++inp) {
                 auto [src_sub, src_slot] = sn.input_from[inp];
@@ -2002,15 +2079,15 @@ bool FullGraphFusion::TryCompilePartition(
                               (UINT)sn_dml_idx, (UINT)inp});
             }
             for (auto& [onnx_idx, to_input] : sn.graph_inputs) {
-                if (onnx_idx >= cn.input_names.size()) continue;
-                auto gi_name = cn.input_names[onnx_idx];
+                if (onnx_idx >= compiled_node.input_names.size()) continue;
+                auto gi_name = compiled_node.input_names[onnx_idx];
                 while (graph_input_aliases.count(gi_name))
                     gi_name = graph_input_aliases[gi_name];
-                if (im.constant_node_map.count(gi_name)) {
-                    me.push_back({(UINT)(const_node_base + im.constant_node_map[gi_name]),
+                if (input_map.constant_node_map.count(gi_name)) {
+                    me.push_back({(UINT)(const_node_base + input_map.constant_node_map[gi_name]),
                                   0, (UINT)sn_dml_idx, (UINT)to_input});
-                } else if (im.dml_input_map.count(gi_name)) {
-                    ie.push_back({(UINT)im.dml_input_map[gi_name],
+                } else if (input_map.dml_input_map.count(gi_name)) {
+                    ie.push_back({(UINT)input_map.dml_input_map[gi_name],
                                   (UINT)sn_dml_idx, (UINT)to_input});
                 }
             }
@@ -2026,16 +2103,16 @@ bool FullGraphFusion::TryCompilePartition(
 
     size_t oi_idx = 0;
     // Output edges for operator nodes.
-    for (size_t ci = 0; ci < compiled_nodes.size(); ++ci) {
-        for (size_t k = 0; k < compiled_nodes[ci].output_names.size(); ++k) {
-            size_t pdi = dml_node_offset[ci];
+    for (size_t node_idx = 0; node_idx < compiled_nodes.size(); ++node_idx) {
+        for (size_t k = 0; k < compiled_nodes[node_idx].output_names.size(); ++k) {
+            size_t pdi = dml_node_offset[node_idx];
             UINT foi;
-            const auto& osrc = compiled_nodes[ci].translated->output_source;
+            const auto& osrc = compiled_nodes[node_idx].translated->output_source;
             if (!osrc.empty() && k < osrc.size()) {
                 auto [ss, sl] = osrc[k]; if (ss>=0) pdi+=1+ss; foi=(UINT)sl;
             } else {
-                if (!compiled_nodes[ci].translated->sub_nodes.empty())
-                    pdi += compiled_nodes[ci].translated->sub_nodes.size();
+                if (!compiled_nodes[node_idx].translated->sub_nodes.empty())
+                    pdi += compiled_nodes[node_idx].translated->sub_nodes.size();
                 foi = (UINT)k;
             }
             if (wired_from.count((UINT)pdi)) continue; // already has an outgoing edge
@@ -2044,7 +2121,7 @@ bool FullGraphFusion::TryCompilePartition(
     }
 
     // Output edges for constant nodes with no outgoing intermediate edge.
-    for (size_t c = 0; c < im.constant_nodes.size(); ++c) {
+    for (size_t c = 0; c < input_map.constant_nodes.size(); ++c) {
         UINT const_dml_idx = static_cast<UINT>(const_node_base + c);
         if (wired_from.count(const_dml_idx)) continue;
         oe.push_back({const_dml_idx, 0, (UINT)oi_idx++});
@@ -2057,7 +2134,7 @@ bool FullGraphFusion::TryCompilePartition(
     for (size_t i=0;i<oe.size();++i) oe2[i]={DML_GRAPH_EDGE_TYPE_OUTPUT,&oe[i]};
 
     DML_GRAPH_DESC gd{};
-    gd.InputCount = (UINT)im.total_dml_inputs;
+    gd.InputCount = (UINT)input_map.total_dml_inputs;
     gd.OutputCount = (UINT)oi_idx;
     gd.NodeCount = (UINT)graph_nodes.size();
     gd.Nodes = graph_nodes.data();
@@ -2067,6 +2144,21 @@ bool FullGraphFusion::TryCompilePartition(
 
     DML_EXECUTION_FLAGS flags = compiled_nodes.size()>=5
         ? DML_EXECUTION_FLAG_DESCRIPTORS_VOLATILE : DML_EXECUTION_FLAG_NONE;
+
+    {
+        bool has_fp16 = false, has_fp32 = false;
+        for (const auto& compiled_node : compiled_nodes) {
+            for (const auto& t : compiled_node.translated->input_tensors)
+                if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT16) has_fp16 = true;
+                else if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT32) has_fp32 = true;
+            for (const auto& t : compiled_node.translated->output_tensors)
+                if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT16) has_fp16 = true;
+                else if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT32) has_fp32 = true;
+        }
+        if (has_fp16 && !has_fp32)
+            flags |= DML_EXECUTION_FLAG_ALLOW_HALF_PRECISION_COMPUTATION;
+    }
+
     ComPtr<IDMLCompiledOperator> op;
     HRESULT hr = dml_device1->CompileGraph(&gd, flags, IID_PPV_ARGS(op.GetAddressOf()));
     if (FAILED(hr)) {
@@ -2097,6 +2189,7 @@ bool FullGraphFusion::TryCompilePartition(
                     " — DML debug layer not active\n");
             }
         }
+
         return false;
     }
     return true;
