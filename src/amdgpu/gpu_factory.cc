@@ -19,7 +19,7 @@
     do {                                                               \
         return (backend != nullptr &&                                  \
                 backend->fn != nullptr) ?                              \
-                    backend->fn(backend, __VA_ARGS__) : defval;        \
+                    backend->fn(backend, ##__VA_ARGS__) : defval;        \
     } while (0)
 
 #define BACKEND_CALL_S(backend, fn, ...)                               \
@@ -28,7 +28,7 @@
             if (backend->fn == nullptr) {                              \
                 return MAKE_STATUS(ORT_NOT_IMPLEMENTED, #fn ": method not implemented"); \
             }                                                          \
-            RETURN_IF_ERROR(backend->fn(backend, __VA_ARGS__));        \
+            RETURN_IF_ERROR(backend->fn(backend, ##__VA_ARGS__));        \
             return STATUS_OK;                                          \
         }                                                              \
         return MAKE_STATUS(ORT_EP_FAIL, #fn ": invalid backend factory"); \
@@ -37,7 +37,7 @@
 #define BACKEND_CALL_V(backend, fn, ...)                               \
     do {                                                               \
         if (backend != nullptr && backend->fn != nullptr) {            \
-            backend->fn(backend, __VA_ARGS__);                         \
+            backend->fn(backend, ##__VA_ARGS__);                         \
         }                                                              \
     } while (0)
 

@@ -5,13 +5,17 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <system_error>
 #include <thread>
 
 #include "common/path_string.h"
+#include "common/platform/linux/env_var.h"
 #include "common/telemetry.h"
+
+namespace fs = std::filesystem;
 
 namespace telemetry {
 
@@ -67,7 +71,17 @@ void AcquireAppendLock(int fd) {
 }  // namespace
 
 PathString BaseDirectory() {
-    return "/var/log";
+    // Per-user writable location per the XDG Base Directory Specification:
+    // $XDG_STATE_HOME when set, otherwise $HOME/.local/state.
+    const std::string xdg_state = platform::GetEnvironmentVar("XDG_STATE_HOME");
+    if (!xdg_state.empty()) {
+        return ToPathString(xdg_state);
+    }
+    const std::string home = platform::GetEnvironmentVar("HOME");
+    if (home.empty()) {
+        return {};
+    }
+    return (fs::path{ToPathString(home)} / ".local" / "state").native();
 }
 
 std::string CurrentProcessName() {

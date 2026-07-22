@@ -42,6 +42,10 @@ endif()
 target_link_libraries(plugin-ep-utils PUBLIC onnxruntime::onnxruntime
         fmt::fmt Microsoft.GSL::GSL range-v3::range-v3 onnx protobuf::libprotobuf)
 
+if(NOT WIN32)
+    target_link_libraries(plugin-ep-utils PUBLIC ${CMAKE_DL_LIBS})
+endif()
+
 target_include_directories(plugin-ep-utils PUBLIC
         ${CMAKE_CURRENT_LIST_DIR} ${CMAKE_CURRENT_LIST_DIR}/common)
 
