@@ -9,6 +9,13 @@
 #include "hip/utils.h"        // hipGetDeviceProperties for ASIC-based backend routing
 #include "common/env_var.h"   // ParseEnvironmentVariable (routing test override)
 
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstdint>
+#include <string>
+#include <string_view>
+
 #define EP_CALL_T(backend, fn, defval, ...)                            \
     do {                                                               \
         return (backend != nullptr &&                                  \
@@ -36,6 +43,75 @@
 
 
 namespace gpu_ep {
+
+namespace {
+
+// FNV-1a (64-bit). Used to store model_arch names as hash constants so the plaintext
+// names appear in neither the source nor the shipped binary.
+constexpr std::uint64_t fnv1a(std::string_view s) {
+    std::uint64_t h{0xcbf29ce484222325ULL};
+    for (const char c : s) {
+        h ^= static_cast<std::uint8_t>(c);
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+
+// Normalize a model_arch string (lowercase + trim) before hashing, so "Llama", " llama"
+// all match. Must mirror the tool that generates the kLlmModelArch constants.
+std::string normalize_model_arch(std::string_view value) {
+    std::string s{value};
+    std::transform(s.begin(), s.end(), s.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const auto not_space = [](unsigned char c) { return std::isspace(c) == 0; };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+    s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+    return s;
+}
+
+// Known LLM model_arch families (hashed). Presence of model_arch alone does NOT imply
+// LLM (non-LLM callers may set it too); only a match here counts as an LLM.
+constexpr std::array<std::uint64_t, 9> kLlmModelArch{{
+    fnv1a("llama"), fnv1a("qwen2"), fnv1a("qwen3"), fnv1a("phi3"), fnv1a("gpt2"),
+    fnv1a("mistral"), fnv1a("gemma"), fnv1a("gemma2"), fnv1a("lfm2"),
+}};
+
+// Parse the numeric arch from a gcnArchName, e.g. "gfx1201" or "gfx1200:xnack-" -> 1201/1200.
+int parse_gfx_arch(std::string_view arch_name) {
+    int arch{0};
+    const auto pos = arch_name.find("gfx");
+    if (pos != std::string_view::npos) {
+        for (std::size_t i = pos + 3;
+             i < arch_name.size() && std::isdigit(static_cast<unsigned char>(arch_name[i])); ++i) {
+            arch = arch * 10 + (arch_name[i] - '0');
+        }
+    }
+    return arch;
+}
+
+// True if a model_arch string names a known LLM family. Presence alone does NOT imply LLM
+// (non-LLM callers may set model_arch too); only a match against kLlmModelArch counts.
+bool is_llm_model_arch(const std::optional<std::string>& model_arch) {
+    if (!model_arch.has_value()) return false;
+    const std::uint64_t h = fnv1a(normalize_model_arch(model_arch.value()));
+    return std::find(kLlmModelArch.begin(), kLlmModelArch.end(), h) != kLlmModelArch.end();
+}
+
+// Pure backend-selection policy (AMDGPUUmbrellaEP.md §4.3). No I/O — unit-testable.
+// Explicit profile is honored as-is; Auto/Optimized derives from (arch, is_llm):
+//   Medusa gfx1170/gfx1171 -> DirectML (checked first)
+//   LLM:     arch < gfx1100 -> DirectML, else MIGraphX
+//   non-LLM: arch < gfx1150 -> DirectML, else MIGraphX
+Profile select_backend(int arch, bool is_llm, Profile profile) {
+    if (profile != Profile::Auto && profile != Profile::Optimized) {
+        return profile;  // explicit backend request honored unchanged
+    }
+    if (arch == 1170 || arch == 1171) return Profile::DirectML;              // Medusa (first)
+    if (is_llm)  return arch < 1100 ? Profile::DirectML : Profile::MIGraphX;
+    return arch < 1150 ? Profile::DirectML : Profile::MIGraphX;
+}
+
+}  // namespace
 
 ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view ep_name,
         const Ort::ConstSessionOptions& session_options, const OrtLogger* logger)
@@ -106,13 +182,13 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
 
     const ProviderInfo info{provider_options};
 
-    // ASIC-based default backend selection for the Auto/Optimized profile. Explicit profiles
+    // Heuristic backend selection for the Auto/Optimized profile. Explicit profiles
     // (migraphx/directml/hip) are honored unchanged below. Policy (AMDGPUUmbrellaEP.md §4.3):
-    //   Medusa gfx1170/gfx1171 -> DirectML (checked first)
-    //   arch < gfx1150 (pre-gfx11.5) -> DirectML
-    //   arch >= gfx1150             -> MIGraphX
+    //   Medusa gfx1170/gfx1171          -> DirectML (checked first)
+    //   LLM      (model_arch is a known family): arch < gfx1100 -> DirectML, else MIGraphX
+    //   non-LLM  (no/other model_arch):          arch < gfx1150 -> DirectML, else MIGraphX
     // ORT_AMDGPU_ROUTING_FORCE_ARCH=<gfxNNNN> overrides the queried arch for testing on a single GPU.
-    const auto route_by_asic = [&]() -> Profile {
+    const auto route_by_heuristic = [&]() -> Profile {
         std::string arch_name;
         const auto forced = ParseEnvironmentVariable<std::string>("ORT_AMDGPU_ROUTING_FORCE_ARCH");
         if (forced.has_value()) {
@@ -124,20 +200,15 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
             }
             arch_name = prop.gcnArchName;  // e.g. "gfx1201" or "gfx1100:xnack-"
         }
-        int arch = 0;
-        const auto pos = arch_name.find("gfx");
-        if (pos != std::string::npos) {
-            for (size_t i = pos + 3; i < arch_name.size() && ::isdigit(static_cast<unsigned char>(arch_name[i])); ++i)
-                arch = arch * 10 + (arch_name[i] - '0');
-        }
         // TODO(routing): WebNN caller -> DirectML on all ASICs once the WebNN signal is available here.
-        Profile chosen;
-        if (arch == 1170 || arch == 1171) chosen = Profile::DirectML;  // Medusa MDS1/MDS2 (checked first)
-        else if (arch < 1150)             chosen = Profile::DirectML;  // pre-gfx11.5 (incl. Navi31 gfx1100)
-        else                              chosen = Profile::MIGraphX;  // gfx1150/1151/1200/1201
+        const int arch = parse_gfx_arch(arch_name);
+        const bool is_llm = is_llm_model_arch(info.model_arch);
+        const Profile chosen = select_backend(arch, is_llm, info.profile);
+
         if (ParseEnvironmentVariableWithDefault<bool>("ORT_AMDGPU_ROUTING_DEBUG", false)) {
-            fprintf(stderr, "[amdgpu-routing] arch=\"%s\"(%d)%s -> %s\n", arch_name.c_str(), arch,
+            fprintf(stderr, "[amdgpu-routing] arch=\"%s\"(%d)%s model_arch=%s llm=%d -> %s\n", arch_name.c_str(), arch,
                     forced.has_value() ? " [forced]" : "",
+                    info.model_arch.has_value() ? info.model_arch.value().c_str() : "(none)", is_llm,
                     chosen == Profile::DirectML ? "DirectML" : "MIGraphX");
             fflush(stderr);
         }
@@ -246,22 +317,20 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         THROW_IF_ERROR(factory.CreateMIGraphXBackend(local_session_options, logger, backend_ep_));
     };
 
-    if (info.profile == Profile::Eager) {
+    // Explicit profile is honored; Auto/Optimized derives from (ASIC, model_arch). select_backend()
+    // (inside route_by_heuristic) applies both, so the result covers every profile value.
+    const Profile effective = route_by_heuristic();
+
+    if (effective == Profile::Eager) {
         create_directml_backend();
-    } else if (info.profile == Profile::DirectML) {
+    } else if (effective == Profile::DirectML) {
         create_directml_backend();
-    } else if (info.profile == Profile::MIGraphX) {
+    } else if (effective == Profile::MIGraphX) {
         create_migraphx_backend();
-    } else if (info.profile == Profile::Hip) {
+    } else if (effective == Profile::Hip) {
         create_hip_backend();
     } else {
-        // Auto / Optimized: pick the backend from the GPU ASIC (route_by_asic returns
-        // only DirectML or MIGraphX in V1).
-        if (route_by_asic() == Profile::DirectML) {
-            create_directml_backend();
-        } else {
-            create_migraphx_backend();
-        }
+        create_migraphx_backend();
     }
     // Capture per-EP now: the shared factory_ backend field is overwritten by a later
     // umbrella EP (different backend). See PR for the cross-backend UAF details.
