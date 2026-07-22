@@ -43,15 +43,18 @@ namespace {
 
 telemetry::Backend BackendForProfile(Profile profile) noexcept {
     switch (profile) {
+#ifdef USE_DML
         case Profile::Eager:
         case Profile::DirectML:
             return telemetry::Backend::DirectML;
+#endif
         case Profile::Auto:
         case Profile::Optimized:
         case Profile::MIGraphX:
+        default:
+            // Without DirectML support the wrapper always runs on MIGraphX.
             return telemetry::Backend::MIGraphX;
     }
-    return telemetry::Backend::MIGraphX;
 }
 
 }  // namespace
@@ -134,6 +137,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     }
     telemetry_.emplace(std::move(telemetry_config), &factory_.TelemetryWriter());
 
+#ifdef USE_DML
     const auto create_directml_backend = [&] {
         THROW_IF_ERROR(factory.CreateDirectMLBackend(local_session_options, logger, backend_ep_));
         // DirectML manages its own per-session GPU allocator (DmlBucketizedBufferAllocator)
@@ -145,6 +149,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
             API_CALL_S(ExecutionProvider, this_, CreateAllocator, memory_info, allocator);
         };
     };
+#endif
 
     const auto create_hip_backend = [&] {
         // hip backend manages allocator/data-transfer at the backend factory level,
@@ -227,15 +232,16 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         THROW_IF_ERROR(factory.CreateMIGraphXBackend(local_session_options, logger, backend_ep_));
     };
 
-    switch (backend_) {
-        case telemetry::Backend::DirectML:
-            create_directml_backend();
-            break;
-        case telemetry::Backend::MIGraphX:
-        case telemetry::Backend::Unknown:
-            create_migraphx_backend();
-            break;
+#ifdef USE_DML
+    if (backend_ == telemetry::Backend::DirectML) {
+        create_directml_backend();
+    } else {
+        create_migraphx_backend();
     }
+#else
+    // DirectML not built: everything runs on MIGraphX.
+    create_migraphx_backend();
+#endif
     // Capture per-EP now: the shared factory_ backend field is overwritten by a later
     // umbrella EP (different backend). See PR for the cross-backend UAF details.
     backend_ep_factory_ = factory_.GetBackendFactory();

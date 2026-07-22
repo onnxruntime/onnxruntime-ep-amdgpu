@@ -15,10 +15,18 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
     ~ProviderFactory();
 
     Ort::Status CreateDirectMLBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
+#ifdef USE_DML
         RETURN_IF_ERROR(dml_ep_factory_->CreateEp(dml_ep_factory_, nullptr, nullptr, 0, session_options, logger, &ep));
         backend_ep_factory_ = dml_ep_factory_;
         backend_get_telemetry_ = dml_get_telemetry_;
         return STATUS_OK;
+#else
+        (void)session_options;
+        (void)logger;
+        (void)ep;
+        return MAKE_STATUS(ORT_FAIL,
+            "DirectML backend requested, but the AMDGPU EP was not built with DirectML support");
+#endif
     }
 
     Ort::Status CreateMIGraphXBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
@@ -103,11 +111,13 @@ private:
     typedef OrtStatus* (*ReleaseEpFactory_t)(OrtEpFactory*);
     typedef OrtStatus* (*CreateEpFactories_t)(const char*, const OrtApiBase*, const OrtLogger*, OrtEpFactory**, size_t, size_t*);
 
+#ifdef USE_DML
     void* dml_backend_{};
     ReleaseEpFactory_t dml_release_ep_factory_{};
 
     OrtEpFactory* dml_ep_factory_{};
     telemetry::GetBackendDataFn dml_get_telemetry_{};
+#endif
 
     void* mgx_backend_{};
     ReleaseEpFactory_t mgx_release_ep_factory_{};
