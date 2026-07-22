@@ -1025,8 +1025,39 @@ try {
             RETURN_IF_ERROR(CreateNodeComputeInfoFromCache(graph, fused_node, input_name_indices,
                 output_name_indices, node_compute_info));
         } else {
+            // The .mxr filename must encode every option that changes the compiled
+            // program.  Precision/quantization and tuning are applied only on the
+            // compile path (calibrate_and_quantize / compile_program); the load path
+            // deserializes the cached program as-is.  If these options are not part of
+            // the cache key, an fp16 and an fp32 build of the same graph hash to the
+            // same filename, so a later run loads the first program and silently
+            // ignores the requested precision.  Fold a canonical option key into the
+            // prefix so each distinct build gets its own .mxr.
+            std::string options_key;
+            options_key += enable_fp16_ ? "fp16;" : "";
+            options_key += enable_bf16_ ? "bf16;" : "";
+            options_key += enable_int8_ ? "int8;" : "";
+            options_key += enable_fp8_ ? "fp8;" : "";
+            options_key += exhaustive_tune_ ? "tune;" : "";
+            options_key += "ops=" + mlss_use_specific_ops_ + ";";
+            if ((enable_int8_ ^ enable_fp8_) && int8_calibration_cache_available_) {
+                // Calibration data changes the quantized program, so different tables
+                // must key to different caches.  dynamic_ranges_ is unordered; sort the
+                // entries first so the digest is stable across runs.
+                options_key += "calib=" + int8_calibration_table_name_ + ";";
+                options_key += int8_use_native_calibration_table_ ? "native;" : "";
+                std::set<std::string> sorted_ranges;
+                for (const auto& [name, value] : dynamic_ranges_) {
+                    sorted_ranges.insert(name + "=" + std::to_string(value));
+                }
+                for (const auto& entry : sorted_ranges) {
+                    options_key += entry + ";";
+                }
+            }
+
             const auto mxr_prefix{hash::ToHex(MIGraphX_Version) + "-" + GenerateGraphId(graph) + "-" +
-                hash::ToHex(std::string_view{device_prop_.gcnArchName}) + "-"};
+                hash::ToHex(std::string_view{device_prop_.gcnArchName}) + "-" +
+                hash::ToHex(std::string_view{options_key}) + "-"};
 
             RETURN_IF_ERROR(CreateNodeComputeInfoFromGraph(graph, fused_node, input_name_indices,
                 output_name_indices, mxr_prefix, node_compute_info, ep_context_node));
