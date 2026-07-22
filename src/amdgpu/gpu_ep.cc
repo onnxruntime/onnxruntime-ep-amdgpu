@@ -98,13 +98,14 @@ bool is_llm_model_arch(const std::optional<std::string>& model_arch) {
 }
 
 // Pure backend-selection policy (AMDGPUUmbrellaEP.md §4.3). No I/O — unit-testable.
-// Explicit profile is honored as-is; Auto/Optimized derives from (arch, is_llm):
+// Only the Auto profile is heuristic-driven; every other profile (explicit backend, or Optimized)
+// is honored/left as-is and dispatched unchanged. Auto derives from (arch, is_llm):
 //   Medusa gfx1170/gfx1171 -> DirectML (checked first)
 //   LLM:     arch < gfx1100 -> DirectML, else MIGraphX
 //   non-LLM: arch < gfx1150 -> DirectML, else MIGraphX
 Profile select_backend(int arch, bool is_llm, Profile profile) {
-    if (profile != Profile::Auto && profile != Profile::Optimized) {
-        return profile;  // explicit backend request honored unchanged
+    if (profile != Profile::Auto) {
+        return profile;  // explicit profile (and Optimized) honored/dispatched as-is
     }
     if (arch == 1170 || arch == 1171) return Profile::DirectML;              // Medusa (first)
     if (is_llm)  return arch < 1100 ? Profile::DirectML : Profile::MIGraphX;
