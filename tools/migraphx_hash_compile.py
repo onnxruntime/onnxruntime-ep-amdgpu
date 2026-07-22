@@ -37,6 +37,15 @@ Usage (inside a container / env with ORT + MIGraphX):
 
     # Exhaustive tuning (slower compile, faster kernels):
     python3 migraphx_hash_compile.py --model model.onnx --quantize fp16 --exhaustive-tune
+
+    # Target the v2 EP (filename includes an <options_hash> component):
+    python3 migraphx_hash_compile.py --model model.onnx --quantize fp16 -v2
+
+With the v2 EP, build options (fp16/bf16/int8/fp8, exhaustive_tune,
+mlss_use_specific_ops, calibration) are folded into the .mxr filename hash, so
+the per-quantization subfolder workaround is no longer strictly required; pass
+-v2 to decode the 5-component filename and record the folded options in the
+manifest.
 """
 
 import argparse
@@ -51,6 +60,17 @@ import time
 import numpy as np
 
 QUANT_CHOICES = ["fp16", "bf16", "int8", "fp8"]
+
+# Per-architecture ops the EP forces onto AMDMLSS. This is a READ-ONLY mirror of
+# kArchMlssOps in src/migraphx/mgx_ep.cc (matched by gcnArchName prefix). It is
+# used ONLY to make the manifest's mlss_use_specific_ops field match what the EP
+# resolves; it is deliberately NOT fed into the provider options, because the EP
+# already appends these itself -- setting them here too would produce "conv,conv"
+# and change the options hash. Keep this table in sync with mgx_ep.cc.
+ARCH_MLSS_DEFAULTS = {
+    "gfx1200": "conv",
+    "gfx1201": "conv",
+}
 
 # migraphx_* provider-option keys (see migraphx_execution_provider_info.h)
 OPT_FP16 = "migraphx_fp16_enable"
@@ -132,13 +152,18 @@ def get_gpu_arch(device_id):
     return "unknown"
 
 
-def decode_mxr_filename(filename):
+def decode_mxr_filename(filename, v2=False):
     """Split an EP .mxr filename into its components and decode the version.
 
-    Filename layout (migraphx_execution_provider.cc):
-        <version_hex>-<graph_id>-<gpu_arch_hash>-<shape_hash>.mxr
+    Filename layout (mgx_ep.cc):
+        v1: <version_hex>-<graph_id>-<gpu_arch_hash>-<shape_hash>.mxr
+        v2: <version_hex>-<graph_id>-<gpu_arch_hash>-<options_hash>-<shape_hash>.mxr
 
-    Only the version field is reversible; the other three are one-way
+    v2 adds the <options_hash> component (fp16/bf16/int8/fp8, exhaustive_tune,
+    mlss_use_specific_ops, and int8/fp8 calibration identity) so that different
+    build options no longer collide on the same filename.
+
+    Only the version field is reversible; the other hashes are one-way
     MurmurHash3 values recorded here purely for traceability.
     """
     stem = filename[:-4] if filename.endswith(".mxr") else filename
@@ -153,10 +178,16 @@ def decode_mxr_filename(filename):
             )
         except ValueError:
             decoded["migraphx_version"] = "unpar?able"
-    if len(parts) == 4:
+    # v2 EP emits 5 components (adds options_hash before the shape hash); v1 emits 4.
+    expect = 5 if v2 else 4
+    if len(parts) == expect:
         decoded["graph_id_hash"] = parts[1]
         decoded["gpu_arch_hash"] = parts[2]
-        decoded["shape_hash"] = parts[3]
+        if v2:
+            decoded["options_hash"] = parts[3]
+            decoded["shape_hash"] = parts[4]
+        else:
+            decoded["shape_hash"] = parts[3]
     return decoded
 
 
@@ -215,6 +246,52 @@ def md5sum(path, chunk_size=1024 * 1024):
         return None
 
 
+def resolve_arch_mlss_ops(gpu_arch):
+    """EP-resolved mlss_use_specific_ops for a GPU arch, from the arch defaults.
+
+    Mirrors mgx_ep.cc: the EP prefix-matches gcnArchName against kArchMlssOps and
+    appends the ops. This is manifest-only; it does not (and must not) drive the
+    provider options. Returns the ops string, or "" if the arch has no default.
+    Note this reflects only the arch defaults -- a user-set provider option or
+    ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS env var (merged in by the EP) is not seen
+    here.
+    """
+    if not gpu_arch:
+        return ""
+    for arch, ops in ARCH_MLSS_DEFAULTS.items():
+        if gpu_arch.startswith(arch):
+            return ops
+    return ""
+
+
+def options_hash_fields(args, gpu_arch):
+    """The build options the v2 EP folds into the .mxr <options_hash> component.
+
+    Mirrors the canonical option key built in mgx_ep.cc so the manifest records
+    exactly what feeds that hash. mlss_use_specific_ops is EP-resolved from the
+    arch defaults (see resolve_arch_mlss_ops); the per-tensor calibration
+    dynamic_ranges are read by the EP from the int8/fp8 calibration table at
+    compile time and are reported as such.
+    """
+    quant = set(args.quantize or [])
+    mlss = resolve_arch_mlss_ops(gpu_arch)
+    fields = {
+        "fp16_enable": "fp16" in quant,
+        "bf16_enable": "bf16" in quant,
+        "int8_enable": "int8" in quant,
+        "fp8_enable": "fp8" in quant,
+        "exhaustive_tune": bool(args.exhaustive_tune),
+        "mlss_use_specific_ops": mlss if mlss else "(empty; arch has no default)",
+    }
+    if ("int8" in quant or "fp8" in quant) and args.int8_calib_table:
+        fields["int8_calibration_table_name"] = args.int8_calib_table
+        fields["int8_use_native_calibration_table"] = bool(args.int8_native_calib)
+        fields["calibration_dynamic_ranges"] = (
+            "(read from calibration table by the EP; not reproduced here)"
+        )
+    return fields
+
+
 def write_manifest(mxr_path, args, provider_options, input_shapes,
                    output_shapes, gpu_arch, ort_version):
     """Write a <name>_<md5>_manifest.log next to the generated .mxr."""
@@ -225,7 +302,7 @@ def write_manifest(mxr_path, args, provider_options, input_shapes,
     manifest_name = mxr_name[:-4] + "_" + mxr_md5 + "_manifest.log"
     manifest_path = os.path.join(mxr_dir, manifest_name)
 
-    decoded = decode_mxr_filename(mxr_name)
+    decoded = decode_mxr_filename(mxr_name, v2=args.v2)
     file_size = os.path.getsize(mxr_path) if os.path.exists(mxr_path) else 0
     model_filename = os.path.basename(args.model)
 
@@ -267,10 +344,17 @@ def write_manifest(mxr_path, args, provider_options, input_shapes,
                  f"  (from field '{decoded.get('version_hex', '?')}')")
     lines.append(f"graph id hash      : {decoded.get('graph_id_hash', 'n/a')}")
     lines.append(f"gpu arch hash      : {decoded.get('gpu_arch_hash', 'n/a')}")
+    if args.v2:
+        lines.append(f"options hash       : {decoded.get('options_hash', 'n/a')}")
     lines.append(f"shape hash         : {decoded.get('shape_hash', 'n/a')}")
-    lines.append("  (graph id / arch / shape are one-way MurmurHash3 values and"
-                 " cannot be inverted.)")
+    lines.append("  (graph id / arch / options / shape are one-way MurmurHash3 values"
+                 " and cannot be inverted.)")
     lines.append("")
+    if args.v2:
+        lines.append("--- Options folded into EP <options_hash> (v2) ---")
+        for key, value in options_hash_fields(args, gpu_arch).items():
+            lines.append(f"  {key}: {value}")
+        lines.append("")
     lines.append("--- Provider options passed to ORT ---")
     lines.append(json.dumps(provider_options, indent=2))
     lines.append("")
@@ -302,6 +386,11 @@ def main():
                         help="Base directory for output. The .mxr + manifest are written to a "
                              "per-quantization subfolder of it (e.g. <output-dir>/fp16), which "
                              "becomes migraphx_model_cache_dir. Default: ./mxr_out")
+    parser.add_argument("-v2", "--v2", dest="v2", action="store_true",
+                        help="Target the v2 EP whose .mxr filename adds an <options_hash> "
+                             "component (fp16/bf16/int8/fp8, exhaustive_tune, "
+                             "mlss_use_specific_ops, calibration). Decodes the 5-component "
+                             "filename and records the folded option fields in the manifest.")
 
     args = parser.parse_args()
 
