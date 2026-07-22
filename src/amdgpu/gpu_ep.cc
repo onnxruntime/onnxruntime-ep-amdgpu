@@ -6,6 +6,8 @@
 
 #include "gpu_options.h"
 #include "mgx_options.h"
+#include "hip/utils.h"        // hipGetDeviceProperties for ASIC-based backend routing
+#include "common/env_var.h"   // ParseEnvironmentVariable (routing test override)
 
 #define EP_CALL_T(backend, fn, defval, ...)                            \
     do {                                                               \
@@ -104,7 +106,48 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
 
     const ProviderInfo info{provider_options};
 
+    // ASIC-based default backend selection for the Auto/Optimized profile. Explicit profiles
+    // (migraphx/directml/hip) are honored unchanged below. Policy (AMDGPUUmbrellaEP.md §4.3):
+    //   Medusa gfx1170/gfx1171 -> DirectML (checked first)
+    //   arch < gfx1150 (pre-gfx11.5) -> DirectML
+    //   arch >= gfx1150             -> MIGraphX
+    // ORT_AMDGPU_ROUTING_FORCE_ARCH=<gfxNNNN> overrides the queried arch for testing on a single GPU.
+    const auto route_by_asic = [&]() -> Profile {
+        std::string arch_name;
+        const auto forced = ParseEnvironmentVariable<std::string>("ORT_AMDGPU_ROUTING_FORCE_ARCH");
+        if (forced.has_value()) {
+            arch_name = *forced;
+        } else {
+            hipDeviceProp_t prop{};
+            if (hipGetDeviceProperties(&prop, info.device_id.value_or(0)) != hipSuccess) {
+                return Profile::MIGraphX;  // preserve the historical default on query failure
+            }
+            arch_name = prop.gcnArchName;  // e.g. "gfx1201" or "gfx1100:xnack-"
+        }
+        int arch = 0;
+        const auto pos = arch_name.find("gfx");
+        if (pos != std::string::npos) {
+            for (size_t i = pos + 3; i < arch_name.size() && ::isdigit(static_cast<unsigned char>(arch_name[i])); ++i)
+                arch = arch * 10 + (arch_name[i] - '0');
+        }
+        // TODO(routing): WebNN caller -> DirectML on all ASICs once the WebNN signal is available here.
+        Profile chosen;
+        if (arch == 1170 || arch == 1171) chosen = Profile::DirectML;  // Medusa MDS1/MDS2 (checked first)
+        else if (arch < 1150)             chosen = Profile::DirectML;  // pre-gfx11.5 (incl. Navi31 gfx1100)
+        else                              chosen = Profile::MIGraphX;  // gfx1150/1151/1200/1201
+        if (ParseEnvironmentVariableWithDefault<bool>("ORT_AMDGPU_ROUTING_DEBUG", false)) {
+            fprintf(stderr, "[amdgpu-routing] arch=\"%s\"(%d)%s -> %s\n", arch_name.c_str(), arch,
+                    forced.has_value() ? " [forced]" : "",
+                    chosen == Profile::DirectML ? "DirectML" : "MIGraphX");
+            fflush(stderr);
+        }
+        return chosen;
+    };
+
     const auto create_directml_backend = [&] {
+        if (ParseEnvironmentVariableWithDefault<bool>("ORT_AMDGPU_ROUTING_DEBUG", false)) {
+            fprintf(stderr, "[amdgpu-routing] create DirectML backend\n"); fflush(stderr);
+        }
         THROW_IF_ERROR(factory.CreateDirectMLBackend(local_session_options, logger, backend_ep_));
         // DirectML manages its own per-session GPU allocator (DmlBucketizedBufferAllocator)
         // via EP-level CreateAllocator. Wire it now that we know the backend is DirectML.
@@ -117,6 +160,9 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     };
 
     const auto create_hip_backend = [&] {
+        if (ParseEnvironmentVariableWithDefault<bool>("ORT_AMDGPU_ROUTING_DEBUG", false)) {
+            fprintf(stderr, "[amdgpu-routing] create Hip backend\n"); fflush(stderr);
+        }
         // hip backend manages allocator/data-transfer at the backend factory level,
         // reached through the amdgpu Allocator/DataTransfer wrappers — leave
         // OrtEp::CreateAllocator null so ORT falls back to ep_factory_.CreateAllocator.
@@ -124,6 +170,9 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     };
 
     const auto create_migraphx_backend = [&] {
+        if (ParseEnvironmentVariableWithDefault<bool>("ORT_AMDGPU_ROUTING_DEBUG", false)) {
+            fprintf(stderr, "[amdgpu-routing] create MIGraphX backend\n"); fflush(stderr);
+        }
         const auto get_name = [](const std::string_view sv) {
             return std::string{"ep."}.append(kMIGraphXBackend).append(".").append(sv);
         };
@@ -206,7 +255,13 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     } else if (info.profile == Profile::Hip) {
         create_hip_backend();
     } else {
-        create_migraphx_backend();
+        // Auto / Optimized: pick the backend from the GPU ASIC (route_by_asic returns
+        // only DirectML or MIGraphX in V1).
+        if (route_by_asic() == Profile::DirectML) {
+            create_directml_backend();
+        } else {
+            create_migraphx_backend();
+        }
     }
     // Capture per-EP now: the shared factory_ backend field is overwritten by a later
     // umbrella EP (different backend). See PR for the cross-backend UAF details.
