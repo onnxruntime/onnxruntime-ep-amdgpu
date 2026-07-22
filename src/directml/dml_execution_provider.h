@@ -48,7 +48,12 @@ namespace dml_ep {
             bool enableMetacommands,
             bool enableGraphCapture,
             bool enableCpuSyncSpinning,
-            bool disableMemoryArena);
+            bool disableMemoryArena,
+            // Factory-owned holder for the SHARED host-accessible allocator. All EP instances receive
+            // the same holder; the first to build the allocator publishes it here, later EPs adopt it
+            // -> one allocation map across sessions (fixes the pos_ids_reformat/Reshape MISS). Nullptr
+            // -> fall back to a per-EP allocator (legacy behavior).
+            std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder = nullptr);
 
         void ReleaseCompletedReferences();
 
@@ -199,6 +204,8 @@ namespace dml_ep {
         void CpuToGpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst);
         void GpuToGpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst);
         void GpuToCpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst);
+        // Resolve the ID3D12Resource for a tensor on either the DEFAULT or host-accessible allocator.
+        ID3D12Resource* ResolveTensorResource(IMLOperatorTensor* tensor);
         bool IsGpuTensor(const onnxruntime::Tensor& tensor);
 
         Microsoft::WRL::ComPtr<ID3D12Device> m_d3d12Device;
@@ -225,6 +232,9 @@ namespace dml_ep {
         std::shared_ptr<CpuAllocator> m_cpuInputAllocator;
         // Host-accessible (CPU-writable) allocator for decode inputs; null when unsupported.
         std::shared_ptr<DmlHostAccessibleAllocator> m_hostAccessibleAllocator;
+        // Non-owning pointer to the factory-owned shared-allocator holder (see ctor). When set, the
+        // host-accessible allocator is shared across all EP instances via this holder.
+        std::shared_ptr<DmlHostAccessibleAllocator>* m_factoryHostAllocHolder = nullptr;
         bool m_hostAccessibleSupported = false;
         std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;
         std::shared_ptr<const InternalRegistrationInfoMap> m_internalRegInfoMap;

@@ -49,8 +49,17 @@ public:
         // Reshape the output tensor.
         MLOperatorTensor outputTensor = kernelContext.GetOutputTensor(0);
 
-        // Avoid self copying.
-        if (inputTensor.GetDataInterface().Get() != outputTensor.GetDataInterface().Get())
+        // Avoid self copying. GetDataInterface() asserts the tensor is a GPU data interface
+        // (IsDataInterface()); calling it on a CPU-classified tensor throws E_INVALIDARG. With
+        // host-accessible decode inputs the aliased output can be CPU-classified -> the original
+        // guard threw -> unhandled -> 0xC0000409 fastfail. A self-copy is only possible when BOTH
+        // sides are GPU data interfaces backed by the same resource; if either side is CPU they
+        // cannot alias the same D3D12 resource, so treat them as different and perform the copy.
+        const bool bothDeviceInterfaces = inputTensor.IsDataInterface() && outputTensor.IsDataInterface();
+        const bool isSelfCopy = bothDeviceInterfaces &&
+            (inputTensor.GetDataInterface().Get() == outputTensor.GetDataInterface().Get());
+
+        if (!isSelfCopy)
         {
             // Copy elements from input tensor to output tensor.
             ORT_THROW_IF_FAILED(m_executionProvider->CopyTensor(

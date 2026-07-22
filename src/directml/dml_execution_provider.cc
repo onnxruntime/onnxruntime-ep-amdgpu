@@ -86,7 +86,8 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
         bool enableMetacommands,
         bool enableGraphCapture,
         bool enableCpuSyncSpinning,
-        bool disableMemoryArena)
+        bool disableMemoryArena,
+        std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder)
         : ApiPtrs{api_ptrs},
           m_d3d12Device(d3d12Device),
           m_dmlDevice(dmlDevice),
@@ -94,7 +95,8 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
           m_graphCaptureEnabled(enableGraphCapture),
           m_cpuSyncSpinningEnabled(enableCpuSyncSpinning),
           m_memoryArenaDisabled(disableMemoryArena),
-          m_context(executionContext)
+          m_context(executionContext),
+          m_factoryHostAllocHolder(factoryHostAllocHolder)
     {
 
         D3D12_FEATURE_DATA_FEATURE_LEVELS featureLevels = {};
@@ -206,9 +208,22 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
             // Host-accessible (CUSTOM/L0/WRITE_COMBINE) allocator for decode inputs — additive, only
             // when supported. It does NOT replace m_allocator: KV/scratch/tensors stay on the DEFAULT
             // heap. CreateAllocatorImpl routes HOST_ACCESSIBLE requests here.
-            if (m_hostAccessibleSupported) {
+            //
+            // SHARED across EP instances via the factory-owned holder: GPU-KV makes OGA create 2
+            // sessions -> 2 EPs; a per-EP allocator gave 2 allocation maps, so a position_ids pointer
+            // allocated in one EP MISSed in the executing EP's map (pos_ids_reformat/Reshape
+            // E_INVALIDARG). The first EP builds the allocator and publishes it to the holder; later
+            // EPs adopt it -> one map. Requires the shared factory d3d12_device (D3D12 resources are
+            // device-local), which CreateEpImpl now guarantees.
+            if (m_factoryHostAllocHolder && *m_factoryHostAllocHolder) {
+                // Another EP already built it — adopt the shared instance.
+                m_hostAccessibleAllocator = *m_factoryHostAllocHolder;
+            } else if (m_hostAccessibleSupported) {
                 D3D12_HEAP_PROPERTIES hostHeap{};
                 hostHeap.Type = D3D12_HEAP_TYPE_CUSTOM;
+                // WRITE_COMBINE: CPU-write-fast, GPU-readable. Decode inputs are CPU-written and
+                // GPU-read, so this is the correct direction. (Logits, which are GPU-written and
+                // CPU-read, must NOT use this heap; they are routed off it on the OGA side.)
                 hostHeap.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
                 hostHeap.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
                 hostHeap.CreationNodeMask = 1;
@@ -219,6 +234,9 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
                     m_hostAccessibleMemInfo,
                     m_d3d12Device.Get(),
                     std::make_unique<DmlCommittedResourceAllocator>(m_d3d12Device.Get(), hostHeap));
+                // Publish to the factory holder so sibling EPs share this one instance.
+                if (m_factoryHostAllocHolder)
+                    *m_factoryHostAllocHolder = m_hostAccessibleAllocator;
             }
         }
 
@@ -366,10 +384,22 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
                     Microsoft::WRL::ComPtr<IUnknown> dataInterface = MLOperatorTensor(tensor).GetDataInterface();
                     ORT_THROW_HR_IF(E_INVALIDARG, !dataInterface);
 
-                    const PluginDmlAllocationInfo* allocInfo = m_allocator->DecodeDataHandle(dataInterface.Get());
-                    ORT_THROW_HR_IF(E_INVALIDARG, !allocInfo);
-
-                    ID3D12Resource* resource = allocInfo->GetResource();
+                    // The data interface may ALREADY be an ID3D12Resource* (AbiSafeTensor non-internal
+                    // path: GetABIDataInterface pre-resolves the resource via DecodeDataHandle), or a
+                    // PluginDmlAllocationInfo* (legacy handle). DecodeDataHandle only static_casts, so
+                    // decoding a resource-as-allocation reinterprets the vtable -> garbage resource ->
+                    // DML dispatch E_INVALIDARG (the host-accessible per-node path hit this; the fused
+                    // DEFAULT path never calls FillBindings). Discriminate by QueryInterface: a resource
+                    // answers ID3D12Resource; a PluginDmlAllocationInfo (IUnknown-only) does not.
+                    Microsoft::WRL::ComPtr<ID3D12Resource> resourceCom;
+                    ID3D12Resource* resource = nullptr;
+                    if (SUCCEEDED(dataInterface.As(&resourceCom))) {
+                        resource = resourceCom.Get();
+                    } else {
+                        const PluginDmlAllocationInfo* allocInfo = m_allocator->DecodeDataHandle(dataInterface.Get());
+                        ORT_THROW_HR_IF(E_INVALIDARG, !allocInfo);
+                        resource = allocInfo->GetResource();
+                    }
                     ORT_THROW_HR_IF(E_INVALIDARG, !resource);
 
                     D3D12_RESOURCE_DESC resourceDesc = resource->GetDesc();
@@ -580,11 +610,12 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
             }
             else if (src_device_type == OrtMemoryInfoDeviceType_GPU)
             {
-                // GPU -> CPU: accumulate for batched readback
+                // GPU -> CPU: accumulate for batched readback. Resolve src via the host-accessible-aware
+                // resolver (CUSTOM/L0 source supported).
                 void* dstData = destInternal.GetData();
-                const PluginDmlAllocationInfo* srcAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(&srcInternal).GetDataInterface().Get());
-                if (srcAllocInfo) {
-                    readbackSrcResources.push_back(srcAllocInfo->GetResource());
+                ID3D12Resource* srcRes = ResolveTensorResource(&srcInternal);
+                if (srcRes) {
+                    readbackSrcResources.push_back(srcRes);
                     readbackDstPtrs.push_back(dstData);
                     readbackSizes.push_back(static_cast<uint32_t>(dataSizeInBytes));
                 }
@@ -618,10 +649,11 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
     {
         const size_t dataSizeInBytes = ComputeByteSizeFromTensor(*dst);
 
-        //// CPU -> GPU copy (upload)
-        const PluginDmlAllocationInfo* dstAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(dst).GetDataInterface().Get());
-
-        ID3D12Resource* dstData = dstAllocInfo->GetResource();
+        //// CPU -> GPU copy (upload). Resolve dst via the host-accessible-aware resolver so a
+        //// CUSTOM/L0 destination (OGA host-accessible decode input) doesn't hit GetDataInterface()'s
+        //// IsDataInterface() assert (E_INVALIDARG) or the wrong DEFAULT-allocator decode.
+        ID3D12Resource* dstData = ResolveTensorResource(dst);
+        ORT_THROW_HR_IF(E_INVALIDARG, !dstData);
         const void* srcData = src->GetData();
 
         constexpr uint64_t dstOffset = 0;
@@ -635,15 +667,40 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
         }
     }
 
+    // Resolve the backing ID3D12Resource for a DML tensor that may live on the DEFAULT bucketized
+    // allocator OR the host-accessible (CUSTOM/L0) allocator. The DEFAULT path stores a
+    // PluginDmlAllocationInfo as the data-interface handle; the host-accessible path stores the mapped
+    // cpu_ptr as raw data. DecodeResource() checks the host-accessible allocator first, so route both
+    // kinds through it via the tensor's raw pointer, avoiding GetDataInterface() (which throws on a
+    // tensor whose IsDataInterface()==false, e.g. host-accessible classified as CPU).
+    ID3D12Resource* PluginDmlExecutionProviderImpl::ResolveTensorResource(IMLOperatorTensor* tensor)
+    {
+        if (tensor->IsDataInterface()) {
+            // DEFAULT-heap: the data interface is a PluginDmlAllocationInfo handle.
+            Microsoft::WRL::ComPtr<IUnknown> di;
+            tensor->GetDataInterface(di.GetAddressOf());
+            if (di) {
+                // Could be the allocation handle (DEFAULT) or, for host-accessible, the mapped ptr
+                // reinterpreted — DecodeResource handles the host-accessible case by pointer identity.
+                ID3D12Resource* r = DecodeResource(di.Get());
+                if (r) return r;
+            }
+        }
+        // Host-accessible / raw-pointer path: the tensor's data ptr is the mapped cpu_ptr.
+        if (void* raw = tensor->GetData()) {
+            ID3D12Resource* r = DecodeResource(raw);
+            if (r) return r;
+        }
+        return nullptr;
+    }
+
     void PluginDmlExecutionProviderImpl::GpuToGpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst)
     {
         const size_t dataSizeInBytes = ComputeByteSizeFromTensor(*dst);
 
-        const PluginDmlAllocationInfo* srcAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(src).GetDataInterface().Get());
-        const PluginDmlAllocationInfo* dstAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(dst).GetDataInterface().Get());
-
-        ID3D12Resource* srcData = srcAllocInfo->GetResource();
-        ID3D12Resource* dstData = dstAllocInfo->GetResource();
+        ID3D12Resource* srcData = ResolveTensorResource(src);
+        ID3D12Resource* dstData = ResolveTensorResource(dst);
+        ORT_THROW_HR_IF(E_INVALIDARG, !srcData || !dstData);
 
         m_context->CopyBufferRegion(dstData, 0, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srcData, 0, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, dataSizeInBytes);
     }
