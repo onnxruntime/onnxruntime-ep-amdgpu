@@ -20,9 +20,19 @@ constexpr auto kExhaustiveTune = "exhaustive_tune"sv;
 constexpr auto kProfile = "profile"sv;
 constexpr auto kCacheDir = "cache_dir"sv;
 constexpr auto kMlssUseSpecificOps = "mlss_use_specific_ops"sv;
+<<<<<<< HEAD
 constexpr auto kTelemetryEnable = "telemetry_enable"sv;
 constexpr auto kTelemetryFile = "telemetry_file"sv;
 constexpr auto kTelemetryDir = "telemetry_dir"sv;
+=======
+constexpr auto kModelArch = "model_arch"sv;
+// Static sequence-length padding (forwarded verbatim to the migraphx backend, which
+// implements the pad/slice). The umbrella only needs to recognize + relay these.
+constexpr auto kStaticPadSeq = "static_pad_seq"sv;
+constexpr auto kStaticPadSeqLen = "static_pad_seq_len"sv;
+constexpr auto kStaticPadInputs = "static_pad_inputs"sv;
+constexpr auto kStaticPadOutputs = "static_pad_outputs"sv;
+>>>>>>> main
 }  // provider_option
 
 }  // gpu_ep

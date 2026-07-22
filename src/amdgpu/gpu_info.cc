@@ -40,9 +40,17 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kForceRecompile, force_recompile)
             .AddAssignmentToReference(provider_option::kExhaustiveTune, exhaustive_tune)
             .AddAssignmentToReference(provider_option::kMlssUseSpecificOps, mlss_use_specific_ops)
+<<<<<<< HEAD
             .AddAssignmentToReference(provider_option::kTelemetryEnable, telemetry_enable)
             .AddAssignmentToReference(provider_option::kTelemetryFile, telemetry_file)
             .AddAssignmentToReference(provider_option::kTelemetryDir, telemetry_dir)
+=======
+            .AddAssignmentToReference(provider_option::kModelArch, model_arch)
+            .AddAssignmentToReference(provider_option::kStaticPadSeq, static_pad_seq)
+            .AddAssignmentToReference(provider_option::kStaticPadSeqLen, static_pad_seq_len)
+            .AddAssignmentToReference(provider_option::kStaticPadInputs, static_pad_inputs)
+            .AddAssignmentToReference(provider_option::kStaticPadOutputs, static_pad_outputs)
+>>>>>>> main
             .Parse(provider_options));
 }
 

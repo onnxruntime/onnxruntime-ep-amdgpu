@@ -44,6 +44,8 @@ private:
 
     ProviderFactory& factory_;
     OrtEp* backend_ep_{};
+    // Backend factory that created this EP's backend_ep_; captured per-EP (see PR for why).
+    OrtEpFactory* backend_ep_factory_{};
 
     std::string ep_name_;
     telemetry::Backend backend_{telemetry::Backend::Unknown};
