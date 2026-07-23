@@ -138,6 +138,8 @@ inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_has
         std::find(kLlmModelArch.begin(), kLlmModelArch.end(), arch_model_hash) != kLlmModelArch.end();
     // 2-6. Prefix buckets (order matters: gfx117x and gfx115x before the general gfx11x).
     if (starts_with(gfx, "gfx117")) return Profile::DirectML;  // Medusa MDS1/MDS2 (temporary)
+    // TODO(routing): Strix Halo LLM (gfx1150/1151) targets HipEP starting next release; it folds to
+    // MIGraphX today because HipEP is not built. Split out an is_llm -> Hip branch once it ships.
     if (starts_with(gfx, "gfx115")) return Profile::MIGraphX;  // Strix (gfx11.5)
     if (starts_with(gfx, "gfx11"))                             // pre-gfx11.5 RDNA3 (gfx110x/1103)
         return is_llm ? Profile::MIGraphX : Profile::DirectML;

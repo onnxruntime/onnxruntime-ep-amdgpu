@@ -8,7 +8,9 @@
 #include "mgx_options.h"
 #include "gpu_routing_policy.h"  // select_backend, model_arch_hash, is_webnn
 #include "hip/utils.h"           // hipGetDeviceProperties for ASIC-based backend routing
+#include "common/env_var.h"      // ParseEnvironmentVariableWithDefault (routing trace)
 
+#include <iostream>
 #include <string>
 #include <string_view>
 
@@ -116,8 +118,20 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         if (hipGetDeviceProperties(&prop, info.device_id.value_or(0)) != hipSuccess) {
             return Profile::MIGraphX;  // preserve the historical default on query failure
         }
-        return select_backend(prop.gcnArchName, model_arch_hash(info.model_arch),
-                              is_webnn(info.model_fw), info.profile);
+        const Profile chosen = select_backend(prop.gcnArchName, model_arch_hash(info.model_arch),
+                                              is_webnn(info.model_fw), info.profile);
+        // QA routing observability. Follows the MIGRAPHX_TRACE_* convention: env-gated,
+        // direct-to-stdout, greppable "[amdgpu-routing]" marker with key=value fields.
+        // TODO(routing): print the exact backend once HIP is a distinct Auto target (next
+        // release); today Auto resolves only to MIGraphX/DirectML (Hip folds to MIGraphX).
+        if (ParseEnvironmentVariableWithDefault<bool>("ORT_AMDGPU_TRACE_ROUTING", false)) {
+            std::cout << "[amdgpu-routing] arch=\"" << prop.gcnArchName << "\""
+                      << " model_arch=" << (info.model_arch ? *info.model_arch : "(none)")
+                      << " model_fw=" << (info.model_fw ? *info.model_fw : "(none)")
+                      << " -> " << (chosen == Profile::MIGraphX ? "MIGraphX" : "DirectML")
+                      << std::endl;
+        }
+        return chosen;
     };
 
     const auto create_directml_backend = [&] {
