@@ -4,81 +4,21 @@
 #pragma once
 
 // Backend-selection policy for the AMD GPU umbrella EP, Auto profile.
-// This header holds the routing DATA (arch cutoffs, LLM family set, the (arch, model_arch) override
-// table) and the pure decision function select_backend(). It has no I/O and no ORT/HIP dependency
-// beyond the Profile enum, so the policy can be read, extended, and unit-tested in isolation. The
-// EP-side glue (querying the ASIC via HIP, reading provider options, logging) lives in gpu_ep.cc.
-//
-// To pin a specific GPU arch + model combination to a backend, add a row to kArchModelBackend.
-// To treat a new model architecture as an LLM (shifts the MIGraphX cutoff down to gfx11.0), add its
-// normalized name to kLlmModelArch.
+// This header holds the pure decision logic (normalization, hashing helpers, and select_backend()). It
+// has no I/O and no ORT/HIP dependency beyond the Profile enum, so the policy can be read, extended, and
+// unit-tested in isolation. The routing DATA (LLM family set + (arch, model_arch) override table) lives
+// in gpu_routing_tables.h; the EP-side glue (ASIC query via HIP, provider options, trace) is in gpu_ep.cc.
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
 
-#include "gpu_info.h"  // Profile
+#include "gpu_routing_tables.h"  // fnv1a, kNoModelArch, kLlmModelArch, kArchModelBackend, arch_model_backend
 
 namespace gpu_ep {
-
-// FNV-1a (64-bit). Used to store model_arch names as hash constants so the plaintext names appear in
-// neither the source nor the shipped binary. Defined first because the tables below hash at compile time.
-constexpr std::uint64_t fnv1a(std::string_view s) {
-    std::uint64_t h{0xcbf29ce484222325ULL};
-    for (const char c : s) {
-        h ^= static_cast<std::uint8_t>(c);
-        h *= 0x100000001b3ULL;
-    }
-    return h;
-}
-
-// A hash of 0 means "no model_arch supplied" (see select_backend). Because model names are only
-// stored/compared as hashes, a family that hashed to 0 would be silently unmatchable; the static_asserts
-// below guard against it. (A distinct-name hash collision is negligible at 64-bit but would be hard to
-// debug, since the plaintext names are not in the binary.)
-constexpr std::uint64_t kNoModelArch = 0;
-
-// ============================================================================================
-//  ROUTING TABLES — the two things maintainers edit. Everything below this block is machinery.
-// ============================================================================================
-
-// (1) Known LLM model_arch families (hashed). Currently the Windows ML P0 LLM set that is tested and
-//     supported. On gfx11.0+ these route to MIGraphX (below gfx11.5 they flip the default).
-//     "llm" is a generic forward-compat marker: a caller (e.g. a newer OGA whose specific arch this
-//     umbrella build doesn't yet recognize) can send model_arch="llm" to force the generic LLM route.
-//     TO ADD AN LLM FAMILY: add one `fnv1a("normalized_name")` entry (and bump the array size).
-constexpr std::array<std::uint64_t, 5> kLlmModelArch{{
-    fnv1a("llama"), fnv1a("qwen2"), fnv1a("phi3"), fnv1a("mistral"),
-    fnv1a("llm"),
-}};
-
-// (2) Per-(arch, model) backend override. Highest priority in Auto mode: a matching row wins over the
-//     arch defaults. This is the hook for specific GPU + model combinations (e.g. a customer model that
-//     must pin to a backend on a given ASIC). Empty today.
-//     TO ADD AN OVERRIDE: add a row `{"gfxNNNN", fnv1a("normalized_name"), Profile::X}` (and bump size).
-struct arch_model_backend {
-    std::string_view arch_prefix;   // gfx-name prefix, e.g. "gfx1201"
-    std::uint64_t model_arch_hash;  // fnv1a of normalized model_arch
-    Profile backend;
-};
-constexpr std::array<arch_model_backend, 0> kArchModelBackend{};
-
-// ============================================================================================
-//  Machinery below — not normally edited.
-// ============================================================================================
-
-static_assert([] {
-    for (const auto h : kLlmModelArch) if (h == kNoModelArch) return false;
-    return true;
-}(), "an LLM family hashed to the no-model sentinel (0); rename or change the sentinel");
-static_assert([] {
-    for (const auto& r : kArchModelBackend) if (r.model_arch_hash == kNoModelArch) return false;
-    return true;
-}(), "an override row uses the no-model sentinel (0); it could never match");
 
 // Normalize a model_arch string (lowercase + trim) before hashing, so "Llama", " llama" all match.
 // The table constants above are the same fnv1a() applied to normalized literals, so runtime and
