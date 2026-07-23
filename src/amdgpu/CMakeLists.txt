@@ -19,7 +19,7 @@ add_library(amdgpu-ep MODULE
         gpu_stream_support.cc
         gpu_stream_support.h)
 
-target_link_libraries(amdgpu-ep PRIVATE plugin-ep-utils flatbuffers)
+target_link_libraries(amdgpu-ep PRIVATE plugin-ep-utils flatbuffers hip-shared)
 
 target_include_directories(amdgpu-ep PRIVATE
         $<TARGET_PROPERTY:migraphx-ep,INTERFACE_INCLUDE_DIRECTORIES>)

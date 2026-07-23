@@ -6,6 +6,13 @@
 
 #include "gpu_options.h"
 #include "mgx_options.h"
+#include "gpu_routing_policy.h"  // select_backend, model_arch_hash, is_webnn
+#include "hip/utils.h"           // hipGetDeviceProperties for ASIC-based backend routing
+#include "common/env_var.h"      // ParseEnvironmentVariableWithDefault (routing trace)
+
+#include <iostream>
+#include <string>
+#include <string_view>
 
 #define EP_CALL_T(backend, fn, defval, ...)                            \
     do {                                                               \
@@ -104,6 +111,47 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
 
     const ProviderInfo info{provider_options};
 
+    // Resolved-profile name for the routing trace (below). Covers every Profile value so the trace
+    // never mislabels an explicit profile (e.g. Optimized/Hip are not DirectML). Auto is always
+    // resolved to a concrete backend before this is called.
+    const auto profile_name = [](Profile p) -> const char* {
+        switch (p) {
+            case Profile::MIGraphX:  return "MIGraphX";
+            case Profile::DirectML:  return "DirectML";
+            case Profile::Hip:       return "Hip";
+            case Profile::Eager:     return "Eager";
+            case Profile::Optimized: return "Optimized";
+            case Profile::Auto:      return "Auto";
+        }
+        return "Auto";
+    };
+
+    // Heuristic backend selection for the Auto profile (explicit profiles honored as-is). Policy and
+    // priority order live in gpu_routing_policy.h select_backend(); this just supplies the ASIC.
+    // QA routing observability (ORT_AMDGPU_TRACE_ROUTING): follows the MIGRAPHX_TRACE_* convention —
+    // env-gated, direct-to-stdout, greppable "[amdgpu-routing]" marker with key=value fields.
+    const auto route_by_heuristic = [&]() -> Profile {
+        const bool trace = ParseEnvironmentVariableWithDefault<bool>("ORT_AMDGPU_TRACE_ROUTING", false);
+        hipDeviceProp_t prop{};
+        if (hipGetDeviceProperties(&prop, info.device_id.value_or(0)) != hipSuccess) {
+            if (trace) {
+                std::cout << "[amdgpu-routing] hipGetDeviceProperties failed -> MIGraphX (default)"
+                          << std::endl;
+            }
+            return Profile::MIGraphX;  // preserve the historical default on query failure
+        }
+        const Profile chosen = select_backend(prop.gcnArchName, model_arch_hash(info.model_arch),
+                                              is_webnn(info.model_fw), info.profile);
+        if (trace) {
+            std::cout << "[amdgpu-routing] arch=\"" << prop.gcnArchName << "\""
+                      << " model_arch=" << (info.model_arch ? *info.model_arch : "(none)")
+                      << " model_fw=" << (info.model_fw ? *info.model_fw : "(none)")
+                      << " -> " << profile_name(chosen)
+                      << std::endl;
+        }
+        return chosen;
+    };
+
     const auto create_directml_backend = [&] {
         THROW_IF_ERROR(factory.CreateDirectMLBackend(local_session_options, logger, backend_ep_));
         // DirectML manages its own per-session GPU allocator (DmlBucketizedBufferAllocator)
@@ -190,12 +238,18 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         THROW_IF_ERROR(factory.CreateMIGraphXBackend(local_session_options, logger, backend_ep_));
     };
 
-    if (info.profile == Profile::Eager) {
+    // Explicit profile is honored; Auto/Optimized derives from (ASIC, model_arch). select_backend()
+    // (inside route_by_heuristic) applies both, so the result covers every profile value.
+    const Profile effective = route_by_heuristic();
+
+    if (effective == Profile::Eager) {
         create_directml_backend();
-    } else if (info.profile == Profile::DirectML) {
+    } else if (effective == Profile::DirectML) {
         create_directml_backend();
-    } else if (info.profile == Profile::MIGraphX) {
+    } else if (effective == Profile::MIGraphX) {
         create_migraphx_backend();
+    } else if (effective == Profile::Hip) {
+        create_hip_backend();
     } else {
         create_migraphx_backend();
     }
