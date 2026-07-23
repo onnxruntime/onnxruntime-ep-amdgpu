@@ -129,13 +129,14 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
             }
             arch_name = prop.gcnArchName;  // e.g. "gfx1201" or "gfx1100:xnack-"
         }
-        // TODO(routing): WebNN caller -> DirectML on all ASICs once the WebNN signal is available here.
-        const Profile chosen = select_backend(arch_name, model_arch_hash(info.model_arch), info.profile);
+        const Profile chosen = select_backend(arch_name, model_arch_hash(info.model_arch),
+                                              is_webnn(info.model_fw), info.profile);
 
         if (ParseEnvironmentVariableWithDefault<bool>("ORT_AMDGPU_ROUTING_DEBUG", false)) {
-            fprintf(stderr, "[amdgpu-routing] arch=\"%s\"%s model_arch=%s -> %s\n", arch_name.c_str(),
+            fprintf(stderr, "[amdgpu-routing] arch=\"%s\"%s model_arch=%s model_fw=%s -> %s\n", arch_name.c_str(),
                     forced.has_value() ? " [forced]" : "",
                     info.model_arch.has_value() ? info.model_arch.value().c_str() : "(none)",
+                    info.model_fw.has_value() ? info.model_fw.value().c_str() : "(none)",
                     chosen == Profile::DirectML ? "DirectML" : "MIGraphX");
             fflush(stderr);
         }

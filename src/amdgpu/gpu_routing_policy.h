@@ -48,9 +48,12 @@ constexpr std::uint64_t kNoModelArch = 0;
 
 // (1) Known LLM model_arch families (hashed). Currently the Windows ML P0 LLM set that is tested and
 //     supported. On gfx11.0+ these route to MIGraphX (below gfx11.5 they flip the default).
+//     "llm" is a generic forward-compat marker: a caller (e.g. a newer OGA whose specific arch this
+//     umbrella build doesn't yet recognize) can send model_arch="llm" to force the generic LLM route.
 //     TO ADD AN LLM FAMILY: add one `fnv1a("normalized_name")` entry (and bump the array size).
-constexpr std::array<std::uint64_t, 4> kLlmModelArch{{
+constexpr std::array<std::uint64_t, 5> kLlmModelArch{{
     fnv1a("llama"), fnv1a("qwen2"), fnv1a("phi3"), fnv1a("mistral"),
+    fnv1a("llm"),
 }};
 
 // (2) Per-(arch, model) backend override. Highest priority in Auto mode: a matching row wins over the
@@ -102,20 +105,29 @@ inline std::uint64_t model_arch_hash(const std::optional<std::string>& model_arc
     return model_arch.has_value() ? fnv1a(normalize_model_arch(model_arch.value())) : kNoModelArch;
 }
 
+// True if the caller framework hint (model_fw provider option) names WebNN. Case-insensitive.
+inline bool is_webnn(const std::optional<std::string>& model_fw) {
+    return model_fw.has_value() && normalize_model_arch(model_fw.value()) == "webnn";
+}
+
 // Pure backend-selection policy. No I/O — unit-testable. Takes the raw gcnArchName ("gfx1201",
 // "gfx1100:xnack-"). Only the Auto profile is heuristic-driven; every other profile (explicit backend,
 // or Optimized) is honored/dispatched as-is. In Auto mode, in priority order:
-//   1. kArchModelBackend (arch prefix + model_arch) override, if any row matches
-//   2. Medusa gfx117x                 -> DirectML
-//   3. gfx11.5+ (gfx115x Strix)       -> MIGraphX
-//   4. gfx11.x pre-11.5 (gfx110x/1103): LLM -> MIGraphX, else DirectML  (the LLM cutoff at gfx11.0)
-//   5. gfx12x (RDNA4)                 -> MIGraphX
-//   6. everything below gfx11 (gfx9/gfx10, incl. LLM) -> DirectML
-inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_hash, Profile profile) {
+//   1. WebNN caller                   -> DirectML (browser/WebNN compatibility carve-out, all ASICs)
+//   2. kArchModelBackend (arch prefix + model_arch) override, if any row matches
+//   3. Medusa gfx117x                 -> DirectML
+//   4. gfx11.5+ (gfx115x Strix)       -> MIGraphX
+//   5. gfx11.x pre-11.5 (gfx110x/1103): LLM -> MIGraphX, else DirectML  (the LLM cutoff at gfx11.0)
+//   6. gfx12x (RDNA4)                 -> MIGraphX
+//   7. everything below gfx11 (gfx9/gfx10, incl. LLM) -> DirectML
+inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_hash, bool is_webnn,
+                              Profile profile) {
     if (profile != Profile::Auto) {
         return profile;  // explicit profile (and Optimized) honored/dispatched as-is
     }
-    // 1. Highest priority: exact (arch prefix, model_arch) override.
+    // 1. WebNN compatibility carve-out: always DirectML, regardless of ASIC (browser path).
+    if (is_webnn) return Profile::DirectML;
+    // 2. Exact (arch prefix, model_arch) override.
     for (const auto& row : kArchModelBackend) {
         if (arch_model_hash != kNoModelArch && row.model_arch_hash == arch_model_hash &&
             starts_with(gfx, row.arch_prefix)) {
