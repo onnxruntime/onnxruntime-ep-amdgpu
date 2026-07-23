@@ -16,13 +16,14 @@
 #include <string>
 #include <string_view>
 
+#include "gpu_info.h"            // Profile (used in select_backend's signature)
 #include "gpu_routing_tables.h"  // fnv1a, kNoModelArch, kLlmModelArch, kArchModelBackend, arch_model_backend
 
 namespace gpu_ep {
 
 // Normalize a model_arch string (lowercase + trim) before hashing, so "Llama", " llama" all match.
-// The table constants above are the same fnv1a() applied to normalized literals, so runtime and
-// compile-time hashing stay consistent by construction.
+// The routing tables in gpu_routing_tables.h hash the same normalized literals via fnv1a(), so
+// runtime and compile-time hashing stay consistent by construction.
 inline std::string normalize_model_arch(std::string_view value) {
     std::string s{value};
     std::transform(s.begin(), s.end(), s.begin(),
@@ -76,7 +77,7 @@ inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_has
     }
     const bool is_llm = arch_model_hash != kNoModelArch &&
         std::find(kLlmModelArch.begin(), kLlmModelArch.end(), arch_model_hash) != kLlmModelArch.end();
-    // 2-6. Prefix buckets (order matters: gfx117x and gfx115x before the general gfx11x).
+    // 3-7. Prefix buckets (order matters: gfx117x and gfx115x before the general gfx11x).
     if (starts_with(gfx, "gfx117")) return Profile::DirectML;  // Medusa MDS1/MDS2 (temporary)
     // TODO(routing): Strix Halo LLM (gfx1150/1151) targets HipEP starting next release; it folds to
     // MIGraphX today because HipEP is not built. Split out an is_llm -> Hip branch once it ships.

@@ -111,24 +111,42 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
 
     const ProviderInfo info{provider_options};
 
+    // Resolved-profile name for the routing trace (below). Covers every Profile value so the trace
+    // never mislabels an explicit profile (e.g. Optimized/Hip are not DirectML). Auto is always
+    // resolved to a concrete backend before this is called.
+    const auto profile_name = [](Profile p) -> const char* {
+        switch (p) {
+            case Profile::MIGraphX:  return "MIGraphX";
+            case Profile::DirectML:  return "DirectML";
+            case Profile::Hip:       return "Hip";
+            case Profile::Eager:     return "Eager";
+            case Profile::Optimized: return "Optimized";
+            case Profile::Auto:      return "Auto";
+        }
+        return "Auto";
+    };
+
     // Heuristic backend selection for the Auto profile (explicit profiles honored as-is). Policy and
     // priority order live in gpu_routing_policy.h select_backend(); this just supplies the ASIC.
+    // QA routing observability (ORT_AMDGPU_TRACE_ROUTING): follows the MIGRAPHX_TRACE_* convention —
+    // env-gated, direct-to-stdout, greppable "[amdgpu-routing]" marker with key=value fields.
     const auto route_by_heuristic = [&]() -> Profile {
+        const bool trace = ParseEnvironmentVariableWithDefault<bool>("ORT_AMDGPU_TRACE_ROUTING", false);
         hipDeviceProp_t prop{};
         if (hipGetDeviceProperties(&prop, info.device_id.value_or(0)) != hipSuccess) {
+            if (trace) {
+                std::cout << "[amdgpu-routing] hipGetDeviceProperties failed -> MIGraphX (default)"
+                          << std::endl;
+            }
             return Profile::MIGraphX;  // preserve the historical default on query failure
         }
         const Profile chosen = select_backend(prop.gcnArchName, model_arch_hash(info.model_arch),
                                               is_webnn(info.model_fw), info.profile);
-        // QA routing observability. Follows the MIGRAPHX_TRACE_* convention: env-gated,
-        // direct-to-stdout, greppable "[amdgpu-routing]" marker with key=value fields.
-        // TODO(routing): print the exact backend once HIP is a distinct Auto target (next
-        // release); today Auto resolves only to MIGraphX/DirectML (Hip folds to MIGraphX).
-        if (ParseEnvironmentVariableWithDefault<bool>("ORT_AMDGPU_TRACE_ROUTING", false)) {
+        if (trace) {
             std::cout << "[amdgpu-routing] arch=\"" << prop.gcnArchName << "\""
                       << " model_arch=" << (info.model_arch ? *info.model_arch : "(none)")
                       << " model_fw=" << (info.model_fw ? *info.model_fw : "(none)")
-                      << " -> " << (chosen == Profile::MIGraphX ? "MIGraphX" : "DirectML")
+                      << " -> " << profile_name(chosen)
                       << std::endl;
         }
         return chosen;
