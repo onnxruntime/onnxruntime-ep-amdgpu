@@ -354,6 +354,23 @@ std::vector<std::vector<Ort::ConstNode>> GetPartitionedSubgraphs(const std::vect
     return subgraphs;
 }
 
+void PrepareAsyncRun(ComputeState& compute_state, hipStream_t stream)
+{
+    if (compute_state.completion_event == nullptr) {
+        HIP_CALL_THROW(
+            hipEventCreateWithFlags(&compute_state.completion_event, hipEventDisableTiming));
+    } else if (compute_state.completion_stream != nullptr and
+               compute_state.completion_stream != stream) {
+        HIP_CALL_THROW(hipStreamWaitEvent(stream, compute_state.completion_event));
+    }
+}
+
+void RecordAsyncRun(ComputeState& compute_state, hipStream_t stream)
+{
+    HIP_CALL_THROW(hipEventRecord(compute_state.completion_event, stream));
+    compute_state.completion_stream = stream;
+}
+
 }  // namespace
 
 #define PARSE_ENV_VAR(__name__, __value__)                                               \
@@ -467,6 +484,7 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
+    PARSE_ENV_VAR(env_var::kAsyncCompute, async_compute_enable_);
 
     // Per-architecture ops to force onto AMDMLSS.
     // Add a row here to enable specific ops on additional architectures.
@@ -566,6 +584,12 @@ ExecutionProvider::~ExecutionProvider() {
     // are ignored because the HIP context may already be torn down at process exit.
     (void)hipSetDevice(device_id_);
     for (auto& [name, cs] : compute_states_) {
+        if (cs.completion_event != nullptr) {
+            (void)hipEventSynchronize(cs.completion_event);
+            (void)hipEventDestroy(cs.completion_event);
+            cs.completion_event = nullptr;
+            cs.completion_stream = nullptr;
+        }
         for (auto& [hash, entry] : cs.hip_graph_cache) {
             if (entry.exec != nullptr) {
                 (void)hipGraphExecDestroy(entry.exec);
@@ -948,6 +972,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     compute_state.max_dynamic_batch = max_dynamic_batch_;
     compute_state.compile_batches = compile_batches_;
     compute_state.coalesce_io = coalesce_io_enable_;
+    compute_state.async_compute = async_compute_enable_;
 
     node_compute_info = std::make_unique<NodeComputeInfo>(*this).release();
     return STATUS_OK;
@@ -1048,11 +1073,18 @@ try {
     return Ort::Status{e.what(), ORT_EP_FAIL};
 }
 
-Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* /* run_options */, bool /* sync_stream */) noexcept
+Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* /* run_options */, bool sync_stream) noexcept
 try {
+    if (not sync_stream or not async_compute_enable_) {
+        return STATUS_OK;
+    }
+
     HIP_RETURN_IF_ERROR(hipSetDevice(device_id_));
-    if (const auto status{hipStreamQuery(stream_)}; status != hipSuccess) {
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(stream_));
+    std::lock_guard lock{mutex_};
+    for (const auto& [name, compute_state] : compute_states_) {
+        if (compute_state.completion_event != nullptr) {
+            HIP_RETURN_IF_ERROR(hipEventSynchronize(compute_state.completion_event));
+        }
     }
     return STATUS_OK;
 } catch (const Ort::Exception& e) {
@@ -1319,8 +1351,10 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
 
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
+        if (compute_state.async_compute) {
+            PrepareAsyncRun(compute_state, hip_stream);
+        }
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
 
         if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
             for (size_t i{}; i < output_size; ++i) {
@@ -1336,6 +1370,11 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 HIP_CALL_THROW(hipMemcpyWithStream(output_data, gpu_resource.data(), resource_shape.bytes(),
                     hipMemcpyDeviceToDevice, hip_stream));
             }
+        }
+
+        if (compute_state.async_compute) {
+            RecordAsyncRun(compute_state, hip_stream);
+        } else {
             HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
         }
     }
