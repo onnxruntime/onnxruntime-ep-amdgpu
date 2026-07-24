@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "common/parse_string.h"
+#include "common/env_var.h"
 
 #include "dml_execution_provider.h"
 #include "DmlExecutionProvider/DmlCommittedResourceAllocator.h"
@@ -164,11 +165,28 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
         THROW_IF_ERROR(ort_api.CreateMemoryInfo_V2("GPU", OrtMemoryInfoDeviceType_GPU, amd::VendorId,
             0, OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator, &m_gpuMemInfo));
 
-        // CUSTOM/L0/WRITE_COMBINE heaps (CPU-writable, GPU-readable, system-memory) let decode inputs
-        // be updated by the CPU in place and read by the GPU with no per-step copy — and, unlike
-        // GPU_UPLOAD, need NO ReBAR. Capability is checked empirically (plain CUSTOM/L0 works even
-        // when OPTIONS19 ComputeOnlyCustomHeapSupported=0) by trying a tiny allocation.
-        {
+        // Host-accessible (CUSTOM/L0/WRITE_COMBINE) decode inputs are OPT-IN on the DirectML backend,
+        // gated by the AMDGPU_DML_HOST_ACCESSIBLE env var (default OFF).
+        //
+        // WHY OFF BY DEFAULT: the CUSTOM/L0 committed resource is backed by the CPU-visible VRAM aperture,
+        // whose availability/budget depend on the board's Resizable-BAR configuration. On some discrete
+        // GPUs a real allocation intermittently fails with E_OUTOFMEMORY, surfacing as std::bad_alloc at
+        // session init on the raw-ORT EAGER-allocator path (CreatePreferredAllocators) — which, unlike
+        // OGA, has NO try/catch fallback. The 256-byte probe below does NOT predict this (it can pass
+        // while real decode-input allocations later fail). Building the allocator also adds a measurable
+        // session-creation cost. modelbench (raw ORT) never uses host-accessible inputs, so it must never
+        // pay this: with the flag off, m_hostAccessibleSupported stays false, the allocator is never built,
+        // and dml_factory.cc CreateAllocatorImpl resolves any HOST_ACCESSIBLE request to a plain CPU
+        // allocator (harmless — nothing binds it as a D3D12 resource on that path).
+        //
+        // WHEN ON (OGA sets AMDGPU_DML_HOST_ACCESSIBLE=1 at runtime): the probe runs and, if it succeeds,
+        // the real CUSTOM/L0 allocator is built and served, so OGA can update decode inputs in place.
+        // OGA's request path is guarded (model.cpp try/catch + null-allocator fallback), so it degrades
+        // rather than hard-fails. MIGraphX/HIP host-accessible (different backend + hipHostMalloc) is
+        // independent of this flag.
+        const bool host_accessible_opt_in =
+            ParseEnvironmentVariableWithDefault<bool>("AMDGPU_DML_HOST_ACCESSIBLE", false);
+        if (host_accessible_opt_in) {
             D3D12_HEAP_PROPERTIES hp{};
             hp.Type = D3D12_HEAP_TYPE_CUSTOM;
             hp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
@@ -668,11 +686,19 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
     }
 
     // Resolve the backing ID3D12Resource for a DML tensor that may live on the DEFAULT bucketized
-    // allocator OR the host-accessible (CUSTOM/L0) allocator. The DEFAULT path stores a
-    // PluginDmlAllocationInfo as the data-interface handle; the host-accessible path stores the mapped
-    // cpu_ptr as raw data. DecodeResource() checks the host-accessible allocator first, so route both
-    // kinds through it via the tensor's raw pointer, avoiding GetDataInterface() (which throws on a
-    // tensor whose IsDataInterface()==false, e.g. host-accessible classified as CPU).
+    // allocator OR the host-accessible (CUSTOM/L0) allocator.
+    //
+    // READING GUIDE (why this differs from the old inline decode): host-accessible decode inputs are
+    // OPT-IN (AMDGPU_DML_HOST_ACCESSIBLE=1). When the flag is OFF (the default), m_hostAccessibleAllocator
+    // is null, so inside DecodeResource() the host-accessible lookup is skipped and this reduces to the
+    // ORIGINAL DEFAULT path: m_allocator->DecodeDataHandle(handle)->GetResource(). Treat the
+    // host-accessible cases below as non-existent unless the flag is set.
+    //
+    //   * DEFAULT-heap tensor: the data-interface IS a PluginDmlAllocationInfo handle -> first branch.
+    //   * host-accessible tensor (flag on): the data ptr is the mapped cpu_ptr; DecodeResource() maps it
+    //     back by pointer identity via the host-accessible allocator -> either branch resolves it.
+    // GetDataInterface() is avoided on the raw-pointer branch because it throws when IsDataInterface()
+    // is false (e.g. a host-accessible tensor classified as CPU).
     ID3D12Resource* PluginDmlExecutionProviderImpl::ResolveTensorResource(IMLOperatorTensor* tensor)
     {
         if (tensor->IsDataInterface()) {

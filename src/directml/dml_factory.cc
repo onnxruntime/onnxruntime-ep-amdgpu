@@ -363,16 +363,21 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateAllocatorImpl(OrtEpFactory* this_
                                                               OrtAllocator** allocator) noexcept {
     auto& factory = *static_cast<ProviderFactory*>(this_ptr);
 
-    // HOST_ACCESSIBLE (decode inputs): return the EP-owned host-accessible allocator (CUSTOM/L0,
-    // persistently mapped) so the umbrella path allocates a CPU-writable pointer backed by a real
-    // D3D12 resource that DecodeResource can map for binding. Without this the umbrella would get a
-    // CpuAllocator (plain malloc) with no resource -> DecodeResource fails -> E_INVALIDARG at bind.
-    // The EP is created before ORT drives allocation (CreateEp precedes CreateAllocator), so
-    // m_ep_raw is valid here. DEFAULT keeps the CpuAllocator passthrough (unchanged).
+    // HOST_ACCESSIBLE (decode inputs): host-accessible on DML is OPT-IN via AMDGPU_DML_HOST_ACCESSIBLE
+    // (see dml_execution_provider.cc). Two outcomes:
+    //   * Flag ON  -> the real CUSTOM/L0 allocator was built; one of the lookups below is non-null and we
+    //                 return it (OGA binds decode inputs to a genuine D3D12-backed resource).
+    //   * Flag OFF -> m_hostAccessibleSupported stayed false, no allocator was built, both lookups return
+    //                 null, and we serve a plain CPU allocator + RETURN. This must NOT fall through to the
+    //                 IsGpuAllocator branch below: the pinned memory_info is GPU-typed, so falling through
+    //                 would hand back a VRAM allocator for what the caller believes is CPU memory (its own
+    //                 latent crash). The CPU allocator is harmless here because on the flag-off path
+    //                 nothing binds these buffers as a D3D12 resource (raw-ORT eagerly CREATES the
+    //                 allocator at init but never allocates through it or binds it; OGA, which WOULD bind,
+    //                 only reaches this path when it hasn't set the flag, in which case its own
+    //                 null-allocator fallback keeps decode inputs off host-accessible entirely).
+    // The EP is created before ORT drives allocation (CreateEp precedes CreateAllocator).
     if (factory.ort_api.MemoryInfoGetDeviceMemType(memory_info) == OrtDeviceMemoryType_HOST_ACCESSIBLE) {
-        // Prefer the factory-owned SHARED allocator (one instance across all EPs -> single allocation
-        // map, so decode-input pointers resolve regardless of which session's EP executes). Fall back
-        // to the per-EP allocator only if the shared one hasn't been built yet.
         if (factory.host_accessible_allocator_) {
             *allocator = factory.host_accessible_allocator_.get();
             return nullptr;
@@ -385,6 +390,9 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateAllocatorImpl(OrtEpFactory* this_
                 }
             }
         }
+        // Flag off / no host-accessible allocator built -> serve a plain CPU allocator.
+        *allocator = std::make_unique<CpuAllocator>(memory_info).release();
+        return nullptr;
     }
 
     // DEFAULT (GPU/VRAM) memtype: route to the REAL per-session GPU allocator
