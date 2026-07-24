@@ -295,6 +295,27 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
     factory->ort_api.DisableMemPattern(const_cast<OrtSessionOptions*>(session_options));
     factory->ort_api.SetSessionExecutionMode(const_cast<OrtSessionOptions*>(session_options), ExecutionMode::ORT_SEQUENTIAL);
 
+    // Host-accessible (CUSTOM/L0) decode inputs are OPT-IN, requested by the caller (e.g. OGA) via the
+    // "ep.directml.enable_host_accessible" session config entry. The umbrella forwards ep.directml.*
+    // entries verbatim, so it arrives here in session_options. Default off: unless explicitly enabled,
+    // the DML backend does not build the CUSTOM/L0 allocator (see dml_execution_provider.cc for why —
+    // it can OOM at session init on some board/ReBAR configs). Value "1"/"true" enables it.
+    // Read via GetSessionOptionsConfigEntries (bulk), mirroring the umbrella/migraphx backends.
+    bool enable_host_accessible = false;
+    {
+        OrtKeyValuePairs* config_entries = nullptr;
+        if (factory->ort_api.GetSessionOptionsConfigEntries(session_options, &config_entries) == nullptr
+                && config_entries != nullptr) {
+            const Ort::KeyValuePairs kv{config_entries};
+            for (const auto& [key, value] : kv.GetKeyValuePairs()) {
+                if (key == "ep.directml.enable_host_accessible") {
+                    enable_host_accessible = (value == "1" || value == "true");
+                    break;
+                }
+            }
+        }
+    }
+
     *ep = nullptr;
     if (num_devices > 1) {
         return factory->ort_api.CreateStatus(ORT_INVALID_ARGUMENT,
@@ -327,7 +348,8 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
         d3d12_device.Get(),
         dml_device.Get(),
         context,
-        &factory->host_accessible_allocator_);  // shared across EP instances (fixes 2-session MISS)
+        &factory->host_accessible_allocator_,  // shared across EP instances (fixes 2-session MISS)
+        enable_host_accessible);               // opt-in from ep.directml.enable_host_accessible
 
     // keep a non-owning raw pointer to the EP for use in the data transfer implementation
     factory->m_ep_raw = factory->m_ep.get();
@@ -363,7 +385,7 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateAllocatorImpl(OrtEpFactory* this_
                                                               OrtAllocator** allocator) noexcept {
     auto& factory = *static_cast<ProviderFactory*>(this_ptr);
 
-    // HOST_ACCESSIBLE (decode inputs): host-accessible on DML is OPT-IN via AMDGPU_DML_HOST_ACCESSIBLE
+    // HOST_ACCESSIBLE (decode inputs): host-accessible on DML is OPT-IN via ep.directml.enable_host_accessible
     // (see dml_execution_provider.cc). Two outcomes:
     //   * Flag ON  -> the real CUSTOM/L0 allocator was built; one of the lookups below is non-null and we
     //                 return it (OGA binds decode inputs to a genuine D3D12-backed resource).

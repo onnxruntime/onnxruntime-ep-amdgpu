@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 #include "common/parse_string.h"
-#include "common/env_var.h"
 
 #include "dml_execution_provider.h"
 #include "DmlExecutionProvider/DmlCommittedResourceAllocator.h"
@@ -88,7 +87,8 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
         bool enableGraphCapture,
         bool enableCpuSyncSpinning,
         bool disableMemoryArena,
-        std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder)
+        std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder,
+        bool enableHostAccessible)
         : ApiPtrs{api_ptrs},
           m_d3d12Device(d3d12Device),
           m_dmlDevice(dmlDevice),
@@ -166,7 +166,8 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
             0, OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator, &m_gpuMemInfo));
 
         // Host-accessible (CUSTOM/L0/WRITE_COMBINE) decode inputs are OPT-IN on the DirectML backend,
-        // gated by the AMDGPU_DML_HOST_ACCESSIBLE env var (default OFF).
+        // gated by the enableHostAccessible flag (from the ep.directml.enable_host_accessible session
+        // config entry, read in dml_factory.cc CreateEpImpl). Default OFF.
         //
         // WHY OFF BY DEFAULT: the CUSTOM/L0 committed resource is backed by the CPU-visible VRAM aperture,
         // whose availability/budget depend on the board's Resizable-BAR configuration. On some discrete
@@ -174,19 +175,16 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
         // session init on the raw-ORT EAGER-allocator path (CreatePreferredAllocators) — which, unlike
         // OGA, has NO try/catch fallback. The 256-byte probe below does NOT predict this (it can pass
         // while real decode-input allocations later fail). Building the allocator also adds a measurable
-        // session-creation cost. modelbench (raw ORT) never uses host-accessible inputs, so it must never
-        // pay this: with the flag off, m_hostAccessibleSupported stays false, the allocator is never built,
-        // and dml_factory.cc CreateAllocatorImpl resolves any HOST_ACCESSIBLE request to a plain CPU
-        // allocator (harmless — nothing binds it as a D3D12 resource on that path).
+        // session-creation cost. modelbench (raw ORT) never sets the flag, so it never pays this: the
+        // allocator is never built and dml_factory.cc CreateAllocatorImpl resolves any HOST_ACCESSIBLE
+        // request to a plain CPU allocator (harmless — nothing binds it as a D3D12 resource on that path).
         //
-        // WHEN ON (OGA sets AMDGPU_DML_HOST_ACCESSIBLE=1 at runtime): the probe runs and, if it succeeds,
+        // WHEN ON (OGA sets ep.directml.enable_host_accessible=1): the probe runs and, if it succeeds,
         // the real CUSTOM/L0 allocator is built and served, so OGA can update decode inputs in place.
         // OGA's request path is guarded (model.cpp try/catch + null-allocator fallback), so it degrades
         // rather than hard-fails. MIGraphX/HIP host-accessible (different backend + hipHostMalloc) is
         // independent of this flag.
-        const bool host_accessible_opt_in =
-            ParseEnvironmentVariableWithDefault<bool>("AMDGPU_DML_HOST_ACCESSIBLE", false);
-        if (host_accessible_opt_in) {
+        if (enableHostAccessible) {
             D3D12_HEAP_PROPERTIES hp{};
             hp.Type = D3D12_HEAP_TYPE_CUSTOM;
             hp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
@@ -689,7 +687,7 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
     // allocator OR the host-accessible (CUSTOM/L0) allocator.
     //
     // READING GUIDE (why this differs from the old inline decode): host-accessible decode inputs are
-    // OPT-IN (AMDGPU_DML_HOST_ACCESSIBLE=1). When the flag is OFF (the default), m_hostAccessibleAllocator
+    // OPT-IN (ep.directml.enable_host_accessible=1). When the flag is OFF (the default), m_hostAccessibleAllocator
     // is null, so inside DecodeResource() the host-accessible lookup is skipped and this reduces to the
     // ORIGINAL DEFAULT path: m_allocator->DecodeDataHandle(handle)->GetResource(). Treat the
     // host-accessible cases below as non-existent unless the flag is set.
