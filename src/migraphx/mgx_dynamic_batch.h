@@ -6,11 +6,17 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <hip/hip_runtime_api.h>
 
 namespace mgx_ep {
+
+// Parse a comma-separated "name:axis" spec (e.g. "input_ids:1,position_ids:1") into
+// a map of parameter name -> axis.  A token with no ":axis" suffix defaults to axis
+// 1 (the token axis).  Empty / unparseable tokens are skipped.
+std::unordered_map<std::string, int> ParseNameAxisSpec(std::string_view spec);
 
 // Parse a comma-separated batch-size specification (e.g. "1,4,16,64") into a
 // sorted, de-duplicated list of batch sizes.  Zero-valued and unparseable
@@ -40,6 +46,17 @@ std::size_t FindNearestCompiledBatchSize(std::size_t requested_batch,
 void PadInputTensor(const void* src_data, void* dst_data,
     std::size_t original_batch, std::size_t padded_batch,
     std::size_t element_size_bytes, std::size_t elements_per_batch,
+    hipStream_t stream);
+
+// Pad a tensor along an inner "sequence" axis: for each of outer_count slices, copy
+// real_len elements and zero-fill the remaining (target_len - real_len) elements of
+// that slice.  Layout is row-major with the seq axis at `axis`: outer_count =
+// product of dims before `axis`, inner_count = product of dims after `axis` (the
+// contiguous block per seq position).  dst must be sized for target_len.  All ops
+// are on the supplied stream (D2D copy + memset of the pad tail).
+void PadSeqTensor(const void* src_data, void* dst_data,
+    std::size_t outer_count, std::size_t real_len, std::size_t target_len,
+    std::size_t inner_count, std::size_t element_size_bytes,
     hipStream_t stream);
 
 }  // namespace mgx_ep

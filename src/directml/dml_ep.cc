@@ -40,10 +40,11 @@ ExecutionProviderPlugin::~ExecutionProviderPlugin() {
 
 ExecutionProviderPlugin::ExecutionProviderPlugin(
     const ApiPtrs& api_ptrs,
-    std::string_view name, 
+    std::string_view name,
     ID3D12Device* d3d12_device_,
     IDMLDevice* dml_device_,
-    Microsoft::WRL::ComPtr<ExecutionContext> executionContext)
+    Microsoft::WRL::ComPtr<ExecutionContext> executionContext,
+    std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder)
     : OrtEp{ORT_API_VERSION}
     , ApiPtrs{api_ptrs}
     , name_{name}
@@ -83,7 +84,8 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
         m_areMetacommandsEnabled,
         m_graphCaptureEnabled,
         false,
-        false);
+        false,
+        factoryHostAllocHolder);
 
     m_dataTransfer = std::make_unique<DMLDataTransfer>(ApiPtrs{api_ptrs});
     m_dataTransfer->AttachExecutionProvider(m_executionProvider);
@@ -1302,7 +1304,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         // Build the anchor index once per session and store it — the IFusionRule
         // objects it owns are referenced by raw pointer in FusionMatch and must
         // outlive m_fusionMap.
-        ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex();
+        ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex(ep->m_executionProvider->IsMcdmDevice());
         ep->m_fusionMap.clear();
 
         std::unordered_set<size_t> fusedNodeIds;
@@ -1354,7 +1356,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         tier0AndCpuExcluded.insert(tier0ClaimedNodeIds.begin(),
                                    tier0ClaimedNodeIds.end());
 
-        ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex();
+        ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex(ep->m_executionProvider->IsMcdmDevice());
         ep->m_fusionMap.clear();
 
         std::unordered_set<size_t> fusedNodeIds;
@@ -1557,12 +1559,23 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CreateAllocatorImpl(_In_ OrtEp*
     if (is_cpu_input_allocator) {
         *allocator = allocators[1];
         return nullptr;
-    } else {
-        // is gpu allocator
-        *allocator = allocators[0];
-        return nullptr;
     }
 
+    // GPU request. Distinguish DEFAULT (VRAM, GPU-exclusive) from HOST_ACCESSIBLE (CPU-writable):
+    // both report DeviceType_GPU, so branch on the memory type. A HOST_ACCESSIBLE request gets the
+    // CUSTOM/L0-backed allocator when supported, so OGA can update decode inputs in place with no
+    // per-step copy. If it is unsupported the host-accessible allocator is null; fall back to the
+    // DEFAULT allocator (today's copy path) rather than silently mis-serve it.
+    OrtDeviceMemoryType mem_type = impl.ort_api.MemoryInfoGetDeviceMemType(memory_info);
+    if (mem_type == OrtDeviceMemoryType_HOST_ACCESSIBLE) {
+        if (auto host_alloc = impl.m_executionProvider.get()->GetHostAccessibleAllocator()) {
+            *allocator = host_alloc.get();
+            return nullptr;
+        }
+    }
+
+    // is gpu allocator (DEFAULT, or host-accessible fallback)
+    *allocator = allocators[0];
     return nullptr;
 }
 
