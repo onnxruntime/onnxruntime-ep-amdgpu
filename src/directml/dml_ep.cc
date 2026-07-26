@@ -44,7 +44,8 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     ID3D12Device* d3d12_device_,
     IDMLDevice* dml_device_,
     Microsoft::WRL::ComPtr<ExecutionContext> executionContext,
-    std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder)
+    std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder,
+    bool enableHostAccessible)
     : OrtEp{ORT_API_VERSION}
     , ApiPtrs{api_ptrs}
     , name_{name}
@@ -85,7 +86,8 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
         m_graphCaptureEnabled,
         false,
         false,
-        factoryHostAllocHolder);
+        factoryHostAllocHolder,
+        enableHostAccessible);
 
     m_dataTransfer = std::make_unique<DMLDataTransfer>(ApiPtrs{api_ptrs});
     m_dataTransfer->AttachExecutionProvider(m_executionProvider);
