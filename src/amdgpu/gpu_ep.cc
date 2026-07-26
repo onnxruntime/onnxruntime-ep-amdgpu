@@ -112,13 +112,12 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     const ProviderInfo info{provider_options};
 
     // Resolved-profile name for the routing trace (below). Covers every Profile value so the trace
-    // never mislabels an explicit profile (e.g. Optimized/Hip are not DirectML). Auto is always
+    // never mislabels an explicit profile (e.g. Optimized is not DirectML). Auto is always
     // resolved to a concrete backend before this is called.
     const auto profile_name = [](Profile p) -> const char* {
         switch (p) {
             case Profile::MIGraphX:  return "MIGraphX";
             case Profile::DirectML:  return "DirectML";
-            case Profile::Hip:       return "Hip";
             case Profile::Eager:     return "Eager";
             case Profile::Optimized: return "Optimized";
             case Profile::Auto:      return "Auto";
@@ -248,8 +247,6 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         create_directml_backend();
     } else if (effective == Profile::MIGraphX) {
         create_migraphx_backend();
-    } else if (effective == Profile::Hip) {
-        create_hip_backend();
     } else {
         create_migraphx_backend();
     }
