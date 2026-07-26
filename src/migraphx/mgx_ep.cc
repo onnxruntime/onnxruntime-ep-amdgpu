@@ -415,6 +415,13 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     for (const auto& [key, value] : key_value_pairs.GetKeyValuePairs()) {
         if (key.rfind(ep_prefix, 0) == 0) {
             provider_options.emplace(key.substr(ep_prefix.length()), value);
+        } else if (key.rfind("ep.directml.", 0) == 0) {
+            // Keys namespaced to the DirectML sibling backend (e.g. ep.directml.enable_host_accessible)
+            // are not ours. The umbrella forwards every ep.* entry to whichever backend it selects, so
+            // a DirectML-targeted key can reach the migraphx backend when the umbrella routes to migraphx
+            // (e.g. OGA's trivial init session, backend=Auto). Skip it — ProviderInfo would otherwise
+            // reject it as an unknown provider option and fail EP creation.
+            continue;
         } else if (key.rfind("ep.", 0) == 0) {
             provider_options.emplace(key, value);
         }

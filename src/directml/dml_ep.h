@@ -35,7 +35,9 @@ public:
         IDMLDevice* dml_device,
         Microsoft::WRL::ComPtr<ExecutionContext> executionContext,
         // Factory-owned holder for the shared host-accessible allocator (nullptr = per-EP legacy).
-        std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder = nullptr);
+        std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder = nullptr,
+        // Opt-in for host-accessible (CUSTOM/L0) decode inputs (ep.directml.enable_host_accessible).
+        bool enableHostAccessible = false);
 
     ~ExecutionProviderPlugin();
 
