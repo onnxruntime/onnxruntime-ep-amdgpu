@@ -31,6 +31,7 @@ struct ProviderInfo {
     std::optional<bool> telemetry_file{};
     std::optional<std::string> telemetry_dir{};
     std::optional<std::string> model_arch{};
+    std::optional<std::string> model_fw{};  // caller framework (e.g. "webnn"); "webnn" -> DirectML
     // Static seq-padding: recognized here only so the umbrella can relay them to the
     // migraphx backend (which implements the pad/slice). Stored as strings verbatim.
     std::optional<std::string> static_pad_seq{};

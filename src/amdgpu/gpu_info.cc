@@ -44,6 +44,7 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kTelemetryFile, telemetry_file)
             .AddAssignmentToReference(provider_option::kTelemetryDir, telemetry_dir)
             .AddAssignmentToReference(provider_option::kModelArch, model_arch)
+            .AddAssignmentToReference(provider_option::kModelFw, model_fw)
             .AddAssignmentToReference(provider_option::kStaticPadSeq, static_pad_seq)
             .AddAssignmentToReference(provider_option::kStaticPadSeqLen, static_pad_seq_len)
             .AddAssignmentToReference(provider_option::kStaticPadInputs, static_pad_inputs)

@@ -19,7 +19,7 @@ add_library(amdgpu-ep MODULE
         gpu_stream_support.cc
         gpu_stream_support.h)
 
-target_link_libraries(amdgpu-ep PRIVATE plugin-ep-utils flatbuffers)
+target_link_libraries(amdgpu-ep PRIVATE plugin-ep-utils flatbuffers hip-shared)
 
 # Expose USE_HIP / USE_DML so the source can gate the optional backend loads.
 target_compile_definitions(amdgpu-ep PRIVATE $<$<BOOL:${USE_HIP}>:USE_HIP>)
