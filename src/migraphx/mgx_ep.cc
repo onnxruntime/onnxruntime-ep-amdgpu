@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <set>
 #include <string>
@@ -171,7 +172,7 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
             return true;
         }
         for (const auto& input : inputs) {
-            if (!IsInt8Tensor(input) || !IsUint8Tensor(input)) {
+            if (!IsInt8Tensor(input) && !IsUint8Tensor(input)) {
                 return true;
             }
         }
@@ -211,7 +212,7 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
         }
         // only support int8 and uint8 type
         for (const auto& input : inputs) {
-            if (!IsInt8Tensor(input) || !IsUint8Tensor(input)) {
+            if (!IsInt8Tensor(input) && !IsUint8Tensor(input)) {
                 return true;
             }
         }
@@ -476,6 +477,13 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     for (const auto& [key, value] : key_value_pairs.GetKeyValuePairs()) {
         if (key.rfind(ep_prefix, 0) == 0) {
             provider_options.emplace(key.substr(ep_prefix.length()), value);
+        } else if (key.rfind("ep.directml.", 0) == 0) {
+            // Keys namespaced to the DirectML sibling backend (e.g. ep.directml.enable_host_accessible)
+            // are not ours. The umbrella forwards every ep.* entry to whichever backend it selects, so
+            // a DirectML-targeted key can reach the migraphx backend when the umbrella routes to migraphx
+            // (e.g. OGA's trivial init session, backend=Auto). Skip it — ProviderInfo would otherwise
+            // reject it as an unknown provider option and fail EP creation.
+            continue;
         } else if (key.rfind("ep.", 0) == 0) {
             provider_options.emplace(key, value);
         }
@@ -490,6 +498,7 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     enable_int8_ = info.enable_int8;
     exhaustive_tune_ = info.exhaustive_tune;
     mlss_use_specific_ops_ = info.mlss_use_specific_ops;
+    model_arch_ = info.model_arch;
     cache_dir_ = info.cache_dir;
     int8_use_native_calibration_table_ = info.int8_use_native_calibration_table;
     int8_calibration_table_name_ = info.int8_calibration_table_name;
@@ -505,8 +514,15 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     hip_graph_enable_ = info.hip_graph_enable;
     max_dynamic_batch_ = info.max_dynamic_batch;
     compile_batches_ = info.compile_batches;
+<<<<<<< HEAD
     coalesce_io_enable_ = info.coalesce_io;
     cpu_control_flow_enable_ = info.cpu_control_flow;
+=======
+    static_pad_seq_ = info.static_pad_seq;
+    static_pad_seq_len_ = info.static_pad_seq_len;
+    static_pad_inputs_ = info.static_pad_inputs;
+    static_pad_outputs_ = info.static_pad_outputs;
+>>>>>>> main
 
     HIP_CALL_THROW(hipSetDevice(device_id_));
     HIP_CALL_THROW(hipGetDeviceProperties(&device_prop_, device_id_));
@@ -529,14 +545,40 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kMaxDynamicBatch, max_dynamic_batch_);
     PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
+    PARSE_ENV_VAR(env_var::kStaticPadSeq, static_pad_seq_);
+    PARSE_ENV_VAR(env_var::kStaticPadSeqLen, static_pad_seq_len_);
+    PARSE_ENV_VAR(env_var::kStaticPadInputs, static_pad_inputs_);
+    PARSE_ENV_VAR(env_var::kStaticPadOutputs, static_pad_outputs_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
+<<<<<<< HEAD
     PARSE_ENV_VAR(env_var::kCpuControlFlow, cpu_control_flow_enable_);
 
     if (cpu_control_flow_enable_) {
         factory_.EnableCpuControlFlow();
     }
+=======
+    PARSE_ENV_VAR(env_var::kModelArch, model_arch_);
+>>>>>>> main
 
-    platform::SetEnvironmentVar("MIGRAPHX_MLSS_USE_SPECIFIC_OPS", mlss_use_specific_ops_);
+    // Per-architecture ops to force onto AMDMLSS.
+    // Add a row here to enable specific ops on additional architectures.
+    struct arch_mlss_ops {
+        std::string_view arch;
+        std::string_view ops;  // comma-separated op names
+    };
+    static constexpr std::array<arch_mlss_ops, 2> kArchMlssOps{{
+        {"gfx1200", "conv"},
+        {"gfx1201", "conv"},
+    }};
+
+    for (const auto& [arch, ops] : kArchMlssOps) {
+        if (compute_capability_.rfind(arch, 0) == 0) {
+            if (!mlss_use_specific_ops_.empty()) {
+                mlss_use_specific_ops_ += ",";
+            }
+            mlss_use_specific_ops_ += ops;
+        }
+    }
 
     auto compute_mode{platform::GetEnvironmentVar(env_var::kComputeMode)};
     if (!compute_mode.empty()) {
@@ -866,10 +908,27 @@ void calibrate_and_quantize(const migraphx::program& prog, const migraphx::targe
     }
 }
 
-void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune) {
+void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune,
+    const std::string& mlss_use_specific_ops) {
     migraphx::compile_options options;
     options.set_fast_math(false);
     options.set_exhaustive_tune_flag(exhaustive_tune);
+    if (!mlss_use_specific_ops.empty()) {
+        // MIGraphX expects a list of op names; split the comma-separated value.
+        std::vector<std::string> ops;
+        std::string_view rest{mlss_use_specific_ops};
+        while (!rest.empty()) {
+            const auto pos{rest.find(',')};
+            if (const auto op{rest.substr(0, pos)}; !op.empty()) {
+                ops.emplace_back(op);
+            }
+            if (pos == std::string_view::npos) {
+                break;
+            }
+            rest.remove_prefix(pos + 1);
+        }
+        options.set_advance_backend_option("mlss_use_specific_ops", ops);
+    }
     prog.compile(target, options);
 }
 
@@ -919,7 +978,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             migraphx::program_parameters params;
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
-            compile_program(program, t_, exhaustive_tune_);
+            compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_);
             if (!disable_compiled_model_caching_) {
                 save_compiled_program(program, mxr_path);
             }
@@ -965,6 +1024,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             has_input_shape,
             dump_subgraphs_,
             exhaustive_tune_,
+            mlss_use_specific_ops_,
             dynamic_ranges_,
             input_name_indices,
             output_name_indices,
@@ -984,6 +1044,30 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     compute_state.max_dynamic_batch = max_dynamic_batch_;
     compute_state.compile_batches = compile_batches_;
     compute_state.coalesce_io = coalesce_io_enable_;
+    compute_state.static_pad_seq = static_pad_seq_;
+    compute_state.static_pad_seq_len = static_pad_seq_len_;
+    if (static_pad_seq_) {
+        // static-pad and dynamic batching both rewrite shapes; combined, the staging copies
+        // collide. Unsupported together.
+        if (max_dynamic_batch_ > 0) {
+            return Ort::Status{"static seq-padding is not supported with dynamic batching "
+                "(max_dynamic_batch > 0); disable one", ORT_EP_FAIL};
+        }
+        compute_state.static_pad_input_axes = ParseNameAxisSpec(static_pad_inputs_);
+        // Outputs: MIGraphX program params are named "#output_N", not their ONNX
+        // names, so resolve the user's "logits:1" spec to (ORT output index -> axis)
+        // via output_name_indices; the runtime slice matches on index.
+        compute_state.static_pad_output_axes_by_index.clear();
+        for (const auto& [oname, axis] : ParseNameAxisSpec(static_pad_outputs_)) {
+            if (const auto it{output_name_indices.find(oname)}; it != output_name_indices.end()) {
+                compute_state.static_pad_output_axes_by_index.emplace(it->second, axis);
+            }
+        }
+        // No named inputs -> nothing to pad; keep the feature inert.
+        if (compute_state.static_pad_input_axes.empty()) {
+            compute_state.static_pad_seq = false;
+        }
+    }
 
     node_compute_info = std::make_unique<NodeComputeInfo>(*this).release();
     return STATUS_OK;
@@ -1154,12 +1238,51 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         }
     }
 
+    // Resolve static seq-padding for this call (no-op when disabled).  A named input
+    // is padded on its token axis to the fixed target length, only for prefill: the
+    // axis extent must be in (1, target).  decode (extent == 1) and already-max
+    // prompts are left alone.  Inert when static_pad_seq_len == 0.
+    StaticSeqContext seq{};
+    if (compute_state.static_pad_seq && compute_state.static_pad_seq_len > 0) {
+        const auto target{compute_state.static_pad_seq_len};
+        for (const auto& [name, axis] : compute_state.static_pad_input_axes) {
+            const auto it{input_name_indices.find(name)};
+            if (it == input_name_indices.end()) {
+                continue;
+            }
+            const auto shape{kernel_context.GetInput(it->second).GetTensorTypeAndShapeInfo().GetShape()};
+            if (axis < 0 || static_cast<size_t>(axis) >= shape.size()) {
+                continue;
+            }
+            const auto extent{static_cast<size_t>(shape[axis])};
+            if (extent > 1 && extent < target) {
+                seq.active = true;
+                seq.real_len = extent;
+                seq.target_len = target;
+                seq.input_axes = &compute_state.static_pad_input_axes;
+                seq.output_axes_by_index = &compute_state.static_pad_output_axes_by_index;
+                break;  // all named inputs share the same token length this call
+            }
+        }
+    }
+
     // Map an actual input shape to the shape the program is compiled for: a batched
-    // input (axis-0 extent == requested batch) is bucketed up to the target batch.
-    const auto effective_shape{[&dyn](std::vector<int64_t> shape) {
+    // input (axis-0 extent == requested batch) is bucketed up to the target batch,
+    // and a named seq input has its token axis padded up to the static target length.
+    const auto effective_shape{[&dyn, &seq](std::vector<int64_t> shape,
+                                            const std::string& name) {
         if (dyn.active && !shape.empty() &&
             static_cast<size_t>(shape.front()) == dyn.requested_batch) {
             shape.front() = static_cast<int64_t>(dyn.target_batch);
+        }
+        if (seq.active && seq.input_axes != nullptr) {
+            if (const auto it{seq.input_axes->find(name)}; it != seq.input_axes->end()) {
+                const int axis{it->second};
+                if (axis >= 0 && static_cast<size_t>(axis) < shape.size() &&
+                    static_cast<size_t>(shape[axis]) == seq.real_len) {
+                    shape[axis] = static_cast<int64_t>(seq.target_len);
+                }
+            }
         }
         return shape;
     }};
@@ -1167,7 +1290,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     if (!compute_state.has_input_shapes) {
         for (auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
-            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape())};
+            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape(), name)};
             onnx_options.set_input_parameter_shape(name, {shape.begin(), shape.end()});
             hash::Hash(input_shapes_hash, shape);
         }
@@ -1188,7 +1311,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                         prog_strides.size() == 1 && prog_strides.front() == 0) {
                         prog_lengths.clear();
                     }
-                    const auto eff{effective_shape(shape)};
+                    const auto eff{effective_shape(shape, name)};
                     std::vector<size_t> lengths{eff.begin(), eff.end()};
                     if (prog_lengths != lengths) {
                         onnx_options.set_input_parameter_shape(name, lengths);
@@ -1205,7 +1328,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         // for identical input shapes regardless of which program is currently active.
         for (const auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
-            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape())};
+            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape(), name)};
             hash::Hash(input_shapes_hash, shape);
         }
     }
@@ -1268,7 +1391,8 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 compute_state.enable_fp16, compute_state.enable_bf16, compute_state.enable_int8,
                 compute_state.enable_fp8, compute_state.int8_calibration_cache_available, compute_state.dynamic_ranges);
 
-            compile_program(program, compute_state.t, compute_state.exhaustive_tune);
+            compile_program(program, compute_state.t, compute_state.exhaustive_tune,
+                compute_state.mlss_use_specific_ops);
             if (!compute_state.disable_compiled_model_caching) {
                 save_compiled_program(program, mxr_path);
             }
@@ -1282,18 +1406,26 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         param_shapes = program.get_parameter_shapes();
     }
 
+<<<<<<< HEAD
     // Staging path: required for hipGraph capture (pointer stability) and for
     // dynamic batching (input padding / output slicing).
     if ((compute_state.hip_graph_enable || dyn.active) && param_shapes.size() > 0) {
+=======
+    // Staging path: required for hipGraph capture (pointer stability), for dynamic
+    // batching (batch-axis pad/slice), and for static seq-padding (token-axis
+    // pad/slice).  Stage I/O into EP-owned buffers, bind scratch, then replay/capture
+    // a graph or run eagerly.
+    if ((compute_state.hip_graph_enable || dyn.active || seq.active) && param_shapes.size() > 0) {
+>>>>>>> main
         const auto shape_hash{hash::ToHex(input_shapes_hash)};
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
-        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn);
+        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn, seq);
         auto bind{BindStagingParams(compute_state, param_shapes, shape_hash, hip_stream)};
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
             bind.params, bind.prog_output_indices, shape_hash, dyn);
-        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn);
+        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn, seq);
         HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
         return STATUS_OK;
     }

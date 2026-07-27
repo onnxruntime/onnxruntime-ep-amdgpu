@@ -31,8 +31,12 @@ void* Allocator::Alloc(const size_t size) const {
 }
 
 void Allocator::Free(void* p) const {
-    SetDevice(device_id_);
-    HIP_CALL_THROW(hipFree(p));
+    // Free is wired as OrtAllocator::Free — ORT's deleter, invoked from ~Tensor, which is implicitly
+    // noexcept. A throw here (from SetDevice or hipFree) escapes the noexcept boundary -> std::terminate
+    // -> __fastfail (0xC0000409). So the free path MUST NOT throw: best-effort, ignore HIP errors
+    // (matches the (void)hipSetDevice/(void)hipFree cleanup pattern in mgx_ep.cc).
+    (void)hipSetDevice(device_id_);
+    (void)hipFree(p);
 }
 
 const OrtMemoryInfo* Allocator::Info() const {
@@ -49,8 +53,9 @@ void* PinnedAllocator::Alloc(const size_t size) const {
 }
 
 void PinnedAllocator::Free(void* p) const {
-    SetDevice(device_id_);
-    HIP_CALL_THROW(hipHostFree(p));
+    // Must not throw — same reason as Allocator::Free above (invoked from ~Tensor, a noexcept deleter).
+    (void)hipSetDevice(device_id_);
+    (void)hipHostFree(p);
 }
 
 const OrtMemoryInfo* PinnedAllocator::Info() const {

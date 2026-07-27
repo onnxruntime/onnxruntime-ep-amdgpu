@@ -68,7 +68,14 @@ private:
     const OrtApi* ort_api_;
     const PluginDmlExecutionProviderImpl* execution_provider_;
     bool is_internal_operator_;
-    mutable std::vector<int64_t> shape_cache_;  // Cache for shape
+
+    // Eagerly cached state — resolved once in constructor, returned directly by accessors.
+    // Mirrors ORT's TensorWrapper which pre-computes m_abiDataInterface in its constructor.
+    bool cached_is_cpu_ = true;
+    MLOperatorTensorDataType cached_dtype_ = MLOperatorTensorDataType::Undefined;
+    std::vector<uint32_t> cached_shape_;
+    void* cached_data_ = nullptr;
+    Microsoft::WRL::ComPtr<IUnknown> cached_abi_data_interface_;
 };
 
 // ============================================================================
@@ -130,10 +137,6 @@ public:
     STDMETHOD(AllocateTemporaryData)(size_t size, IUnknown** data) const noexcept override;
     STDMETHOD_(void, GetExecutionInterface)(IUnknown** executionInterface) const noexcept override;
 
-    // Resource state transitions — mirrors PluginOpKernelContextWrapper::TransitionResourcesForOperatorIfRequired.
-    // Must be called before (isBeforeOp=true) and after (isBeforeOp=false) ml_operator_kernel->Compute().
-    void TransitionResourcesForOperatorIfRequired(bool isBeforeOp);
-
     // IMLOperatorKernelContextPrivate methods
     STDMETHOD(GetSequenceInputTensor)(uint32_t inputIndex, uint32_t sequenceIndex, IMLOperatorTensor** tensor) const noexcept override;
     STDMETHOD(PrepareSequenceOutput)(uint32_t outputIndex, MLOperatorTensorDataType dataType) const noexcept override;
@@ -146,10 +149,12 @@ private:
     OrtKernelContext* kernel_context_;
     const OrtApi* ort_api_;
     const PluginDmlExecutionProviderImpl* execution_provider_;
-    bool is_internal_operator_;  // For resource state transitions (MemcpyToHost/FromHost)
+    bool is_internal_operator_;  // Controls GetABIDataInterface and GetExecutionInterface return type
     const std::vector<std::optional<std::vector<uint32_t>>>* inferred_output_shapes_;
-    mutable std::vector<Microsoft::WRL::ComPtr<AbiSafeTensor>> tensor_cache_;         // input tensors
-    mutable std::vector<Microsoft::WRL::ComPtr<AbiSafeTensor>> output_tensor_cache_;  // output tensors (for post-op transitions)
+    mutable std::vector<Microsoft::WRL::ComPtr<AbiSafeTensor>> input_tensor_cache_;
+    mutable std::vector<Microsoft::WRL::ComPtr<AbiSafeTensor>> output_tensor_cache_;
+    size_t input_count_ = 0;
+    size_t output_count_ = 0;
     mutable Microsoft::WRL::ComPtr<IUnknown> abi_execution_object_;
     Microsoft::WRL::ComPtr<IWinmlExecutionProvider> winml_provider_;
 
@@ -433,7 +438,7 @@ struct DmlKernelCreationState {
     std::vector<uint32_t> required_constant_cpu_inputs;
     bool requires_input_shapes_at_creation = false;
     bool requires_output_shapes_at_creation = false;
-    bool is_internal_operator = false;  // For resource state transitions (MemcpyToHost/FromHost)
+    bool is_internal_operator = false;  // Controls GetABIDataInterface and GetExecutionInterface return type
     std::vector<std::string> tensor_attribute_names;  // Tensor-typed ONNX attribute names (e.g., ConstantOfShape's "value")
 
     const PluginDmlExecutionProviderImpl* dml_execution_provider = nullptr;
@@ -520,7 +525,7 @@ struct DmlAbiKernel {
     Microsoft::WRL::ComPtr<IMLOperatorKernel> ml_operator_kernel;
     const OrtApi* ort_api = nullptr;
     const PluginDmlExecutionProviderImpl* dml_execution_provider = nullptr;
-    bool is_internal_operator = false;  // For resource state transitions (MemcpyToHost/FromHost)
+    bool is_internal_operator = false;  // Controls GetABIDataInterface and GetExecutionInterface return type
     std::string ep_name;  // Runtime EP name for allocator lookup in AbiSafeKernelContext
     std::vector<std::optional<std::vector<uint32_t>>> inferred_output_shapes;  // nullopt=unset, empty vector=scalar
     std::string operator_name;  // For debugging

@@ -25,6 +25,7 @@ struct ProviderInfo {
     bool exhaustive_tune{};
     bool dump_subgraphs{};
     std::string mlss_use_specific_ops{};
+    std::string model_arch{};
     ComputeMode compute_mode{};
     fs::path cache_dir{};
     bool disable_caching{};
@@ -38,7 +39,14 @@ struct ProviderInfo {
     std::size_t max_dynamic_batch{};
     std::string compile_batches{};
     bool coalesce_io{};
+<<<<<<< HEAD
     bool cpu_control_flow{};
+=======
+    bool static_pad_seq{};
+    std::size_t static_pad_seq_len{};
+    std::string static_pad_inputs{};
+    std::string static_pad_outputs{};
+>>>>>>> main
 
     ProviderInfo() = default;
 

@@ -286,7 +286,10 @@ static BiasGeluCompiledKernel CompileBiasGeluDml(
     ComPtr<IDMLOperator> dml_op;
     if (FAILED(dml_device->CreateOperator(&add_op_desc, IID_PPV_ARGS(&dml_op)))) return result;
 
-    if (FAILED(dml_device->CompileOperator(dml_op.Get(), DML_EXECUTION_FLAG_NONE,
+    DML_EXECUTION_FLAGS exec_flags = (dml_dtype == DML_TENSOR_DATA_TYPE_FLOAT16)
+        ? DML_EXECUTION_FLAG_ALLOW_HALF_PRECISION_COMPUTATION
+        : DML_EXECUTION_FLAG_NONE;
+    if (FAILED(dml_device->CompileOperator(dml_op.Get(), exec_flags,
                                            IID_PPV_ARGS(result.compiled_op.GetAddressOf())))) {
         DML_PERF_LOG("[BiasGelu] CompileBiasGeluDml: CompileOperator FAILED");
         return result;

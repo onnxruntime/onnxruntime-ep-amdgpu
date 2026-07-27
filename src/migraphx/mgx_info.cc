@@ -40,6 +40,18 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
                     return STATUS_OK;
                 })
             .AddValueParser(
+                provider_option::kStaticPadInputs,
+                [this](const std::string_view value) -> Ort::Status {
+                    static_pad_inputs = value;
+                    return STATUS_OK;
+                })
+            .AddValueParser(
+                provider_option::kStaticPadOutputs,
+                [this](const std::string_view value) -> Ort::Status {
+                    static_pad_outputs = value;
+                    return STATUS_OK;
+                })
+            .AddValueParser(
                 provider_option::kComputeMode,
                 [this](const std::string_view value) -> Ort::Status {
                     std::string lower{value};
@@ -73,9 +85,15 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kForceRecompile, force_recompile)
             .AddAssignmentToReference(provider_option::kHipGraphEnable, hip_graph_enable)
             .AddAssignmentToReference(provider_option::kMaxDynamicBatch, max_dynamic_batch)
+            .AddAssignmentToReference(provider_option::kStaticPadSeq, static_pad_seq)
+            .AddAssignmentToReference(provider_option::kStaticPadSeqLen, static_pad_seq_len)
             .AddAssignmentToReference(provider_option::kCoalesceIO, coalesce_io)
             .AddAssignmentToReference(provider_option::kMlssUseSpecificOps, mlss_use_specific_ops)
+<<<<<<< HEAD
             .AddAssignmentToReference(provider_option::kCpuControlFlow, cpu_control_flow)
+=======
+            .AddAssignmentToReference(provider_option::kModelArch, model_arch)
+>>>>>>> main
             .Parse(provider_options));
 }
 

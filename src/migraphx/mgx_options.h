@@ -26,6 +26,19 @@ constexpr auto kMaxDynamicBatch = "max_dynamic_batch"sv;
 constexpr auto kCompileBatches = "compile_batches"sv;
 constexpr auto kCoalesceIO = "coalesce_io"sv;
 constexpr auto kMlssUseSpecificOps = "mlss_use_specific_ops"sv;
+<<<<<<< HEAD
 constexpr auto kCpuControlFlow = "cpu_control_flow"sv;
+=======
+constexpr auto kModelArch = "model_arch"sv;
+
+// Static sequence-length padding.  When enabled, the EP pads the token axis of the
+// named inputs up to static_pad_seq_len (so a varying prefill length compiles the
+// program only once) and slices the named outputs back down to the real length.
+// Set by OGA for MIGraphX LLM sessions; mirrors the pad OGA used to do itself.
+constexpr auto kStaticPadSeq = "static_pad_seq"sv;             // "1" = enable
+constexpr auto kStaticPadSeqLen = "static_pad_seq_len"sv;      // target token-axis length
+constexpr auto kStaticPadInputs = "static_pad_inputs"sv;       // "input_ids:1,position_ids:1"
+constexpr auto kStaticPadOutputs = "static_pad_outputs"sv;     // "logits:1"
+>>>>>>> main
 
 }  // namespace mgx_ep::provider_option

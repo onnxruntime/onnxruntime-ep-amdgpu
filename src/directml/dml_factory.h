@@ -7,6 +7,7 @@
 
 #include "dml_data_transfer.h"
 #include "dml_ep.h"
+#include "dml_host_accessible_allocator.h"
 
 namespace dml_ep {
 
@@ -87,6 +88,13 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> cmd_queue;
     Microsoft::WRL::ComPtr<IDMLDevice> dml_device;
+
+    // Factory-scoped host-accessible (CUSTOM/L0) allocator — shared across ALL EP instances so the
+    // decode-input allocation map is single. GPU-KV makes OGA create 2 sessions (dummy-allocator +
+    // real) -> 2 EPs; a per-EP host-accessible allocator gave 2 maps, so a position_ids pointer
+    // allocated in one EP MISSed in the executing EP's map (Reshape E_INVALIDARG). One factory-owned
+    // instance (built on the shared d3d12_device) fixes it, mirroring the MIGraphX pinned allocator.
+    std::shared_ptr<DmlHostAccessibleAllocator> host_accessible_allocator_;
 
     std::unique_ptr<ExecutionProviderPlugin> m_ep;
     ExecutionProviderPlugin* m_ep_raw = nullptr; // non-owning observer pointer

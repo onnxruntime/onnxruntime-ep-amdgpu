@@ -8,6 +8,8 @@
 #include <set>
 #include <mutex>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -42,8 +44,16 @@ constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
 constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
 constexpr auto kCoalesceIO = "ORT_MIGRAPHX_COALESCE_IO"sv;
 constexpr auto kMlssUseSpecificOps = "ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS"sv;
+<<<<<<< HEAD
 // When set, If/Loop/Scan (+ bool condition ops) run on CPU; MIGraphX compiles the rest.
 constexpr auto kCpuControlFlow = "ORT_MIGRAPHX_CPU_CONTROL_FLOW"sv;
+=======
+constexpr auto kModelArch = "ORT_MIGRAPHX_MODEL_ARCH"sv;
+constexpr auto kStaticPadSeq = "ORT_MIGRAPHX_STATIC_PAD_SEQ"sv;
+constexpr auto kStaticPadSeqLen = "ORT_MIGRAPHX_STATIC_PAD_SEQ_LEN"sv;
+constexpr auto kStaticPadInputs = "ORT_MIGRAPHX_STATIC_PAD_INPUTS"sv;
+constexpr auto kStaticPadOutputs = "ORT_MIGRAPHX_STATIC_PAD_OUTPUTS"sv;
+>>>>>>> main
 }  // namespace env_vars
 
 // EP-owned device staging buffer (pointer-stable across runs so it can be
@@ -108,6 +118,7 @@ struct ComputeState {
     bool has_input_shapes{};
     bool dump_subgraphs_{};
     bool exhaustive_tune{};
+    std::string mlss_use_specific_ops{};
     const Map<float>& dynamic_ranges;
     Map<size_t> input_name_indices;
     Map<size_t> output_name_indices;
@@ -124,6 +135,19 @@ struct ComputeState {
     bool hip_graph_enable{};
     std::size_t max_dynamic_batch{};
     std::string compile_batches{};
+
+    // ── Static sequence-length padding (set at Compile time) ──────────────────
+    // When static_pad_seq is set, named inputs are padded on their token axis up to
+    // static_pad_seq_len before the program runs, and named outputs are sliced back
+    // down to the real token length afterwards.  Parsed once from the "name:axis"
+    // specs into (parameter name -> token axis) maps.
+    bool static_pad_seq{};
+    std::size_t static_pad_seq_len{};
+    Map<int> static_pad_input_axes{};   // input param name -> token axis (inputs keep real names)
+    // Outputs are program params named "#output_N", not their ONNX names, so the
+    // slice must match on ORT output INDEX, not name.  Resolved from the user's
+    // "logits:1" spec via output_name_indices at Compile time.
+    std::unordered_map<std::size_t, int> static_pad_output_axes_by_index{};
 
     // ── Dynamic-batch runtime state ──────────────────────────────────────────
     bool has_dynamic_batch{};
@@ -241,6 +265,7 @@ private:
     bool enable_int8_{};
     bool exhaustive_tune_{};
     std::string mlss_use_specific_ops_{};
+    std::string model_arch_{};
     bool int8_calibration_cache_available_{};
     bool int8_use_native_calibration_table_{};
     bool dump_subgraphs_{};
@@ -257,7 +282,14 @@ private:
     std::size_t max_dynamic_batch_{};
     std::string compile_batches_{};
     bool coalesce_io_enable_{};
+<<<<<<< HEAD
     bool cpu_control_flow_enable_{};
+=======
+    bool static_pad_seq_{};
+    std::size_t static_pad_seq_len_{};
+    std::string static_pad_inputs_{};
+    std::string static_pad_outputs_{};
+>>>>>>> main
 
     std::mutex mutex_{};
 };
