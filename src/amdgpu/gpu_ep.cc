@@ -280,13 +280,11 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         THROW_IF_ERROR(factory.CreateMIGraphXBackend(local_session_options, logger, backend_ep_));
     };
 
-#ifdef USE_DML
-    if (backend_ == telemetry::Backend::DirectML) {
-        create_directml_backend();
     // Explicit profile is honored; Auto/Optimized derives from (ASIC, model_arch). select_backend()
     // (inside route_by_heuristic) applies both, so the result covers every profile value.
     const Profile effective = route_by_heuristic();
 
+#ifdef USE_DML
     if (effective == Profile::Eager) {
         create_directml_backend();
     } else if (effective == Profile::DirectML) {
@@ -299,8 +297,12 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         create_migraphx_backend();
     }
 #else
-    // DirectML not built: everything runs on MIGraphX.
-    create_migraphx_backend();
+    // DirectML not built (e.g. Linux): DirectML/Eager profiles fall back to MIGraphX.
+    if (effective == Profile::Hip) {
+        create_hip_backend();
+    } else {
+        create_migraphx_backend();
+    }
 #endif
     // Capture per-EP now: the shared factory_ backend field is overwritten by a later
     // umbrella EP (different backend). See PR for the cross-backend UAF details.
