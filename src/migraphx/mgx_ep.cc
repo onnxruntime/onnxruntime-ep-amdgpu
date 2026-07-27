@@ -322,8 +322,7 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
 std::unordered_set<size_t> CollectCpuControlFlowBoundaryNodes(
     const std::vector<Ort::ConstNode>& sorted_nodes)
 {
-    // If/Loop/Scan on CPU.  Greater/Cast too so the bool condition is CPU-resident
-    // (If reads it directly).  Clip stays on GPU — branch bodies reuse /Clip_output_0.
+    // If/Loop/Scan on CPU. Greater/Cast too so the bool condition is CPU-resident
     std::unordered_set<size_t> boundary_nodes;
     for (const auto& node : sorted_nodes) {
         const auto op_type{node.GetOperatorType()};

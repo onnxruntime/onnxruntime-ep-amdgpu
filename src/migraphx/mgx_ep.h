@@ -44,7 +44,6 @@ constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
 constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
 constexpr auto kCoalesceIO = "ORT_MIGRAPHX_COALESCE_IO"sv;
 constexpr auto kMlssUseSpecificOps = "ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS"sv;
-// When set, If/Loop/Scan (+ bool condition ops) run on CPU; MIGraphX compiles the rest.
 constexpr auto kCpuControlFlow = "ORT_MIGRAPHX_CPU_CONTROL_FLOW"sv;
 constexpr auto kModelArch = "ORT_MIGRAPHX_MODEL_ARCH"sv;
 constexpr auto kStaticPadSeq = "ORT_MIGRAPHX_STATIC_PAD_SEQ"sv;
