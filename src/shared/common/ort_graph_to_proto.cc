@@ -202,10 +202,8 @@ try {
     return Ort::Status{e.what(), ORT_EP_FAIL};
 }
 
-}  // namespace
-
-Ort::Status GraphToProto(const OrtGraph* ort_graph, ONNX_NAMESPACE::GraphProto& graph_proto,
-    const HandleInitializerDataFunc& handle_initializer_data_func)
+Ort::Status GraphToProtoImpl(const OrtGraph* ort_graph, ONNX_NAMESPACE::GraphProto& graph_proto,
+    const HandleInitializerDataFunc& handle_initializer_data_func, bool promote_outer_scope_inputs)
 try {
     Ort::ConstGraph graph{ort_graph};
 
@@ -271,7 +269,7 @@ try {
             const auto attr_proto{node_proto->add_attribute()};
             attr_proto->set_name(attr_name);
             attr_proto->set_type(ONNX_NAMESPACE::AttributeProto_AttributeType_GRAPH);
-            RETURN_IF_ERROR(GraphToProto(subgraph, *attr_proto->mutable_g()));
+            RETURN_IF_ERROR(GraphToProtoImpl(subgraph, *attr_proto->mutable_g(), {}, false));
         }
 
         // Handle node inputs
@@ -303,24 +301,27 @@ try {
         }
     }
 
-    // Promote outer-scope branch feeds to graph inputs for MIGraphX compile.
-    std::set<std::string> declared_inputs;
-    for (const auto& value_info : GetValueInfos(graph_inputs)) {
-        declared_inputs.insert(value_info.GetName());
-    }
-    for (const auto& [name, value_info] : value_infos) {
-        if (!value_info.IsFromOuterScope()) {
-            continue;
+    if (promote_outer_scope_inputs) {
+        // A control-flow branch compiled as a standalone graph needs captured values
+        // exposed as graph inputs. Nested branches keep them as outer-scope captures.
+        std::set<std::string> declared_inputs;
+        for (const auto& value_info : GetValueInfos(graph_inputs)) {
+            declared_inputs.insert(value_info.GetName());
         }
-        if (declared_inputs.count(name) != 0) {
-            continue;
+        for (const auto& [name, value_info] : value_infos) {
+            if (!value_info.IsFromOuterScope()) {
+                continue;
+            }
+            if (declared_inputs.count(name) != 0) {
+                continue;
+            }
+            if (initializer_value_infos.count(name) != 0) {
+                continue;
+            }
+            auto value_info_proto{graph_proto.mutable_input()->Add()};
+            ValueInfoToProto(value_info, *value_info_proto);
+            declared_inputs.insert(name);
         }
-        if (initializer_value_infos.count(name) != 0) {
-            continue;
-        }
-        auto value_info_proto{graph_proto.mutable_input()->Add()};
-        ValueInfoToProto(value_info, *value_info_proto);
-        declared_inputs.insert(name);
     }
 
     // Add value_infos to GraphProto as ValueInfoProto objects.
@@ -406,6 +407,14 @@ try {
     return Ort::Status{e};
 } catch (const std::exception& e) {
     return Ort::Status{e.what(), ORT_EP_FAIL};
+}
+
+}  // namespace
+
+Ort::Status GraphToProto(const OrtGraph* ort_graph, ONNX_NAMESPACE::GraphProto& graph_proto,
+    const HandleInitializerDataFunc& handle_initializer_data_func)
+{
+    return GraphToProtoImpl(ort_graph, graph_proto, handle_initializer_data_func, true);
 }
 
 Ort::Status GraphToProto(const OrtGraph* ort_graph, ONNX_NAMESPACE::ModelProto& model_proto,
