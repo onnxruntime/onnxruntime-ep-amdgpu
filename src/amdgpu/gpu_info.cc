@@ -40,16 +40,13 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kForceRecompile, force_recompile)
             .AddAssignmentToReference(provider_option::kExhaustiveTune, exhaustive_tune)
             .AddAssignmentToReference(provider_option::kMlssUseSpecificOps, mlss_use_specific_ops)
-<<<<<<< HEAD
             .AddAssignmentToReference(provider_option::kCpuControlFlow, cpu_control_flow)
-=======
             .AddAssignmentToReference(provider_option::kModelArch, model_arch)
             .AddAssignmentToReference(provider_option::kModelFw, model_fw)
             .AddAssignmentToReference(provider_option::kStaticPadSeq, static_pad_seq)
             .AddAssignmentToReference(provider_option::kStaticPadSeqLen, static_pad_seq_len)
             .AddAssignmentToReference(provider_option::kStaticPadInputs, static_pad_inputs)
             .AddAssignmentToReference(provider_option::kStaticPadOutputs, static_pad_outputs)
->>>>>>> main
             .Parse(provider_options));
 }
 

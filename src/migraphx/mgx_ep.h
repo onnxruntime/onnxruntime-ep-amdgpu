@@ -44,16 +44,13 @@ constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
 constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
 constexpr auto kCoalesceIO = "ORT_MIGRAPHX_COALESCE_IO"sv;
 constexpr auto kMlssUseSpecificOps = "ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS"sv;
-<<<<<<< HEAD
 // When set, If/Loop/Scan (+ bool condition ops) run on CPU; MIGraphX compiles the rest.
 constexpr auto kCpuControlFlow = "ORT_MIGRAPHX_CPU_CONTROL_FLOW"sv;
-=======
 constexpr auto kModelArch = "ORT_MIGRAPHX_MODEL_ARCH"sv;
 constexpr auto kStaticPadSeq = "ORT_MIGRAPHX_STATIC_PAD_SEQ"sv;
 constexpr auto kStaticPadSeqLen = "ORT_MIGRAPHX_STATIC_PAD_SEQ_LEN"sv;
 constexpr auto kStaticPadInputs = "ORT_MIGRAPHX_STATIC_PAD_INPUTS"sv;
 constexpr auto kStaticPadOutputs = "ORT_MIGRAPHX_STATIC_PAD_OUTPUTS"sv;
->>>>>>> main
 }  // namespace env_vars
 
 // EP-owned device staging buffer (pointer-stable across runs so it can be
@@ -282,14 +279,11 @@ private:
     std::size_t max_dynamic_batch_{};
     std::string compile_batches_{};
     bool coalesce_io_enable_{};
-<<<<<<< HEAD
     bool cpu_control_flow_enable_{};
-=======
     bool static_pad_seq_{};
     std::size_t static_pad_seq_len_{};
     std::string static_pad_inputs_{};
     std::string static_pad_outputs_{};
->>>>>>> main
 
     std::mutex mutex_{};
 };

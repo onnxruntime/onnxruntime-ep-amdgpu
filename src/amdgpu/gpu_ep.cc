@@ -211,13 +211,12 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 get_name(mgx_ep::provider_option::kMlssUseSpecificOps).c_str(),
                 info.mlss_use_specific_ops.value().c_str()));
         }
-<<<<<<< HEAD
         if (info.cpu_control_flow.has_value()) {
             THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
                 local_session_options,
                 get_name(mgx_ep::provider_option::kCpuControlFlow).c_str(),
                 info.cpu_control_flow.value() ? "1" : "0"));
-=======
+        }
         if (info.model_arch.has_value()) {
             THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
                 local_session_options,
@@ -248,7 +247,6 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 local_session_options,
                 get_name(mgx_ep::provider_option::kStaticPadOutputs).c_str(),
                 info.static_pad_outputs.value().c_str()));
->>>>>>> main
         }
         THROW_IF_ERROR(factory.CreateMIGraphXBackend(local_session_options, logger, backend_ep_));
     };

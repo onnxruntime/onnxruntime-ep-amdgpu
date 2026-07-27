@@ -27,9 +27,7 @@ struct ProviderInfo {
     std::optional<bool> exhaustive_tune{};
     std::optional<fs::path> cache_dir{};
     std::optional<std::string> mlss_use_specific_ops{};
-<<<<<<< HEAD
     std::optional<bool> cpu_control_flow{};
-=======
     std::optional<std::string> model_arch{};
     std::optional<std::string> model_fw{};  // caller framework (e.g. "webnn"); "webnn" -> DirectML
     // Static seq-padding: recognized here only so the umbrella can relay them to the
@@ -38,7 +36,6 @@ struct ProviderInfo {
     std::optional<std::string> static_pad_seq_len{};
     std::optional<std::string> static_pad_inputs{};
     std::optional<std::string> static_pad_outputs{};
->>>>>>> main
 
     ProviderInfo() = default;
 

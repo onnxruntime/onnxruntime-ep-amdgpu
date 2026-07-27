@@ -514,15 +514,12 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     hip_graph_enable_ = info.hip_graph_enable;
     max_dynamic_batch_ = info.max_dynamic_batch;
     compile_batches_ = info.compile_batches;
-<<<<<<< HEAD
     coalesce_io_enable_ = info.coalesce_io;
     cpu_control_flow_enable_ = info.cpu_control_flow;
-=======
     static_pad_seq_ = info.static_pad_seq;
     static_pad_seq_len_ = info.static_pad_seq_len;
     static_pad_inputs_ = info.static_pad_inputs;
     static_pad_outputs_ = info.static_pad_outputs;
->>>>>>> main
 
     HIP_CALL_THROW(hipSetDevice(device_id_));
     HIP_CALL_THROW(hipGetDeviceProperties(&device_prop_, device_id_));
@@ -550,15 +547,12 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kStaticPadInputs, static_pad_inputs_);
     PARSE_ENV_VAR(env_var::kStaticPadOutputs, static_pad_outputs_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
-<<<<<<< HEAD
     PARSE_ENV_VAR(env_var::kCpuControlFlow, cpu_control_flow_enable_);
+    PARSE_ENV_VAR(env_var::kModelArch, model_arch_);
 
     if (cpu_control_flow_enable_) {
         factory_.EnableCpuControlFlow();
     }
-=======
-    PARSE_ENV_VAR(env_var::kModelArch, model_arch_);
->>>>>>> main
 
     // Per-architecture ops to force onto AMDMLSS.
     // Add a row here to enable specific ops on additional architectures.
@@ -1406,17 +1400,11 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         param_shapes = program.get_parameter_shapes();
     }
 
-<<<<<<< HEAD
-    // Staging path: required for hipGraph capture (pointer stability) and for
-    // dynamic batching (input padding / output slicing).
-    if ((compute_state.hip_graph_enable || dyn.active) && param_shapes.size() > 0) {
-=======
     // Staging path: required for hipGraph capture (pointer stability), for dynamic
     // batching (batch-axis pad/slice), and for static seq-padding (token-axis
     // pad/slice).  Stage I/O into EP-owned buffers, bind scratch, then replay/capture
     // a graph or run eagerly.
     if ((compute_state.hip_graph_enable || dyn.active || seq.active) && param_shapes.size() > 0) {
->>>>>>> main
         const auto shape_hash{hash::ToHex(input_shapes_hash)};
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
