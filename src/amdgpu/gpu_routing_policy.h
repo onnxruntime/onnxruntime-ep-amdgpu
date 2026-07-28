@@ -57,10 +57,8 @@ inline bool is_webnn(const std::optional<std::string>& model_fw) {
 //   1. WebNN caller                   -> DirectML (browser/WebNN compatibility carve-out, all ASICs)
 //   2. kArchModelBackend (arch prefix + model_arch) override, if any row matches
 //   3. Medusa gfx117x                 -> DirectML
-//   4. gfx11.5+ (gfx115x Strix)       -> MIGraphX
-//   5. gfx11.x pre-11.5 (gfx110x/1103): LLM -> MIGraphX, else DirectML  (the LLM cutoff at gfx11.0)
-//   6. gfx12x (RDNA4)                 -> MIGraphX
-//   7. everything below gfx11 (gfx9/gfx10, incl. LLM) -> DirectML
+//   4. gfx11 and newer                -> MIGraphX
+//   5. everything below gfx11 (gfx9/gfx10) -> DirectML
 inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_hash, bool is_webnn,
                               Profile profile) {
     if (profile != Profile::Auto) {
@@ -75,17 +73,14 @@ inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_has
             return row.backend;
         }
     }
-    const bool is_llm = arch_model_hash != kNoModelArch &&
-        std::find(kLlmModelArch.begin(), kLlmModelArch.end(), arch_model_hash) != kLlmModelArch.end();
-    // 3-7. Prefix buckets (order matters: gfx117x and gfx115x before the general gfx11x).
+    // 3-5. Prefix buckets (order matters: gfx117x before the general gfx11x).
     if (starts_with(gfx, "gfx117")) return Profile::DirectML;  // Medusa MDS1/MDS2 (temporary)
-    // TODO(routing): Strix Halo LLM (gfx1150/1151) targets HipEP starting next release; it folds to
-    // MIGraphX today because HipEP is not built. Split out an is_llm -> Hip branch once it ships.
-    if (starts_with(gfx, "gfx115")) return Profile::MIGraphX;  // Strix (gfx11.5)
-    if (starts_with(gfx, "gfx11"))                             // pre-gfx11.5 RDNA3 (gfx110x/1103)
-        return is_llm ? Profile::MIGraphX : Profile::DirectML;
+    // TODO(routing): Strix Halo LLMs (gfx1150/1151) target HipEP starting next release; they fold
+    // into MIGraphX today because HipEP is not built. Needs its own branch, keyed on kLlmModelArch,
+    // once it ships.
+    if (starts_with(gfx, "gfx11")) return Profile::MIGraphX;   // RDNA3 / RDNA3.5
     if (starts_with(gfx, "gfx12")) return Profile::MIGraphX;   // RDNA4
-    return Profile::DirectML;                                  // pre-gfx11 (gfx9/gfx10), incl. LLM
+    return Profile::DirectML;                                  // pre-gfx11 (gfx9/gfx10)
 }
 
 }  // namespace gpu_ep
