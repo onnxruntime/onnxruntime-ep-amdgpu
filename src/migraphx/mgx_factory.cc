@@ -244,7 +244,7 @@ try {
 }
 
 bool ProviderFactory::IsStreamAware() const {
-    if (cpu_control_flow_) {
+    if (cpu_control_flow_session_count_.load(std::memory_order_relaxed) != 0) {
         return false;
     }
     const auto cc{platform::GetEnvironmentVar(env_var::kCpuControlFlow)};

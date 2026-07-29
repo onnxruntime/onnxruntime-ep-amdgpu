@@ -549,10 +549,6 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kCpuControlFlow, cpu_control_flow_enable_);
     PARSE_ENV_VAR(env_var::kModelArch, model_arch_);
 
-    if (cpu_control_flow_enable_) {
-        factory_.EnableCpuControlFlow();
-    }
-
     // Per-architecture ops to force onto AMDMLSS.
     // Add a row here to enable specific ops on additional architectures.
     struct arch_mlss_ops {
@@ -649,6 +645,12 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
         }
 
     /* TODO: print configured options for the session */
+
+    // Register only after construction succeeds so the factory count is balanced
+    // by the destructor.
+    if (cpu_control_flow_enable_) {
+        factory_.EnableCpuControlFlow();
+    }
 }
 
 ExecutionProvider::~ExecutionProvider() {
@@ -700,6 +702,10 @@ ExecutionProvider::~ExecutionProvider() {
                 buf.data = nullptr;
             }
         }
+    }
+
+    if (cpu_control_flow_enable_) {
+        factory_.DisableCpuControlFlow();
     }
 }
 
