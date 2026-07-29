@@ -879,12 +879,8 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     const auto has_input_shape{get_input_output_names(sorted_graph, input_names, output_names)};
     fs::path model_path{graph.GetModelPath()};
 
-    // When dumping an EPContext model, the referenced/embedded MXR file must actually be
-    // written to disk. If the user hasn't set `cache_dir`, fall back to the directory of the
-    // EPContext output model (`ep.context_file_path`) or, failing that, the original model's
-    // directory - mirroring the resolution order used when re-loading an EPContext model
-    // (see CreateNodeComputeInfoFromCache) and the convention used by other EPs (the cache
-    // file lives next to the dumped context model).
+    // If context_enable is set but cache_dir isn't, default to context_file_path's or the
+    // model's directory so the EPContext node references an MXR file that actually gets written.
     fs::path effective_cache_dir{cache_dir_};
     if (context_enable_ && effective_cache_dir.empty()) {
         if (!context_file_path_.empty()) {
@@ -925,8 +921,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
             compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_);
-            // The EPContext node (below) references this exact file, so it must be written
-            // even if the user disabled the reuse-on-recompile cache via `disable_caching`.
+            // context_enable needs this file on disk even if caching is otherwise disabled.
             if (!disable_compiled_model_caching_ || context_enable_) {
                 save_compiled_program(program, mxr_path);
             }
@@ -938,7 +933,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     }
 
     if (context_enable_) {
-        // Guaranteed non-empty: the RETURN_IF above rejects context_enable_ && !has_input_shape.
+        // input_shapes_hash_hex is non-empty here: the RETURN_IF above requires has_input_shape.
         const fs::path ep_context_mxr_path{mxr_prefix + input_shapes_hash_hex + ".mxr"};
 
         EpContextNodeHelper ep_context_helper{*this, sorted_graph, fused_node};
