@@ -26,33 +26,48 @@ DataTransfer::DataTransfer(const ProviderFactory& factory)
     };
 }
 
+OrtDataTransferImpl* DataTransfer::GetBackendDataTransfer() const noexcept
+{
+    const auto backend_factory{factory_.GetBackendFactory()};
+    if (backend_factory == nullptr) {
+        return nullptr;
+    }
+    if (backend_factory != backend_factory_) {
+        // Backend changed (e.g. profile switch) — drop the stale transfer and
+        // re-create it from the newly selected backend factory.
+        if (backend_data_transfer_ != nullptr && backend_data_transfer_->Release != nullptr) {
+            backend_data_transfer_->Release(backend_data_transfer_);
+        }
+        backend_data_transfer_ = nullptr;
+        backend_factory_ = nullptr;
+        if (backend_factory->CreateDataTransfer(backend_factory, &backend_data_transfer_) != nullptr) {
+            backend_data_transfer_ = nullptr;
+            return nullptr;
+        }
+        backend_factory_ = backend_factory;
+    }
+    return backend_data_transfer_;
+}
+
 bool DataTransfer::CanCopy(const OrtMemoryDevice* src_memory_device,
     const OrtMemoryDevice* dst_memory_device) const noexcept
 {
-    if (backend_data_transfer_ == nullptr) {
-        const auto backend_factory{factory_.GetBackendFactory()};
-        if (backend_factory == nullptr) {
-            return false;
-        }
-        if (backend_factory->CreateDataTransfer(backend_factory, &backend_data_transfer_) != nullptr) {
-            return false;
-        }
+    const auto backend_data_transfer{GetBackendDataTransfer()};
+    if (backend_data_transfer == nullptr) {
+        return false;
     }
-    return backend_data_transfer_->CanCopy(backend_data_transfer_,
+    return backend_data_transfer->CanCopy(backend_data_transfer,
         src_memory_device, dst_memory_device);
 }
 
 Ort::Status DataTransfer::CopyTensors(const OrtValue** src_tensors,
     OrtValue** dst_tensors, OrtSyncStream** streams, size_t num_tensors) const noexcept
 {
-    if (backend_data_transfer_ == nullptr) {
-        const auto backend_factory{factory_.GetBackendFactory()};
-        if (backend_factory == nullptr) {
-            return MAKE_STATUS(ORT_EP_FAIL, "invalid backend factory");
-        }
-        RETURN_IF_ERROR(backend_factory->CreateDataTransfer(backend_factory, &backend_data_transfer_));
+    const auto backend_data_transfer{GetBackendDataTransfer()};
+    if (backend_data_transfer == nullptr) {
+        return MAKE_STATUS(ORT_EP_FAIL, "invalid backend factory");
     }
-    RETURN_IF_ERROR(backend_data_transfer_->CopyTensors(backend_data_transfer_,
+    RETURN_IF_ERROR(backend_data_transfer->CopyTensors(backend_data_transfer,
         src_tensors, dst_tensors, streams, num_tensors));
     return STATUS_OK;
 }
