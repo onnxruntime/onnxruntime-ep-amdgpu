@@ -28,6 +28,7 @@ struct ProviderInfo {
     std::optional<std::string> mlss_use_specific_ops{};
     std::optional<std::string> model_arch{};
     std::optional<std::string> model_fw{};  // caller framework (e.g. "webnn"); "webnn" -> DirectML
+    std::optional<std::string> hip_graph_enable{};
     // Static seq-padding: recognized here only so the umbrella can relay them to the
     // migraphx backend (which implements the pad/slice). Stored as strings verbatim.
     std::optional<std::string> static_pad_seq{};
