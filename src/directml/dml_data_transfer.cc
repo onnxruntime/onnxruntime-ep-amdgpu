@@ -5,6 +5,8 @@
 
 #include "dml_ep.h"
 #include "dml_execution_provider.h"
+#include "dml_bucketized_buffer_allocator.h"
+#include "plugin_dml_AllocationInfo.h"
 
 namespace dml_ep {
 
@@ -23,6 +25,57 @@ void DMLDataTransfer::AttachExecutionProvider(std::shared_ptr<PluginDmlExecution
 void DMLDataTransfer::AttachFactoryEpRef(ExecutionProviderPlugin** ep_raw_ref)
 {
     m_ep_raw_ref = ep_raw_ref;
+}
+
+void DMLDataTransfer::RegisterProvider(const std::shared_ptr<PluginDmlExecutionProviderImpl>& ep)
+{
+    if (!ep) return;
+    std::lock_guard<std::mutex> lock(m_providersMutex);
+    for (const auto& p : m_providers) {
+        if (p.get() == ep.get()) return;  // already registered
+    }
+    m_providers.push_back(ep);
+}
+
+void DMLDataTransfer::UnregisterProvider(const PluginDmlExecutionProviderImpl* ep)
+{
+    if (!ep) return;
+    std::lock_guard<std::mutex> lock(m_providersMutex);
+    for (auto it = m_providers.begin(); it != m_providers.end(); ++it) {
+        if (it->get() == ep) { m_providers.erase(it); return; }
+    }
+}
+
+// Resolve the EP that owns the first GPU tensor by decoding its allocation handle to the owning
+// bucketized allocator, then matching that allocator to a registered EP. A single CopyTensors call
+// operates on tensors from one session, so the first GPU tensor determines the owner. Returns the
+// attached provider when no GPU tensor is present or the owner can't be matched.
+std::shared_ptr<PluginDmlExecutionProviderImpl> DMLDataTransfer::ResolveOwningProvider(
+    const OrtValue* const* src_tensors, OrtValue* const* dst_tensors, size_t num_tensors)
+{
+    auto ownerOf = [this](const OrtValue* value) -> DmlBucketizedBufferAllocator* {
+        if (!value) return nullptr;
+        const OrtMemoryDevice* dev = ep_api.Value_GetMemoryDevice(value);
+        if (!dev || ep_api.MemoryDevice_GetDeviceType(dev) != OrtMemoryInfoDeviceType_GPU) return nullptr;
+        // For a GPU tensor, the data pointer IS the PluginDmlAllocationInfo* handle (DecodeDataHandle
+        // only static_casts it). Its GetOwner() is the allocator that made it.
+        void* data = nullptr;
+        if (ort_api.GetTensorMutableData(const_cast<OrtValue*>(value), &data) != nullptr || !data) return nullptr;
+        return static_cast<PluginDmlAllocationInfo*>(data)->GetOwner();
+    };
+
+    DmlBucketizedBufferAllocator* owner = nullptr;
+    for (size_t i = 0; i < num_tensors && !owner; ++i) {
+        owner = ownerOf(src_tensors ? src_tensors[i] : nullptr);
+        if (!owner) owner = ownerOf(dst_tensors ? dst_tensors[i] : nullptr);
+    }
+    if (!owner) return m_executionProvider;
+
+    std::lock_guard<std::mutex> lock(m_providersMutex);
+    for (const auto& p : m_providers) {
+        if (p && p->GetBucketizedAllocator() == owner) return p;
+    }
+    return m_executionProvider;  // fall back if not found (shouldn't happen for a live session)
 }
 
 bool ORT_API_CALL DMLDataTransfer::CanCopyImpl(const OrtDataTransferImpl* this_ptr,
@@ -61,11 +114,18 @@ OrtStatus* ORT_API_CALL DMLDataTransfer::CopyTensorsImpl(OrtDataTransferImpl* th
         impl.m_executionProvider = (*impl.m_ep_raw_ref)->GetInternalExecutionProvider();
     }
 
-    if (!impl.m_executionProvider) {
+    // Route the copy to the EP that owns the tensors, not a single cached provider. A shared
+    // DMLDataTransfer services multiple sessions, each with its own ExecutionContext/queue/fence;
+    // a copy must run on the owning session's context so its readback waits on the fence that
+    // produced the data.
+    std::shared_ptr<PluginDmlExecutionProviderImpl> provider =
+        impl.ResolveOwningProvider(src_tensors_ptr, dst_tensors_ptr, num_tensors);
+
+    if (!provider) {
         return impl.ort_api.CreateStatus(ORT_FAIL, "DMLDataTransfer: execution provider not attached");
     }
 
-    impl.m_executionProvider->CopyTensorsPlugin(src_tensors_ptr, dst_tensors_ptr, streams_ptr, num_tensors);
+    provider->CopyTensorsPlugin(src_tensors_ptr, dst_tensors_ptr, streams_ptr, num_tensors);
 
     return nullptr;
 }
