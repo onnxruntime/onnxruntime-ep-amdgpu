@@ -892,9 +892,10 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
 
     RETURN_IF(context_enable_ && !has_input_shape,
         "ep.context_enable is set but the graph has dynamic input shapes at compile time; "
-        "MIGraphX EP cannot produce a single MXR cache file up front for this subgraph. "
-        "Provide static input shapes (or fix the shapes before session creation) to use "
-        "EPContext model generation with the MIGraphX EP.");
+        "EPContext currently supports one statically compiled MXR per partition and cannot be "
+        "used with dynamic batching. Provide static input shapes before session creation. To use "
+        "dynamic batching instead, disable ep.context_enable and configure "
+        "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH and, optionally, ORT_MIGRAPHX_COMPILE_BATCHES.");
 
     migraphx::program program;
     migraphx::onnx_options onnx_options;
