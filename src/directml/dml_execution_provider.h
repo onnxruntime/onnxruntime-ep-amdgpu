@@ -53,7 +53,10 @@ namespace dml_ep {
             // the same holder; the first to build the allocator publishes it here, later EPs adopt it
             // -> one allocation map across sessions (fixes the pos_ids_reformat/Reshape MISS). Nullptr
             // -> fall back to a per-EP allocator (legacy behavior).
-            std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder = nullptr);
+            std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder = nullptr,
+            // Opt-in for host-accessible (CUSTOM/L0) decode inputs (ep.directml.enable_host_accessible).
+            // When false (default) the CUSTOM/L0 allocator is never built.
+            bool enableHostAccessible = false);
 
         void ReleaseCompletedReferences();
 
