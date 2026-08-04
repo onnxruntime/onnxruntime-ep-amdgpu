@@ -295,14 +295,43 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
     factory->ort_api.DisableMemPattern(const_cast<OrtSessionOptions*>(session_options));
     factory->ort_api.SetSessionExecutionMode(const_cast<OrtSessionOptions*>(session_options), ExecutionMode::ORT_SEQUENTIAL);
 
+    // Host-accessible (CUSTOM/L0) decode inputs are OPT-IN, requested by the caller (e.g. OGA) via the
+    // "ep.directml.enable_host_accessible" session config entry. The umbrella forwards ep.directml.*
+    // entries verbatim, so it arrives here in session_options. Default off: unless explicitly enabled,
+    // the DML backend does not build the CUSTOM/L0 allocator (see dml_execution_provider.cc for why —
+    // it can OOM at session init on some board/ReBAR configs). Value "1"/"true" enables it.
+    // Read via GetSessionOptionsConfigEntries (bulk), mirroring the umbrella/migraphx backends.
+    bool enable_host_accessible = false;
+    {
+        OrtKeyValuePairs* config_entries = nullptr;
+        if (factory->ort_api.GetSessionOptionsConfigEntries(session_options, &config_entries) == nullptr
+                && config_entries != nullptr) {
+            const Ort::KeyValuePairs kv{config_entries};
+            for (const auto& [key, value] : kv.GetKeyValuePairs()) {
+                if (key == "ep.directml.enable_host_accessible") {
+                    enable_host_accessible = (value == "1" || value == "true");
+                    break;
+                }
+            }
+        }
+    }
+
     *ep = nullptr;
     if (num_devices > 1) {
         return factory->ort_api.CreateStatus(ORT_INVALID_ARGUMENT,
             "DirectML EP supports selection for a single or none devices");
     }
 
-    // Create DML device and execution context for the selected adapter
-    Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device = factory->CreateD3d12Device();
+    // Create DML device and execution context for the selected adapter.
+    // Share ONE ID3D12Device across all EP instances (factory->d3d12_device), created once and reused.
+    // D3D12 resources are device-local, so the factory-scoped host-accessible allocator (built below on
+    // this device) is only valid for buffers bound in an EP that uses the SAME device -> the device
+    // MUST be shared, not freshly created per EP. Command queue / DML device / ExecutionContext stay
+    // per-EP (they are cheap and the context lifetime is per-session).
+    if (!factory->d3d12_device) {
+        factory->d3d12_device = factory->CreateD3d12Device();
+    }
+    Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device = factory->d3d12_device;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> cmd_queue = factory->CreateCommandQueue(d3d12_device);
     Microsoft::WRL::ComPtr<IDMLDevice> dml_device = factory->CreateDMLDevice(d3d12_device);
 
@@ -318,7 +347,9 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
         factory->ep_name_,
         d3d12_device.Get(),
         dml_device.Get(),
-        context);
+        context,
+        &factory->host_accessible_allocator_,  // shared across EP instances (fixes 2-session MISS)
+        enable_host_accessible);               // opt-in from ep.directml.enable_host_accessible
 
     // keep a non-owning raw pointer to the EP for use in the data transfer implementation
     factory->m_ep_raw = factory->m_ep.get();
@@ -353,6 +384,57 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateAllocatorImpl(OrtEpFactory* this_
                                                               const OrtKeyValuePairs* allocator_options,
                                                               OrtAllocator** allocator) noexcept {
     auto& factory = *static_cast<ProviderFactory*>(this_ptr);
+
+    // HOST_ACCESSIBLE (decode inputs): host-accessible on DML is OPT-IN via ep.directml.enable_host_accessible
+    // (see dml_execution_provider.cc). Two outcomes:
+    //   * Flag ON  -> the real CUSTOM/L0 allocator was built; one of the lookups below is non-null and we
+    //                 return it (OGA binds decode inputs to a genuine D3D12-backed resource).
+    //   * Flag OFF -> m_hostAccessibleSupported stayed false, no allocator was built, both lookups return
+    //                 null, and we serve a plain CPU allocator + RETURN. This must NOT fall through to the
+    //                 IsGpuAllocator branch below: the pinned memory_info is GPU-typed, so falling through
+    //                 would hand back a VRAM allocator for what the caller believes is CPU memory (its own
+    //                 latent crash). The CPU allocator is harmless here because on the flag-off path
+    //                 nothing binds these buffers as a D3D12 resource (raw-ORT eagerly CREATES the
+    //                 allocator at init but never allocates through it or binds it; OGA, which WOULD bind,
+    //                 only reaches this path when it hasn't set the flag, in which case its own
+    //                 null-allocator fallback keeps decode inputs off host-accessible entirely).
+    // The EP is created before ORT drives allocation (CreateEp precedes CreateAllocator).
+    if (factory.ort_api.MemoryInfoGetDeviceMemType(memory_info) == OrtDeviceMemoryType_HOST_ACCESSIBLE) {
+        if (factory.host_accessible_allocator_) {
+            *allocator = factory.host_accessible_allocator_.get();
+            return nullptr;
+        }
+        if (factory.m_ep_raw != nullptr) {
+            if (auto internal = factory.m_ep_raw->GetInternalExecutionProvider()) {
+                if (auto host_alloc = internal->GetHostAccessibleAllocator()) {
+                    *allocator = host_alloc.get();
+                    return nullptr;
+                }
+            }
+        }
+        // Flag off / no host-accessible allocator built -> serve a plain CPU allocator.
+        *allocator = std::make_unique<CpuAllocator>(memory_info).release();
+        return nullptr;
+    }
+
+    // DEFAULT (GPU/VRAM) memtype: route to the REAL per-session GPU allocator
+    // (DmlBucketizedBufferAllocator via CreatePreferredAllocators()[0]) instead of the CpuAllocator
+    // stub below. The stub returns plain malloc with no D3D12 resource, so when a GPU-resident tensor
+    // pointer (e.g. a GroupQueryAttention output) reaches DecodeResource->DecodeDataHandle it is
+    // blind-cast to a PluginDmlAllocationInfo* and AddRef'd through a garbage vtable -> 0xC0000005.
+    // The real GPU allocator's Alloc returns a genuine PluginDmlAllocationInfo* that DecodeDataHandle
+    // can decode. m_ep_raw is valid here (CreateEp precedes CreateAllocator, same as HOST_ACCESSIBLE
+    // above). Single shared ID3D12Device (factory rejects num_devices>1), so a factory-served GPU
+    // buffer is valid for the session's queue.
+    if (factory.IsGpuAllocator(memory_info) && factory.m_ep_raw != nullptr) {
+        if (auto internal = factory.m_ep_raw->GetInternalExecutionProvider()) {
+            auto allocators = internal->CreatePreferredAllocators();
+            if (!allocators.empty() && allocators[0] != nullptr) {
+                *allocator = allocators[0];  // GPU allocator (DmlBucketizedBufferAllocator)
+                return nullptr;
+            }
+        }
+    }
 
     // Return a passthrough allocator that wraps the memory_info. The real per-session
     // GPU allocator (DmlBucketizedBufferAllocator) is created by the EP-level
@@ -555,9 +637,15 @@ Microsoft::WRL::ComPtr<IDMLDevice> ProviderFactory::CreateDMLDevice(const Micros
         flags |= DML_CREATE_DEVICE_FLAG_DEBUG;
     }
 #endif
-
-    THROW_IF_FAILED(DMLCreateDevice1(d3d12_device.Get(), flags, DML_FEATURE_LEVEL_6_4,
-                                     IID_PPV_ARGS(dml_device.ReleaseAndGetAddressOf())));
+    HRESULT dml_hr = DMLCreateDevice1(d3d12_device.Get(), flags, DML_FEATURE_LEVEL_6_4,
+                                      IID_PPV_ARGS(dml_device.ReleaseAndGetAddressOf()));
+    if (FAILED(dml_hr) && (flags & DML_CREATE_DEVICE_FLAG_DEBUG)) {
+        // DirectML.Debug.dll may be absent -> retry without the debug flag rather than hard-fail.
+        flags &= ~DML_CREATE_DEVICE_FLAG_DEBUG;
+        dml_hr = DMLCreateDevice1(d3d12_device.Get(), flags, DML_FEATURE_LEVEL_6_4,
+                                  IID_PPV_ARGS(dml_device.ReleaseAndGetAddressOf()));
+    }
+    THROW_IF_FAILED(dml_hr);
 
     return dml_device;
 }

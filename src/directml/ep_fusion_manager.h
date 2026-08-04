@@ -140,7 +140,8 @@ public:
 
     // Build once per session and store on ExecutionProviderPlugin — the rules
     // it owns are referenced by raw pointer in FusionMatch and must outlive it.
-    static AnchorIndex BuildAnchorIndex();
+    // isMcdmDevice gates activation options for MCDM-restricted base ops.
+    static AnchorIndex BuildAnchorIndex(bool isMcdmDevice = false);
 
     // ApplyFusions detects patterns using the pre-built index and stores one
     // FusionMatch per fused group in fusion_map.

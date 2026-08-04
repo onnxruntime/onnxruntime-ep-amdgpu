@@ -9,6 +9,7 @@
 #include "dml_readback_heap.h"
 #include "dml_pooled_upload_heap.h"
 #include "dml_bucketized_buffer_allocator.h"
+#include "dml_host_accessible_allocator.h"
 #include "dml_common.h"
 #include "DmlExecutionProvider/inc/IWinmlExecutionProvider.h"
 #include "DmlExecutionProvider/IExecutionProvider.h"
@@ -47,7 +48,15 @@ namespace dml_ep {
             bool enableMetacommands,
             bool enableGraphCapture,
             bool enableCpuSyncSpinning,
-            bool disableMemoryArena);
+            bool disableMemoryArena,
+            // Factory-owned holder for the SHARED host-accessible allocator. All EP instances receive
+            // the same holder; the first to build the allocator publishes it here, later EPs adopt it
+            // -> one allocation map across sessions (fixes the pos_ids_reformat/Reshape MISS). Nullptr
+            // -> fall back to a per-EP allocator (legacy behavior).
+            std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder = nullptr,
+            // Opt-in for host-accessible (CUSTOM/L0) decode inputs (ep.directml.enable_host_accessible).
+            // When false (default) the CUSTOM/L0 allocator is never built.
+            bool enableHostAccessible = false);
 
         void ReleaseCompletedReferences();
 
@@ -169,6 +178,8 @@ namespace dml_ep {
         bool CpuSyncSpinningEnabled() const noexcept;
         std::shared_ptr<OrtAllocator> GetGpuAllocator();
         std::shared_ptr<OrtAllocator> GetCpuInputAllocator();
+        // Host-accessible (CPU-writable, CUSTOM/L0 system-memory) allocator for decode inputs.
+        std::shared_ptr<OrtAllocator> GetHostAccessibleAllocator();
 
         std::shared_ptr<const InternalRegistrationInfoMap>
         GetInternalRegistrationInfoMap() const;
@@ -196,6 +207,8 @@ namespace dml_ep {
         void CpuToGpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst);
         void GpuToGpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst);
         void GpuToCpuCopy(IMLOperatorTensor* src, IMLOperatorTensor* dst);
+        // Resolve the ID3D12Resource for a tensor on either the DEFAULT or host-accessible allocator.
+        ID3D12Resource* ResolveTensorResource(IMLOperatorTensor* tensor);
         bool IsGpuTensor(const onnxruntime::Tensor& tensor);
 
         Microsoft::WRL::ComPtr<ID3D12Device> m_d3d12Device;
@@ -220,6 +233,12 @@ namespace dml_ep {
         std::unique_ptr<PluginDmlReadbackHeap> m_readbackHeap;
         std::shared_ptr<DmlBucketizedBufferAllocator> m_allocator;
         std::shared_ptr<CpuAllocator> m_cpuInputAllocator;
+        // Host-accessible (CPU-writable) allocator for decode inputs; null when unsupported.
+        std::shared_ptr<DmlHostAccessibleAllocator> m_hostAccessibleAllocator;
+        // Non-owning pointer to the factory-owned shared-allocator holder (see ctor). When set, the
+        // host-accessible allocator is shared across all EP instances via this holder.
+        std::shared_ptr<DmlHostAccessibleAllocator>* m_factoryHostAllocHolder = nullptr;
+        bool m_hostAccessibleSupported = false;
         std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;
         std::shared_ptr<const InternalRegistrationInfoMap> m_internalRegInfoMap;
         mutable uint64_t m_partitionKernelPrefixVal = 0;
@@ -228,6 +247,7 @@ namespace dml_ep {
 
         static constexpr std::chrono::milliseconds m_batchFlushInterval = std::chrono::milliseconds(10);
         OrtMemoryInfo* m_gpuMemInfo{};
+        OrtMemoryInfo* m_hostAccessibleMemInfo{};
     };
 
 }  // namespace dml_ep

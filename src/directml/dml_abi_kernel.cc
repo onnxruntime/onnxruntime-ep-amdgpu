@@ -376,6 +376,15 @@ AbiSafeTensor::AbiSafeTensor(
         OrtMemType mem_type = OrtMemTypeDefault;
         ort_api_->MemoryInfoGetMemType(mem_info, &mem_type);
         cached_is_cpu_ = (mem_type == OrtMemTypeCPUInput || mem_type == OrtMemTypeCPUOutput);
+        // A HOST_ACCESSIBLE (CUSTOM/L0 "pinned") tensor is GPU-resident from DML's perspective — it is
+        // backed by a real ID3D12Resource and DML operators (e.g. Reshape) consume it as a GPU data
+        // interface. Its OrtMemoryInfo name ("pinned") isn't "Cpu" and its OrtMemType isn't CPUInput/
+        // Output, so it would fall through as cached_is_cpu_=false already — EXCEPT when ort_memtype
+        // resolves oddly (seen: ort_memtype=-1); force GPU classification by the device-memory-type so
+        // GetDataInterface() succeeds instead of throwing (MLOperatorAuthorHelper.h:537 -> E_INVALIDARG).
+        if (ort_api_->MemoryInfoGetDeviceMemType(mem_info) == OrtDeviceMemoryType_HOST_ACCESSIBLE) {
+            cached_is_cpu_ = false;
+        }
     }
 
     // Cache data pointer (needed for both CPU GetData and GPU ABI interface resolution).

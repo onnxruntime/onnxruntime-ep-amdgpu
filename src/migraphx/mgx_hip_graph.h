@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <hip/hip_runtime_api.h>
@@ -23,6 +24,21 @@ struct DynamicBatchContext {
     bool active{false};
     std::size_t requested_batch{0};
     std::size_t target_batch{0};
+};
+
+// Static sequence-length padding context for a single Compute call.  When active,
+// named inputs are padded up on their token axis to target_len and named outputs
+// are sliced back down to real_len -- the seq-axis analogue of DynamicBatchContext.
+// This makes a varying prefill length compile the program only once.  Only prefill
+// is padded: a call is padded iff the named input's token-axis extent is in
+// (1, target_len); decode (extent == 1) is never padded.
+struct StaticSeqContext {
+    bool active{false};
+    std::size_t real_len{0};    // actual prefill token count this call
+    std::size_t target_len{0};  // padded token-axis length (== static_pad_seq_len)
+    const Map<int>* input_axes{nullptr};   // input param name -> token axis
+    // Outputs matched by ORT output index (program params are "#output_N", not ONNX names).
+    const std::unordered_map<std::size_t, int>* output_axes_by_index{nullptr};
 };
 
 // Parse the output index from a MIGraphX output parameter name ("#output_0").
@@ -59,17 +75,21 @@ void ZeroScratchFor(ComputeState& cs, const std::string& shape_hash, hipStream_t
 // Allocate staging buffers (one per program input/output parameter).  Batched
 // buffers (batch on axis 0) are sized to max_dynamic_batch so a single set of
 // buffers serves every compiled bucket; all others are sized exactly.  No-op if
-// already allocated.
+// already allocated.  When static seq-padding is active the buffers are already
+// sized to the padded (target_len) shape because that is the compiled program's
+// shape, so no extra sizing is needed here.
 void AllocateStaging(ComputeState& cs,
     const migraphx::program_parameter_shapes& param_shapes, hipStream_t stream,
     const DynamicBatchContext& dyn);
 
 // Copy ORT input tensors into their staging buffers, padding batched inputs up to
-// the target bucket batch when dynamic batching is active.
+// the target bucket batch when dynamic batching is active, and padding named
+// inputs up to target_len on their token axis when static seq-padding is active.
 void CopyInputsToStaging(ComputeState& cs,
     const migraphx::program_parameter_shapes& param_shapes,
     const Ort::KernelContext& ctx, hipStream_t stream,
-    const DynamicBatchContext& dyn);
+    const DynamicBatchContext& dyn,
+    const StaticSeqContext& seq);
 
 // StagingBindResult is defined in mgx_ep.h (cached per shape hash on ComputeState).
 
@@ -80,10 +100,12 @@ StagingBindResult BindStagingParams(ComputeState& cs,
     const std::string& shape_hash, hipStream_t stream);
 
 // Copy staging output buffers back into the ORT output tensors, slicing batched
-// outputs down to the requested batch when dynamic batching is active.
+// outputs down to the requested batch when dynamic batching is active, and slicing
+// named outputs down to real_len on their token axis when static seq-padding is active.
 void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
     const Ort::KernelContext& ctx, hipStream_t stream,
-    const DynamicBatchContext& dyn);
+    const DynamicBatchContext& dyn,
+    const StaticSeqContext& seq);
 
 // Free all staging buffers and reset the allocation flag (used when the program
 // is recompiled for a new shape so buffers are re-sized on next use).

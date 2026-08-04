@@ -216,6 +216,7 @@ add_library(directml-ep MODULE
     dml_execution_context.cc
     dml_execution_provider.cc
     dml_factory.cc
+    dml_host_accessible_allocator.cc
     dml_info.cc
     dml_plugin_command_recorder.cc
     dml_plugin_MLOperatorAuthorImpl.cc
@@ -231,6 +232,7 @@ add_library(directml-ep MODULE
     quick_gelu_ep_fusion.cc
     bias_gelu_ep_fusion.cc
     fused_matmul_ep_fusion.cc
+    op_activation_ep_fusion.cc
     dml_op_translators.cc
     full_graph_fusion.cc
 

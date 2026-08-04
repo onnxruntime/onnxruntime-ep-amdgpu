@@ -13,6 +13,28 @@
 
 namespace mgx_ep {
 
+namespace {
+
+// Rewrites any legacy "migraphx_*"-prefixed option names (see
+// provider_option::kLegacyOptionAliases) to this plugin EP's canonical
+// (unprefixed) names, so scripts/tools written against the classic built-in
+// MIGraphXExecutionProvider keep working unmodified against this plugin EP.
+// If both an alias and its canonical name are present, the canonical name's
+// value wins.
+ProviderOptions ApplyLegacyOptionAliases(const ProviderOptions& options) {
+    ProviderOptions normalized = options;
+    for (const auto& [alias, canonical_name] : provider_option::kLegacyOptionAliases) {
+        const auto alias_it = normalized.find(std::string{alias});
+        if (alias_it != normalized.end()) {
+            normalized.emplace(std::string{canonical_name}, alias_it->second);
+            normalized.erase(alias_it);
+        }
+    }
+    return normalized;
+}
+
+}  // namespace
+
 ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
     THROW_IF_ERROR(
         ProviderOptionsParser{}
@@ -37,6 +59,18 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
                 provider_option::kCompileBatches,
                 [this](const std::string_view value) -> Ort::Status {
                     compile_batches = value;
+                    return STATUS_OK;
+                })
+            .AddValueParser(
+                provider_option::kStaticPadInputs,
+                [this](const std::string_view value) -> Ort::Status {
+                    static_pad_inputs = value;
+                    return STATUS_OK;
+                })
+            .AddValueParser(
+                provider_option::kStaticPadOutputs,
+                [this](const std::string_view value) -> Ort::Status {
+                    static_pad_outputs = value;
                     return STATUS_OK;
                 })
             .AddValueParser(
@@ -73,10 +107,12 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kForceRecompile, force_recompile)
             .AddAssignmentToReference(provider_option::kHipGraphEnable, hip_graph_enable)
             .AddAssignmentToReference(provider_option::kMaxDynamicBatch, max_dynamic_batch)
+            .AddAssignmentToReference(provider_option::kStaticPadSeq, static_pad_seq)
+            .AddAssignmentToReference(provider_option::kStaticPadSeqLen, static_pad_seq_len)
             .AddAssignmentToReference(provider_option::kCoalesceIO, coalesce_io)
             .AddAssignmentToReference(provider_option::kMlssUseSpecificOps, mlss_use_specific_ops)
             .AddAssignmentToReference(provider_option::kModelArch, model_arch)
-            .Parse(provider_options));
+            .Parse(ApplyLegacyOptionAliases(provider_options)));
 }
 
 }  // namespace mgx_ep
