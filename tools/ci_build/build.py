@@ -724,7 +724,7 @@ def main():
         'use_migraphx': 'migraphx'
     }
     if _is_windows():
-        _use_flag_to_ep_dir['use_dml'] = 'directml'
+        _use_flag_to_ep_dir['use_dml'] = 'directx'
 
     wheel_ep_dirs: list[str] = []
     if args.build_wheel:

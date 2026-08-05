@@ -31,7 +31,7 @@ target_include_directories(amdgpu-ep PRIVATE
 # The directml-ep target only exists when USE_DML is on (Windows)
 if(USE_DML)
     target_include_directories(amdgpu-ep PRIVATE
-            $<TARGET_PROPERTY:directml-ep,INTERFACE_INCLUDE_DIRECTORIES>)
+            $<TARGET_PROPERTY:directx-ep,INTERFACE_INCLUDE_DIRECTORIES>)
 endif()
 
 if(WIN32)

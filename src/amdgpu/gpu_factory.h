@@ -137,7 +137,6 @@ private:
     OrtMemoryInfo* gpu_memory_info_{};
     OrtMemoryInfo* pinned_memory_info_{};
 
-    std::unique_ptr<DataTransfer> data_transfer_{};
     // One allocator per device memory type. ORT registers a separate shared
     // allocator per OrtMemoryInfo (default vs host-accessible) and matches them
     // by the device reported from each allocator's Info(); a single shared

@@ -24,6 +24,7 @@ constexpr auto kTelemetryEnable = "telemetry_enable"sv;
 constexpr auto kTelemetryFile = "telemetry_file"sv;
 constexpr auto kTelemetryDir = "telemetry_dir"sv;
 constexpr auto kModelArch = "model_arch"sv;
+constexpr auto kHipGraphEnable = "hip_graph_enable"sv;
 constexpr auto kModelFw = "model_fw"sv;  // caller framework hint, e.g. "webnn" (routes to DirectML)
 // Static sequence-length padding (forwarded verbatim to the migraphx backend, which
 // implements the pad/slice). The umbrella only needs to recognize + relay these.

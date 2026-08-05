@@ -4,7 +4,7 @@
 #pragma once
 
 // Routing DATA for the AMD GPU umbrella EP, Auto profile — the two tables maintainers edit:
-//   kLlmModelArch     : model_arch families treated as LLMs (shifts the MIGraphX cutoff to gfx11.0)
+//   kLlmModelArch     : model_arch families treated as LLMs (no arch bucket reads this today)
 //   kArchModelBackend : per-(gfx prefix, model_arch) backend overrides (grows large over time)
 // Kept in its own header so the growable tables live in one small, self-contained file. The pure
 // decision logic that consumes them is in gpu_routing_policy.h; the EP-side glue is in gpu_ep.cc.
@@ -42,9 +42,11 @@ constexpr std::uint64_t kNoModelArch = 0;
 // ============================================================================================
 
 // (1) Known LLM model_arch families (hashed). Currently the Windows ML P0 LLM set that is tested and
-//     supported. On gfx11.0+ these route to MIGraphX (below gfx11.5 they flip the default).
-//     "llm" is a generic forward-compat marker: a caller (e.g. a newer OGA whose specific arch this
-//     umbrella build doesn't yet recognize) can send model_arch="llm" to force the generic LLM route.
+//     supported. "llm" is a generic forward-compat marker: a caller (e.g. a newer OGA whose specific
+//     arch this umbrella build doesn't yet recognize) can send model_arch="llm" to name itself an LLM.
+//     NOTE: no arch bucket distinguishes LLM from non-LLM today (gfx11 and newer all go to MIGraphX),
+//     so nothing reads this yet. Kept for the next arch that needs the split. Per-(arch, model)
+//     pinning goes in kArchModelBackend below, which IS live.
 //     TO ADD AN LLM FAMILY: add one `fnv1a("normalized_name")` entry (and bump the array size).
 constexpr std::array<std::uint64_t, 5> kLlmModelArch{{
     fnv1a("llama"), fnv1a("qwen2"), fnv1a("phi3"), fnv1a("mistral"),

@@ -37,5 +37,5 @@ onnxruntime_ep_directml = ["*.dll", "*.pdb"]
 module_name = "onnxruntime_ep_directml"
 
 [[tool.ep.components]]
-library = "directml-ep"
+library = "directx-ep"
 ep_name = "DmlExecutionProvider"

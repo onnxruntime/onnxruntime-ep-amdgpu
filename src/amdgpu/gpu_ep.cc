@@ -252,6 +252,12 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 get_name(mgx_ep::provider_option::kModelArch).c_str(),
                 info.model_arch.value().c_str()));
         }
+        if (info.hip_graph_enable.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kHipGraphEnable).c_str(),
+                info.hip_graph_enable.value().c_str()));
+        }
         // Relay static seq-padding options to the backend, which implements pad/slice.
         if (info.static_pad_seq.has_value()) {
             THROW_IF_ERROR(ort_api.AddSessionConfigEntry(

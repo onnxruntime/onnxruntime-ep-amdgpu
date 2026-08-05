@@ -44,4 +44,4 @@ ep_name = "AMDGPUExecutionProvider"
 library = "migraphx-backend"
 
 [[tool.ep.components]]
-library = "directml-backend"
+library = "directx-backend"

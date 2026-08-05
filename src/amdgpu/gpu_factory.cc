@@ -46,7 +46,7 @@ namespace gpu_ep {
 
 namespace {
 #ifdef USE_DML
-constexpr auto directmlBackend{LIBRARY_PREFIX ORT_TSTR("directml-backend") LIBRARY_SUFFIX};
+constexpr auto directmlBackend{LIBRARY_PREFIX ORT_TSTR("directx-backend") LIBRARY_SUFFIX};
 #endif
 constexpr auto migraphxBackend{LIBRARY_PREFIX ORT_TSTR("migraphx-backend") LIBRARY_SUFFIX};
 constexpr auto hipBackend{LIBRARY_PREFIX ORT_TSTR("hip-backend") LIBRARY_SUFFIX};
@@ -176,8 +176,6 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     THROW_IF_ERROR(hip_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
         &hip_ep_factory_, 1, &factories_created));
 #endif
-
-    data_transfer_ = std::make_unique<DataTransfer>(*this);
 }
 
 ProviderFactory::~ProviderFactory() {
@@ -191,7 +189,6 @@ ProviderFactory::~ProviderFactory() {
     // by the time the factory is destroyed since sessions are destroyed first.
     gpu_allocator_.reset();
     pinned_allocator_.reset();
-    data_transfer_.reset();
 
     if (gpu_memory_info_) {
         ort_api.ReleaseMemoryInfo(gpu_memory_info_);
@@ -329,7 +326,11 @@ void ProviderFactory::ReleaseAllocator(OrtAllocator*) const {
 }
 
 Ort::Status ProviderFactory::CreateDataTransfer(OrtDataTransferImpl** data_transfer) {
-    *data_transfer = data_transfer_.get();
+    // Per-session: hand ORT a fresh DataTransfer bound to the backend this session
+    // selected (GetBackendFactory() reflects the CreateEp that just ran; it is null at
+    // library-registration time, yielding an inert instance). ORT owns it and calls
+    // Release (which deletes it) at session teardown.
+    *data_transfer = std::make_unique<DataTransfer>(*this, GetBackendFactory()).release();
     return STATUS_OK;
 }
 
