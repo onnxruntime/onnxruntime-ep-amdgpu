@@ -1413,7 +1413,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
-        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn);
+        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn, seq);
         // Item 3: reuse a cached binding for this shape hash.  Staging buffers and
         // scratch are pointer-stable until FreeStaging, so binding once and replaying
         // avoids re-doing N program_parameters.add() calls, string work, and a
@@ -1427,7 +1427,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         auto& bind{bind_it->second};
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
             bind.params, bind.prog_output_indices, shape_hash, dyn);
-        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn);
+        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn, seq);
         // No per-Compute sync: all work above is enqueued on ORT's compute stream,
         // which ORT flushes at run end (DeviceStreamCollection::CleanUp ->
         // SyncStream::Flush) honoring the run's sync_stream setting.  Cross-stream
