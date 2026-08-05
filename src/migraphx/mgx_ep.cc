@@ -479,7 +479,12 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
     PARSE_ENV_VAR(env_var::kStaticPadSeq, static_pad_seq_);
-    PARSE_ENV_VAR(env_var::kStaticPadSeqLen, static_pad_seq_len_);
+    // Not PARSE_ENV_VAR: we need to know whether the value was given, not just what it is.
+    if (const auto pad_len_env{ParseEnvironmentVariable<std::size_t>(env_var::kStaticPadSeqLen)};
+        pad_len_env.has_value()) {
+        static_pad_seq_len_ = pad_len_env.value();
+        static_pad_seq_len_from_env_ = true;
+    }
     PARSE_ENV_VAR(env_var::kStaticPadInputs, static_pad_inputs_);
     PARSE_ENV_VAR(env_var::kStaticPadOutputs, static_pad_outputs_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
@@ -980,6 +985,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     compute_state.coalesce_io = coalesce_io_enable_;
     compute_state.static_pad_seq = static_pad_seq_;
     compute_state.static_pad_seq_len = static_pad_seq_len_;
+    compute_state.static_pad_seq_len_from_env = static_pad_seq_len_from_env_;
     if (static_pad_seq_) {
         // static-pad and dynamic batching both rewrite shapes; combined, the staging copies
         // collide. Unsupported together.
@@ -1186,9 +1192,30 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // axis extent must be in (1, target).  decode (extent == 1) and already-max
     // prompts are left alone.  Inert when static_pad_seq_len == 0.
     StaticSeqContext seq{};
-    if (compute_state.static_pad_seq && compute_state.static_pad_seq_len > 0) {
-        const auto target{compute_state.static_pad_seq_len};
+    if (compute_state.static_pad_seq) {
+        // Take the target from the attention mask (axis 1; axis 0 is batch, scaled by num_beams).
+        // It carries the length the caller is really generating with, and is the same length it
+        // sized its KV cache to.  The configured value cannot be trusted here: for OGA it is
+        // config.search.max_length, read while the session is created, so a caller that sets
+        // max_length on GeneratorParams sets it too late for us and we would pad to the model's
+        // full context.  An explicit env value still wins; models with no mask keep the
+        // configured length.
+        static const std::string kAttentionMaskInput{"attention_mask"};
+        std::size_t target{compute_state.static_pad_seq_len};
+        if (not compute_state.static_pad_seq_len_from_env) {
+            if (const auto mask_it{input_name_indices.find(kAttentionMaskInput)};
+                mask_it != input_name_indices.end()) {
+                const auto mask_shape{
+                    kernel_context.GetInput(mask_it->second).GetTensorTypeAndShapeInfo().GetShape()};
+                if (mask_shape.size() > 1 && mask_shape[1] > 0) {
+                    target = static_cast<std::size_t>(mask_shape[1]);
+                }
+            }
+        }
         for (const auto& [name, axis] : compute_state.static_pad_input_axes) {
+            if (target == 0) {
+                break;  // nothing usable to pad to -> leave shapes untouched (inert, as before)
+            }
             const auto it{input_name_indices.find(name)};
             if (it == input_name_indices.end()) {
                 continue;

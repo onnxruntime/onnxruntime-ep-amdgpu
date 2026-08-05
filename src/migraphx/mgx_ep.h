@@ -149,7 +149,9 @@ struct ComputeState {
     // down to the real token length afterwards.  Parsed once from the "name:axis"
     // specs into (parameter name -> token axis) maps.
     bool static_pad_seq{};
+    // Fallback target; the pad length normally comes from the attention mask (see Compute).
     std::size_t static_pad_seq_len{};
+    bool static_pad_seq_len_from_env{};  // set explicitly via env -> overrides the mask
     Map<int> static_pad_input_axes{};   // input param name -> token axis (inputs keep real names)
     // Outputs are program params named "#output_N", not their ONNX names, so the
     // slice must match on ORT output INDEX, not name.  Resolved from the user's
@@ -299,6 +301,7 @@ private:
     bool coalesce_io_enable_{};
     bool static_pad_seq_{};
     std::size_t static_pad_seq_len_{};
+    bool static_pad_seq_len_from_env_{};  // set explicitly via env -> overrides the mask
     std::string static_pad_inputs_{};
     std::string static_pad_outputs_{};
 
