@@ -23,31 +23,50 @@ Allocator::Allocator(const ProviderFactory& factory,
 }
 
 Allocator::~Allocator() {
-    if (const auto f{factory_.GetBackendFactory()}; f != nullptr) {
-        f->ReleaseAllocator(f, backend_allocator_);
+    // Release through the factory the allocator was created from, not whatever
+    // backend is current now — a profile switch may have moved GetBackendFactory().
+    if (backend_allocator_ != nullptr && backend_factory_ != nullptr) {
+        backend_factory_->ReleaseAllocator(backend_factory_, backend_allocator_);
     }
+}
+
+OrtAllocator* Allocator::GetBackendAllocator() const noexcept {
+    const auto backend_factory{factory_.GetBackendFactory()};
+    if (backend_factory == nullptr) {
+        return nullptr;
+    }
+    if (backend_factory != backend_factory_) {
+        // Backend changed (e.g. profile switch) — drop the stale allocator and
+        // re-create it from the newly selected backend factory.
+        if (backend_allocator_ != nullptr && backend_factory_ != nullptr) {
+            backend_factory_->ReleaseAllocator(backend_factory_, backend_allocator_);
+        }
+        backend_allocator_ = nullptr;
+        backend_factory_ = nullptr;
+        if (backend_factory->CreateAllocator(backend_factory, memory_info_,
+                allocator_options_, &backend_allocator_) != nullptr) {
+            backend_allocator_ = nullptr;
+            return nullptr;
+        }
+        backend_factory_ = backend_factory;
+    }
+    return backend_allocator_;
 }
 
 void* Allocator::Alloc(size_t size) const noexcept {
-    if (backend_allocator_ == nullptr) {
-        if (const auto f{factory_.GetBackendFactory()}; f != nullptr) {
-            if (f->CreateAllocator(f, memory_info_, allocator_options_, &backend_allocator_) != nullptr) {
-                return nullptr;
-            }
-        }
+    const auto backend_allocator{GetBackendAllocator()};
+    if (backend_allocator == nullptr) {
+        return nullptr;
     }
-    return backend_allocator_->Alloc(backend_allocator_, size);
+    return backend_allocator->Alloc(backend_allocator, size);
 }
 
 void Allocator::Free(void* p) const noexcept {
-    if (backend_allocator_ == nullptr) {
-        if (const auto f{factory_.GetBackendFactory()}; f != nullptr) {
-            if (f->CreateAllocator(f, memory_info_, allocator_options_, &backend_allocator_) != nullptr) {
-                return;
-            }
-        }
+    const auto backend_allocator{GetBackendAllocator()};
+    if (backend_allocator == nullptr) {
+        return;
     }
-    backend_allocator_->Free(backend_allocator_, p);
+    backend_allocator->Free(backend_allocator, p);
 }
 
 const OrtMemoryInfo* Allocator::Info() const noexcept {
