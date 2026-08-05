@@ -11,7 +11,13 @@ struct ProviderFactory;
 
 struct DataTransfer : OrtDataTransferImpl {
     DataTransfer() = delete;
-    explicit DataTransfer(const ProviderFactory& factory);
+    // Per-session: the backend is snapshotted at construction from the factory that
+    // the session's CreateEp just selected, and never re-queried. ORT creates one
+    // DataTransfer per session (CreateDataTransfer -> GetDataTransfer) and owns it,
+    // Releasing (deleting) it at session teardown. backend_factory may be null when
+    // ORT creates a transfer at library-registration time (before any backend is
+    // selected); such an instance is inert.
+    DataTransfer(const ProviderFactory& factory, OrtEpFactory* backend_factory);
 
 private:
     bool CanCopy(const OrtMemoryDevice* src_memory_device,
@@ -20,13 +26,9 @@ private:
     [[nodiscard]] Ort::Status CopyTensors(const OrtValue** src_tensors,
         OrtValue** dst_tensors, OrtSyncStream** streams, size_t num_tensors) const noexcept;
 
-    // Returns the backend's data transfer, re-creating it if the selected backend
-    // changed (e.g. profile switch). Returns nullptr if no backend is available.
-    OrtDataTransferImpl* GetBackendDataTransfer() const noexcept;
-
     const ProviderFactory& factory_;
-    mutable OrtEpFactory* backend_factory_{};
-    mutable OrtDataTransferImpl* backend_data_transfer_{};
+    OrtEpFactory* backend_factory_{};
+    OrtDataTransferImpl* backend_data_transfer_{};
 };
 
 }  // namespace gpu_ep
