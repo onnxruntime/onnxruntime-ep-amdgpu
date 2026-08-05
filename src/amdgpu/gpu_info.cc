@@ -42,6 +42,7 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kMlssUseSpecificOps, mlss_use_specific_ops)
             .AddAssignmentToReference(provider_option::kModelArch, model_arch)
             .AddAssignmentToReference(provider_option::kModelFw, model_fw)
+            .AddAssignmentToReference(provider_option::kHipGraphEnable, hip_graph_enable)
             .AddAssignmentToReference(provider_option::kStaticPadSeq, static_pad_seq)
             .AddAssignmentToReference(provider_option::kStaticPadSeqLen, static_pad_seq_len)
             .AddAssignmentToReference(provider_option::kStaticPadInputs, static_pad_inputs)

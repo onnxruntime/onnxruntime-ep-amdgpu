@@ -21,6 +21,7 @@ constexpr auto kProfile = "profile"sv;
 constexpr auto kCacheDir = "cache_dir"sv;
 constexpr auto kMlssUseSpecificOps = "mlss_use_specific_ops"sv;
 constexpr auto kModelArch = "model_arch"sv;
+constexpr auto kHipGraphEnable = "hip_graph_enable"sv;
 constexpr auto kModelFw = "model_fw"sv;  // caller framework hint, e.g. "webnn" (routes to DirectML)
 // Static sequence-length padding (forwarded verbatim to the migraphx backend, which
 // implements the pad/slice). The umbrella only needs to recognize + relay these.
