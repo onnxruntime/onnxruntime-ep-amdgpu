@@ -45,7 +45,7 @@
 namespace gpu_ep {
 
 namespace {
-constexpr auto directmlBackend{LIBRARY_PREFIX ORT_TSTR("directml-backend") LIBRARY_SUFFIX};
+constexpr auto directmlBackend{LIBRARY_PREFIX ORT_TSTR("directx-backend") LIBRARY_SUFFIX};
 constexpr auto migraphxBackend{LIBRARY_PREFIX ORT_TSTR("migraphx-backend") LIBRARY_SUFFIX};
 constexpr auto hipBackend{LIBRARY_PREFIX ORT_TSTR("hip-backend") LIBRARY_SUFFIX};
 }

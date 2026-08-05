@@ -11,7 +11,7 @@ Each provider is built as a standalone shared library that ONNX Runtime loads at
 | Provider | Target | Directory | Build Flag |
 |----------|--------|-----------|------------|
 | **AMDGPU** | AMD GPUs (generic ROCm) | `src/amdgpu/` | `--use_amdgpu` |
-| **DirectML** | Windows GPU (DirectX 12) | `src/directml/` | `--use_dml` |
+| **DirectML** | Windows GPU (DirectX 12) | `src/directx/` | `--use_dml` |
 | **MIGraphX** | AMD Instinct / Radeon GPUs (ROCm) | `src/migraphx/` | `--use_migraphx` |
 
 ## Prerequisites
