@@ -4,6 +4,7 @@
 #pragma once
 
 #include <string_view>
+#include <utility>
 using namespace std::literals::string_view_literals;  // NOLINT(build/namespaces_literals)
 
 namespace mgx_ep::provider_option {
@@ -36,5 +37,25 @@ constexpr auto kStaticPadSeq = "static_pad_seq"sv;             // "1" = enable
 constexpr auto kStaticPadSeqLen = "static_pad_seq_len"sv;      // target token-axis length
 constexpr auto kStaticPadInputs = "static_pad_inputs"sv;       // "input_ids:1,position_ids:1"
 constexpr auto kStaticPadOutputs = "static_pad_outputs"sv;     // "logits:1"
+
+// Legacy aliases: the classic (built-in) MIGraphXExecutionProvider prefixed
+// its option names with "migraphx_", e.g. "migraphx_fp16_enable" rather than
+// this plugin EP's "fp16_enable" (the "ep.<name>." prefix already added by
+// SessionOptionsAppendExecutionProvider_V2/add_provider_for_devices() makes
+// repeating "migraphx_" in the key itself redundant). These aliases let
+// scripts/tools written against the classic EP's option names keep working
+// unmodified against this plugin EP. Only options with a direct plugin
+// equivalent are aliased; options with no equivalent here (e.g.
+// migraphx_mem_limit, migraphx_arena_extend_strategy, migraphx_external_*,
+// migraphx_model_cache_dir) are intentionally not aliased.
+constexpr std::pair<std::string_view, std::string_view> kLegacyOptionAliases[] = {
+    {"migraphx_fp16_enable", kFp16Enable},
+    {"migraphx_bf16_enable", kBf16Enable},
+    {"migraphx_fp8_enable", kFp8Enable},
+    {"migraphx_int8_enable", kInt8Enable},
+    {"migraphx_int8_calibration_table_name", kInt8CalibTable},
+    {"migraphx_int8_use_native_calibration_table", kInt8UseNativeCalibTable},
+    {"migraphx_exhaustive_tune", kExhaustiveTune},
+};
 
 }  // namespace mgx_ep::provider_option

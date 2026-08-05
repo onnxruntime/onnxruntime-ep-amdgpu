@@ -18,6 +18,7 @@
 
 #include "common/path_string.h"
 #include "common/plugin_ep_utils.h"
+#include "common/murmurhash3.h"
 
 #include "mgx_factory.h"
 #include "mgx_info.h"
@@ -99,6 +100,17 @@ struct CapturedHipGraph {
     std::vector<std::pair<void*, std::size_t>> captured_output_zeroes{};
 };
 
+// Result of binding staging buffers (and the EP-owned scratch) as program
+// parameters for a given compiled shape.  Cached per shape hash in ComputeState:
+// staging buffers and scratch are pointer-stable until FreeStaging, so a binding
+// built once can be replayed unchanged instead of rebuilt every Compute call.
+struct StagingBindResult {
+    migraphx::program_parameters params{};
+    std::vector<std::size_t> prog_output_indices{};       // ORT output index per bound output
+    std::vector<std::string> bound_output_names{};        // staging key per bound output
+    std::vector<migraphx::shape> bound_output_shapes{};   // current bucket shape per bound output
+};
+
 struct ComputeState {
     std::mutex& mutex;
     int device_id;
@@ -170,6 +182,17 @@ struct ComputeState {
     Map<ScratchBuffer> scratch_bufs{};
     // Captured graphs keyed by shape hash.
     Map<CapturedHipGraph> hip_graph_cache{};
+
+    // ── Binding / shape-hash fast-path caches ────────────────────────────────
+    // Staging parameter bindings keyed by shape hash (multi-entry, so alternating
+    // dynamic-batch buckets each keep their binding).  Invalidated by FreeStaging
+    // (staging pointers change) and per-hash on recompile.
+    Map<StagingBindResult> staging_bind_cache{};
+    // Last call's actual input shapes and their hash, for skipping the shape-compare
+    // and rehash loops when the shapes are unchanged from the previous Compute call.
+    std::vector<std::int64_t> last_input_shapes{};
+    hash::Value last_input_shapes_hash{};
+    bool has_last_input_shapes{};
 };
 
 struct EpContextComputeState {
@@ -245,7 +268,6 @@ private:
     Map<EpContextComputeState> ep_context_compute_states_;
     Map<ComputeState> compute_states_;
 
-    hipStream_t stream_{};
     hipDeviceProp_t device_prop_{};
 
     int device_id_{};

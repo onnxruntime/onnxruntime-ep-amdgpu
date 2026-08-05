@@ -28,7 +28,7 @@ target_include_directories(amdgpu-ep PRIVATE
         $<TARGET_PROPERTY:migraphx-ep,INTERFACE_INCLUDE_DIRECTORIES>)
 
 target_include_directories(amdgpu-ep PRIVATE
-        $<TARGET_PROPERTY:directml-ep,INTERFACE_INCLUDE_DIRECTORIES>)
+        $<TARGET_PROPERTY:directx-ep,INTERFACE_INCLUDE_DIRECTORIES>)
 
 if(WIN32)
     set_property(TARGET amdgpu-ep APPEND_STRING
