@@ -136,12 +136,11 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     const ProviderInfo info{provider_options};
     backend_ = BackendForProfile(info.profile);
 
+    // Telemetry is an internal EP facility. It is enabled by default and uses the
+    // platform default directory (LocalLow on Windows).
     telemetry::Config telemetry_config;
-    telemetry_config.enabled = info.telemetry_enable.value_or(false);
-    telemetry_config.file = info.telemetry_file.value_or(info.telemetry_dir.has_value());
-    if (info.telemetry_dir.has_value() && !info.telemetry_dir->empty()) {
-        telemetry_config.directory = ToPathString(*info.telemetry_dir);
-    }
+    telemetry_config.enabled = true;
+    telemetry_config.file = true;
     telemetry_.emplace(std::move(telemetry_config), &factory_.TelemetryWriter());
 
     // Resolved-profile name for the routing trace (below). Covers every Profile value so the trace

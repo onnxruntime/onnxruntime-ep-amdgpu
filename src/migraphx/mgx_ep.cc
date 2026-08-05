@@ -926,10 +926,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             mxr_path = effective_cache_dir / (mxr_prefix + input_shapes_hash_hex + ".mxr");
         }
         loaded_from_cache = !force_recompile_ && load_compiled_program(program, mxr_path);
-        if (loaded_from_cache) {
-            // Accumulate backend-specific telemetry: a cache hit occurred.
-            backend_telemetry_.loaded_from_cache = true;
-        }
+        backend_telemetry_.loaded_from_cache = loaded_from_cache;
         if (!loaded_from_cache) {
             const auto external_data_dir{external_data_dir_.empty() ?
                 model_path.parent_path() : external_data_dir_};
