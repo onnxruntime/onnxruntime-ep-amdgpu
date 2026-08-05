@@ -879,18 +879,39 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     const auto has_input_shape{get_input_output_names(sorted_graph, input_names, output_names)};
     fs::path model_path{graph.GetModelPath()};
 
+    // If context_enable is set but cache_dir isn't, default to context_file_path's or the
+    // model's directory so the EPContext node references an MXR file that actually gets written.
+    fs::path effective_cache_dir{cache_dir_};
+    if (context_enable_ && effective_cache_dir.empty()) {
+        if (!context_file_path_.empty()) {
+            effective_cache_dir = context_file_path_.parent_path();
+        } else if (!model_path.empty()) {
+            effective_cache_dir = model_path.parent_path();
+        }
+    }
+
+    RETURN_IF(context_enable_ && !has_input_shape,
+        "ep.context_enable is set but the graph has dynamic input shapes at compile time; "
+        "EPContext currently supports one statically compiled MXR per partition and cannot be "
+        "used with dynamic batching. Provide static input shapes before session creation. To use "
+        "dynamic batching instead, disable ep.context_enable and configure "
+        "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH and, optionally, ORT_MIGRAPHX_COMPILE_BATCHES.");
+
     migraphx::program program;
     migraphx::onnx_options onnx_options;
 
+    std::string input_shapes_hash_hex;
     if (has_input_shape) {
         hash::Value input_shapes_hash{};
         for (const auto& input : GetValueInfos(sorted_graph.GetInputs())) {
             const auto shape{input.TypeInfo().GetTensorTypeAndShapeInfo().GetShape()};
             hash::Hash(input_shapes_hash, shape);
         }
+        input_shapes_hash_hex = hash::ToHex(input_shapes_hash);
+
         fs::path mxr_path;
-        if (!cache_dir_.empty()) {
-            mxr_path = cache_dir_ / (mxr_prefix + hash::ToHex(input_shapes_hash) + ".mxr");
+        if (!effective_cache_dir.empty()) {
+            mxr_path = effective_cache_dir / (mxr_prefix + input_shapes_hash_hex + ".mxr");
         }
         if (force_recompile_ || !load_compiled_program(program, mxr_path)) {
             const auto external_data_dir{external_data_dir_.empty() ?
@@ -901,7 +922,8 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
             compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_);
-            if (!disable_compiled_model_caching_) {
+            // context_enable needs this file on disk even if caching is otherwise disabled.
+            if (!disable_compiled_model_caching_ || context_enable_) {
                 save_compiled_program(program, mxr_path);
             }
         }
@@ -912,21 +934,11 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     }
 
     if (context_enable_) {
-        fs::path ep_context_mxr_path;
-        if (has_input_shape && !cache_dir_.empty()) {
-            hash::Value input_shapes_hash{};
-            for (const auto& input : GetValueInfos(sorted_graph.GetInputs())) {
-                const auto shape{input.TypeInfo().GetTensorTypeAndShapeInfo().GetShape()};
-                hash::Hash(input_shapes_hash, shape);
-            }
-            ep_context_mxr_path = mxr_prefix + hash::ToHex(input_shapes_hash) + ".mxr";
-        } else {
-            const auto model_stem{model_path.stem().string()};
-            ep_context_mxr_path = model_stem + "_migraphx.mxr";
-        }
+        // input_shapes_hash_hex is non-empty here: the RETURN_IF above requires has_input_shape.
+        const fs::path ep_context_mxr_path{mxr_prefix + input_shapes_hash_hex + ".mxr"};
 
         EpContextNodeHelper ep_context_helper{*this, sorted_graph, fused_node};
-        RETURN_IF_ERROR(ep_context_helper.CreateEpContextNode(ep_context_mxr_path, cache_dir_,
+        RETURN_IF_ERROR(ep_context_helper.CreateEpContextNode(ep_context_mxr_path, effective_cache_dir,
             context_embed_mode_, compute_capability_, model_path, context_node_name_prefix_,
             ep_context_node));
     }
@@ -953,7 +965,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             onnx_string,
             compute_mode_,
             model_path,
-            cache_dir_,
+            effective_cache_dir,
             disable_compiled_model_caching_,
             force_recompile_,
             external_data_dir_,
