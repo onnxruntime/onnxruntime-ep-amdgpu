@@ -179,7 +179,7 @@ set_source_files_properties(
     PROPERTIES COMPILE_FLAGS "/arch:AVX512"
 )
 
-add_library(directml-ep MODULE
+add_library(directx-ep MODULE
     # ---- Top-level directml sources ----
     cpu_allocator.h
     dml_abi_custom_registry.h
@@ -612,19 +612,19 @@ add_library(directml-ep MODULE
     ${MLAS_ASM_SOURCES}
 )
 
-add_custom_command(TARGET directml-ep POST_BUILD
+add_custom_command(TARGET directx-ep POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${DIRECTML_ROOT}/bin/x64-win/DirectML.dll
-        $<TARGET_FILE_DIR:directml-ep>
+        $<TARGET_FILE_DIR:directx-ep>
 )
 
-add_custom_command(TARGET directml-ep POST_BUILD
+add_custom_command(TARGET directx-ep POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${D3D12_ROOT}/build/native/bin/x64/D3D12Core.dll
-        $<TARGET_FILE_DIR:directml-ep>
+        $<TARGET_FILE_DIR:directx-ep>
 )
 
-target_include_directories(directml-ep PRIVATE
+target_include_directories(directx-ep PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/External
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -636,14 +636,14 @@ target_include_directories(directml-ep PRIVATE
 
 # Prevent object file name collisions for files with the same basename
 # in different directories (e.g. core/platform/env.cc vs core/platform/windows/env.cc)
-set_target_properties(directml-ep PROPERTIES OBJECT_PATH_MAX 4096)
+set_target_properties(directx-ep PROPERTIES OBJECT_PATH_MAX 4096)
 
 # Fix C1041 PDB contention: serialize writes to the shared .pdb file
 # and use /Z7 (embedded debug info) to avoid shared PDB file entirely
-target_compile_options(directml-ep PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:/FS>)
-set_target_properties(directml-ep PROPERTIES MSVC_DEBUG_INFORMATION_FORMAT $<$<CONFIG:Debug,RelWithDebInfo>:Embedded>)
+target_compile_options(directx-ep PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:/FS>)
+set_target_properties(directx-ep PROPERTIES MSVC_DEBUG_INFORMATION_FORMAT $<$<CONFIG:Debug,RelWithDebInfo>:Embedded>)
 
-target_link_libraries(directml-ep
+target_link_libraries(directx-ep
     PRIVATE
         plugin-ep-utils
         flatbuffers
@@ -660,7 +660,7 @@ target_link_libraries(directml-ep
         Microsoft::DirectX-Guids
 )
 
-target_compile_definitions(directml-ep
+target_compile_definitions(directx-ep
     PRIVATE
         NOGDI
         NOMINMAX
@@ -670,24 +670,24 @@ target_compile_definitions(directml-ep
         DML_TARGET_VERSION_USE_LATEST
 )
 
-set_property(TARGET directml-ep APPEND_STRING
+set_property(TARGET directx-ep APPEND_STRING
         PROPERTY LINK_FLAGS /DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
 
-install(TARGETS directml-ep
+install(TARGETS directx-ep
         DESTINATION ".")
 
 install(FILES ${DIRECTML_ROOT}/bin/x64-win/DirectML.dll ${D3D12_ROOT}/build/native/bin/x64/D3D12Core.dll
         DESTINATION ".")
 
-install(FILES $<TARGET_PDB_FILE:directml-ep>
+install(FILES $<TARGET_PDB_FILE:directx-ep>
         DESTINATION "." OPTIONAL)
 
 if(USE_AMDGPU)
-    set_target_properties(directml-ep PROPERTIES OUTPUT_NAME "directml-backend")
-    target_include_directories(directml-ep INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+    set_target_properties(directx-ep PROPERTIES OUTPUT_NAME "directx-backend")
+    target_include_directories(directx-ep INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 add_version_info(
-     TARGET directml-ep
+     TARGET directx-ep
         DESCRIPTION "DirectML Execution Provider - ONNX Runtime plugin"
         PRODUCT "DirectML Plugin EP")
