@@ -884,18 +884,39 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     const auto has_input_shape{get_input_output_names(sorted_graph, input_names, output_names)};
     fs::path model_path{graph.GetModelPath()};
 
+    // If context_enable is set but cache_dir isn't, default to context_file_path's or the
+    // model's directory so the EPContext node references an MXR file that actually gets written.
+    fs::path effective_cache_dir{cache_dir_};
+    if (context_enable_ && effective_cache_dir.empty()) {
+        if (!context_file_path_.empty()) {
+            effective_cache_dir = context_file_path_.parent_path();
+        } else if (!model_path.empty()) {
+            effective_cache_dir = model_path.parent_path();
+        }
+    }
+
+    RETURN_IF(context_enable_ && !has_input_shape,
+        "ep.context_enable is set but the graph has dynamic input shapes at compile time; "
+        "EPContext currently supports one statically compiled MXR per partition and cannot be "
+        "used with dynamic batching. Provide static input shapes before session creation. To use "
+        "dynamic batching instead, disable ep.context_enable and configure "
+        "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH and, optionally, ORT_MIGRAPHX_COMPILE_BATCHES.");
+
     migraphx::program program;
     migraphx::onnx_options onnx_options;
 
+    std::string input_shapes_hash_hex;
     if (has_input_shape) {
         hash::Value input_shapes_hash{};
         for (const auto& input : GetValueInfos(sorted_graph.GetInputs())) {
             const auto shape{input.TypeInfo().GetTensorTypeAndShapeInfo().GetShape()};
             hash::Hash(input_shapes_hash, shape);
         }
+        input_shapes_hash_hex = hash::ToHex(input_shapes_hash);
+
         fs::path mxr_path;
-        if (!cache_dir_.empty()) {
-            mxr_path = cache_dir_ / (mxr_prefix + hash::ToHex(input_shapes_hash) + ".mxr");
+        if (!effective_cache_dir.empty()) {
+            mxr_path = effective_cache_dir / (mxr_prefix + input_shapes_hash_hex + ".mxr");
         }
         if (force_recompile_ || !load_compiled_program(program, mxr_path)) {
             const auto external_data_dir{external_data_dir_.empty() ?
@@ -906,7 +927,8 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
             compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_);
-            if (!disable_compiled_model_caching_) {
+            // context_enable needs this file on disk even if caching is otherwise disabled.
+            if (!disable_compiled_model_caching_ || context_enable_) {
                 save_compiled_program(program, mxr_path);
             }
         }
@@ -917,21 +939,11 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     }
 
     if (context_enable_) {
-        fs::path ep_context_mxr_path;
-        if (has_input_shape && !cache_dir_.empty()) {
-            hash::Value input_shapes_hash{};
-            for (const auto& input : GetValueInfos(sorted_graph.GetInputs())) {
-                const auto shape{input.TypeInfo().GetTensorTypeAndShapeInfo().GetShape()};
-                hash::Hash(input_shapes_hash, shape);
-            }
-            ep_context_mxr_path = mxr_prefix + hash::ToHex(input_shapes_hash) + ".mxr";
-        } else {
-            const auto model_stem{model_path.stem().string()};
-            ep_context_mxr_path = model_stem + "_migraphx.mxr";
-        }
+        // input_shapes_hash_hex is non-empty here: the RETURN_IF above requires has_input_shape.
+        const fs::path ep_context_mxr_path{mxr_prefix + input_shapes_hash_hex + ".mxr"};
 
         EpContextNodeHelper ep_context_helper{*this, sorted_graph, fused_node};
-        RETURN_IF_ERROR(ep_context_helper.CreateEpContextNode(ep_context_mxr_path, cache_dir_,
+        RETURN_IF_ERROR(ep_context_helper.CreateEpContextNode(ep_context_mxr_path, effective_cache_dir,
             context_embed_mode_, compute_capability_, model_path, context_node_name_prefix_,
             ep_context_node));
     }
@@ -958,7 +970,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             onnx_string,
             compute_mode_,
             model_path,
-            cache_dir_,
+            effective_cache_dir,
             disable_compiled_model_caching_,
             force_recompile_,
             external_data_dir_,
@@ -1096,17 +1108,15 @@ try {
     return Ort::Status{e.what(), ORT_EP_FAIL};
 }
 
-Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* /* run_options */, bool /* sync_stream */) noexcept
-try {
-    HIP_RETURN_IF_ERROR(hipSetDevice(device_id_));
-    if (const auto status{hipStreamQuery(stream_)}; status != hipSuccess) {
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(stream_));
-    }
+Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* /* run_options */, bool /* sync_stream */) noexcept {
+    // Nothing to synchronize here.  Compute runs on ORT's per-run device stream
+    // (created in CreateSyncStreamForDevice and handed to the kernel via
+    // GetGPUComputeStream()), and ORT flushes that stream at run end through
+    // DeviceStreamCollection::CleanUp -> SyncStream::Flush, honoring the run's
+    // sync_stream setting.  The previous implementation synchronized the EP's
+    // default stream, which never carried any compute work, so it was both
+    // incorrect and a redundant CPU/GPU serialization point.
     return STATUS_OK;
-} catch (const Ort::Exception& e) {
-    return Ort::Status{e};
-} catch (const std::exception& e) {
-    return Ort::Status{e.what(), ORT_EP_FAIL};
 }
 
 Ort::Status ExecutionProvider::CreateSyncStreamForDevice(const OrtMemoryDevice* memory_device, OrtSyncStreamImpl** stream)
@@ -1247,7 +1257,24 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         return shape;
     }};
 
-    if (!compute_state.has_input_shapes) {
+    // Item 4: gather the actual input shapes once.  If they are identical to the
+    // previous call we can skip both the shape-compare loop and the rehash loop:
+    // identical actual shapes imply an identical effective shape, dyn bucket, and
+    // hash, and (since the program was already compiled for them last time) a match.
+    std::vector<std::int64_t> current_input_shapes;
+    current_input_shapes.reserve(input_name_indices.size() * 4);
+    for (const auto& [name, index] : input_name_indices) {
+        const auto shape{kernel_context.GetInput(index).GetTensorTypeAndShapeInfo().GetShape()};
+        current_input_shapes.insert(current_input_shapes.end(), shape.begin(), shape.end());
+    }
+    const bool shapes_unchanged{compute_state.has_last_input_shapes &&
+                                current_input_shapes == compute_state.last_input_shapes};
+
+    if (shapes_unchanged) {
+        input_shapes_hash = compute_state.last_input_shapes_hash;
+        input_shapes_match = true;
+        param_shapes = program.get_parameter_shapes();
+    } else if (!compute_state.has_input_shapes) {
         for (auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
             auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape(), name)};
@@ -1362,25 +1389,50 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             if (dyn.active) {
                 compute_state.cached_programs.emplace(current_hash, program);
             }
+            // The program for this hash was (re)built, so any binding cached
+            // against the previous program for the same hash is stale.
+            compute_state.staging_bind_cache.erase(current_hash);
         }
         param_shapes = program.get_parameter_shapes();
     }
 
-    // Staging path: required for hipGraph capture (pointer stability), for dynamic
-    // batching (batch-axis pad/slice), and for static seq-padding (token-axis
-    // pad/slice).  Stage I/O into EP-owned buffers, bind scratch, then replay/capture
-    // a graph or run eagerly.
+    // Item 4: remember these shapes so the next identical call takes the fast path.
+    // Set only after the (possible) recompile above, so the recorded hash always
+    // corresponds to a program that is compiled and ready for these shapes.
+    if (!shapes_unchanged) {
+        compute_state.last_input_shapes = std::move(current_input_shapes);
+        compute_state.last_input_shapes_hash = input_shapes_hash;
+        compute_state.has_last_input_shapes = true;
+    }
+
+    // Staging path: required for hipGraph capture (pointer stability) and for
+    // dynamic batching (input padding / output slicing).  Stage I/O into EP-owned
+    // buffers, bind scratch, then replay/capture a graph or run eagerly
     if ((compute_state.hip_graph_enable || dyn.active || seq.active) && param_shapes.size() > 0) {
         const auto shape_hash{hash::ToHex(input_shapes_hash)};
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
-        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn, seq);
-        auto bind{BindStagingParams(compute_state, param_shapes, shape_hash, hip_stream)};
+        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn);
+        // Item 3: reuse a cached binding for this shape hash.  Staging buffers and
+        // scratch are pointer-stable until FreeStaging, so binding once and replaying
+        // avoids re-doing N program_parameters.add() calls, string work, and a
+        // scratch lookup on every inference.
+        auto bind_it{compute_state.staging_bind_cache.find(shape_hash)};
+        if (bind_it == compute_state.staging_bind_cache.end()) {
+            bind_it = compute_state.staging_bind_cache.emplace(
+                shape_hash,
+                BindStagingParams(compute_state, param_shapes, shape_hash, hip_stream)).first;
+        }
+        auto& bind{bind_it->second};
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
             bind.params, bind.prog_output_indices, shape_hash, dyn);
-        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn, seq);
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn);
+        // No per-Compute sync: all work above is enqueued on ORT's compute stream,
+        // which ORT flushes at run end (DeviceStreamCollection::CleanUp ->
+        // SyncStream::Flush) honoring the run's sync_stream setting.  Cross-stream
+        // consumers are ordered via ORT notifications.  Syncing here would only
+        // serialize CPU/GPU and defeat that overlap.
         return STATUS_OK;
     }
 
@@ -1429,7 +1481,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        // Enqueue only; ORT flushes the compute stream at run end (see OnRunEnd).
 
         if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
             for (size_t i{}; i < output_size; ++i) {
@@ -1445,7 +1497,6 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 HIP_CALL_THROW(hipMemcpyWithStream(output_data, gpu_resource.data(), resource_shape.bytes(),
                     hipMemcpyDeviceToDevice, hip_stream));
             }
-            HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
         }
     }
     return STATUS_OK;
@@ -1518,7 +1569,7 @@ try {
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        // Enqueue only; ORT flushes the compute stream at run end (see OnRunEnd).
 
         if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
             for (size_t i{}; i < output_size; ++i) {
@@ -1534,7 +1585,6 @@ try {
                 HIP_CALL_THROW(hipMemcpyWithStream(output_data, gpu_resource.data(), resource_shape.bytes(),
                     hipMemcpyDeviceToDevice, hip_stream));
             }
-            HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
         }
     }
     return STATUS_OK;

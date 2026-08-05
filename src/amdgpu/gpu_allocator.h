@@ -21,6 +21,11 @@ private:
     void Free(void* p) const noexcept;
     [[nodiscard]] const OrtMemoryInfo* Info() const noexcept;
 
+    // Returns the backend's allocator, re-creating it if the selected backend
+    // changed (e.g. profile switch)
+    OrtAllocator* GetBackendAllocator() const noexcept;
+
+    mutable OrtEpFactory* backend_factory_{};
     mutable OrtAllocator* backend_allocator_{};
 
     const ProviderFactory& factory_;

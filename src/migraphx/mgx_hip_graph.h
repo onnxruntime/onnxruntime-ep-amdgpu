@@ -91,13 +91,7 @@ void CopyInputsToStaging(ComputeState& cs,
     const DynamicBatchContext& dyn,
     const StaticSeqContext& seq);
 
-// Result of binding staging buffers as program parameters.
-struct StagingBindResult {
-    migraphx::program_parameters params{};
-    std::vector<std::size_t> prog_output_indices{};       // ORT output index per bound output
-    std::vector<std::string> bound_output_names{};        // staging key per bound output
-    std::vector<migraphx::shape> bound_output_shapes{};   // current bucket shape per bound output
-};
+// StagingBindResult is defined in mgx_ep.h (cached per shape hash on ComputeState).
 
 // Bind staging input/output buffers and the EP-owned scratch buffer as program
 // parameters for the given compiled shape.
