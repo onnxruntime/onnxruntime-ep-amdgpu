@@ -159,19 +159,15 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     THROW_IF_ERROR(hip_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
         &hip_ep_factory_, 1, &factories_created));
 #endif
-
-    data_transfer_ = std::make_unique<DataTransfer>(*this);
 }
 
 ProviderFactory::~ProviderFactory() {
-    // Destroy members that hold backend function pointers before unloading the DLLs.
-    // ~Allocator calls backend_ep_factory_->ReleaseAllocator and ~DataTransfer calls
-    // backend factory methods — both would crash if the DLL is already unloaded.
-    // Session-owned resources (DmlBucketizedBufferAllocator etc.) are already released
-    // by the time the factory is destroyed since sessions are destroyed first.
+    // Destroy allocator members that hold backend function pointers before unloading
+    // the DLLs — ~Allocator calls backend_factory_->ReleaseAllocator, which would crash
+    // if the backend DLL were already unloaded. The per-session DataTransfer objects are
+    // owned and released by ORT during each session's teardown (before the factory dies).
     gpu_allocator_.reset();
     pinned_allocator_.reset();
-    data_transfer_.reset();
 
     if (gpu_memory_info_) {
         ort_api.ReleaseMemoryInfo(gpu_memory_info_);
@@ -307,7 +303,11 @@ void ProviderFactory::ReleaseAllocator(OrtAllocator*) const {
 }
 
 Ort::Status ProviderFactory::CreateDataTransfer(OrtDataTransferImpl** data_transfer) {
-    *data_transfer = data_transfer_.get();
+    // Per-session: hand ORT a fresh DataTransfer bound to the backend this session
+    // selected (GetBackendFactory() reflects the CreateEp that just ran; it is null at
+    // library-registration time, yielding an inert instance). ORT owns it and calls
+    // Release (which deletes it) at session teardown.
+    *data_transfer = std::make_unique<DataTransfer>(*this, GetBackendFactory()).release();
     return STATUS_OK;
 }
 
