@@ -492,19 +492,19 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
     PARSE_ENV_VAR(env_var::kModelArch, model_arch_);
 
-    // Per-architecture ops to force onto AMDMLSS.
-    // Add a row here to enable specific ops on additional architectures.
+    // Per-architecture-family ops to force onto AMDMLSS.
+    // Prefixes also match architecture variants and HIP feature suffixes.
     struct arch_mlss_ops {
-        std::string_view arch;
+        std::string_view arch_prefix;
         std::string_view ops;  // comma-separated op names
     };
     static constexpr std::array<arch_mlss_ops, 2> kArchMlssOps{{
-        {"gfx1200", "conv"},
-        {"gfx1201", "conv"},
+        {"gfx12", "conv"},
+        {"gfx115", "conv"},
     }};
 
-    for (const auto& [arch, ops] : kArchMlssOps) {
-        if (compute_capability_.rfind(arch, 0) == 0) {
+    for (const auto& [arch_prefix, ops] : kArchMlssOps) {
+        if (compute_capability_.rfind(arch_prefix, 0) == 0) {
             if (!mlss_use_specific_ops_.empty()) {
                 mlss_use_specific_ops_ += ",";
             }
