@@ -1,6 +1,8 @@
 // Copyright (c) Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
+#include <filesystem>
+
 #include "gpu_info.h"
 #include "gpu_ep.h"
 
@@ -13,6 +15,8 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+
+#include "common/telemetry.h"
 
 #define EP_CALL_T(backend, fn, defval, ...)                            \
     do {                                                               \
@@ -41,6 +45,26 @@
 
 
 namespace gpu_ep {
+
+namespace {
+
+telemetry::Backend BackendForProfile(Profile profile) noexcept {
+    switch (profile) {
+#ifdef USE_DML
+        case Profile::Eager:
+        case Profile::DirectML:
+            return telemetry::Backend::DirectML;
+#endif
+        case Profile::Auto:
+        case Profile::Optimized:
+        case Profile::MIGraphX:
+        default:
+            // Without DirectML support the wrapper always runs on MIGraphX.
+            return telemetry::Backend::MIGraphX;
+    }
+}
+
+}  // namespace
 
 ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view ep_name,
         const Ort::ConstSessionOptions& session_options, const OrtLogger* logger)
@@ -110,6 +134,14 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     }
 
     const ProviderInfo info{provider_options};
+    backend_ = BackendForProfile(info.profile);
+
+    // Telemetry is an internal EP facility. It is enabled by default and uses the
+    // platform default directory (LocalLow on Windows).
+    telemetry::Config telemetry_config;
+    telemetry_config.enabled = true;
+    telemetry_config.file = true;
+    telemetry_.emplace(std::move(telemetry_config), &factory_.TelemetryWriter());
 
     // Resolved-profile name for the routing trace (below). Covers every Profile value so the trace
     // never mislabels an explicit profile (e.g. Optimized/Hip are not DirectML). Auto is always
@@ -152,6 +184,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         return chosen;
     };
 
+#ifdef USE_DML
     const auto create_directml_backend = [&] {
         THROW_IF_ERROR(factory.CreateDirectMLBackend(local_session_options, logger, backend_ep_));
         // DirectML manages its own per-session GPU allocator (DmlBucketizedBufferAllocator)
@@ -163,6 +196,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
             API_CALL_S(ExecutionProvider, this_, CreateAllocator, memory_info, allocator);
         };
     };
+#endif
 
     const auto create_hip_backend = [&] {
         // hip backend manages allocator/data-transfer at the backend factory level,
@@ -255,6 +289,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     // (inside route_by_heuristic) applies both, so the result covers every profile value.
     const Profile effective = route_by_heuristic();
 
+#ifdef USE_DML
     if (effective == Profile::Eager) {
         create_directml_backend();
     } else if (effective == Profile::DirectML) {
@@ -266,6 +301,14 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     } else {
         create_migraphx_backend();
     }
+#else
+    // DirectML not built (e.g. Linux): DirectML/Eager profiles fall back to MIGraphX.
+    if (effective == Profile::Hip) {
+        create_hip_backend();
+    } else {
+        create_migraphx_backend();
+    }
+#endif
     // Capture per-EP now: the shared factory_ backend field is overwritten by a later
     // umbrella EP (different backend). See PR for the cross-backend UAF details.
     backend_ep_factory_ = factory_.GetBackendFactory();
@@ -297,7 +340,44 @@ Ort::Status ExecutionProvider::GetCapability(const OrtGraph* graph,
 Ort::Status ExecutionProvider::Compile(const OrtGraph** graphs, const OrtNode** fused_nodes, size_t count,
     OrtNodeComputeInfo** node_compute_infos, OrtNode** ep_context_nodes) const noexcept
 {
-    EP_CALL_S(backend_ep_, Compile, graphs, fused_nodes, count, node_compute_infos, ep_context_nodes);
+    if (backend_ep_ == nullptr) {
+        return MAKE_STATUS(ORT_EP_FAIL, "Compile: invalid backend");
+    }
+    if (backend_ep_->Compile != nullptr) {
+        RETURN_IF_ERROR(backend_ep_->Compile(backend_ep_, graphs, fused_nodes, count,
+            node_compute_infos, ep_context_nodes));
+    }
+    if (count > 0 && graphs != nullptr) {
+        LogTelemetry(Ort::ConstGraph{graphs[0]});
+    }
+    return STATUS_OK;
+}
+
+void ExecutionProvider::LogTelemetry(const Ort::ConstGraph& graph) const noexcept try {
+    if (!telemetry_ || !telemetry_->IsEnabled()) {
+        return;
+    }
+    std::call_once(telemetry_once_, [&] {
+        // Generic, backend-agnostic fields collected by the wrapper.
+        telemetry::Record record;
+        record.SetEpVersion(factory_.GetVersion())
+              .SetBackend(backend_)
+              .SetParentProcess(telemetry::ParentProcessName());
+        const std::filesystem::path model_path{graph.GetModelPath()};
+        if (model_path.has_filename()) {
+            record.SetModelName(model_path.filename().string());
+        }
+        if (const telemetry::GetBackendDataFn collect = factory_.GetBackendTelemetryFn();
+                collect != nullptr) {
+            telemetry::BackendData data{};
+            if (collect(backend_ep_, &data)) {
+                record.Merge(data);
+            }
+        }
+        telemetry_->Write(record);
+    });
+} catch (const std::exception&) {
+    // Telemetry must never disrupt inference.
 }
 
 void ExecutionProvider::ReleaseNodeComputeInfos(OrtNodeComputeInfo** node_compute_info,

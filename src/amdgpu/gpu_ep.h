@@ -3,6 +3,12 @@
 
 #pragma once
 
+#include <mutex>
+#include <optional>
+#include <string>
+
+#include "common/telemetry.h"
+
 #include "gpu_info.h"
 #include "gpu_factory.h"
 
@@ -34,12 +40,17 @@ private:
     [[nodiscard]] const char* GetCompiledModelCompatibilityInfo(const OrtGraph* graph) const;
     Ort::Status GetKernelRegistry(const OrtKernelRegistry** kernel_registry) const;
 
+    void LogTelemetry(const Ort::ConstGraph& graph) const noexcept;
+
     ProviderFactory& factory_;
     OrtEp* backend_ep_{};
     // Backend factory that created this EP's backend_ep_; captured per-EP (see PR for why).
     OrtEpFactory* backend_ep_factory_{};
 
     std::string ep_name_;
+    telemetry::Backend backend_{telemetry::Backend::Unknown};
+    std::optional<telemetry::Logger> telemetry_;
+    mutable std::once_flag telemetry_once_;
     const Ort::Logger logger_{};
 };
 

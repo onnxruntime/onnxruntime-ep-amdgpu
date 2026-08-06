@@ -19,24 +19,32 @@ add_library(plugin-ep-utils STATIC
         common/plugin_ep_utils.cc
         common/plugin_ep_utils.h
         common/provider_options.h
-        common/provider_options_utils.h)
+        common/provider_options_utils.h
+        common/telemetry.cc
+        common/telemetry.h)
 
 if(WIN32)
     target_sources(plugin-ep-utils
         PUBLIC
             common/platform/windows/dynamic_library.cc
             common/platform/windows/env_var.cc
-            common/platform/windows/env_var.h)
+            common/platform/windows/env_var.h
+            common/platform/windows/telemetry.cc)
 else()
     target_sources(plugin-ep-utils
         PUBLIC
             common/platform/linux/dynamic_library.cc
             common/platform/linux/env_var.cc
-            common/platform/linux/env_var.h)
+            common/platform/linux/env_var.h
+            common/platform/linux/telemetry.cc)
 endif()
 
 target_link_libraries(plugin-ep-utils PUBLIC onnxruntime::onnxruntime
         fmt::fmt Microsoft.GSL::GSL range-v3::range-v3 onnx protobuf::libprotobuf)
+
+if(NOT WIN32)
+    target_link_libraries(plugin-ep-utils PUBLIC ${CMAKE_DL_LIBS})
+endif()
 
 target_include_directories(plugin-ep-utils PUBLIC
         ${CMAKE_CURRENT_LIST_DIR} ${CMAKE_CURRENT_LIST_DIR}/common)

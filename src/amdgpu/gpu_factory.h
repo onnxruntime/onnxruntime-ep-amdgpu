@@ -6,6 +6,8 @@
 #include "gpu_allocator.h"
 #include "gpu_data_transfer.h"
 
+#include "common/telemetry.h"
+
 namespace gpu_ep {
 
 struct ProviderFactory : OrtEpFactory, ApiPtrs {
@@ -13,14 +15,24 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
     ~ProviderFactory();
 
     Ort::Status CreateDirectMLBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
+#ifdef USE_DML
         RETURN_IF_ERROR(dml_ep_factory_->CreateEp(dml_ep_factory_, nullptr, nullptr, 0, session_options, logger, &ep));
         backend_ep_factory_ = dml_ep_factory_;
+        backend_get_telemetry_ = dml_get_telemetry_;
         return STATUS_OK;
+#else
+        (void)session_options;
+        (void)logger;
+        (void)ep;
+        return MAKE_STATUS(ORT_FAIL,
+            "DirectML backend requested, but the AMDGPU EP was not built with DirectML support");
+#endif
     }
 
     Ort::Status CreateMIGraphXBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
         RETURN_IF_ERROR(mgx_ep_factory_->CreateEp(mgx_ep_factory_, nullptr, nullptr, 0, session_options, logger, &ep));
         backend_ep_factory_ = mgx_ep_factory_;
+        backend_get_telemetry_ = mgx_get_telemetry_;
         return STATUS_OK;
     }
 
@@ -39,6 +51,16 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
         return backend_ep_factory_;
     }
 
+    // Telemetry collector exported by the active backend DLL, or null if that
+    // backend contributes no backend-specific telemetry.
+    [[nodiscard]] telemetry::GetBackendDataFn GetBackendTelemetryFn() const noexcept {
+        return backend_get_telemetry_;
+    }
+
+    [[nodiscard]] telemetry::FileWriter& TelemetryWriter() noexcept { return telemetry_writer_; }
+
+    [[nodiscard]] const char* GetVersion() const;
+
 private:
     [[nodiscard]] const char* GetVendor() const;
     [[nodiscard]] const char* GetName() const;
@@ -53,7 +75,6 @@ private:
     void ReleaseEp(OrtEp* ep) const;
 
     [[nodiscard]] uint32_t GetVendorId() const;
-    [[nodiscard]] const char* GetVersion() const;
 
     // Ort::Status ValidateCompiledModelCompatibilityInfo(const std::vector<Ort::ConstHardwareDevice>& devices,
     //      std::string_view compatibility_info, OrtCompiledModelCompatibility* model_compatibility);
@@ -80,6 +101,8 @@ private:
     Ort::Status GetCustomOpDomains(OrtCustomOpDomain** domains, size_t num_domains) const;
 
     OrtEpFactory* backend_ep_factory_{};
+    telemetry::GetBackendDataFn backend_get_telemetry_{};
+    telemetry::FileWriter telemetry_writer_;
     const Ort::Logger default_logger_{};
 
     std::string ep_name_;
@@ -88,15 +111,19 @@ private:
     typedef OrtStatus* (*ReleaseEpFactory_t)(OrtEpFactory*);
     typedef OrtStatus* (*CreateEpFactories_t)(const char*, const OrtApiBase*, const OrtLogger*, OrtEpFactory**, size_t, size_t*);
 
+#ifdef USE_DML
     void* dml_backend_{};
     ReleaseEpFactory_t dml_release_ep_factory_{};
 
     OrtEpFactory* dml_ep_factory_{};
+    telemetry::GetBackendDataFn dml_get_telemetry_{};
+#endif
 
     void* mgx_backend_{};
     ReleaseEpFactory_t mgx_release_ep_factory_{};
 
     OrtEpFactory* mgx_ep_factory_{};
+    telemetry::GetBackendDataFn mgx_get_telemetry_{};
 
     void* hip_backend_{};
     ReleaseEpFactory_t hip_release_ep_factory_{};

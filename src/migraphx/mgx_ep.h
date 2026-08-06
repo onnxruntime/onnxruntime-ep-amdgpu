@@ -18,6 +18,7 @@
 
 #include "common/path_string.h"
 #include "common/plugin_ep_utils.h"
+#include "common/telemetry.h"
 #include "common/murmurhash3.h"
 
 #include "mgx_factory.h"
@@ -229,6 +230,8 @@ struct ExecutionProvider : OrtEp, ApiPtrs {
         return it->second;
     }
 
+    void CollectTelemetry(telemetry::BackendData& out) const noexcept;
+
 private:
     [[nodiscard]] const char* GetName() const noexcept;
 
@@ -290,6 +293,7 @@ private:
     std::string int8_calibration_table_name_{};
     fs::path external_data_dir_{};
     std::string compute_capability_{};
+    telemetry::BackendData backend_telemetry_{};
     bool context_embed_mode_{};
     bool context_enable_{};
     std::string context_node_name_prefix_{};
