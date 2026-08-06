@@ -18,6 +18,8 @@
 
 #include "common/path_string.h"
 #include "common/plugin_ep_utils.h"
+#include "common/telemetry.h"
+#include "common/murmurhash3.h"
 
 #include "mgx_factory.h"
 #include "mgx_info.h"
@@ -100,6 +102,17 @@ struct CapturedHipGraph {
     std::vector<std::pair<void*, std::size_t>> captured_output_zeroes{};
 };
 
+// Result of binding staging buffers (and the EP-owned scratch) as program
+// parameters for a given compiled shape.  Cached per shape hash in ComputeState:
+// staging buffers and scratch are pointer-stable until FreeStaging, so a binding
+// built once can be replayed unchanged instead of rebuilt every Compute call.
+struct StagingBindResult {
+    migraphx::program_parameters params{};
+    std::vector<std::size_t> prog_output_indices{};       // ORT output index per bound output
+    std::vector<std::string> bound_output_names{};        // staging key per bound output
+    std::vector<migraphx::shape> bound_output_shapes{};   // current bucket shape per bound output
+};
+
 struct ComputeState {
     std::mutex& mutex;
     int device_id;
@@ -138,7 +151,9 @@ struct ComputeState {
     // down to the real token length afterwards.  Parsed once from the "name:axis"
     // specs into (parameter name -> token axis) maps.
     bool static_pad_seq{};
+    // Fallback target; the pad length normally comes from the attention mask (see Compute).
     std::size_t static_pad_seq_len{};
+    bool static_pad_seq_len_from_env{};  // set explicitly via env -> overrides the mask
     Map<int> static_pad_input_axes{};   // input param name -> token axis (inputs keep real names)
     // Outputs are program params named "#output_N", not their ONNX names, so the
     // slice must match on ORT output INDEX, not name.  Resolved from the user's
@@ -207,6 +222,8 @@ struct ExecutionProvider : OrtEp, ApiPtrs {
         return it->second;
     }
 
+    void CollectTelemetry(telemetry::BackendData& out) const noexcept;
+
 private:
     [[nodiscard]] const char* GetName() const noexcept;
 
@@ -248,7 +265,6 @@ private:
     Map<EpContextComputeState> ep_context_compute_states_;
     Map<ComputeState> compute_states_;
 
-    hipStream_t stream_{};
     hipDeviceProp_t device_prop_{};
 
     int device_id_{};
@@ -269,6 +285,7 @@ private:
     std::string int8_calibration_table_name_{};
     fs::path external_data_dir_{};
     std::string compute_capability_{};
+    telemetry::BackendData backend_telemetry_{};
     bool context_embed_mode_{};
     bool context_enable_{};
     std::string context_node_name_prefix_{};
@@ -281,6 +298,7 @@ private:
     bool cpu_control_flow_enable_{};
     bool static_pad_seq_{};
     std::size_t static_pad_seq_len_{};
+    bool static_pad_seq_len_from_env_{};  // set explicitly via env -> overrides the mask
     std::string static_pad_inputs_{};
     std::string static_pad_outputs_{};
 

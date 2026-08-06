@@ -19,7 +19,7 @@
     do {                                                               \
         return (backend != nullptr &&                                  \
                 backend->fn != nullptr) ?                              \
-                    backend->fn(backend, __VA_ARGS__) : defval;        \
+                    backend->fn(backend, ##__VA_ARGS__) : defval;        \
     } while (0)
 
 #define BACKEND_CALL_S(backend, fn, ...)                               \
@@ -28,7 +28,7 @@
             if (backend->fn == nullptr) {                              \
                 return MAKE_STATUS(ORT_NOT_IMPLEMENTED, #fn ": method not implemented"); \
             }                                                          \
-            RETURN_IF_ERROR(backend->fn(backend, __VA_ARGS__));        \
+            RETURN_IF_ERROR(backend->fn(backend, ##__VA_ARGS__));        \
             return STATUS_OK;                                          \
         }                                                              \
         return MAKE_STATUS(ORT_EP_FAIL, #fn ": invalid backend factory"); \
@@ -37,7 +37,7 @@
 #define BACKEND_CALL_V(backend, fn, ...)                               \
     do {                                                               \
         if (backend != nullptr && backend->fn != nullptr) {            \
-            backend->fn(backend, __VA_ARGS__);                         \
+            backend->fn(backend, ##__VA_ARGS__);                         \
         }                                                              \
     } while (0)
 
@@ -45,7 +45,9 @@
 namespace gpu_ep {
 
 namespace {
+#ifdef USE_DML
 constexpr auto directmlBackend{LIBRARY_PREFIX ORT_TSTR("directx-backend") LIBRARY_SUFFIX};
+#endif
 constexpr auto migraphxBackend{LIBRARY_PREFIX ORT_TSTR("migraphx-backend") LIBRARY_SUFFIX};
 constexpr auto hipBackend{LIBRARY_PREFIX ORT_TSTR("hip-backend") LIBRARY_SUFFIX};
 }
@@ -119,6 +121,9 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
         API_CALL_S(ProviderFactory, this_, GetCustomOpDomains, domains, num_domains);
     };
 
+    size_t factories_created{};
+
+#ifdef USE_DML
     THROW_IF_ERROR(LoadDynamicLibrary(directmlBackend, &dml_backend_));
     THROW_IF_ERROR(GetSymbolFromLibrary(dml_backend_,
         "ReleaseEpFactory", reinterpret_cast<void**>(&dml_release_ep_factory_)));
@@ -127,13 +132,19 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     THROW_IF_ERROR(GetSymbolFromLibrary(dml_backend_,
         "CreateEpFactories", reinterpret_cast<void**>(&dml_create_ep_factories)));
 
-    size_t factories_created{};
+    // Optional: a backend may export a telemetry collector. Absence is fine.
+    if (!GetSymbolFromLibrary(dml_backend_, telemetry::kGetBackendDataSymbol,
+            reinterpret_cast<void**>(&dml_get_telemetry_)).IsOK()) {
+        dml_get_telemetry_ = nullptr;
+    }
+
     // Pass ep_name_ (e.g. "amdgpu") so the directml backend registers its kernels,
     // allocators, and node assignments under the same name ORT sees for this EP.
     // Using kDirectMLBackend ("directml") would cause a provider name mismatch:
     // ORT would look up kernels under "amdgpu" but find them stamped as "directml".
     THROW_IF_ERROR(dml_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
         &dml_ep_factory_, 1, &factories_created));
+#endif
 
     THROW_IF_ERROR(LoadDynamicLibrary(migraphxBackend, &mgx_backend_));
     THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
@@ -142,6 +153,12 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     CreateEpFactories_t mgx_create_ep_factories{};
     THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
         "CreateEpFactories", reinterpret_cast<void**>(&mgx_create_ep_factories)));
+
+    // Optional: a backend may export a telemetry collector. Absence is fine.
+    if (!GetSymbolFromLibrary(mgx_backend_, telemetry::kGetBackendDataSymbol,
+            reinterpret_cast<void**>(&mgx_get_telemetry_)).IsOK()) {
+        mgx_get_telemetry_ = nullptr;
+    }
 
     THROW_IF_ERROR(mgx_create_ep_factories(kMIGraphXBackend, ort_api_base, default_logger,
         &mgx_ep_factory_, 1, &factories_created));
@@ -162,10 +179,14 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
 }
 
 ProviderFactory::~ProviderFactory() {
-    // Destroy allocator members that hold backend function pointers before unloading
-    // the DLLs — ~Allocator calls backend_factory_->ReleaseAllocator, which would crash
-    // if the backend DLL were already unloaded. The per-session DataTransfer objects are
-    // owned and released by ORT during each session's teardown (before the factory dies).
+
+    telemetry_writer_.Stop();
+
+    // Destroy members that hold backend function pointers before unloading the DLLs.
+    // ~Allocator calls backend_ep_factory_->ReleaseAllocator and ~DataTransfer calls
+    // backend factory methods — both would crash if the DLL is already unloaded.
+    // Session-owned resources (DmlBucketizedBufferAllocator etc.) are already released
+    // by the time the factory is destroyed since sessions are destroyed first.
     gpu_allocator_.reset();
     pinned_allocator_.reset();
 
@@ -175,9 +196,11 @@ ProviderFactory::~ProviderFactory() {
     if (pinned_memory_info_) {
         ort_api.ReleaseMemoryInfo(pinned_memory_info_);
     }
+#ifdef USE_DML
     if (!UnloadDynamicLibrary(dml_backend_).IsOK()) {
         /* TODO: log failure while unloading DirectML EP library */
     }
+#endif
     if (!UnloadDynamicLibrary(mgx_backend_).IsOK()) {
         /* TODO: log failure while unloading MIGraphX EP library */
     }
@@ -340,18 +363,26 @@ Ort::Status ProviderFactory::GetNumCustomOpDomains(size_t* num_domains) const {
     // Forward to the directml backend factory so ORT registers com.microsoft schemas
     // (e.g. GroupNorm, SkipLayerNormalization) that the directml EP claims during GetCapability.
     // The backend factory is available at factory init time, before any session is created.
+    // Only DirectML contributes custom op domains; MIGraphX does not.
+#ifdef USE_DML
     if (dml_ep_factory_ != nullptr && dml_ep_factory_->GetNumCustomOpDomains != nullptr) {
         RETURN_IF_ERROR(dml_ep_factory_->GetNumCustomOpDomains(dml_ep_factory_, num_domains));
         return STATUS_OK;
     }
+#endif
     *num_domains = 0;
     return STATUS_OK;
 }
 
 Ort::Status ProviderFactory::GetCustomOpDomains(OrtCustomOpDomain** domains, size_t num_domains) const {
+#ifdef USE_DML
     if (dml_ep_factory_ != nullptr && dml_ep_factory_->GetCustomOpDomains != nullptr) {
         RETURN_IF_ERROR(dml_ep_factory_->GetCustomOpDomains(dml_ep_factory_, domains, num_domains));
     }
+#else
+    (void)domains;
+    (void)num_domains;
+#endif
     return STATUS_OK;
 }
 

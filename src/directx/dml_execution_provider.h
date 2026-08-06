@@ -159,6 +159,11 @@ namespace dml_ep {
 
         STDMETHOD_(ID3D12Resource*, DecodeResource)(void* allocation) const noexcept final;
 
+        // The bucketized GPU allocator that owns this EP's device tensors. Lets a shared
+        // DMLDataTransfer identify which EP owns a tensor so a copy runs on that EP's own
+        // ExecutionContext/queue/fence.
+        DmlBucketizedBufferAllocator* GetBucketizedAllocator() const noexcept { return m_allocator.get(); }
+
         std::shared_ptr<onnxruntime::KernelRegistry> GetKernelRegistry() const
         {
             return m_kernelRegistry;

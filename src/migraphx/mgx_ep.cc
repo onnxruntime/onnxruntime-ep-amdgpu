@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstdio>
 #include <set>
 #include <string>
 #include <string_view>
@@ -19,6 +20,7 @@
 #include "common/env_var.h"
 #include "common/murmurhash3.h"
 #include "common/ort_graph_to_proto.h"
+#include "common/telemetry.h"
 
 #include "hip/stream_support.h"
 
@@ -542,7 +544,12 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
     PARSE_ENV_VAR(env_var::kStaticPadSeq, static_pad_seq_);
-    PARSE_ENV_VAR(env_var::kStaticPadSeqLen, static_pad_seq_len_);
+    // Not PARSE_ENV_VAR: we need to know whether the value was given, not just what it is.
+    if (const auto pad_len_env{ParseEnvironmentVariable<std::size_t>(env_var::kStaticPadSeqLen)};
+        pad_len_env.has_value()) {
+        static_pad_seq_len_ = pad_len_env.value();
+        static_pad_seq_len_from_env_ = true;
+    }
     PARSE_ENV_VAR(env_var::kStaticPadInputs, static_pad_inputs_);
     PARSE_ENV_VAR(env_var::kStaticPadOutputs, static_pad_outputs_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
@@ -933,10 +940,15 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
 
 }  // namespace <anonymous>
 
+void ExecutionProvider::CollectTelemetry(telemetry::BackendData& out) const noexcept {
+    out = backend_telemetry_;
+}
+
 Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGraph& graph,
     const Ort::ConstNode& fused_node, const Map<size_t>& input_name_indices, const Map<size_t>& output_name_indices,
     const std::string& mxr_prefix, OrtNodeComputeInfo*& node_compute_info, OrtNode*& ep_context_node)
 {
+    bool loaded_from_cache = false;
     const auto sorted_nodes{GetKahnsVariantTopologicalSortedNodes(graph)};
     Ort::Graph sorted_graph{graph.GetGraphView(sorted_nodes)};
     ONNX_NAMESPACE::ModelProto model_proto{};
@@ -990,7 +1002,9 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         if (!effective_cache_dir.empty()) {
             mxr_path = effective_cache_dir / (mxr_prefix + input_shapes_hash_hex + ".mxr");
         }
-        if (force_recompile_ || !load_compiled_program(program, mxr_path)) {
+        loaded_from_cache = !force_recompile_ && load_compiled_program(program, mxr_path);
+        backend_telemetry_.loaded_from_cache = loaded_from_cache;
+        if (!loaded_from_cache) {
             const auto external_data_dir{external_data_dir_.empty() ?
                 model_path.parent_path() : external_data_dir_};
             onnx_options.set_external_data_path(external_data_dir.string());
@@ -1057,6 +1071,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     compute_state.coalesce_io = coalesce_io_enable_;
     compute_state.static_pad_seq = static_pad_seq_;
     compute_state.static_pad_seq_len = static_pad_seq_len_;
+    compute_state.static_pad_seq_len_from_env = static_pad_seq_len_from_env_;
     if (static_pad_seq_) {
         // static-pad and dynamic batching both rewrite shapes; combined, the staging copies
         // collide. Unsupported together.
@@ -1132,6 +1147,16 @@ Ort::Status ExecutionProvider::Compile(const std::vector<Ort::ConstGraph>& graph
     const std::vector<Ort::ConstNode>& fused_nodes, gsl::span<OrtNodeComputeInfo*> node_compute_infos,
     gsl::span<OrtNode*> ep_context_nodes) noexcept
 try {
+    // Reset the backend-specific telemetry gathered for this compile. Generic
+    // fields (model, version, ...) are collected by the wrapper; here we only
+    // record what is specific to MIGraphX (gfx arch and MXR cache state).
+    backend_telemetry_.backend = telemetry::Backend::MIGraphX;
+    backend_telemetry_.has_gfx_arch = !compute_capability_.empty();
+    std::snprintf(backend_telemetry_.gfx_arch, sizeof(backend_telemetry_.gfx_arch),
+        "%s", compute_capability_.c_str());
+    backend_telemetry_.has_loaded_from_cache = true;
+    backend_telemetry_.loaded_from_cache = false;
+
     for (const auto& [graph, fused_node, node_compute_info, ep_context_node] : zip(graphs, fused_nodes, node_compute_infos, ep_context_nodes)) {
         const auto input_name_indices{BuildInputNameIndices(graph, fused_node)};
         const auto outputs{GetValueInfos(fused_node.GetOutputs())};
@@ -1142,6 +1167,7 @@ try {
         }
 
         if (EpContextNodeReader::GraphHasContextNode(graph)) {
+            backend_telemetry_.loaded_from_cache = true;
             RETURN_IF_ERROR(CreateNodeComputeInfoFromCache(graph, fused_node, input_name_indices,
                 output_name_indices, node_compute_info));
         } else {
@@ -1175,10 +1201,6 @@ Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* /* run_options */, 
 try {
     HIP_RETURN_IF_ERROR(hipSetDevice(device_id_));
     return STATUS_OK;
-} catch (const Ort::Exception& e) {
-    return Ort::Status{e};
-} catch (const std::exception& e) {
-    return Ort::Status{e.what(), ORT_EP_FAIL};
 }
 
 Ort::Status ExecutionProvider::CreateSyncStreamForDevice(const OrtMemoryDevice* memory_device, OrtSyncStreamImpl** stream)
@@ -1254,9 +1276,30 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // axis extent must be in (1, target).  decode (extent == 1) and already-max
     // prompts are left alone.  Inert when static_pad_seq_len == 0.
     StaticSeqContext seq{};
-    if (compute_state.static_pad_seq && compute_state.static_pad_seq_len > 0) {
-        const auto target{compute_state.static_pad_seq_len};
+    if (compute_state.static_pad_seq) {
+        // Take the target from the attention mask (axis 1; axis 0 is batch, scaled by num_beams).
+        // It carries the length the caller is really generating with, and is the same length it
+        // sized its KV cache to.  The configured value cannot be trusted here: for OGA it is
+        // config.search.max_length, read while the session is created, so a caller that sets
+        // max_length on GeneratorParams sets it too late for us and we would pad to the model's
+        // full context.  An explicit env value still wins; models with no mask keep the
+        // configured length.
+        static const std::string kAttentionMaskInput{"attention_mask"};
+        std::size_t target{compute_state.static_pad_seq_len};
+        if (not compute_state.static_pad_seq_len_from_env) {
+            if (const auto mask_it{input_name_indices.find(kAttentionMaskInput)};
+                mask_it != input_name_indices.end()) {
+                const auto mask_shape{
+                    kernel_context.GetInput(mask_it->second).GetTensorTypeAndShapeInfo().GetShape()};
+                if (mask_shape.size() > 1 && mask_shape[1] > 0) {
+                    target = static_cast<std::size_t>(mask_shape[1]);
+                }
+            }
+        }
         for (const auto& [name, axis] : compute_state.static_pad_input_axes) {
+            if (target == 0) {
+                break;  // nothing usable to pad to -> leave shapes untouched (inert, as before)
+            }
             const auto it{input_name_indices.find(name)};
             if (it == input_name_indices.end()) {
                 continue;
@@ -1298,7 +1341,24 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         return shape;
     }};
 
-    if (!compute_state.has_input_shapes) {
+    // Item 4: gather the actual input shapes once.  If they are identical to the
+    // previous call we can skip both the shape-compare loop and the rehash loop:
+    // identical actual shapes imply an identical effective shape, dyn bucket, and
+    // hash, and (since the program was already compiled for them last time) a match.
+    std::vector<std::int64_t> current_input_shapes;
+    current_input_shapes.reserve(input_name_indices.size() * 4);
+    for (const auto& [name, index] : input_name_indices) {
+        const auto shape{kernel_context.GetInput(index).GetTensorTypeAndShapeInfo().GetShape()};
+        current_input_shapes.insert(current_input_shapes.end(), shape.begin(), shape.end());
+    }
+    const bool shapes_unchanged{compute_state.has_last_input_shapes &&
+                                current_input_shapes == compute_state.last_input_shapes};
+
+    if (shapes_unchanged) {
+        input_shapes_hash = compute_state.last_input_shapes_hash;
+        input_shapes_match = true;
+        param_shapes = program.get_parameter_shapes();
+    } else if (!compute_state.has_input_shapes) {
         for (auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
             auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape(), name)};
@@ -1413,25 +1473,50 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             if (dyn.active) {
                 compute_state.cached_programs.emplace(current_hash, program);
             }
+            // The program for this hash was (re)built, so any binding cached
+            // against the previous program for the same hash is stale.
+            compute_state.staging_bind_cache.erase(current_hash);
         }
         param_shapes = program.get_parameter_shapes();
     }
 
-    // Staging path: required for hipGraph capture (pointer stability), for dynamic
-    // batching (batch-axis pad/slice), and for static seq-padding (token-axis
-    // pad/slice).  Stage I/O into EP-owned buffers, bind scratch, then replay/capture
-    // a graph or run eagerly.
+    // Item 4: remember these shapes so the next identical call takes the fast path.
+    // Set only after the (possible) recompile above, so the recorded hash always
+    // corresponds to a program that is compiled and ready for these shapes.
+    if (!shapes_unchanged) {
+        compute_state.last_input_shapes = std::move(current_input_shapes);
+        compute_state.last_input_shapes_hash = input_shapes_hash;
+        compute_state.has_last_input_shapes = true;
+    }
+
+    // Staging path: required for hipGraph capture (pointer stability) and for
+    // dynamic batching (input padding / output slicing).  Stage I/O into EP-owned
+    // buffers, bind scratch, then replay/capture a graph or run eagerly
     if ((compute_state.hip_graph_enable || dyn.active || seq.active) && param_shapes.size() > 0) {
         const auto shape_hash{hash::ToHex(input_shapes_hash)};
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
         CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn, seq);
-        auto bind{BindStagingParams(compute_state, param_shapes, shape_hash, hip_stream)};
+        // Item 3: reuse a cached binding for this shape hash.  Staging buffers and
+        // scratch are pointer-stable until FreeStaging, so binding once and replaying
+        // avoids re-doing N program_parameters.add() calls, string work, and a
+        // scratch lookup on every inference.
+        auto bind_it{compute_state.staging_bind_cache.find(shape_hash)};
+        if (bind_it == compute_state.staging_bind_cache.end()) {
+            bind_it = compute_state.staging_bind_cache.emplace(
+                shape_hash,
+                BindStagingParams(compute_state, param_shapes, shape_hash, hip_stream)).first;
+        }
+        auto& bind{bind_it->second};
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
             bind.params, bind.prog_output_indices, shape_hash, dyn);
         CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn, seq);
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        // No per-Compute sync: all work above is enqueued on ORT's compute stream,
+        // which ORT flushes at run end (DeviceStreamCollection::CleanUp ->
+        // SyncStream::Flush) honoring the run's sync_stream setting.  Cross-stream
+        // consumers are ordered via ORT notifications.  Syncing here would only
+        // serialize CPU/GPU and defeat that overlap.
         return STATUS_OK;
     }
 
@@ -1483,7 +1568,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         std::lock_guard lock{compute_state.mutex};
 
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        // Enqueue only; ORT flushes the compute stream at run end (see OnRunEnd).
 
         if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
             for (size_t i{}; i < output_size; ++i) {
@@ -1499,7 +1584,6 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 HIP_CALL_THROW(hipMemcpyWithStream(output_data, gpu_resource.data(), resource_shape.bytes(),
                     hipMemcpyDeviceToDevice, hip_stream));
             }
-            HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
         }
     }
     return STATUS_OK;
@@ -1575,7 +1659,7 @@ try {
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        // Enqueue only; ORT flushes the compute stream at run end (see OnRunEnd).
 
         if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
             for (size_t i{}; i < output_size; ++i) {
@@ -1591,7 +1675,6 @@ try {
                 HIP_CALL_THROW(hipMemcpyWithStream(output_data, gpu_resource.data(), resource_shape.bytes(),
                     hipMemcpyDeviceToDevice, hip_stream));
             }
-            HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
         }
     }
     return STATUS_OK;
@@ -1602,3 +1685,14 @@ try {
 }
 
 }  // namespace mgx_ep
+
+// Telemetry collector exported for the amdgpu wrapper. The wrapper resolves this
+// by symbol (see telemetry::kGetBackendDataSymbol) and calls it with a live
+// backend EP to pull MIGraphX-specific telemetry.
+extern "C" bool GetBackendTelemetry(const OrtEp* ep, telemetry::BackendData* out) noexcept {
+    if (ep == nullptr || out == nullptr) {
+        return false;
+    }
+    static_cast<const mgx_ep::ExecutionProvider*>(ep)->CollectTelemetry(*out);
+    return true;
+}
