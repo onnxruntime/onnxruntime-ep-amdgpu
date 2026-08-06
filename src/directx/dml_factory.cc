@@ -359,6 +359,10 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
         factory->dml_data_transfer_implementation->AttachExecutionProvider(
             factory->m_ep_raw->GetInternalExecutionProvider());
         factory->dml_data_transfer_implementation->AttachFactoryEpRef(&factory->m_ep_raw);
+        // Register this EP so the shared data transfer can route each copy to the EP that owns the
+        // tensor (its own ExecutionContext/queue/fence). Multiple sessions share this one transfer.
+        factory->dml_data_transfer_implementation->RegisterProvider(
+            factory->m_ep_raw->GetInternalExecutionProvider());
     }
 
     *ep = factory->m_ep.release();
@@ -370,12 +374,16 @@ void ORT_API_CALL ProviderFactory::ReleaseEpImpl(OrtEpFactory* this_ptr, OrtEp* 
     auto& factory = *static_cast<ProviderFactory*>(this_ptr);
     if (ep) {
         factory.m_ep_raw = nullptr; // invalidate observer before deletion
+        ExecutionProviderPlugin* provider = static_cast<ExecutionProviderPlugin*>(ep);
         // Clear the factory-owned data transfer's EP reference so the EP's ref count
-        // can reach zero and GPU resources are freed when the session ends.
+        // can reach zero and GPU resources are freed when the session ends. Also drop this EP from
+        // the per-copy routing registry so a released session's provider is never selected.
         if (factory.dml_data_transfer_implementation) {
             factory.dml_data_transfer_implementation->AttachExecutionProvider(nullptr);
+            if (auto internal = provider->GetInternalExecutionProvider()) {
+                factory.dml_data_transfer_implementation->UnregisterProvider(internal.get());
+            }
         }
-        ExecutionProviderPlugin* provider = static_cast<ExecutionProviderPlugin*>(ep);
         delete provider;
     }
 }
