@@ -1201,6 +1201,10 @@ Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* /* run_options */, 
 try {
     HIP_RETURN_IF_ERROR(hipSetDevice(device_id_));
     return STATUS_OK;
+} catch (const Ort::Exception& e) {
+    return Ort::Status{e};
+} catch (const std::exception& e) {
+    return Ort::Status{e.what(), ORT_EP_FAIL};
 }
 
 Ort::Status ExecutionProvider::CreateSyncStreamForDevice(const OrtMemoryDevice* memory_device, OrtSyncStreamImpl** stream)

@@ -54,7 +54,7 @@ telemetry::Backend BackendForProfile(Profile profile) noexcept {
             return telemetry::Backend::Hip;
 #ifdef USE_DML
         case Profile::Eager:
-        case Profile::DirectML:
+        case Profile::DirectX:
             return telemetry::Backend::DirectML;
 #endif
         case Profile::Auto:
@@ -151,7 +151,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     const auto profile_name = [](Profile p) -> const char* {
         switch (p) {
             case Profile::MIGraphX:  return "MIGraphX";
-            case Profile::DirectML:  return "DirectML";
+            case Profile::DirectX:   return "DirectX";
             case Profile::Hip:       return "Hip";
             case Profile::Eager:     return "Eager";
             case Profile::Optimized: return "Optimized";
@@ -187,8 +187,8 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     };
 
 #ifdef USE_DML
-    const auto create_directml_backend = [&] {
-        THROW_IF_ERROR(factory.CreateDirectMLBackend(local_session_options, logger, backend_ep_));
+    const auto create_directx_backend = [&] {
+        THROW_IF_ERROR(factory.CreateDirectXBackend(local_session_options, logger, backend_ep_));
         // DirectML manages its own per-session GPU allocator (DmlBucketizedBufferAllocator)
         // via EP-level CreateAllocator. Wire it now that we know the backend is DirectML.
         // MIGraphX allocators are handled at factory level — leave OrtEp::CreateAllocator null
@@ -299,9 +299,9 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
 
 #ifdef USE_DML
     if (effective == Profile::Eager) {
-        create_directml_backend();
-    } else if (effective == Profile::DirectML) {
-        create_directml_backend();
+        create_directx_backend();
+    } else if (effective == Profile::DirectX) {
+        create_directx_backend();
     } else if (effective == Profile::MIGraphX) {
         create_migraphx_backend();
     } else if (effective == Profile::Hip) {

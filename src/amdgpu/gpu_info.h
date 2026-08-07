@@ -15,7 +15,7 @@ enum class Profile {
     Eager,
     Optimized,
     MIGraphX,
-    DirectML,
+    DirectX,
     Hip
 };
 
