@@ -146,6 +146,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
         &dml_ep_factory_, 1, &factories_created));
 #endif
 
+#ifdef USE_MIGRAPHX
     THROW_IF_ERROR(LoadDynamicLibrary(migraphxBackend, &mgx_backend_));
     THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
         "ReleaseEpFactory", reinterpret_cast<void**>(&mgx_release_ep_factory_)));
@@ -162,6 +163,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
 
     THROW_IF_ERROR(mgx_create_ep_factories(kMIGraphXBackend, ort_api_base, default_logger,
         &mgx_ep_factory_, 1, &factories_created));
+#endif
 
     // hip (morphizen) backend: optional, only present when built with USE_HIP.
 #ifdef USE_HIP
@@ -201,9 +203,11 @@ ProviderFactory::~ProviderFactory() {
         /* TODO: log failure while unloading DirectML EP library */
     }
 #endif
+#ifdef USE_MIGRAPHX
     if (!UnloadDynamicLibrary(mgx_backend_).IsOK()) {
         /* TODO: log failure while unloading MIGraphX EP library */
     }
+#endif
     if (!UnloadDynamicLibrary(hip_backend_).IsOK()) {
         /* TODO: log failure while unloading hip EP library */
     }

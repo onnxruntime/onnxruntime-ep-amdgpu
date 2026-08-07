@@ -7,7 +7,9 @@
 #include "gpu_ep.h"
 
 #include "gpu_options.h"
+#ifdef USE_MIGRAPHX
 #include "mgx_options.h"
+#endif
 #include "gpu_routing_policy.h"  // select_backend, model_arch_hash, is_webnn
 #include "hip/utils.h"           // hipGetDeviceProperties for ASIC-based backend routing
 #include "common/env_var.h"      // ParseEnvironmentVariableWithDefault (routing trace)
@@ -208,6 +210,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     };
 
     const auto create_migraphx_backend = [&] {
+#ifdef USE_MIGRAPHX
         const auto get_name = [](const std::string_view sv) {
             return std::string{"ep."}.append(kMIGraphXBackend).append(".").append(sv);
         };
@@ -291,6 +294,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 info.static_pad_outputs.value().c_str()));
         }
         THROW_IF_ERROR(factory.CreateMIGraphXBackend(local_session_options, logger, backend_ep_));
+#endif
     };
 
     // Explicit profile is honored; Auto/Optimized derives from (ASIC, model_arch). select_backend()
@@ -311,7 +315,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     }
 #else
     // DirectML not built (e.g. Linux): DirectML/Eager profiles fall back to MIGraphX.
-    if (effective == Profile::Hip) {
+    if (true) {
         create_hip_backend();
     } else {
         create_migraphx_backend();
