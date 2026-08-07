@@ -5,6 +5,10 @@
 
 #include "common/plugin_ep_utils.h"
 
+#include <memory>
+#include <mutex>
+#include <vector>
+
 namespace dml_ep {
 
 class PluginDmlExecutionProviderImpl;
@@ -31,9 +35,23 @@ public:
     // the EP instance exists).
     void AttachFactoryEpRef(ExecutionProviderPlugin** ep_raw_ref);
 
+    // Register/unregister a live EP so CopyTensorsImpl can route each copy to the EP that owns the
+    // tensor's allocation (its own ExecutionContext/queue/fence), instead of a single cached
+    // provider. A shared DMLDataTransfer services multiple sessions, each with its own context.
+    void RegisterProvider(const std::shared_ptr<PluginDmlExecutionProviderImpl>& ep);
+    void UnregisterProvider(const PluginDmlExecutionProviderImpl* ep);
+
 private:
+    // Resolve the EP that owns a GPU tensor (by its allocation's owning allocator). Falls back to
+    // the attached provider when ownership can't be determined (e.g. CPU-only copy).
+    std::shared_ptr<PluginDmlExecutionProviderImpl> ResolveOwningProvider(
+        const OrtValue* const* src_tensors, OrtValue* const* dst_tensors, size_t num_tensors);
+
     std::shared_ptr<PluginDmlExecutionProviderImpl> m_executionProvider;
     ExecutionProviderPlugin** m_ep_raw_ref = nullptr; // non-owning ptr to factory's m_ep_raw
+
+    std::mutex m_providersMutex;
+    std::vector<std::shared_ptr<PluginDmlExecutionProviderImpl>> m_providers; // all live EPs
 };
 
 }  // namespace dml_ep

@@ -44,14 +44,21 @@ if(WIN32)
 endif()
 
 option(USE_AMDGPU "Build the AMD GPU Execution Provider" OFF)
-option(USE_DML "Build the DirectML Execution Provider" OFF)
+# DirectML is an optional backend and is Windows-only: default ON on Windows,
+# OFF elsewhere. Still overridable via -DUSE_DML.
+if(WIN32)
+    option(USE_DML "Build the DirectML Execution Provider" ON)
+else()
+    option(USE_DML "Build the DirectML Execution Provider" OFF)
+endif()
 option(USE_MIGRAPHX "Build the MIGraphX Execution Provider" OFF)
 option(USE_HIP "Build the HIP (morphizen) backend shim" OFF)
 
 if(USE_AMDGPU)
-    set(CACHE{USE_DML} TYPE BOOL FORCE VALUE ON)
+    # The AMDGPU wrapper always needs the MIGraphX backend, so force it on.
+    # DirectML stays optional and follows the platform default of USE_DML above.
     set(CACHE{USE_MIGRAPHX} TYPE BOOL FORCE VALUE ON)
-    set(CACHE{USE_HIP} TYPE BOOL FORCE VALUE OFF)
+    set(CACHE{USE_HIP} TYPE BOOL FORCE VALUE ON)
 endif()
 
 add_subdirectory(src)

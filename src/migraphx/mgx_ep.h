@@ -18,6 +18,7 @@
 
 #include "common/path_string.h"
 #include "common/plugin_ep_utils.h"
+#include "common/telemetry.h"
 #include "common/murmurhash3.h"
 
 #include "mgx_factory.h"
@@ -45,6 +46,7 @@ constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
 constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
 constexpr auto kCoalesceIO = "ORT_MIGRAPHX_COALESCE_IO"sv;
 constexpr auto kMlssUseSpecificOps = "ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS"sv;
+constexpr auto kCpuControlFlow = "ORT_MIGRAPHX_CPU_CONTROL_FLOW"sv;
 constexpr auto kModelArch = "ORT_MIGRAPHX_MODEL_ARCH"sv;
 constexpr auto kStaticPadSeq = "ORT_MIGRAPHX_STATIC_PAD_SEQ"sv;
 constexpr auto kStaticPadSeqLen = "ORT_MIGRAPHX_STATIC_PAD_SEQ_LEN"sv;
@@ -149,7 +151,9 @@ struct ComputeState {
     // down to the real token length afterwards.  Parsed once from the "name:axis"
     // specs into (parameter name -> token axis) maps.
     bool static_pad_seq{};
+    // Fallback target; the pad length normally comes from the attention mask (see Compute).
     std::size_t static_pad_seq_len{};
+    bool static_pad_seq_len_from_env{};  // set explicitly via env -> overrides the mask
     Map<int> static_pad_input_axes{};   // input param name -> token axis (inputs keep real names)
     // Outputs are program params named "#output_N", not their ONNX names, so the
     // slice must match on ORT output INDEX, not name.  Resolved from the user's
@@ -182,17 +186,8 @@ struct ComputeState {
     Map<ScratchBuffer> scratch_bufs{};
     // Captured graphs keyed by shape hash.
     Map<CapturedHipGraph> hip_graph_cache{};
-
-    // ── Binding / shape-hash fast-path caches ────────────────────────────────
-    // Staging parameter bindings keyed by shape hash (multi-entry, so alternating
-    // dynamic-batch buckets each keep their binding).  Invalidated by FreeStaging
-    // (staging pointers change) and per-hash on recompile.
-    Map<StagingBindResult> staging_bind_cache{};
-    // Last call's actual input shapes and their hash, for skipping the shape-compare
-    // and rehash loops when the shapes are unchanged from the previous Compute call.
-    std::vector<std::int64_t> last_input_shapes{};
-    hash::Value last_input_shapes_hash{};
-    bool has_last_input_shapes{};
+    // Host inputs (e.g. scalar alpha) staged to device before run_async.
+    Map<StagingBuffer> cpu_input_upload_bufs{};
 };
 
 struct EpContextComputeState {
@@ -226,6 +221,8 @@ struct ExecutionProvider : OrtEp, ApiPtrs {
         }
         return it->second;
     }
+
+    void CollectTelemetry(telemetry::BackendData& out) const noexcept;
 
 private:
     [[nodiscard]] const char* GetName() const noexcept;
@@ -288,6 +285,7 @@ private:
     std::string int8_calibration_table_name_{};
     fs::path external_data_dir_{};
     std::string compute_capability_{};
+    telemetry::BackendData backend_telemetry_{};
     bool context_embed_mode_{};
     bool context_enable_{};
     std::string context_node_name_prefix_{};
@@ -297,8 +295,10 @@ private:
     std::size_t max_dynamic_batch_{};
     std::string compile_batches_{};
     bool coalesce_io_enable_{};
+    bool cpu_control_flow_enable_{};
     bool static_pad_seq_{};
     std::size_t static_pad_seq_len_{};
+    bool static_pad_seq_len_from_env_{};  // set explicitly via env -> overrides the mask
     std::string static_pad_inputs_{};
     std::string static_pad_outputs_{};
 

@@ -4,9 +4,11 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstdio>
 #include <set>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 
 #include <gsl/span>
 
@@ -18,6 +20,7 @@
 #include "common/env_var.h"
 #include "common/murmurhash3.h"
 #include "common/ort_graph_to_proto.h"
+#include "common/telemetry.h"
 
 #include "hip/stream_support.h"
 
@@ -318,17 +321,19 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
     return false;
 }
 
-bool AllNodesAssignedToEp(const Ort::ConstGraph& graph, std::string_view ep_name) {
-    const auto nodes{graph.GetNodes()};
-    return !nodes.empty() && ranges::all_of(nodes,
-        [&ep_name](const Ort::ConstNode& node) { 
-            return node.GetName() == ep_name; 
-        });
-}
-
-bool IsNodeControlFlowOp(const Ort::ConstNode& node) {
-    const auto op_type{node.GetOperatorType()};
-    return op_type == "If" || op_type == "Loop" || op_type == "Scan";
+std::unordered_set<size_t> CollectCpuControlFlowBoundaryNodes(
+    const std::vector<Ort::ConstNode>& sorted_nodes)
+{
+    // If/Loop/Scan on CPU. Greater/Cast too so the bool condition is CPU-resident
+    std::unordered_set<size_t> boundary_nodes;
+    for (const auto& node : sorted_nodes) {
+        const auto op_type{node.GetOperatorType()};
+        if (op_type == "If" || op_type == "Loop" || op_type == "Scan" ||
+            op_type == "Greater" || op_type == "Cast") {
+            boundary_nodes.insert(node.GetId());
+        }
+    }
+    return boundary_nodes;
 }
 
 std::vector<std::vector<Ort::ConstNode>> GetPartitionedSubgraphs(const std::vector<Ort::ConstNode>& nodes,
@@ -352,6 +357,64 @@ std::vector<std::vector<Ort::ConstNode>> GetPartitionedSubgraphs(const std::vect
         subgraphs.emplace_back(subgraph);
     }
     return subgraphs;
+}
+
+Map<size_t> BuildInputNameIndices(const Ort::ConstGraph& graph, const Ort::ConstNode& fused_node) {
+    Map<size_t> input_name_indices;
+    size_t input_index{};
+    const auto add_input = [&](const Ort::ConstValueInfo& input) {
+        if (input == nullptr || input.IsConstantInitializer()) {
+            return;
+        }
+        if (input_name_indices.count(input.GetName()) != 0) {
+            return;
+        }
+        input_name_indices.emplace(input.GetName(), input_index++);
+    };
+    // KernelContext indices: fused boundary inputs, then graph inputs (branch feeds).
+    for (const auto& input : GetValueInfos(fused_node.GetInputs())) {
+        add_input(input);
+    }
+    for (const auto& input : GetValueInfos(graph.GetInputs())) {
+        add_input(input);
+    }
+    for (const auto& input : GetValueInfos(fused_node.GetImplicitInputs())) {
+        add_input(input);
+    }
+    return input_name_indices;
+}
+
+void* GetGpuInputData(ComputeState& cs, const Ort::KernelContext& ctx, const std::string& name,
+    size_t index, const migraphx::shape& prog_shape, hipStream_t stream)
+{
+    const auto input_tensor{ctx.GetInput(index)};
+    const auto mem{input_tensor.GetTensorMemoryInfo()};
+    if (mem.GetDeviceType() != OrtMemoryInfoDeviceType_CPU) {
+        return const_cast<void*>(input_tensor.GetTensorRawData());
+    }
+
+    const std::size_t bytes{prog_shape.bytes()};
+    auto& buf{cs.cpu_input_upload_bufs[name]};
+    if (buf.data == nullptr || buf.size_bytes < bytes) {
+        if (buf.data != nullptr) {
+            (void)hipFree(buf.data);
+        }
+        void* ptr{nullptr};
+        HIP_CALL_THROW(hipMalloc(&ptr, bytes));
+        buf.data = ptr;
+        buf.size_bytes = bytes;
+        buf.shape = prog_shape;
+    }
+
+    const void* src{input_tensor.GetTensorRawData()};
+    if (bytes > 0) {
+        if (stream != nullptr) {
+            HIP_CALL_THROW(hipMemcpyAsync(buf.data, src, bytes, hipMemcpyHostToDevice, stream));
+        } else {
+            HIP_CALL_THROW(hipMemcpy(buf.data, src, bytes, hipMemcpyHostToDevice));
+        }
+    }
+    return buf.data;
 }
 
 }  // namespace
@@ -452,6 +515,8 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     hip_graph_enable_ = info.hip_graph_enable;
     max_dynamic_batch_ = info.max_dynamic_batch;
     compile_batches_ = info.compile_batches;
+    coalesce_io_enable_ = info.coalesce_io;
+    cpu_control_flow_enable_ = info.cpu_control_flow;
     static_pad_seq_ = info.static_pad_seq;
     static_pad_seq_len_ = info.static_pad_seq_len;
     static_pad_inputs_ = info.static_pad_inputs;
@@ -479,10 +544,16 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
     PARSE_ENV_VAR(env_var::kStaticPadSeq, static_pad_seq_);
-    PARSE_ENV_VAR(env_var::kStaticPadSeqLen, static_pad_seq_len_);
+    // Not PARSE_ENV_VAR: we need to know whether the value was given, not just what it is.
+    if (const auto pad_len_env{ParseEnvironmentVariable<std::size_t>(env_var::kStaticPadSeqLen)};
+        pad_len_env.has_value()) {
+        static_pad_seq_len_ = pad_len_env.value();
+        static_pad_seq_len_from_env_ = true;
+    }
     PARSE_ENV_VAR(env_var::kStaticPadInputs, static_pad_inputs_);
     PARSE_ENV_VAR(env_var::kStaticPadOutputs, static_pad_outputs_);
     PARSE_ENV_VAR(env_var::kMlssUseSpecificOps, mlss_use_specific_ops_);
+    PARSE_ENV_VAR(env_var::kCpuControlFlow, cpu_control_flow_enable_);
     PARSE_ENV_VAR(env_var::kModelArch, model_arch_);
 
     // Per-architecture ops to force onto AMDMLSS.
@@ -517,6 +588,10 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
         } else {
             /* TODO: log invalid value for the compute mode - do not change it. */
         }
+    }
+
+    if (cpu_control_flow_enable_ && hip_graph_enable_) {
+        hip_graph_enable_ = false;
     }
 
     if (enable_fp16_ && enable_bf16_) {
@@ -577,6 +652,12 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
         }
 
     /* TODO: print configured options for the session */
+
+    // Register only after construction succeeds so the factory count is balanced
+    // by the destructor.
+    if (cpu_control_flow_enable_) {
+        factory_.EnableCpuControlFlow();
+    }
 }
 
 ExecutionProvider::~ExecutionProvider() {
@@ -622,6 +703,16 @@ ExecutionProvider::~ExecutionProvider() {
                 buf.data = nullptr;
             }
         }
+        for (auto& [param_name, buf] : cs.cpu_input_upload_bufs) {
+            if (buf.data != nullptr) {
+                (void)hipFree(buf.data);
+                buf.data = nullptr;
+            }
+        }
+    }
+
+    if (cpu_control_flow_enable_) {
+        factory_.DisableCpuControlFlow();
     }
 }
 
@@ -632,16 +723,16 @@ try {
         return STATUS_OK;
     }
 
-    // If this graph is a subgraph of a control flow op (If/Loop/Scan),
-    // do not claim its nodes separately. The parent op will be claimed
-    // by the outer graph's GetCapability and compiled with the original
-    // unfused subgraphs intact
+    // With cpu_control_flow, compile If/Loop/Scan branch bodies; ops in
+    // CollectCpuControlFlowBoundaryNodes stay on CPU.
     const auto parent_node = graph.GetParentNode();
-    if (parent_node) {
-        const auto parent_op_type = parent_node.GetOperatorType();
-        if (parent_op_type == "If" || parent_op_type == "Loop" || parent_op_type == "Scan") {
-            return STATUS_OK;
-        }
+    const bool in_control_flow_subgraph = parent_node &&
+        (parent_node.GetOperatorType() == "If" ||
+         parent_node.GetOperatorType() == "Loop" ||
+         parent_node.GetOperatorType() == "Scan");
+
+    if (!cpu_control_flow_enable_ && in_control_flow_subgraph) {
+        return STATUS_OK;
     }
 
     // Check if this graph contains EPContext nodes intended for this EP.
@@ -680,18 +771,16 @@ try {
     std::vector<Ort::ConstNode> supported_nodes, unsupported_nodes;
 
     const auto sorted_nodes{GetKahnsVariantTopologicalSortedNodes(graph)};
+    const std::unordered_set<size_t> cpu_boundary_nodes{
+        cpu_control_flow_enable_ && !in_control_flow_subgraph
+            ? CollectCpuControlFlowBoundaryNodes(sorted_nodes)
+            : std::unordered_set<size_t>{}};
+
     for (const auto& node : sorted_nodes) {
-        if (IsNodeControlFlowOp(node)) {
-            auto supported_control_flow = [this](const Ort::ConstNode& node) {
-                return ranges::all_of(node.GetSubgraphs(),
-                    [this](const Ort::AttrNameSubgraph& attr) {
-                        return AllNodesAssignedToEp(attr.sub_graph, ep_name_);
-                    });
-            };
-            // Subgraph nodes are processed in separate prior GetCapability calls.
-            // EP assignment of subgraph nodes cannot be verified through this API
-            // during the parent graph's GetCapability pass. Fall through to the
-            // normal op type check to let MIGraphX claim supported control flow ops.
+        if (cpu_control_flow_enable_ && !in_control_flow_subgraph &&
+            cpu_boundary_nodes.count(node.GetId()) != 0) {
+            unsupported_nodes.push_back(node);
+            continue;
         }
 
         bool are_types_supported{true};
@@ -720,15 +809,10 @@ try {
         const auto subgraphs{GetPartitionedSubgraphs(sorted_nodes, unsupported_nodes)};
         /* TODO: log unsupported nodes */
         for (const auto& subgraph : subgraphs) {
-            if (subgraph.size() == 1) {
-                RETURN_IF_STATUS(ep_api.EpGraphSupportInfo_AddSingleNode(graph_support_info,
-                    subgraph.front()));
-            } else {
-                OrtNodeFusionOptions node_fusion_options{ORT_API_VERSION, true};
-                RETURN_IF_STATUS(ep_api.EpGraphSupportInfo_AddNodesToFuse(graph_support_info,
-                    reinterpret_cast<const OrtNode* const*>(subgraph.data()), subgraph.size(),
-                    &node_fusion_options));
-            }
+            OrtNodeFusionOptions node_fusion_options{ORT_API_VERSION, true};
+            RETURN_IF_STATUS(ep_api.EpGraphSupportInfo_AddNodesToFuse(graph_support_info,
+                reinterpret_cast<const OrtNode* const*>(subgraph.data()), subgraph.size(),
+                &node_fusion_options));
         }
     }
     return STATUS_OK;
@@ -856,10 +940,15 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
 
 }  // namespace <anonymous>
 
+void ExecutionProvider::CollectTelemetry(telemetry::BackendData& out) const noexcept {
+    out = backend_telemetry_;
+}
+
 Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGraph& graph,
     const Ort::ConstNode& fused_node, const Map<size_t>& input_name_indices, const Map<size_t>& output_name_indices,
     const std::string& mxr_prefix, OrtNodeComputeInfo*& node_compute_info, OrtNode*& ep_context_node)
 {
+    bool loaded_from_cache = false;
     const auto sorted_nodes{GetKahnsVariantTopologicalSortedNodes(graph)};
     Ort::Graph sorted_graph{graph.GetGraphView(sorted_nodes)};
     ONNX_NAMESPACE::ModelProto model_proto{};
@@ -913,7 +1002,9 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         if (!effective_cache_dir.empty()) {
             mxr_path = effective_cache_dir / (mxr_prefix + input_shapes_hash_hex + ".mxr");
         }
-        if (force_recompile_ || !load_compiled_program(program, mxr_path)) {
+        loaded_from_cache = !force_recompile_ && load_compiled_program(program, mxr_path);
+        backend_telemetry_.loaded_from_cache = loaded_from_cache;
+        if (!loaded_from_cache) {
             const auto external_data_dir{external_data_dir_.empty() ?
                 model_path.parent_path() : external_data_dir_};
             onnx_options.set_external_data_path(external_data_dir.string());
@@ -980,6 +1071,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     compute_state.coalesce_io = coalesce_io_enable_;
     compute_state.static_pad_seq = static_pad_seq_;
     compute_state.static_pad_seq_len = static_pad_seq_len_;
+    compute_state.static_pad_seq_len_from_env = static_pad_seq_len_from_env_;
     if (static_pad_seq_) {
         // static-pad and dynamic batching both rewrite shapes; combined, the staging copies
         // collide. Unsupported together.
@@ -1055,16 +1147,18 @@ Ort::Status ExecutionProvider::Compile(const std::vector<Ort::ConstGraph>& graph
     const std::vector<Ort::ConstNode>& fused_nodes, gsl::span<OrtNodeComputeInfo*> node_compute_infos,
     gsl::span<OrtNode*> ep_context_nodes) noexcept
 try {
+    // Reset the backend-specific telemetry gathered for this compile. Generic
+    // fields (model, version, ...) are collected by the wrapper; here we only
+    // record what is specific to MIGraphX (gfx arch and MXR cache state).
+    backend_telemetry_.backend = telemetry::Backend::MIGraphX;
+    backend_telemetry_.has_gfx_arch = !compute_capability_.empty();
+    std::snprintf(backend_telemetry_.gfx_arch, sizeof(backend_telemetry_.gfx_arch),
+        "%s", compute_capability_.c_str());
+    backend_telemetry_.has_loaded_from_cache = true;
+    backend_telemetry_.loaded_from_cache = false;
+
     for (const auto& [graph, fused_node, node_compute_info, ep_context_node] : zip(graphs, fused_nodes, node_compute_infos, ep_context_nodes)) {
-        const auto inputs{GetValueInfos(fused_node.GetInputs())};
-        std::unordered_map<std::string, size_t> input_name_indices;
-        input_name_indices.reserve(inputs.size());
-        const auto initializers{graph.GetInitializers()};
-        for (const auto& [i, input] : enumerate(inputs)) {
-            if (!input.IsConstantInitializer()) {
-                input_name_indices.emplace(input.GetName(), i);
-            }
-        }
+        const auto input_name_indices{BuildInputNameIndices(graph, fused_node)};
         const auto outputs{GetValueInfos(fused_node.GetOutputs())};
         std::unordered_map<std::string, size_t> output_name_indices;
         output_name_indices.reserve(outputs.size());
@@ -1073,6 +1167,7 @@ try {
         }
 
         if (EpContextNodeReader::GraphHasContextNode(graph)) {
+            backend_telemetry_.loaded_from_cache = true;
             RETURN_IF_ERROR(CreateNodeComputeInfoFromCache(graph, fused_node, input_name_indices,
                 output_name_indices, node_compute_info));
         } else {
@@ -1133,14 +1228,9 @@ try {
     return Ort::Status{e.what(), ORT_EP_FAIL};
 }
 
-Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* /* run_options */, bool /* sync_stream */) noexcept {
-    // Nothing to synchronize here.  Compute runs on ORT's per-run device stream
-    // (created in CreateSyncStreamForDevice and handed to the kernel via
-    // GetGPUComputeStream()), and ORT flushes that stream at run end through
-    // DeviceStreamCollection::CleanUp -> SyncStream::Flush, honoring the run's
-    // sync_stream setting.  The previous implementation synchronized the EP's
-    // default stream, which never carried any compute work, so it was both
-    // incorrect and a redundant CPU/GPU serialization point.
+Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* /* run_options */, bool /* sync_stream */) noexcept
+try {
+    HIP_RETURN_IF_ERROR(hipSetDevice(device_id_));
     return STATUS_OK;
 }
 
@@ -1217,9 +1307,30 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // axis extent must be in (1, target).  decode (extent == 1) and already-max
     // prompts are left alone.  Inert when static_pad_seq_len == 0.
     StaticSeqContext seq{};
-    if (compute_state.static_pad_seq && compute_state.static_pad_seq_len > 0) {
-        const auto target{compute_state.static_pad_seq_len};
+    if (compute_state.static_pad_seq) {
+        // Take the target from the attention mask (axis 1; axis 0 is batch, scaled by num_beams).
+        // It carries the length the caller is really generating with, and is the same length it
+        // sized its KV cache to.  The configured value cannot be trusted here: for OGA it is
+        // config.search.max_length, read while the session is created, so a caller that sets
+        // max_length on GeneratorParams sets it too late for us and we would pad to the model's
+        // full context.  An explicit env value still wins; models with no mask keep the
+        // configured length.
+        static const std::string kAttentionMaskInput{"attention_mask"};
+        std::size_t target{compute_state.static_pad_seq_len};
+        if (not compute_state.static_pad_seq_len_from_env) {
+            if (const auto mask_it{input_name_indices.find(kAttentionMaskInput)};
+                mask_it != input_name_indices.end()) {
+                const auto mask_shape{
+                    kernel_context.GetInput(mask_it->second).GetTensorTypeAndShapeInfo().GetShape()};
+                if (mask_shape.size() > 1 && mask_shape[1] > 0) {
+                    target = static_cast<std::size_t>(mask_shape[1]);
+                }
+            }
+        }
         for (const auto& [name, axis] : compute_state.static_pad_input_axes) {
+            if (target == 0) {
+                break;  // nothing usable to pad to -> leave shapes untouched (inert, as before)
+            }
             const auto it{input_name_indices.find(name)};
             if (it == input_name_indices.end()) {
                 continue;
@@ -1374,7 +1485,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                         }
 
                         compile_params.add(name, migraphx::argument{param_shapes[name],
-                            const_cast<void*>(value.GetTensorRawData())});
+                            GetGpuInputData(compute_state, kernel_context, name, index, param_shapes[name], nullptr)});
                     }
                 }
             }
@@ -1417,7 +1528,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
-        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn);
+        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn, seq);
         // Item 3: reuse a cached binding for this shape hash.  Staging buffers and
         // scratch are pointer-stable until FreeStaging, so binding once and replaying
         // avoids re-doing N program_parameters.add() calls, string work, and a
@@ -1431,7 +1542,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         auto& bind{bind_it->second};
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
             bind.params, bind.prog_output_indices, shape_hash, dyn);
-        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn);
+        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn, seq);
         // No per-Compute sync: all work above is enqueued on ORT's compute stream,
         // which ORT flushes at run end (DeviceStreamCollection::CleanUp ->
         // SyncStream::Flush) honoring the run's sync_stream setting.  Cross-stream
@@ -1443,23 +1554,25 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     migraphx::program_parameters compute_params;
     auto output_shapes{program.get_output_shapes()};
     std::vector<size_t> output_indices;
+    HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
+    const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
     if (param_shapes.size() > 0) {
         for (std::string name : param_shapes.names()) {
             if (input_name_indices.count(name) > 0) {
                 const auto index{input_name_indices.at(name)};
                 auto input_tensor{kernel_context.GetInput(index)};
                 auto tensor_info{input_tensor.GetTensorTypeAndShapeInfo()};
-                auto tensor_shape{tensor_info.GetShape()};
                 auto tensor_type{tensor_info.GetElementType()};
 
                 migraphx_shape_datatype_t datatype;
                 GetMIGraphXType(tensor_type, datatype);
 
-                if (auto prog_shape{param_shapes[name.c_str()]}; datatype != prog_shape.type()) {
+                const auto prog_shape{param_shapes[name.c_str()]};
+                if (datatype != prog_shape.type()) {
                     throw std::runtime_error{"NodeComputeInfo::Compute(): tensor parameter type mismatch"};
                 }
-                compute_params.add(name.c_str(), migraphx::argument{param_shapes[name.c_str()],
-                    const_cast<void*>(input_tensor.GetTensorRawData())});
+                void* input_data{GetGpuInputData(compute_state, kernel_context, name, index, prog_shape, hip_stream)};
+                compute_params.add(name.c_str(), migraphx::argument{prog_shape, input_data});
             } else {
                 // it is an output argument
                 constexpr std::string_view name_prefix{"#output_"};
@@ -1475,6 +1588,9 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                     void* output_data{output_tensor.GetTensorMutableRawData()};
                     auto argument_shape{param_shapes[name.c_str()]};
                     compute_params.add(name.c_str(), migraphx::argument{argument_shape, output_data});
+                } else {
+                    return Ort::Status{MakeString("NodeComputeInfo::Compute(): unbound program parameter '",
+                        name, "'").c_str(), ORT_EP_FAIL};
                 }
             }
         }
@@ -1482,8 +1598,6 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     {
         std::lock_guard lock{compute_state.mutex};
 
-        HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
-        auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
         // Enqueue only; ORT flushes the compute stream at run end (see OnRunEnd).
 
@@ -1563,6 +1677,9 @@ try {
                     void* output_data{output_tensor.GetTensorMutableRawData()};
                     auto argument_shape{param_shapes[name.c_str()]};
                     compute_params.add(name.c_str(), migraphx::argument{argument_shape, output_data});
+                } else {
+                    return Ort::Status{MakeString("EpContextNodeComputeInfo::Compute(): unbound program parameter '",
+                        name, "'").c_str(), ORT_EP_FAIL};
                 }
             }
         }
@@ -1599,3 +1716,14 @@ try {
 }
 
 }  // namespace mgx_ep
+
+// Telemetry collector exported for the amdgpu wrapper. The wrapper resolves this
+// by symbol (see telemetry::kGetBackendDataSymbol) and calls it with a live
+// backend EP to pull MIGraphX-specific telemetry.
+extern "C" bool GetBackendTelemetry(const OrtEp* ep, telemetry::BackendData* out) noexcept {
+    if (ep == nullptr || out == nullptr) {
+        return false;
+    }
+    static_cast<const mgx_ep::ExecutionProvider*>(ep)->CollectTelemetry(*out);
+    return true;
+}

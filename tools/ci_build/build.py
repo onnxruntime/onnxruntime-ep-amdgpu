@@ -181,8 +181,10 @@ def _generate_build_tree(cmake_path: Path, source_dir: Path, build_dir: Path, cm
         if _is_linux() and ('Ninja' in args.cmake_generator or 'Unix' in args.cmake_generator):
             cmake_args += ['-DCMAKE_CXX_COMPILER_LAUNCHER=ccache', '-DCMAKE_C_COMPILER_LAUNCHER=ccache']
 
-    if _is_windows():
-        cmake_args += ['-DUSE_DML=' + ('ON' if args.use_dml else 'OFF')]
+    # Always pass USE_DML explicitly so a stale CMakeCache (e.g. from an older
+    # USE_AMDGPU build that forced USE_DML ON) cannot keep DirectML enabled on Linux.
+    use_dml = getattr(args, 'use_dml', False)
+    cmake_args += ['-DUSE_DML=' + ('ON' if use_dml else 'OFF')]
 
     cmake_args += [
         '-DUSE_AMDGPU=' + ('ON' if args.use_amdgpu else 'OFF'),
@@ -730,8 +732,12 @@ def main():
             if getattr(args, flag, False):
                 wheel_ep_dirs.append(ep_dir)
 
+    if not hasattr(args, 'use_dml'):
+        args.use_dml = False
     if args.use_amdgpu:
-        args.use_dml = args.use_migraphx = True
+        args.use_migraphx = True
+        # DirectML is Windows-only; on Linux the AMDGPU wrapper uses MIGraphX only.
+        args.use_dml = _is_windows()
 
     # Default behavior when no action flags are specified
     if not args.update and not args.build and not args.clean:
@@ -773,16 +779,18 @@ def main():
         onnxrt_home = args.onnxrt_home
 
     cmake_prefix_path = []
+    if args.use_migraphx and migraphx_home is not None:
+        migraphx_home = Path(migraphx_home) if not isinstance(migraphx_home, Path) else migraphx_home
+        # Prefer the explicitly requested MIGraphX install over the copy bundled in ROCm.
+        cmake_prefix_path += [migraphx_home]
+        cmake_extra_defines += [f'migraphx_DIR={migraphx_home / "lib" / "cmake" / "migraphx"}']
+
     if args.hip_path is not None:
         cmake_prefix_path += [args.hip_path]
 
     if onnxrt_home is not None:
         cmake_prefix_path += [
             Path(onnxrt_home) if not isinstance(onnxrt_home, Path) else onnxrt_home]
-
-    if args.use_migraphx and migraphx_home is not None:
-        cmake_prefix_path += [
-            Path(migraphx_home) if not isinstance(migraphx_home, Path) else migraphx_home]
 
     with _build_environment(vs_version=vs_version):
         log.info("Build started")

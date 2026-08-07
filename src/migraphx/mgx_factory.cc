@@ -6,6 +6,7 @@
 #include <windows.h>
 #endif
 
+#include "common/env_var.h"
 #include "common/parse_string.h"
 #include "common/plugin_ep_utils.h"
 
@@ -243,7 +244,11 @@ try {
 }
 
 bool ProviderFactory::IsStreamAware() const {
-    return true;
+    if (cpu_control_flow_session_count_.load(std::memory_order_relaxed) != 0) {
+        return false;
+    }
+    const auto cc{platform::GetEnvironmentVar(env_var::kCpuControlFlow)};
+    return cc != "1" && cc != "true" && cc != "True";
 }
 
 Ort::Status ProviderFactory::CreateSyncStreamForDevice(const OrtMemoryDevice* memory_device,
