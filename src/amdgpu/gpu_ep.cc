@@ -50,6 +50,8 @@ namespace {
 
 telemetry::Backend BackendForProfile(Profile profile) noexcept {
     switch (profile) {
+        case Profile::Hip:
+            return telemetry::Backend::Hip;
 #ifdef USE_DML
         case Profile::Eager:
         case Profile::DirectML:
