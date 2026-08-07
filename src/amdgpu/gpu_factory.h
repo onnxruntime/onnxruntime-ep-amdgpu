@@ -29,12 +29,14 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
 #endif
     }
 
+#ifdef USE_MIGRAPHX
     Ort::Status CreateMIGraphXBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
         RETURN_IF_ERROR(mgx_ep_factory_->CreateEp(mgx_ep_factory_, nullptr, nullptr, 0, session_options, logger, &ep));
         backend_ep_factory_ = mgx_ep_factory_;
         backend_get_telemetry_ = mgx_get_telemetry_;
         return STATUS_OK;
     }
+#endif
 
     Ort::Status CreateHipBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
         // null when not built with hip support.
@@ -119,11 +121,13 @@ private:
     telemetry::GetBackendDataFn dml_get_telemetry_{};
 #endif
 
+#ifdef USE_MIGRAPHX
     void* mgx_backend_{};
     ReleaseEpFactory_t mgx_release_ep_factory_{};
 
     OrtEpFactory* mgx_ep_factory_{};
     telemetry::GetBackendDataFn mgx_get_telemetry_{};
+#endif
 
     void* hip_backend_{};
     ReleaseEpFactory_t hip_release_ep_factory_{};

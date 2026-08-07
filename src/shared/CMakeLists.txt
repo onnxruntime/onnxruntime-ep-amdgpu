@@ -49,7 +49,7 @@ endif()
 target_include_directories(plugin-ep-utils PUBLIC
         ${CMAKE_CURRENT_LIST_DIR} ${CMAKE_CURRENT_LIST_DIR}/common)
 
-if(USE_HIPDNN OR USE_MIGRAPHX OR USE_ROCM)
+if(USE_HIP OR USE_HIPDNN OR USE_MIGRAPHX OR USE_ROCM)
 
     add_library(hip-shared STATIC
         hip/allocator.cc

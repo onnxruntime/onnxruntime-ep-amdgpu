@@ -57,7 +57,7 @@ option(USE_HIP "Build the HIP (morphizen) backend shim" OFF)
 if(USE_AMDGPU)
     # The AMDGPU wrapper always needs the MIGraphX backend, so force it on.
     # DirectML stays optional and follows the platform default of USE_DML above.
-    set(CACHE{USE_MIGRAPHX} TYPE BOOL FORCE VALUE ON)
+    set(CACHE{USE_MIGRAPHX} TYPE BOOL FORCE VALUE OFF)
     set(CACHE{USE_HIP} TYPE BOOL FORCE VALUE ON)
 endif()
 
