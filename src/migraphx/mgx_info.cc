@@ -111,6 +111,7 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kStaticPadSeqLen, static_pad_seq_len)
             .AddAssignmentToReference(provider_option::kCoalesceIO, coalesce_io)
             .AddAssignmentToReference(provider_option::kMlssUseSpecificOps, mlss_use_specific_ops)
+            .AddAssignmentToReference(provider_option::kCpuControlFlow, cpu_control_flow)
             .AddAssignmentToReference(provider_option::kModelArch, model_arch)
             .Parse(ApplyLegacyOptionAliases(provider_options)));
 }

@@ -39,6 +39,7 @@ struct ProviderInfo {
     std::size_t max_dynamic_batch{};
     std::string compile_batches{};
     bool coalesce_io{};
+    bool cpu_control_flow{};
     bool static_pad_seq{};
     std::size_t static_pad_seq_len{};
     std::string static_pad_inputs{};

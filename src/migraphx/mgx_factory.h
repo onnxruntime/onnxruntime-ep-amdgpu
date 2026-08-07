@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <string_view>
 #include <gsl/gsl>
 
@@ -17,6 +18,14 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
     ProviderFactory(const ApiPtrs& api_ptrs, const char* ep_name, const Ort::Logger& default_logger);
 
     Ort::Status GetKernelRegistry(std::string_view ep_name, const OrtKernelRegistry*& kernel_registry) const;
+
+    void EnableCpuControlFlow() const {
+        cpu_control_flow_session_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void DisableCpuControlFlow() const {
+        cpu_control_flow_session_count_.fetch_sub(1, std::memory_order_relaxed);
+    }
 
 private:
     [[nodiscard]] const char* GetName() const;
@@ -75,6 +84,9 @@ private:
     AllocatorMap<hip::Allocator> gpu_allocators_;
 
     std::unique_ptr<hip::DataTransfer> data_transfer_;
+
+    // Number of live sessions using cpu_control_flow.
+    mutable std::atomic_size_t cpu_control_flow_session_count_{0};
 };
 
 }  // namespace mgx_ep

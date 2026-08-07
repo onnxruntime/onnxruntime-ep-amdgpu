@@ -46,6 +46,7 @@ constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
 constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
 constexpr auto kCoalesceIO = "ORT_MIGRAPHX_COALESCE_IO"sv;
 constexpr auto kMlssUseSpecificOps = "ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS"sv;
+constexpr auto kCpuControlFlow = "ORT_MIGRAPHX_CPU_CONTROL_FLOW"sv;
 constexpr auto kModelArch = "ORT_MIGRAPHX_MODEL_ARCH"sv;
 constexpr auto kStaticPadSeq = "ORT_MIGRAPHX_STATIC_PAD_SEQ"sv;
 constexpr auto kStaticPadSeqLen = "ORT_MIGRAPHX_STATIC_PAD_SEQ_LEN"sv;
@@ -185,17 +186,8 @@ struct ComputeState {
     Map<ScratchBuffer> scratch_bufs{};
     // Captured graphs keyed by shape hash.
     Map<CapturedHipGraph> hip_graph_cache{};
-
-    // ── Binding / shape-hash fast-path caches ────────────────────────────────
-    // Staging parameter bindings keyed by shape hash (multi-entry, so alternating
-    // dynamic-batch buckets each keep their binding).  Invalidated by FreeStaging
-    // (staging pointers change) and per-hash on recompile.
-    Map<StagingBindResult> staging_bind_cache{};
-    // Last call's actual input shapes and their hash, for skipping the shape-compare
-    // and rehash loops when the shapes are unchanged from the previous Compute call.
-    std::vector<std::int64_t> last_input_shapes{};
-    hash::Value last_input_shapes_hash{};
-    bool has_last_input_shapes{};
+    // Host inputs (e.g. scalar alpha) staged to device before run_async.
+    Map<StagingBuffer> cpu_input_upload_bufs{};
 };
 
 struct EpContextComputeState {
@@ -303,6 +295,7 @@ private:
     std::size_t max_dynamic_batch_{};
     std::string compile_batches_{};
     bool coalesce_io_enable_{};
+    bool cpu_control_flow_enable_{};
     bool static_pad_seq_{};
     std::size_t static_pad_seq_len_{};
     bool static_pad_seq_len_from_env_{};  // set explicitly via env -> overrides the mask
