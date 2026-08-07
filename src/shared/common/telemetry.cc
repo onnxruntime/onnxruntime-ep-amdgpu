@@ -47,6 +47,8 @@ std::string_view ToString(Backend backend) noexcept {
             return "DirectML";
         case Backend::MIGraphX:
             return "MIGraphX";
+        case Backend::Hip:
+            return "Hip";
         case Backend::Unknown:
             break;
     }
