@@ -27,6 +27,7 @@ enum class Backend : int {
     Unknown = 0,
     DirectML = 1,
     MIGraphX = 2,
+    Hip = 3,
 };
 
 std::string_view ToString(Backend backend) noexcept;
