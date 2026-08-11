@@ -326,11 +326,12 @@ void ProviderFactory::ReleaseAllocator(OrtAllocator*) const {
 }
 
 Ort::Status ProviderFactory::CreateDataTransfer(OrtDataTransferImpl** data_transfer) {
-    // Per-session: hand ORT a fresh DataTransfer bound to the backend this session
-    // selected (GetBackendFactory() reflects the CreateEp that just ran; it is null at
-    // library-registration time, yielding an inert instance). ORT owns it and calls
-    // Release (which deletes it) at session teardown.
-    *data_transfer = std::make_unique<DataTransfer>(*this, GetBackendFactory()).release();
+    // ORT calls this once per session (after that session's CreateEp) and once per
+    // factory at library-registration time, before any backend has been selected. The
+    // registration-time instance is the one behind the env-level OrtApi::CopyTensors,
+    // so DataTransfer resolves its backend lazily rather than at construction.
+    // ORT owns each instance and calls Release (which deletes it) at teardown.
+    *data_transfer = std::make_unique<DataTransfer>(*this).release();
     return STATUS_OK;
 }
 
