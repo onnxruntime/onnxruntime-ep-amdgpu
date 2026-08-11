@@ -48,7 +48,7 @@ DML_TENSOR_DATA_TYPE OnnxDtypeToDml(ONNXTensorElementDataType onnx_dtype) {
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:  return DML_TENSOR_DATA_TYPE_UINT16;
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:  return DML_TENSOR_DATA_TYPE_UINT32;
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:  return DML_TENSOR_DATA_TYPE_UINT64;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:   return DML_TENSOR_DATA_TYPE_UINT32;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:   return DML_TENSOR_DATA_TYPE_UINT8;
     default: return DML_TENSOR_DATA_TYPE_UNKNOWN;
     }
 }
@@ -722,6 +722,61 @@ static std::optional<TranslatedOp> TranslateIsInf(
     result.output_tensor_descs.resize(1);
     result.desc_storage = storage;
     result.op_desc = { DML_OPERATOR_ELEMENT_WISE_IS_INFINITY, &storage->desc };
+    result.fixup = [storage](TranslatedOp& self) {
+        RebuildTensorDescPointers(self);
+        storage->desc.InputTensor  = &self.input_tensor_descs[0];
+        storage->desc.OutputTensor = &self.output_tensor_descs[0];
+    };
+    result.FixupPointers();
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// IsNaN → DML_OPERATOR_ELEMENT_WISE_IS_NAN
+//
+// Predicate op: per the ONNX and DML specs, the input is always a float type
+// and the output is always bool (UINT8). The generic unary-activation template
+// assumes output dtype == input dtype, which is wrong here and makes DML reject
+// CreateOperator with E_INVALIDARG. So this dedicated translator hardcodes the
+// UINT8 output, mirroring TranslateIsInf. The desc has no attributes.
+// ---------------------------------------------------------------------------
+
+static std::optional<TranslatedOp> TranslateIsNaN(
+    const OrtApi& ort_api,
+    const OrtNode* node,
+    const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
+    const std::unordered_map<std::string, const OrtValue*>&) {
+    auto inputs = GetInputNames(ort_api, node);
+    auto outputs = GetOutputNames(ort_api, node);
+    if (inputs.empty() || outputs.empty()) return std::nullopt;
+
+    auto* in_info = LookupShape(value_shapes, inputs[0]);
+    if (!in_info) return std::nullopt;
+
+    // Spec guarantee: IsNaN input must be a floating-point type.
+    if (in_info->data_type != DML_TENSOR_DATA_TYPE_FLOAT16 &&
+        in_info->data_type != DML_TENSOR_DATA_TYPE_FLOAT32 &&
+        in_info->data_type != DML_TENSOR_DATA_TYPE_FLOAT64) {
+        return std::nullopt;
+    }
+
+    auto in_tensor  = MakeTensorInfo(in_info->sizes, in_info->data_type);
+    auto out_tensor = MakeTensorInfo(in_info->sizes, DML_TENSOR_DATA_TYPE_UINT8);
+
+    struct IsNaNStorage {
+        DML_ELEMENT_WISE_IS_NAN_OPERATOR_DESC desc{};
+    };
+    auto storage = std::make_shared<IsNaNStorage>();
+
+    TranslatedOp result;
+    result.input_tensors = { in_tensor };
+    result.output_tensors = { out_tensor };
+    result.input_buffer_descs = { in_tensor.ToBufferDesc() };
+    result.input_tensor_descs.resize(1);
+    result.output_buffer_descs = { out_tensor.ToBufferDesc() };
+    result.output_tensor_descs.resize(1);
+    result.desc_storage = storage;
+    result.op_desc = { DML_OPERATOR_ELEMENT_WISE_IS_NAN, &storage->desc };
     result.fixup = [storage](TranslatedOp& self) {
         RebuildTensorDescPointers(self);
         storage->desc.InputTensor  = &self.input_tensor_descs[0];
@@ -9792,7 +9847,7 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["Atan"]       = TranslateUnaryActivation<DML_ELEMENT_WISE_ATAN_OPERATOR_DESC,          DML_OPERATOR_ELEMENT_WISE_ATAN>;
     registry["Atanh"]      = TranslateUnaryActivation<DML_ELEMENT_WISE_ATANH_OPERATOR_DESC,         DML_OPERATOR_ELEMENT_WISE_ATANH>;
     registry["BitwiseNot"] = TranslateUnaryActivation<DML_ELEMENT_WISE_BIT_NOT_OPERATOR_DESC,       DML_OPERATOR_ELEMENT_WISE_BIT_NOT>;
-    registry["IsNaN"]      = TranslateUnaryActivation<DML_ELEMENT_WISE_IS_NAN_OPERATOR_DESC,        DML_OPERATOR_ELEMENT_WISE_IS_NAN>;
+    registry["IsNaN"]      = TranslateIsNaN;
     registry["Softsign"]   = TranslateUnaryActivation<DML_ACTIVATION_SOFTSIGN_OPERATOR_DESC,        DML_OPERATOR_ACTIVATION_SOFTSIGN>;
 
     // Dropout = identity at inference
