@@ -30,6 +30,9 @@ Allocator::~Allocator() {
     }
 }
 
+// Always lazy — deliberately unlike DataTransfer, which freezes its per-session instance.
+// Allocators are factory-owned and shared across sessions, so there is no single session's
+// backend to pin to; freezing would bind every later session to the first one selected.
 OrtAllocator* Allocator::GetBackendAllocator() const noexcept {
     const auto backend_factory{factory_.GetBackendFactory()};
     if (backend_factory == nullptr) {

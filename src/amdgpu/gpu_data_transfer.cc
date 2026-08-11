@@ -28,11 +28,23 @@ DataTransfer::DataTransfer(const ProviderFactory& factory)
         API_CALL_S(DataTransfer, this_, CopyTensors, src_tensors, dst_tensors, streams, num_tensors);
     };
 
-    // The backend is resolved on first use, not here: this constructor also runs at
-    // library-registration time, before any backend has been selected.
+    // A backend here means we are the per-session instance (see header): freeze on it, so
+    // a later session overwriting the process-global slot cannot redirect this session's
+    // copies. No backend means the registration-time instance: stay lazy.
+    //
+    // frozen_ is still false, so this call takes the lazy path and populates
+    // backend_data_transfer_ before we freeze on the result. Two statements to keep that
+    // ordering explicit. A failed CreateDataTransfer leaves frozen_ false, so the instance
+    // retries later instead of latching the failure.
+    const bool backend_already_selected{GetBackendDataTransfer() != nullptr};
+    frozen_ = backend_already_selected;
 }
 
 OrtDataTransferImpl* DataTransfer::GetBackendDataTransfer() const noexcept {
+    if (frozen_) {
+        // Pinned to this session's own backend; the global slot may since have changed.
+        return backend_data_transfer_;
+    }
     const auto backend_factory{factory_.GetBackendFactory()};
     if (backend_factory == nullptr) {
         // No backend selected yet (e.g. called before any CreateEp). Not an error —

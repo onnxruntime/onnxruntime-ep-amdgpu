@@ -11,14 +11,15 @@ struct ProviderFactory;
 
 struct DataTransfer : OrtDataTransferImpl {
     DataTransfer() = delete;
-    // The backend is resolved lazily, on first use, and re-resolved if the selected
-    // backend changes (e.g. profile switch) — see GetBackendDataTransfer.
+    // ORT creates one instance per session (after that session's CreateEp) and one per
+    // factory at library registration (before any CreateEp). These need opposite
+    // behaviour, so the constructor branches on whether a backend exists yet:
     //
-    // Lazy is required, not merely convenient: ORT creates a DataTransfer per session
-    // (CreateDataTransfer -> GetDataTransfer) *and* one per factory at library
-    // registration time, before any CreateEp has run. That registration-time instance
-    // is the only one reachable from the env-level OrtApi::CopyTensors, so resolving
-    // the backend in the constructor leaves that path permanently broken.
+    //  - backend selected -> per-session: snapshot and freeze. Re-resolving would follow
+    //    ProviderFactory's process-global slot into a *later* session's backend.
+    //  - no backend -> registration-time instance, the only one the env-level
+    //    OrtApi::CopyTensors can reach. Stay lazy; resolving here breaks it permanently.
+    //
     // ORT owns each instance and Releases (deletes) it at teardown.
     explicit DataTransfer(const ProviderFactory& factory);
 
@@ -29,9 +30,15 @@ private:
     [[nodiscard]] Ort::Status CopyTensors(const OrtValue** src_tensors,
         OrtValue** dst_tensors, OrtSyncStream** streams, size_t num_tensors) const noexcept;
 
-    // Returns the backend's data transfer, re-querying it if the selected backend
-    // changed (e.g. profile switch). Null until a backend has been selected.
+    // Returns the backend's data transfer. When frozen_, the snapshot taken in the
+    // constructor. Otherwise re-queried if the selected backend changed (e.g. profile
+    // switch), and null until a backend has been selected.
     OrtDataTransferImpl* GetBackendDataTransfer() const noexcept;
+
+    // True when a backend already existed at construction — i.e. the per-session
+    // instance. Not mutable: written only in the constructor, by design. The decision
+    // belongs there, not in the const GetBackendDataTransfer().
+    bool frozen_{};
 
     mutable OrtEpFactory* backend_factory_{};
     mutable OrtDataTransferImpl* backend_data_transfer_{};
