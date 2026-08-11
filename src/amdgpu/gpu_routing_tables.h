@@ -3,9 +3,9 @@
 
 #pragma once
 
-// Routing DATA for the AMD GPU umbrella EP, Auto profile — the two tables maintainers edit:
+// Routing DATA for the AMD GPU umbrella EP, Auto profile:
 //   kLlmModelArch     : model_arch families treated as LLMs (no arch bucket reads this today)
-//   kArchModelBackend : per-(gfx prefix, model_arch) backend overrides (grows large over time)
+//   kArchModelBackend : generated per-(gfx prefix, model_arch) backend overrides
 // Kept in its own header so the growable tables live in one small, self-contained file. The pure
 // decision logic that consumes them is in gpu_routing_policy.h; the EP-side glue is in gpu_ep.cc.
 //
@@ -17,6 +17,7 @@
 #include <string_view>
 
 #include "gpu_info.h"  // Profile
+#include "gpu_routing_signatures.h"
 
 namespace gpu_ep {
 
@@ -53,17 +54,9 @@ constexpr std::array<std::uint64_t, 5> kLlmModelArch{{
     fnv1a("llm"),
 }};
 
-// (2) Per-(arch, model) backend override. Highest priority in Auto mode: a matching row wins over the
-//     arch defaults. This is the hook for specific GPU + model combinations (e.g. a customer model that
-//     must pin to a backend on a given ASIC). Empty today; expected to grow.
-//     TO ADD AN OVERRIDE: add a row `{"gfxNNNN", fnv1a("normalized_name"), Profile::X}` (and bump size).
-struct arch_model_backend {
-    std::string_view arch_prefix;   // gfx-name prefix, e.g. "gfx1201"
-    std::uint64_t model_arch_hash;  // fnv1a of normalized model_arch
-    Profile backend;
-};
-constexpr std::array<arch_model_backend, 0> kArchModelBackend{};
-
+// (2) Per-(arch, model_arch) backend overrides. Highest priority in Auto mode: a matching row wins over
+//     the architecture defaults. ModelBench temporarily supplies a content SHA prefix as model_arch;
+//     model_arch_hash() normalizes and hashes it exactly like semantic values such as "llama".
 static_assert([] {
     for (const auto h : kLlmModelArch) if (h == kNoModelArch) return false;
     return true;
