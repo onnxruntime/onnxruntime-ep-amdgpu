@@ -927,8 +927,13 @@ static bool ReadRuntimeShape(
     size_t elem_size = (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) ? 2 : 4;
     out_sizes.resize(rank);
     for (size_t i = 0; i < rank; ++i)
-        out_sizes[i] = static_cast<uint32_t>(dims[i] > 0 ? dims[i] : 1);
-    out_bytes = static_cast<uint64_t>(elem_count * elem_size);
+        // Preserve a genuine 0 dim (empty tensor) so the caller can detect it and
+        // no-op — DML descriptors can't represent a zero-sized dim. Only a
+        // symbolic/dynamic dim (< 0) is clamped to a 1 placeholder.
+        out_sizes[i] = static_cast<uint32_t>(dims[i] >= 0 ? dims[i] : 1);
+    // DML requires TotalTensorSizeInBytes to be DWORD-aligned (multiple of 4).
+    uint64_t raw = static_cast<uint64_t>(elem_count * elem_size);
+    out_bytes = (raw + 3u) & ~uint64_t(3u);
     return true;
 }
 
@@ -995,8 +1000,13 @@ static OrtStatus* ORT_API_CALL FusedMatMul_Compute(
         b_sizes = state->initializer_sizes;
     }
 
+    // Empty input (0-sized dim, e.g. from a data-dependent branch): DML can't
+    // build a descriptor for it, so no-op the way ORT's DML EP does. Compile,
+    // recompile, and execute are skipped; the empty output is still allocated
+    // below for downstream consumers.
+    bool inputs_empty = (a_bytes == 0 || b_bytes == 0);
 
-    if (!state->initialized) {
+    if (!state->initialized && !inputs_empty) {
         std::lock_guard<std::mutex> lock(state->init_mutex);
         if (!state->initialized) {
             DML_PERF_LOG("[FusedMatMul] Compute: lazy-init A=", SizesToString(a_sizes),
@@ -1019,7 +1029,7 @@ static OrtStatus* ORT_API_CALL FusedMatMul_Compute(
 
     const FusedMatMulCompiledKernel* active_kernel = &state->kernel;
     FusedMatMulCompiledKernel temp_kernel;
-    if (a_sizes != state->compiled_a_sizes || b_sizes != state->compiled_b_sizes) {
+    if (!inputs_empty && (a_sizes != state->compiled_a_sizes || b_sizes != state->compiled_b_sizes)) {
         DML_PERF_LOG("[FusedMatMul] Compute: shape change A=", SizesToString(a_sizes),
                      " B=", SizesToString(b_sizes));
         temp_kernel = CompileFusedMatMulDml(
@@ -1067,6 +1077,11 @@ static OrtStatus* ORT_API_CALL FusedMatMul_Compute(
         if (st || !c_value) { if (st) api.ReleaseStatus(st);
             return api.CreateStatus(ORT_FAIL, "FusedMatMul: failed to get output"); }
     }
+
+    // Empty input → empty output: output OrtValue is allocated above; skip the
+    // DML bind/execute entirely and return success (ORT DML EP no-op).
+    if (inputs_empty)
+        return nullptr;
 
     auto get_resource = [&](const OrtValue* value) -> ID3D12Resource* {
         void* raw = nullptr;

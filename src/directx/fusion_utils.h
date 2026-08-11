@@ -28,6 +28,24 @@ std::vector<std::string> GetNodeInputNames(const OrtApi& api, const OrtNode* nod
 std::vector<std::string> GetNodeOutputNames(const OrtApi& api, const OrtNode* node);
 
 // ---------------------------------------------------------------------------
+// Empty-tensor detection
+// ---------------------------------------------------------------------------
+
+// Returns true if the node has an empty (extent-0) edge that DML cannot
+// represent inside a compiled graph: any output with a zero-sized dim, or any
+// input with a zero-sized dim that is NOT a constant initializer. A constant
+// initializer input is exempt — it is consumed at compile time and never
+// becomes a runtime DML edge (e.g. Resize's empty roi input).
+//
+// Used both to split Tier-0 partitions at an empty-tensor boundary (group
+// formation) and to reject a partition outright (ValidateTier0). Reads only
+// static ORT shape metadata; a dim ORT reports as dynamic (< 0) is not empty.
+bool NodeHasEmptyEdge(
+    const OrtApi& api,
+    const OrtNode* node,
+    const std::unordered_map<std::string, const OrtValue*>& initializers);
+
+// ---------------------------------------------------------------------------
 // Initializer helpers
 // ---------------------------------------------------------------------------
 
