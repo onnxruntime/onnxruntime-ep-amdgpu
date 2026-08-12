@@ -52,7 +52,7 @@ else()
     option(USE_DML "Build the DirectML Execution Provider" OFF)
 endif()
 option(USE_MIGRAPHX "Build the MIGraphX Execution Provider" OFF)
-option(USE_HIP "Build the HIP (morphizen) backend shim" OFF)
+option(USE_HIP "Build the HIP (morphizen) backend shim" ON)
 
 if(USE_AMDGPU)
     # The AMDGPU wrapper always needs the MIGraphX backend, so force it on.
