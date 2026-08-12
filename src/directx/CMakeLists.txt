@@ -660,6 +660,12 @@ target_link_libraries(directx-ep
         Microsoft::DirectX-Guids
 )
 
+# Releases this DLL's private static protobuf state on dynamic unload (SWDEV-601759).
+# Compiled into the DLL target directly: if it lived in the plugin-ep-utils static
+# library the linker would satisfy DllMain from the CRT stub and silently drop it.
+target_sources(directx-ep PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/shared/common/platform/windows/dll_main.cc)
+
 target_compile_definitions(directx-ep
     PRIVATE
         NOGDI

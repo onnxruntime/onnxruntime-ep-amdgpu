@@ -31,6 +31,12 @@ add_library(migraphx-ep MODULE
 target_link_libraries(migraphx-ep PRIVATE migraphx::c hip-shared flatbuffers)
 
 if(WIN32)
+    # Releases this DLL's private static protobuf state on dynamic unload (SWDEV-601759).
+    # Compiled into the DLL target directly: if it lived in the plugin-ep-utils static
+    # library the linker would satisfy DllMain from the CRT stub and silently drop it.
+    target_sources(migraphx-ep PRIVATE
+            ${PROJECT_SOURCE_DIR}/src/shared/common/platform/windows/dll_main.cc)
+
     set_property(TARGET migraphx-ep APPEND_STRING
             PROPERTY LINK_FLAGS /DEF:${PROJECT_SOURCE_DIR}/src/migraphx/symbols.def)
 
