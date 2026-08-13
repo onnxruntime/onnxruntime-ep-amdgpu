@@ -9584,7 +9584,6 @@ static std::optional<TranslatedOp> TranslateQLinearConcat(
     struct QLinConcatStorage {
         std::vector<std::shared_ptr<void>> sub_storages;
         DML_JOIN_OPERATOR_DESC join_desc{};
-        DML_ELEMENT_WISE_QUANTIZE_LINEAR_OPERATOR_DESC quant_desc{};
         std::vector<DmlTensorInfo> deq_out_infos;
         std::vector<DML_BUFFER_TENSOR_DESC> deq_out_bufs;
         std::vector<DML_TENSOR_DESC> deq_out_tds;
@@ -9598,13 +9597,16 @@ static std::optional<TranslatedOp> TranslateQLinearConcat(
     auto storage = std::make_shared<QLinConcatStorage>();
     storage->axis = dml_axis;
 
-    // Build all input tensors (y_scale, y_zp, then all tuples).
+    // Build all input tensors (y_scale, y_zp, then all tuples). Uses the modern
+    // DML_OPERATOR_DEQUANTIZE / DML_OPERATOR_QUANTIZE, which accept per-tensor
+    // scalar scale/zero-point natively (via QuantizationTensors) — so scale/zp
+    // keep their raw sizes, no broadcast needed.
     TranslatedOp result;
     for (size_t i = 0; i < inputs.size(); ++i) {
         if (inputs[i].empty() || !value_shapes.count(inputs[i])) return std::nullopt;
         auto* info = LookupShape(value_shapes, inputs[i]);
         if (!info) return std::nullopt;
-        auto t = MakeTensorInfo(info->sizes, info->data_type);
+        DmlTensorInfo t = MakeTensorInfo(info->sizes, info->data_type);
         result.input_tensors.push_back(t);
         result.input_buffer_descs.push_back(t.ToBufferDesc());
         result.input_name_reorder.push_back(i);
@@ -9666,22 +9668,31 @@ static std::optional<TranslatedOp> TranslateQLinearConcat(
     storage->deq_out_bufs.push_back(deq0_out.ToBufferDesc());
     storage->deq_out_tds.push_back({ DML_TENSOR_TYPE_BUFFER, &storage->deq_out_bufs.back() });
 
-    struct DeqStorage { DML_ELEMENT_WISE_DEQUANTIZE_LINEAR_OPERATOR_DESC desc{}; };
+    struct DeqStorage {
+        DML_DEQUANTIZE_OPERATOR_DESC desc{};
+        std::vector<DML_TENSOR_DESC> quant_tensor_descs;
+    };
     auto deq0_store = std::make_shared<DeqStorage>();
     storage->sub_storages.push_back(deq0_store);
 
     result.desc_storage = storage;
-    result.op_desc = { DML_OPERATOR_ELEMENT_WISE_DEQUANTIZE_LINEAR, &deq0_store->desc };
+    deq0_store->desc.QuantizationType = DML_QUANTIZATION_TYPE_SCALE_ZERO_POINT;
+    result.op_desc = { DML_OPERATOR_DEQUANTIZE, &deq0_store->desc };
     result.fixup = [storage, deq0_store](TranslatedOp& self) {
         RebuildTensorDescPointers(self);
         storage->deq_out_bufs[0].Sizes = storage->deq_out_infos[0].sizes.data();
         storage->deq_out_bufs[0].Strides = storage->deq_out_infos[0].strides.empty()
             ? nullptr : storage->deq_out_infos[0].strides.data();
         storage->deq_out_tds[0] = { DML_TENSOR_TYPE_BUFFER, &storage->deq_out_bufs[0] };
-        deq0_store->desc.InputTensor    = &self.input_tensor_descs[0];
-        deq0_store->desc.ScaleTensor    = &self.input_tensor_descs[1];
-        deq0_store->desc.ZeroPointTensor= &self.input_tensor_descs[2];
-        deq0_store->desc.OutputTensor   = &storage->deq_out_tds[0];
+        deq0_store->quant_tensor_descs = { self.input_tensor_descs[1], self.input_tensor_descs[2] };
+        deq0_store->desc.InputTensor            = &self.input_tensor_descs[0];
+        deq0_store->desc.QuantizationTensorCount = static_cast<UINT>(deq0_store->quant_tensor_descs.size());
+        deq0_store->desc.QuantizationTensors    = deq0_store->quant_tensor_descs.data();
+        deq0_store->desc.OutputTensor           = &storage->deq_out_tds[0];
+        // RebuildTensorDescPointers set op_desc.Desc = desc_storage.get() (the
+        // QLinConcatStorage). The primary's desc lives in the separate deq0_store,
+        // so restore the correct pointer.
+        self.op_desc.Desc = &deq0_store->desc;
     };
     result.FixupPointers();
 
@@ -9704,7 +9715,8 @@ static std::optional<TranslatedOp> TranslateQLinearConcat(
         deq_node.input_from = { {-2, 0}, {-2, 0}, {-2, 0} };
         deq_node.graph_inputs = { {onnx_base, 0}, {onnx_base + 1, 1}, {onnx_base + 2, 2} };
 
-        // Fill input tensor info for desc pointers.
+        // Fill input tensor info for desc pointers. Modern DML_OPERATOR_DEQUANTIZE
+        // takes per-tensor scalar scale/zp natively — all inputs keep raw sizes.
         for (size_t j = 0; j < 3; ++j) {
             auto* ti = LookupShape(value_shapes, inputs[onnx_base + j]);
             if (!ti) return std::nullopt;
@@ -9716,13 +9728,15 @@ static std::optional<TranslatedOp> TranslateQLinearConcat(
         deq_node.output_buffer_descs = { deq_out.ToBufferDesc() };
         deq_node.output_tensor_descs.resize(1);
         deq_node.desc_storage = deq_store;
-        deq_node.op_desc = { DML_OPERATOR_ELEMENT_WISE_DEQUANTIZE_LINEAR, &deq_store->desc };
+        deq_store->desc.QuantizationType = DML_QUANTIZATION_TYPE_SCALE_ZERO_POINT;
+        deq_node.op_desc = { DML_OPERATOR_DEQUANTIZE, &deq_store->desc };
         deq_node.fixup = [deq_store](SubNode& self) {
             RebuildSubNodePointers(self);
-            deq_store->desc.InputTensor    = &self.input_tensor_descs[0];
-            deq_store->desc.ScaleTensor    = &self.input_tensor_descs[1];
-            deq_store->desc.ZeroPointTensor= &self.input_tensor_descs[2];
-            deq_store->desc.OutputTensor   = &self.output_tensor_descs[0];
+            deq_store->quant_tensor_descs = { self.input_tensor_descs[1], self.input_tensor_descs[2] };
+            deq_store->desc.InputTensor            = &self.input_tensor_descs[0];
+            deq_store->desc.QuantizationTensorCount = static_cast<UINT>(deq_store->quant_tensor_descs.size());
+            deq_store->desc.QuantizationTensors    = deq_store->quant_tensor_descs.data();
+            deq_store->desc.OutputTensor           = &self.output_tensor_descs[0];
         };
         deq_node.FixupPointers();
         result.sub_nodes.push_back(std::move(deq_node));
@@ -9759,12 +9773,21 @@ static std::optional<TranslatedOp> TranslateQLinearConcat(
         storage->join_desc.InputTensors = storage->join_in_tds.data();
         storage->join_desc.OutputTensor = &self.output_tensor_descs[0];
         storage->join_desc.Axis = local_axis;
+        // RebuildSubNodePointers set op_desc.Desc = desc_storage.get() (the
+        // QLinConcatStorage, first member is a vector). join_desc lives mid-struct,
+        // so restore the correct pointer.
+        self.op_desc.Desc = &storage->join_desc;
     };
     join_node.FixupPointers();
     result.sub_nodes.push_back(std::move(join_node));
 
     // QuantizeLinear sub_node: quantize joined output with y_scale, y_zp.
-    auto quant_store = std::make_shared<DML_ELEMENT_WISE_QUANTIZE_LINEAR_OPERATOR_DESC>();
+    // Modern DML_OPERATOR_QUANTIZE takes per-tensor scalar scale/zp natively.
+    struct QuantStorage {
+        DML_QUANTIZE_OPERATOR_DESC desc{};
+        std::vector<DML_TENSOR_DESC> quant_tensor_descs;
+    };
+    auto quant_store = std::make_shared<QuantStorage>();
     storage->sub_storages.push_back(quant_store);
 
     auto ys_tensor = MakeTensorInfo(ys_info->sizes, ys_info->data_type);
@@ -9783,13 +9806,15 @@ static std::optional<TranslatedOp> TranslateQLinearConcat(
     quant_node.output_buffer_descs = { out_tensor.ToBufferDesc() };
     quant_node.output_tensor_descs.resize(1);
     quant_node.desc_storage = quant_store;
-    quant_node.op_desc = { DML_OPERATOR_ELEMENT_WISE_QUANTIZE_LINEAR, quant_store.get() };
+    quant_store->desc.QuantizationType = DML_QUANTIZATION_TYPE_SCALE_ZERO_POINT;
+    quant_node.op_desc = { DML_OPERATOR_QUANTIZE, &quant_store->desc };
     quant_node.fixup = [quant_store](SubNode& self) {
         RebuildSubNodePointers(self);
-        quant_store->InputTensor    = &self.input_tensor_descs[0];
-        quant_store->ScaleTensor    = &self.input_tensor_descs[1];
-        quant_store->ZeroPointTensor= &self.input_tensor_descs[2];
-        quant_store->OutputTensor   = &self.output_tensor_descs[0];
+        quant_store->quant_tensor_descs = { self.input_tensor_descs[1], self.input_tensor_descs[2] };
+        quant_store->desc.InputTensor            = &self.input_tensor_descs[0];
+        quant_store->desc.QuantizationTensorCount = static_cast<UINT>(quant_store->quant_tensor_descs.size());
+        quant_store->desc.QuantizationTensors    = quant_store->quant_tensor_descs.data();
+        quant_store->desc.OutputTensor           = &self.output_tensor_descs[0];
     };
     quant_node.FixupPointers();
     result.sub_nodes.push_back(std::move(quant_node));
