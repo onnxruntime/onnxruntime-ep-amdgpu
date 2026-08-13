@@ -30,9 +30,9 @@ Allocator::~Allocator() {
     }
 }
 
-// Always lazy — deliberately unlike DataTransfer, which freezes its per-session instance.
-// Allocators are factory-owned and shared across sessions, so there is no single session's
-// backend to pin to; freezing would bind every later session to the first one selected.
+// Always lazy. Sessions no longer reach this wrapper — they resolve allocators per-session
+// through OrtEp::CreateAllocator (gpu_ep.cc). What is left is the factory-level fallback,
+// notably ORT's environment shared allocator, which is shared and has no session to pin to.
 OrtAllocator* Allocator::GetBackendAllocator() const noexcept {
     const auto backend_factory{factory_.GetBackendFactory()};
     if (backend_factory == nullptr) {
