@@ -1410,6 +1410,34 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
                     edge.ToNodeIndex = static_cast<UINT>(sn_dml_idx);
                     edge.ToNodeInputIndex = static_cast<UINT>(to_input);
                     input_edge_storage.push_back(edge);
+                    continue;
+                }
+                // Partition-internal producer (e.g. a Resize feeding a concat
+                // sub_node dequant). Mirror the primary-input producer logic.
+                auto prod_it = value_producer.find(gi_name);
+                if (prod_it != value_producer.end()) {
+                    size_t prod_compiled_idx = prod_it->second.first;
+                    size_t prod_dml_idx = dml_node_offset[prod_compiled_idx];
+                    size_t prod_output_slot = prod_it->second.second;
+                    UINT from_output_index;
+                    const auto& osrc = compiled_nodes[prod_compiled_idx].translated->output_source;
+                    if (!osrc.empty() && prod_output_slot < osrc.size()) {
+                        auto [src_sub, src_slot] = osrc[prod_output_slot];
+                        if (src_sub >= 0)
+                            prod_dml_idx += 1 + static_cast<size_t>(src_sub);
+                        from_output_index = static_cast<UINT>(src_slot);
+                    } else {
+                        size_t num_subs = compiled_nodes[prod_compiled_idx].translated->sub_nodes.size();
+                        if (num_subs > 0)
+                            prod_dml_idx += num_subs;
+                        from_output_index = static_cast<UINT>(prod_output_slot);
+                    }
+                    DML_INTERMEDIATE_GRAPH_EDGE_DESC edge{};
+                    edge.FromNodeIndex = static_cast<UINT>(prod_dml_idx);
+                    edge.FromNodeOutputIndex = from_output_index;
+                    edge.ToNodeIndex = static_cast<UINT>(sn_dml_idx);
+                    edge.ToNodeInputIndex = static_cast<UINT>(to_input);
+                    intermediate_edge_storage.push_back(edge);
                 }
             }
         }
@@ -2098,6 +2126,23 @@ bool FullGraphFusion::TryCompilePartition(
                 } else if (input_map.dml_input_map.count(gi_name)) {
                     ie.push_back({(UINT)input_map.dml_input_map[gi_name],
                                   (UINT)sn_dml_idx, (UINT)to_input});
+                } else if (value_producer.count(gi_name)) {
+                    // Partition-internal producer (e.g. a Resize feeding a concat
+                    // sub_node dequant). Mirror the primary-input producer logic.
+                    auto [pci, pos] = value_producer[gi_name];
+                    size_t pdi = dml_node_offset[pci];
+                    UINT foi;
+                    const auto& osrc = compiled_nodes[pci].translated->output_source;
+                    if (!osrc.empty() && pos < osrc.size()) {
+                        auto [ss, sl] = osrc[pos];
+                        if (ss >= 0) pdi += 1+ss;
+                        foi = (UINT)sl;
+                    } else {
+                        if (!compiled_nodes[pci].translated->sub_nodes.empty())
+                            pdi += compiled_nodes[pci].translated->sub_nodes.size();
+                        foi = (UINT)pos;
+                    }
+                    me.push_back({(UINT)pdi, foi, (UINT)sn_dml_idx, (UINT)to_input});
                 }
             }
         }
