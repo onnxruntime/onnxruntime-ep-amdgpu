@@ -820,16 +820,16 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
 
             bool is_fuseable = !cpuPreferredNodes.count(nid)
                 && ep->IsNodeSupportedByDml(node, graph_support_info, deviceDataTypeMask)
-                && HasTranslator(tier0_registry, ep->ort_api, node);
+                && HasTranslator(tier0_registry, ep->ort_api, node)
+                && !fusion_utils::NodeHasEmptyEdge(ep->ort_api, node, ep->m_graphInitializerMap);
 
             if (!is_fuseable) {
-                bool splits = false;
+                // Boundary node: finalize any open upstream group feeding it so
+                // the static work before this point still fuses.
                 for (const auto& name : input_names) {
                     auto it = output_to_group.find(name);
-                    if (it != output_to_group.end() && !groups[it->second].finalized) {
+                    if (it != output_to_group.end() && !groups[it->second].finalized)
                         groups[it->second].finalized = true;
-                        splits = true;
-                    }
                 }
                 DML_PERF_LOG("[Tier0] BOUNDARY node=", nid, "\n");
                 continue;
@@ -1239,7 +1239,8 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                 }
                 DML_PERF_LOG("[Tier0] iter=", iter, " candidate group (", g.nodes.size(), " nodes): ", group_ops, "\n");
 
-                if (!FullGraphFusion::ValidateTier0(ep->ort_api, g.nodes, resolved_shapes)) {
+                if (!FullGraphFusion::ValidateTier0(ep->ort_api, g.nodes, resolved_shapes,
+                                                    ep->m_graphInitializerMap)) {
                     DML_PERF_LOG("[Tier0] SKIP: ValidateTier0 failed\n");
                     continue;
                 }
