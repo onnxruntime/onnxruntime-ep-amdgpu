@@ -188,6 +188,17 @@ struct ComputeState {
     Map<CapturedHipGraph> hip_graph_cache{};
     // Host inputs (e.g. scalar alpha) staged to device before run_async.
     Map<StagingBuffer> cpu_input_upload_bufs{};
+
+    // ── Binding / shape-hash fast-path caches ────────────────────────────────
+    // Staging parameter bindings keyed by shape hash (multi-entry, so alternating
+    // dynamic-batch buckets each keep their binding).  Invalidated by FreeStaging
+    // (staging pointers change) and per-hash on recompile.
+    Map<StagingBindResult> staging_bind_cache{};
+    // Last call's actual input shapes and their hash, for skipping the shape-compare
+    // and rehash loops when the shapes are unchanged from the previous Compute call.
+    std::vector<std::int64_t> last_input_shapes{};
+    hash::Value last_input_shapes_hash{};
+    bool has_last_input_shapes{};
 };
 
 struct EpContextComputeState {

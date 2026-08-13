@@ -231,7 +231,8 @@ struct FullGraphNodeComputeInfo : OrtNodeComputeInfo {
 bool FullGraphFusion::ValidateTier0(
     const OrtApi&                                            ort_api,
     const std::vector<const OrtNode*>&                       nodes,
-    const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes)
+    const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes,
+    const std::unordered_map<std::string, const OrtValue*>& initializers)
 {
     // Helper: get tensor name from a ValueInfo.
     auto GetViName = [&](const OrtValueInfo* vi) -> std::string {
@@ -274,6 +275,17 @@ bool FullGraphFusion::ValidateTier0(
     // AND dims contain -1) and resolved_shapes doesn't cover it.
     for (const OrtNode* node : nodes) {
         if (!node) continue;
+
+        // Reject any node with an empty (extent-0) edge DML can't represent in a
+        // compiled graph — empty output, or empty non-constant input. Shared with
+        // Tier-0 group formation (which uses it to split partitions at the same
+        // boundary), so both admission gates agree. Constant-initializer empty
+        // inputs (e.g. Resize roi) are exempt.
+        if (fusion_utils::NodeHasEmptyEdge(ort_api, node, initializers)) {
+            DiagLog("[ValidateTier0] FAIL: op=" + GetOpType(node) + " has empty (extent-0) edge\n");
+            return false;
+        }
+
         size_t node_num_inputs = 0;
         ort_api.Node_GetNumInputs(node, &node_num_inputs);
         std::vector<const OrtValueInfo*> in_vis(node_num_inputs, nullptr);
@@ -298,17 +310,14 @@ bool FullGraphFusion::ValidateTier0(
             if (in_rank > 0) {
                 std::vector<int64_t> in_dims(in_rank, -1);
                 ort_api.GetDimensions(si, in_dims.data(), in_rank);
-                bool is_empty = false;
+                // Empty (extent-0) edges are already handled by NodeHasEmptyEdge
+                // above; here we only reject positively-dynamic dims (< 0).
+                bool has_dynamic = false;
                 for (size_t d = 0; d < in_rank; ++d)
-                    if (in_dims[d] == 0) { is_empty = true; break; }
-                if (!is_empty) {
-                    bool has_dynamic = false;
-                    for (size_t d = 0; d < in_rank; ++d)
-                        if (in_dims[d] < 0) { has_dynamic = true; break; }
-                    if (has_dynamic && !CheckResolvedFallback(in_vis[k])) {
-                        DiagLog("[ValidateTier0] FAIL input: op=" + GetOpType(node) + " tensor='" + GetViName(in_vis[k]) + "' dynamic dims\n");
-                        return false;
-                    }
+                    if (in_dims[d] < 0) { has_dynamic = true; break; }
+                if (has_dynamic && !CheckResolvedFallback(in_vis[k])) {
+                    DiagLog("[ValidateTier0] FAIL input: op=" + GetOpType(node) + " tensor='" + GetViName(in_vis[k]) + "' dynamic dims\n");
+                    return false;
                 }
             }
         }
@@ -1401,6 +1410,34 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
                     edge.ToNodeIndex = static_cast<UINT>(sn_dml_idx);
                     edge.ToNodeInputIndex = static_cast<UINT>(to_input);
                     input_edge_storage.push_back(edge);
+                    continue;
+                }
+                // Partition-internal producer (e.g. a Resize feeding a concat
+                // sub_node dequant). Mirror the primary-input producer logic.
+                auto prod_it = value_producer.find(gi_name);
+                if (prod_it != value_producer.end()) {
+                    size_t prod_compiled_idx = prod_it->second.first;
+                    size_t prod_dml_idx = dml_node_offset[prod_compiled_idx];
+                    size_t prod_output_slot = prod_it->second.second;
+                    UINT from_output_index;
+                    const auto& osrc = compiled_nodes[prod_compiled_idx].translated->output_source;
+                    if (!osrc.empty() && prod_output_slot < osrc.size()) {
+                        auto [src_sub, src_slot] = osrc[prod_output_slot];
+                        if (src_sub >= 0)
+                            prod_dml_idx += 1 + static_cast<size_t>(src_sub);
+                        from_output_index = static_cast<UINT>(src_slot);
+                    } else {
+                        size_t num_subs = compiled_nodes[prod_compiled_idx].translated->sub_nodes.size();
+                        if (num_subs > 0)
+                            prod_dml_idx += num_subs;
+                        from_output_index = static_cast<UINT>(prod_output_slot);
+                    }
+                    DML_INTERMEDIATE_GRAPH_EDGE_DESC edge{};
+                    edge.FromNodeIndex = static_cast<UINT>(prod_dml_idx);
+                    edge.FromNodeOutputIndex = from_output_index;
+                    edge.ToNodeIndex = static_cast<UINT>(sn_dml_idx);
+                    edge.ToNodeInputIndex = static_cast<UINT>(to_input);
+                    intermediate_edge_storage.push_back(edge);
                 }
             }
         }
@@ -2089,6 +2126,23 @@ bool FullGraphFusion::TryCompilePartition(
                 } else if (input_map.dml_input_map.count(gi_name)) {
                     ie.push_back({(UINT)input_map.dml_input_map[gi_name],
                                   (UINT)sn_dml_idx, (UINT)to_input});
+                } else if (value_producer.count(gi_name)) {
+                    // Partition-internal producer (e.g. a Resize feeding a concat
+                    // sub_node dequant). Mirror the primary-input producer logic.
+                    auto [pci, pos] = value_producer[gi_name];
+                    size_t pdi = dml_node_offset[pci];
+                    UINT foi;
+                    const auto& osrc = compiled_nodes[pci].translated->output_source;
+                    if (!osrc.empty() && pos < osrc.size()) {
+                        auto [ss, sl] = osrc[pos];
+                        if (ss >= 0) pdi += 1+ss;
+                        foi = (UINT)sl;
+                    } else {
+                        if (!compiled_nodes[pci].translated->sub_nodes.empty())
+                            pdi += compiled_nodes[pci].translated->sub_nodes.size();
+                        foi = (UINT)pos;
+                    }
+                    me.push_back({(UINT)pdi, foi, (UINT)sn_dml_idx, (UINT)to_input});
                 }
             }
         }

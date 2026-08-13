@@ -376,8 +376,14 @@ static OrtStatus* ORT_API_CALL BiasGelu_Compute(
     std::vector<uint32_t> bias_sizes(main_rank, 1);
     bias_sizes[main_rank - 1] = static_cast<uint32_t>(bias_elems);
 
+    // Empty input (0-sized dim, e.g. from a data-dependent branch): DML can't
+    // build a descriptor for a zero dim, so no-op the way ORT's DML EP does.
+    // Compile/recompile/execute are skipped; the empty output is still
+    // allocated below for downstream consumers.
+    bool input_empty = (elem_count0 == 0);
+
     // Lazy-init: compile on first Compute with real shapes.
-    if (!state->initialized) {
+    if (!state->initialized && !input_empty) {
         std::lock_guard<std::mutex> lock(state->init_mutex);
         if (!state->initialized) {
             state->kernel = CompileBiasGeluDml(
@@ -394,7 +400,7 @@ static OrtStatus* ORT_API_CALL BiasGelu_Compute(
     // Shape-change: compile a temporary kernel for this call only, then discard.
     const BiasGeluCompiledKernel* active_kernel = &state->kernel;
     BiasGeluCompiledKernel temp_kernel;
-    if (input_sizes != state->compiled_input_sizes) {
+    if (!input_empty && input_sizes != state->compiled_input_sizes) {
         temp_kernel = CompileBiasGeluDml(
             state->provider, dml_dtype, input_sizes, bias_sizes,
             main_bytes, state->bias_bytes);
@@ -412,6 +418,11 @@ static OrtStatus* ORT_API_CALL BiasGelu_Compute(
         if (st || !output) { if (st) api.ReleaseStatus(st);
             return api.CreateStatus(ORT_FAIL, "BiasGelu: failed to get output"); }
     }
+
+    // Empty input → empty output: output OrtValue is allocated above; skip the
+    // DML bind/execute entirely and return success (ORT DML EP no-op).
+    if (input_empty)
+        return nullptr;
 
     // Get D3D12 handle for the main input tensor.
     auto get_resource = [&](const OrtValue* v) -> ID3D12Resource* {

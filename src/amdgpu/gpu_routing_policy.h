@@ -65,7 +65,7 @@ inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_has
         return profile;  // explicit profile (and Optimized) honored/dispatched as-is
     }
     // 1. WebNN compatibility carve-out: always DirectML, regardless of ASIC (browser path).
-    if (is_webnn) return Profile::DirectML;
+    if (is_webnn) return Profile::DirectX;
     // 2. Exact (arch prefix, model_arch) override.
     for (const auto& row : kArchModelBackend) {
         if (arch_model_hash != kNoModelArch && row.model_arch_hash == arch_model_hash &&
@@ -74,13 +74,13 @@ inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_has
         }
     }
     // 3-5. Prefix buckets (order matters: gfx117x before the general gfx11x).
-    if (starts_with(gfx, "gfx117")) return Profile::DirectML;  // Medusa MDS1/MDS2 (temporary)
+    if (starts_with(gfx, "gfx117")) return Profile::DirectX;  // Medusa MDS1/MDS2 (temporary)
     // TODO(routing): Strix Halo LLMs (gfx1150/1151) target HipEP starting next release; they fold
     // into MIGraphX today because HipEP is not built. Needs its own branch, keyed on kLlmModelArch,
     // once it ships.
     if (starts_with(gfx, "gfx11")) return Profile::MIGraphX;   // RDNA3 / RDNA3.5
     if (starts_with(gfx, "gfx12")) return Profile::MIGraphX;   // RDNA4
-    return Profile::DirectML;                                  // pre-gfx11 (gfx9/gfx10)
+    return Profile::DirectX;                                   // pre-gfx11 (gfx9/gfx10)
 }
 
 }  // namespace gpu_ep

@@ -14,7 +14,7 @@ struct ProviderFactory : OrtEpFactory, ApiPtrs {
     ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_api_base, const char* ep_name, const OrtLogger* default_logger);
     ~ProviderFactory();
 
-    Ort::Status CreateDirectMLBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
+    Ort::Status CreateDirectXBackend(const OrtSessionOptions* session_options, const OrtLogger* logger, OrtEp*& ep) {
 #ifdef USE_DML
         RETURN_IF_ERROR(dml_ep_factory_->CreateEp(dml_ep_factory_, nullptr, nullptr, 0, session_options, logger, &ep));
         backend_ep_factory_ = dml_ep_factory_;
