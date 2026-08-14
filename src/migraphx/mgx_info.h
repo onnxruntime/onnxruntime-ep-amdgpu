@@ -3,16 +3,30 @@
 
 #pragma once
 
+#include <cstdint>
+#include <optional>
+
 #include "common/plugin_ep_utils.h"
 #include "mgx_utils.h"
 
 namespace mgx_ep {
 
-enum class ComputeMode {
-    Eager,
-    Balanced,
-    Maximum
+// The enumerator values are load-bearing: they are migraphx's compile_modes
+// values, so the value can be passed straight to
+// migraphx::compile_options::set_compile_mode() without translation (see the
+// static_asserts in mgx_ep.cc's compile_program()). Never renumber these
+// positionally; migraphx snaps an out-of-range value to the nearest mode
+// instead of rejecting it, so a mismatch fails silently.
+enum class ComputeMode : std::int8_t {
+    Eager = 0,
+    Balanced = 50,
+    Maximum = 100
 };
+
+// Parses a compute-mode spelling, case-insensitive: eager|0, balanced|50,
+// maximum|100. Returns nullopt on anything else. Shared by the provider-option
+// parser and the ORT_MIGRAPHX_COMPUTE_MODE environment variable.
+std::optional<ComputeMode> ParseComputeMode(std::string_view value);
 
 struct ProviderInfo {
     int device_id{};
@@ -26,7 +40,9 @@ struct ProviderInfo {
     bool dump_subgraphs{};
     std::string mlss_use_specific_ops{};
     std::string model_arch{};
-    ComputeMode compute_mode{};
+    // Explicit: value-initialization selects Eager (enumerator value 0), which
+    // would silently downgrade every session that does not set the option.
+    ComputeMode compute_mode{ComputeMode::Balanced};
     fs::path cache_dir{};
     bool disable_caching{};
     bool force_recompile{};
