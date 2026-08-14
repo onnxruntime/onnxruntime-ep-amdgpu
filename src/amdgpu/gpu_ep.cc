@@ -136,7 +136,6 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     }
 
     const ProviderInfo info{provider_options};
-    backend_ = BackendForProfile(info.profile);
 
     // Telemetry is an internal EP facility. It is enabled by default and uses the
     // platform default directory (LocalLow on Windows).
@@ -296,6 +295,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     // Explicit profile is honored; Auto/Optimized derives from (ASIC, model_arch). select_backend()
     // (inside route_by_heuristic) applies both, so the result covers every profile value.
     const Profile effective = route_by_heuristic();
+    backend_ = BackendForProfile(effective);
 
 #ifdef USE_DML
     if (effective == Profile::Eager) {
