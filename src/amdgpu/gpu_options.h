@@ -17,6 +17,9 @@ constexpr auto kDeviceId = "device_id"sv;
 constexpr auto kDisableCaching = "disable_caching"sv;
 constexpr auto kForceRecompile = "force_recompile"sv;
 constexpr auto kExhaustiveTune = "exhaustive_tune"sv;
+// Compile-time vs optimization trade-off, relayed verbatim to the migraphx
+// backend, which owns the grammar (eager|balanced|maximum).
+constexpr auto kComputeMode = "compute_mode"sv;
 constexpr auto kProfile = "profile"sv;
 constexpr auto kCacheDir = "cache_dir"sv;
 constexpr auto kMlssUseSpecificOps = "mlss_use_specific_ops"sv;

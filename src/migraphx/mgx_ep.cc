@@ -576,17 +576,17 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
         }
     }
 
-    auto compute_mode{platform::GetEnvironmentVar(env_var::kComputeMode)};
-    if (!compute_mode.empty()) {
-        std::transform(compute_mode.begin(), compute_mode.end(), compute_mode.begin(), ::tolower);
-        if (compute_mode == "eager" || compute_mode == "0") {
-            compute_mode_ = ComputeMode::Eager;
-        } else if (compute_mode == "balanced" || compute_mode == "50") {
-            compute_mode_ = ComputeMode::Balanced;
-        } else if (compute_mode == "maximum" || compute_mode == "100") {
-            compute_mode_ = ComputeMode::Maximum;
+    // Runs after compute_mode_ is taken from the provider options above, so the
+    // environment variable wins over the provider option.
+    if (const auto compute_mode_env{platform::GetEnvironmentVar(env_var::kComputeMode)};
+        !compute_mode_env.empty()) {
+        if (const auto parsed{ParseComputeMode(compute_mode_env)}; parsed.has_value()) {
+            compute_mode_ = *parsed;
         } else {
-            /* TODO: log invalid value for the compute mode - do not change it. */
+            ORT_CXX_LOG_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_WARNING,
+                MakeString("Ignoring ", env_var::kComputeMode, "='", compute_mode_env,
+                    "': unknown compute mode, expected eager|balanced|maximum. "
+                    "Leaving the compute mode unchanged.").c_str());
         }
     }
 
@@ -914,11 +914,28 @@ void calibrate_and_quantize(const migraphx::program& prog, const migraphx::targe
     }
 }
 
+// compute_mode has no default argument on purpose: every call site must state
+// which mode it compiles under.
 void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune,
-    const std::string& mlss_use_specific_ops) {
+    const std::string& mlss_use_specific_ops, ComputeMode compute_mode) {
     migraphx::compile_options options;
     options.set_fast_math(false);
-    options.set_exhaustive_tune_flag(exhaustive_tune);
+
+    // The EP calls this a compute mode; migraphx calls the same concept a compile
+    // mode. ComputeMode's enumerator values are migraphx's compile_modes values
+    // (see mgx_info.h), so this cast is a straight pass-through. migraphx snaps
+    // an unknown value to the nearest mode rather than reporting an error, so
+    // assert the correspondence at compile time instead.
+    static_assert(static_cast<std::int8_t>(ComputeMode::Eager) == migraphx_compile_mode_eager);
+    static_assert(static_cast<std::int8_t>(ComputeMode::Balanced) == migraphx_compile_mode_balanced);
+    static_assert(static_cast<std::int8_t>(ComputeMode::Maximum) == migraphx_compile_mode_max);
+    options.set_compile_mode(static_cast<std::int8_t>(compute_mode));
+
+    // migraphx's own max mode sets the exhaustive-tune flag on the context
+    // (target.cpp), but constructs compile_ops from the unmutated
+    // options.exhaustive_tune, so on this build max would be close to a no-op.
+    // Set the flag here so Maximum means something without patching migraphx.
+    options.set_exhaustive_tune_flag(exhaustive_tune || compute_mode == ComputeMode::Maximum);
     if (!mlss_use_specific_ops.empty()) {
         // MIGraphX expects a list of op names; split the comma-separated value.
         std::vector<std::string> ops;
@@ -1012,7 +1029,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             migraphx::program_parameters params;
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
-            compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_);
+            compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_, compute_mode_);
             // context_enable needs this file on disk even if caching is otherwise disabled.
             if (!disable_compiled_model_caching_ || context_enable_) {
                 save_compiled_program(program, mxr_path);
@@ -1171,8 +1188,12 @@ try {
             RETURN_IF_ERROR(CreateNodeComputeInfoFromCache(graph, fused_node, input_name_indices,
                 output_name_indices, node_compute_info));
         } else {
+            // The compute mode is part of the key: two modes produce different
+            // binaries from the same graph, and without this an A/B between
+            // modes silently replays the other mode's cached program.
             const auto mxr_prefix{hash::ToHex(MIGraphX_Version) + "-" + GenerateGraphId(graph) + "-" +
-                hash::ToHex(std::string_view{device_prop_.gcnArchName}) + "-"};
+                hash::ToHex(std::string_view{device_prop_.gcnArchName}) + "-" +
+                hash::ToHex(static_cast<std::uint64_t>(compute_mode_)) + "-"};
 
             RETURN_IF_ERROR(CreateNodeComputeInfoFromGraph(graph, fused_node, input_name_indices,
                 output_name_indices, mxr_prefix, node_compute_info, ep_context_node));
@@ -1467,7 +1488,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 compute_state.enable_fp8, compute_state.int8_calibration_cache_available, compute_state.dynamic_ranges);
 
             compile_program(program, compute_state.t, compute_state.exhaustive_tune,
-                compute_state.mlss_use_specific_ops);
+                compute_state.mlss_use_specific_ops, compute_state.compute_mode);
             if (!compute_state.disable_compiled_model_caching) {
                 save_compiled_program(program, mxr_path);
             }
