@@ -102,6 +102,12 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     OrtEp::OnRunEnd = [](OrtEp* this_, const OrtRunOptions* run_options, bool sync_stream) noexcept {
         API_CALL_S(ExecutionProvider, this_, OnRunEnd, run_options, sync_stream);
     };
+    // Wired for every profile so allocators resolve through this EP rather than factory_'s
+    // process-global backend slot, which the next session's CreateEp overwrites.
+    OrtEp::CreateAllocator = [](OrtEp* this_, const OrtMemoryInfo* memory_info,
+                                OrtAllocator** allocator) noexcept {
+        API_CALL_S(ExecutionProvider, this_, CreateAllocator, memory_info, allocator);
+    };
     OrtEp::CreateSyncStreamForDevice = [](OrtEp* this_, const OrtMemoryDevice* memory_device,
                                           OrtSyncStreamImpl** stream) noexcept {
         API_CALL_S(ExecutionProvider, this_, CreateSyncStreamForDevice, memory_device, stream);
@@ -136,7 +142,6 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     }
 
     const ProviderInfo info{provider_options};
-    backend_ = BackendForProfile(info.profile);
 
     // Telemetry is an internal EP facility. It is enabled by default and uses the
     // platform default directory (LocalLow on Windows).
@@ -189,21 +194,10 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
 #ifdef USE_DML
     const auto create_directx_backend = [&] {
         THROW_IF_ERROR(factory.CreateDirectXBackend(local_session_options, logger, backend_ep_));
-        // DirectML manages its own per-session GPU allocator (DmlBucketizedBufferAllocator)
-        // via EP-level CreateAllocator. Wire it now that we know the backend is DirectML.
-        // MIGraphX allocators are handled at factory level — leave OrtEp::CreateAllocator null
-        // so ORT falls back to ep_factory_.CreateAllocator (the Allocator wrapper).
-        OrtEp::CreateAllocator = [](OrtEp* this_, const OrtMemoryInfo* memory_info,
-                                    OrtAllocator** allocator) noexcept {
-            API_CALL_S(ExecutionProvider, this_, CreateAllocator, memory_info, allocator);
-        };
     };
 #endif
 
     const auto create_hip_backend = [&] {
-        // hip backend manages allocator/data-transfer at the backend factory level,
-        // reached through the amdgpu Allocator/DataTransfer wrappers — leave
-        // OrtEp::CreateAllocator null so ORT falls back to ep_factory_.CreateAllocator.
         THROW_IF_ERROR(factory.CreateHipBackend(local_session_options, logger, backend_ep_));
     };
 
@@ -296,6 +290,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     // Explicit profile is honored; Auto/Optimized derives from (ASIC, model_arch). select_backend()
     // (inside route_by_heuristic) applies both, so the result covers every profile value.
     const Profile effective = route_by_heuristic();
+    backend_ = BackendForProfile(effective);
 
 #ifdef USE_DML
     if (effective == Profile::Eager) {
@@ -407,7 +402,18 @@ Ort::Status ExecutionProvider::OnRunStart(const OrtRunOptions* run_options) cons
 
 Ort::Status ExecutionProvider::CreateAllocator(const OrtMemoryInfo* memory_info,
     OrtAllocator** allocator) const noexcept {
-    EP_CALL_S(backend_ep_, CreateAllocator, memory_info, allocator);
+    // DirectML implements this on its OrtEp; migraphx and hip implement it on their factory.
+    // Prefer the former, as ORT itself does. The explicit null check is needed because
+    // EP_CALL_S reports a missing function pointer as success, leaving *allocator unset.
+    if (backend_ep_ != nullptr && backend_ep_->CreateAllocator != nullptr) {
+        EP_CALL_S(backend_ep_, CreateAllocator, memory_info, allocator);
+    }
+    if (backend_ep_factory_ == nullptr) {
+        return MAKE_STATUS(ORT_EP_FAIL, "CreateAllocator: invalid backend factory");
+    }
+    RETURN_IF_ERROR(backend_ep_factory_->CreateAllocator(backend_ep_factory_, memory_info,
+        nullptr /*allocator_options*/, allocator));
+    return STATUS_OK;
 }
 
 Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* run_options, bool sync_stream) const noexcept {

@@ -45,3 +45,6 @@ library = "migraphx-backend"
 
 [[tool.ep.components]]
 library = "directx-backend"
+
+[[tool.ep.components]]
+library = "hip-backend"

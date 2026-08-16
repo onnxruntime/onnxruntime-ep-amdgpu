@@ -71,10 +71,17 @@ public:
     // nodes. Verifies every node input and output has tensor type info with a
     // supported DML dtype, rank > 0, and all-static dims. Does not run
     // translators or touch DML.
+    //
+    // Rejects any node input/output with an empty (extent-0) dimension, since
+    // DML cannot represent a zero-sized dim inside a compiled graph (mirrors
+    // ORT's GraphPartitioner ContainsEmptyDimensions gate). An empty dim on a
+    // constant-initializer input is exempt — it is consumed at compile time and
+    // never becomes a runtime DML edge (e.g. Resize's empty roi input).
     static bool ValidateTier0(
         const OrtApi&                                            ort_api,
         const std::vector<const OrtNode*>&                       nodes,
-        const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes = {});
+        const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes = {},
+        const std::unordered_map<std::string, const OrtValue*>& initializers = {});
 
     // Compile a Tier-0 fused subgraph.  Returns an OrtNodeComputeInfo on
     // success, or nullptr if compilation fails (caller falls back to Tier-2/1).
