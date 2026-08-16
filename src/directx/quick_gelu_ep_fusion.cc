@@ -306,8 +306,14 @@ static OrtStatus* ORT_API_CALL QuickGelu_Compute(
         sizes[i] = static_cast<uint32_t>(dims[i] > 0 ? dims[i] : 1);
     }
 
+    // Empty input (0-sized dim, e.g. from a data-dependent branch): DML can't
+    // build a descriptor for a zero dim, so no-op the way ORT's DML EP does.
+    // Compile/recompile/execute are skipped; the empty output is still
+    // allocated below for downstream consumers.
+    bool input_empty = (elem_count == 0);
+
     // Lazy-init: compile on first Compute with real shapes.
-    if (!state->initialized) {
+    if (!state->initialized && !input_empty) {
         std::lock_guard<std::mutex> lock(state->init_mutex);
         if (!state->initialized) {
             state->kernel = CompileQuickGeluDml(
@@ -325,7 +331,7 @@ static OrtStatus* ORT_API_CALL QuickGelu_Compute(
     // original ORT DML EP's local kernel recompile on shape change.
     const QuickGeluCompiledKernel* active_kernel = &state->kernel;
     QuickGeluCompiledKernel temp_kernel;
-    if (sizes != state->compiled_sizes) {
+    if (!input_empty && sizes != state->compiled_sizes) {
         temp_kernel = CompileQuickGeluDml(
             state->provider, state->alpha, dml_dtype, sizes, input_size);
         if (!temp_kernel.IsValid()) {
@@ -342,6 +348,11 @@ static OrtStatus* ORT_API_CALL QuickGelu_Compute(
         if (st || !output_value) { if (st) api.ReleaseStatus(st);
             return api.CreateStatus(ORT_FAIL, "QuickGelu: failed to get output"); }
     }
+
+    // Empty input → empty output: output OrtValue is allocated above; skip the
+    // DML bind/execute entirely and return success (ORT DML EP no-op).
+    if (input_empty)
+        return nullptr;
 
     // Helper: translate OrtValue GPU allocation to ID3D12Resource*.
     auto get_resource = [&](const OrtValue* value) -> ID3D12Resource* {
