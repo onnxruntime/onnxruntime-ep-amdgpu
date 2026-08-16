@@ -979,7 +979,19 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         auto translated_ptr = std::make_unique<TranslatedOp>(std::move(*translated));
         translated_ptr->FixupPointers();
 
+        // A passthrough (shape-only) op is normally elided from the DML graph.
+        // But if any of its outputs is a partition graph output, that output
+        // needs a real DML node to source its outgoing output edge — an elided
+        // alias has none, which later fails as "unresolved output". In that
+        // case materialize a real ELEMENT_WISE_IDENTITY (as ORT does), so the
+        // output is produced by an actual node.
+        bool passthrough_is_graph_output = false;
         if (translated_ptr->passthrough) {
+            for (const auto& oname : output_names)
+                if (subgraph.graph_output_map.count(oname)) { passthrough_is_graph_output = true; break; }
+        }
+
+        if (translated_ptr->passthrough && !passthrough_is_graph_output) {
             // Elide this node from the DML graph. Its outputs alias input[0]'s
             // source, so downstream consumers connect directly to the upstream
             // producer. This handles Reshape (no-op reinterpretation).
@@ -997,6 +1009,17 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
                 }
             }
             continue;
+        }
+
+        if (passthrough_is_graph_output) {
+            // Replace the elided passthrough with a real identity op that copies
+            // input[0] to the output. Fall through to the normal compiled-node
+            // path so its input edge and output edge are wired like any op.
+            DmlTensorInfo out_info = translated_ptr->output_tensors.empty()
+                ? DmlTensorInfo{} : translated_ptr->output_tensors[0];
+            translated_ptr = std::make_unique<TranslatedOp>(BuildIdentityOp(out_info));
+            DML_PERF_LOG("[Compile] passthrough op=", op_type,
+                " materialized as IDENTITY (output is a partition output)\n");
         }
 
         // Track which input names will become actual DML edges. The DML operator
@@ -1718,12 +1741,23 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         // the final reshaped dimensions.
         const auto& vs = it->second;
         const OrtValueInfo* out_vi = subgraph.graph_output_vis[i];
+        // Determine the true (unpadded) output rank. Prefer ORT's shape inference
+        // on the graph-output ValueInfo; a rank of 0 there means a genuine scalar
+        // and MUST be honored. Only when ORT has no shape info at all do we fall
+        // back to the tensor's own original_rank, then to the 4D-padded size.
+        //
+        // Getting this wrong reports a scalar/low-rank output as the padded rank-4
+        // [1,1,1,1], which changes ONNX broadcast semantics for a downstream
+        // consumer — e.g. a materialized Squeeze->identity feeding Min/Max, where
+        // [1,1,1,1] vs [] injects a spurious dimension and explodes shapes.
+        bool rank_known = false;
         size_t orig_rank = 0;
         if (out_vi && out_vi->GetTypeInfo() && out_vi->GetTypeInfo()->tensor_type_info
             && out_vi->GetTypeInfo()->tensor_type_info->HasShape()) {
             ort_api.GetDimensionsCount(out_vi->GetTypeInfo()->tensor_type_info.get(), &orig_rank);
+            rank_known = true;  // includes rank==0 (scalar)
         }
-        if (orig_rank == 0) orig_rank = vs.sizes.size();
+        if (!rank_known) orig_rank = vs.original_rank ? vs.original_rank : vs.sizes.size();
         size_t skip = vs.sizes.size() > orig_rank ? vs.sizes.size() - orig_rank : 0;
         kernel_state->output_dims[i].reserve(vs.sizes.size() - skip);
         for (size_t d = skip; d < vs.sizes.size(); ++d)
@@ -1818,11 +1852,19 @@ bool FullGraphFusion::TryTranslateNodes(
         }
 
         // Export value_shapes under both producer and consumer names.
+        // Export the UNPADDED dims: info.sizes is padded to 4D, but original_rank
+        // records the true rank. Exporting the padded [1,1,1,1] for a scalar/low-
+        // rank tensor would round-trip through resolved_shapes and be re-seeded
+        // (SeedFromVi) with original_rank = 4, corrupting a downstream partition's
+        // reported output rank the same way the Squeeze->identity scalar did.
         auto ExportDims = [&](const std::string& name, const DmlTensorInfo& info) {
             if (out_shapes->count(name)) return;
-            std::vector<int64_t> dims(info.sizes.size());
-            for (size_t d = 0; d < info.sizes.size(); ++d)
-                dims[d] = static_cast<int64_t>(info.sizes[d]);
+            size_t rank = (info.original_rank && info.original_rank <= info.sizes.size())
+                ? info.original_rank : info.sizes.size();
+            size_t skip = info.sizes.size() - rank;  // strip leading padding 1s
+            std::vector<int64_t> dims(rank);
+            for (size_t d = 0; d < rank; ++d)
+                dims[d] = static_cast<int64_t>(info.sizes[skip + d]);
             (*out_shapes)[name] = std::move(dims);
         };
 
@@ -1898,7 +1940,16 @@ bool FullGraphFusion::TryCompilePartition(
         }
         auto translated_ptr = std::make_unique<TranslatedOp>(std::move(*translated));
         translated_ptr->FixupPointers();
+        // Mirror Compile: a passthrough whose output is a partition output must
+        // be materialized as a real identity node (an elided alias has no DML
+        // node to source the output edge). Keeping this in lockstep with Compile
+        // ensures the pre-flight verdict matches the actual compile.
+        bool passthrough_is_graph_output = false;
         if (translated_ptr->passthrough) {
+            for (const auto& oname : output_names)
+                if (subgraph.graph_output_map.count(oname)) { passthrough_is_graph_output = true; break; }
+        }
+        if (translated_ptr->passthrough && !passthrough_is_graph_output) {
             if (!input_names.empty()) {
                 const auto& src = input_names[0];
                 auto prod_it = value_producer.find(src);
@@ -1909,6 +1960,11 @@ bool FullGraphFusion::TryCompilePartition(
                 }
             }
             continue;
+        }
+        if (passthrough_is_graph_output) {
+            DmlTensorInfo out_info = translated_ptr->output_tensors.empty()
+                ? DmlTensorInfo{} : translated_ptr->output_tensors[0];
+            translated_ptr = std::make_unique<TranslatedOp>(BuildIdentityOp(out_info));
         }
         size_t dml_input_count = translated_ptr->input_tensors.size();
         for (size_t s = 0; s < input_names.size() && s < dml_input_count; ++s) {
