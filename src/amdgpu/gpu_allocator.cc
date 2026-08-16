@@ -30,6 +30,9 @@ Allocator::~Allocator() {
     }
 }
 
+// Always lazy. Sessions no longer reach this wrapper — they resolve allocators per-session
+// through OrtEp::CreateAllocator (gpu_ep.cc). What is left is the factory-level fallback,
+// notably ORT's environment shared allocator, which is shared and has no session to pin to.
 OrtAllocator* Allocator::GetBackendAllocator() const noexcept {
     const auto backend_factory{factory_.GetBackendFactory()};
     if (backend_factory == nullptr) {
