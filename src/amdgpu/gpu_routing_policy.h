@@ -56,16 +56,17 @@ inline bool is_webnn(const std::optional<std::string>& model_fw) {
 // or Optimized) is honored/dispatched as-is. In Auto mode, in priority order:
 //   1. WebNN caller                   -> DirectML (browser/WebNN compatibility carve-out, all ASICs)
 //   2. kArchModelBackend (arch prefix + model_arch) override, if any row matches
-//   3. Medusa gfx117x                 -> DirectML
-//   4. gfx11 and newer                -> MIGraphX
-//   5. everything below gfx11 (gfx9/gfx10) -> DirectML
+//   3. HIP-enabled gfx1151 + LLM      -> Hip
+//   4. Medusa gfx117x                 -> DirectML
+//   5. gfx11 and newer                -> MIGraphX
+//   6. everything below gfx11 (gfx9/gfx10) -> DirectML
 inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_hash, bool is_webnn,
                               Profile profile) {
     if (profile != Profile::Auto) {
         return profile;  // explicit profile (and Optimized) honored/dispatched as-is
     }
     // 1. WebNN compatibility carve-out: always DirectML, regardless of ASIC (browser path).
-    if (is_webnn) return Profile::DirectML;
+    if (is_webnn) return Profile::DirectX;
     // 2. Exact (arch prefix, model_arch) override.
     for (const auto& row : kArchModelBackend) {
         if (arch_model_hash != kNoModelArch && row.model_arch_hash == arch_model_hash &&
@@ -73,14 +74,15 @@ inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_has
             return row.backend;
         }
     }
-    // 3-5. Prefix buckets (order matters: gfx117x before the general gfx11x).
-    if (starts_with(gfx, "gfx117")) return Profile::DirectML;  // Medusa MDS1/MDS2 (temporary)
-    // TODO(routing): Strix Halo LLMs (gfx1150/1151) target HipEP starting next release; they fold
-    // into MIGraphX today because HipEP is not built. Needs its own branch, keyed on kLlmModelArch,
-    // once it ships.
+#ifdef USE_HIP
+    // 3. Strix Halo LLMs use the HIP backend when it is included in this build.
+    if (starts_with(gfx, "gfx1151") && arch_model_hash == fnv1a("llm")) return Profile::Hip;
+#endif
+    // 4-6. Prefix buckets (order matters: gfx117x before the general gfx11x).
+    if (starts_with(gfx, "gfx117")) return Profile::DirectX;  // Medusa MDS1/MDS2 (temporary)
     if (starts_with(gfx, "gfx11")) return Profile::MIGraphX;   // RDNA3 / RDNA3.5
     if (starts_with(gfx, "gfx12")) return Profile::MIGraphX;   // RDNA4
-    return Profile::DirectML;                                  // pre-gfx11 (gfx9/gfx10)
+    return Profile::DirectX;                                   // pre-gfx11 (gfx9/gfx10)
 }
 
 }  // namespace gpu_ep
