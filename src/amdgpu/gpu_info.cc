@@ -25,8 +25,8 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
                         profile = Profile::Optimized;
                     } else if (lower == "migraphx" || value == "3") {
                         profile = Profile::MIGraphX;
-                    } else if (lower == "directml" || value == "4") {
-                        profile = Profile::DirectML;
+                    } else if (lower == "directx" || value == "4") {
+                        profile = Profile::DirectX;
                     } else if (lower == "hip" || value == "5") {
                         profile = Profile::Hip;
                     } else {

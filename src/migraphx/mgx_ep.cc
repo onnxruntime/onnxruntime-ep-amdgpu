@@ -1273,6 +1273,10 @@ Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* /* run_options */, 
 try {
     HIP_RETURN_IF_ERROR(hipSetDevice(device_id_));
     return STATUS_OK;
+} catch (const Ort::Exception& e) {
+    return Ort::Status{e};
+} catch (const std::exception& e) {
+    return Ort::Status{e.what(), ORT_EP_FAIL};
 }
 
 Ort::Status ExecutionProvider::CreateSyncStreamForDevice(const OrtMemoryDevice* memory_device, OrtSyncStreamImpl** stream)
@@ -1584,11 +1588,10 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
             bind.params, bind.prog_output_indices, shape_hash, dyn);
         CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn, seq);
-        // No per-Compute sync: all work above is enqueued on ORT's compute stream,
-        // which ORT flushes at run end (DeviceStreamCollection::CleanUp ->
-        // SyncStream::Flush) honoring the run's sync_stream setting.  Cross-stream
-        // consumers are ordered via ORT notifications.  Syncing here would only
-        // serialize CPU/GPU and defeat that overlap.
+        // ORT fetches the outputs before its run-end Flush, and reaches DataTransfer
+        // with a null stream on some paths, which orders nothing against this
+        // hipStreamNonBlocking stream. Sync so that read cannot race in-flight compute.
+        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
         return STATUS_OK;
     }
 
@@ -1640,7 +1643,6 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         std::lock_guard lock{compute_state.mutex};
 
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-        // Enqueue only; ORT flushes the compute stream at run end (see OnRunEnd).
 
         if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
             for (size_t i{}; i < output_size; ++i) {
@@ -1657,6 +1659,10 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                     hipMemcpyDeviceToDevice, hip_stream));
             }
         }
+        // ORT fetches the outputs before its run-end Flush, and reaches DataTransfer
+        // with a null stream on some paths, which orders nothing against this
+        // hipStreamNonBlocking stream. Sync so that read cannot race in-flight compute.
+        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
     }
     return STATUS_OK;
 } catch (const Ort::Exception& e) {
@@ -1731,7 +1737,6 @@ try {
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-        // Enqueue only; ORT flushes the compute stream at run end (see OnRunEnd).
 
         if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
             for (size_t i{}; i < output_size; ++i) {
@@ -1748,6 +1753,10 @@ try {
                     hipMemcpyDeviceToDevice, hip_stream));
             }
         }
+        // ORT fetches the outputs before its run-end Flush, and reaches DataTransfer
+        // with a null stream on some paths, which orders nothing against this
+        // hipStreamNonBlocking stream. Sync so that read cannot race in-flight compute.
+        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
     }
     return STATUS_OK;
 } catch (const Ort::Exception& e) {
