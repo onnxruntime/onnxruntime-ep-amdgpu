@@ -477,7 +477,7 @@ struct BiasGeluNodeComputeInfo : OrtNodeComputeInfo {
     BiasGeluKernelState* state = nullptr;
 
     BiasGeluNodeComputeInfo() {
-        ort_version_supported = ORT_API_VERSION;
+        ort_version_supported = NegotiatedOrtApiVersion();
         CreateState = [](OrtNodeComputeInfo* self, OrtNodeComputeContext*, void** out) noexcept -> OrtStatus* {
             *out = static_cast<BiasGeluNodeComputeInfo*>(self)->state;
             return nullptr;

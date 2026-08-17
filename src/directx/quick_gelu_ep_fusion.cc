@@ -406,7 +406,7 @@ struct QuickGeluNodeComputeInfo : OrtNodeComputeInfo {
     QuickGeluKernelState* state = nullptr;  // owned
 
     QuickGeluNodeComputeInfo() {
-        ort_version_supported = ORT_API_VERSION;
+        ort_version_supported = NegotiatedOrtApiVersion();
         CreateState = [](OrtNodeComputeInfo* self, OrtNodeComputeContext*, void** out) noexcept -> OrtStatus* {
             *out = static_cast<QuickGeluNodeComputeInfo*>(self)->state;
             return nullptr;

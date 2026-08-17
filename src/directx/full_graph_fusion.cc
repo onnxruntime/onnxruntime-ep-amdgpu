@@ -207,7 +207,7 @@ struct FullGraphNodeComputeInfo : OrtNodeComputeInfo {
     std::unique_ptr<FullGraphKernelState> state;
 
     FullGraphNodeComputeInfo() {
-        ort_version_supported = ORT_API_VERSION;
+        ort_version_supported = NegotiatedOrtApiVersion();
         CreateState = [](OrtNodeComputeInfo* self, OrtNodeComputeContext*, void** out) noexcept -> OrtStatus* {
             *out = static_cast<FullGraphNodeComputeInfo*>(self)->state.get();
             return nullptr;

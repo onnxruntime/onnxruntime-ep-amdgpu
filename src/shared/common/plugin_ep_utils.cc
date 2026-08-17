@@ -3,6 +3,54 @@
 
 #include "common/plugin_ep_utils.h"
 
+#include <atomic>
+
+namespace {
+std::atomic<uint32_t> g_negotiated_ort_api_version{ORT_API_VERSION};
+
+// Derive the runtime's max C API version from OrtApiBase::GetVersionString()
+// (e.g. "1.24.6" -> 24; for the 1.x line the API version equals the minor
+// component). Returns 0 if the string can't be parsed, in which case the caller
+// falls back to probing from ORT_API_VERSION.
+uint32_t RuntimeApiVersionFromString(const char* version) noexcept {
+    if (version == nullptr) return 0;
+    const char* p{version};
+    while (*p != '\0' && *p != '.') ++p;  // skip the major component
+    if (*p != '.') return 0;
+    ++p;                                   // first digit of the minor component
+    uint32_t minor{0};
+    bool any_digit{false};
+    for (; *p >= '0' && *p <= '9'; ++p) {
+        minor = minor * 10 + static_cast<uint32_t>(*p - '0');
+        any_digit = true;
+    }
+    return any_digit ? minor : 0;
+}
+}  // namespace
+
+uint32_t NegotiatedOrtApiVersion() noexcept {
+    return g_negotiated_ort_api_version.load(std::memory_order_relaxed);
+}
+
+const OrtApi* NegotiateOrtApi(const OrtApiBase& ort_api_base, uint32_t min_version) noexcept {
+    // Cap the first probe at the runtime's own version so GetApi() is never asked
+    // for a version it rejects. Every out-of-range GetApi() call logs an "API
+    // version not available" line to stderr from inside onnxruntime.dll; starting
+    // at or below the runtime's version avoids that noise entirely.
+    uint32_t ceiling{ORT_API_VERSION};
+    if (const uint32_t rt{RuntimeApiVersionFromString(ort_api_base.GetVersionString())}) {
+        if (rt < ceiling) ceiling = rt;
+    }
+    for (uint32_t v{ceiling}; v >= min_version; --v) {
+        if (const OrtApi* api{ort_api_base.GetApi(v)}) {
+            g_negotiated_ort_api_version.store(v, std::memory_order_relaxed);
+            return api;
+        }
+    }
+    g_negotiated_ort_api_version.store(0, std::memory_order_relaxed);
+    return nullptr;
+}
+
 template <typename T>
 struct VisitorPriorityQueue {
     using ComparatorType = std::function<bool(const T&, const T&)>;
