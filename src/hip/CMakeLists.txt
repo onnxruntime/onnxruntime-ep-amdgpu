@@ -24,7 +24,7 @@ endif()
 
 
 if (USE_AMDGPU)
-    set_target_properties(directx-ep PROPERTIES OUTPUT_NAME "hipdnn-backend")
+    set_target_properties(directx-ep PROPERTIES OUTPUT_NAME "hip-backend")
     target_include_directories(directx-ep INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 endif ()
 
