@@ -1926,13 +1926,23 @@ bool FullGraphFusion::TryCompilePartition(
         if (!node) continue;
         const char* op_type = nullptr;
         ort_api.Node_GetOperatorType(node, &op_type);
-        if (!op_type) return false;
+        if (!op_type) {
+            DiagLog("[TryCompilePartition] translate FAIL: null op_type\n");
+            return false;
+        }
         auto reg_it = registry.find(op_type);
-        if (reg_it == registry.end()) return false;
+        if (reg_it == registry.end()) {
+            DiagLog(std::string("[TryCompilePartition] translate FAIL: no translator for op=") + op_type + "\n");
+            return false;
+        }
         auto input_names  = fusion_utils::GetNodeInputNames(ort_api, node);
         auto output_names = fusion_utils::GetNodeOutputNames(ort_api, node);
         auto translated = reg_it->second(ort_api, node, subgraph.value_shapes, subgraph.all_initializers);
-        if (!translated) return false;
+        if (!translated) {
+            DiagLog(std::string("[TryCompilePartition] translate FAIL: op=") + op_type +
+                " out0=" + (output_names.empty() ? "?" : output_names[0]) + "\n");
+            return false;
+        }
         // Write-back: translator computed output shapes; seed them for downstream.
         for (size_t k = 0; k < output_names.size() && k < translated->output_tensors.size(); ++k) {
             if (!subgraph.value_shapes.count(output_names[k]))
@@ -1988,15 +1998,54 @@ bool FullGraphFusion::TryCompilePartition(
 
     // CreateOperator.
     ComPtr<IDMLDevice> dml_device;
-    if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf()))) return false;
+    if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf()))) {
+        DiagLog("[TryCompilePartition] GetDmlDevice failed\n");
+        return false;
+    }
     ComPtr<IDMLDevice1> dml_device1;
-    if (FAILED(dml_device.As(&dml_device1))) return false;
+    if (FAILED(dml_device.As(&dml_device1))) {
+        DiagLog("[TryCompilePartition] IDMLDevice1 QI failed\n");
+        return false;
+    }
     for (auto& compiled_node : compiled_nodes) {
-        if (FAILED(dml_device->CreateOperator(&compiled_node.translated->op_desc,
-                IID_PPV_ARGS(compiled_node.translated->dml_operator.GetAddressOf())))) return false;
-        for (auto& sn : compiled_node.translated->sub_nodes)
-            if (FAILED(dml_device->CreateOperator(&sn.op_desc,
-                    IID_PPV_ARGS(sn.dml_operator.GetAddressOf())))) return false;
+        HRESULT hr_op = dml_device->CreateOperator(&compiled_node.translated->op_desc,
+                IID_PPV_ARGS(compiled_node.translated->dml_operator.GetAddressOf()));
+        if (FAILED(hr_op)) {
+            char hr_buf[32];
+            snprintf(hr_buf, sizeof(hr_buf), "0x%08X", (unsigned)hr_op);
+            DiagLog(std::string("[TryCompilePartition] CreateOperator FAILED HR=") + hr_buf +
+                " op=" + compiled_node.op_type + "\n");
+            auto dump_tensors = [](const char* tag, const std::vector<DmlTensorInfo>& tensors) {
+                for (size_t ti = 0; ti < tensors.size(); ++ti) {
+                    const auto& t = tensors[ti];
+                    std::string s = std::string("[TryCompilePartition]   ") + tag + "[" +
+                        std::to_string(ti) + "] dtype=" + std::to_string((int)t.data_type) +
+                        " rank=" + std::to_string(t.original_rank) + " sizes=[";
+                    for (size_t d = 0; d < t.sizes.size(); ++d)
+                        s += (d ? "," : "") + std::to_string(t.sizes[d]);
+                    s += "] strides=[";
+                    for (size_t d = 0; d < t.strides.size(); ++d)
+                        s += (d ? "," : "") + std::to_string(t.strides[d]);
+                    s += "] total_bytes=" + std::to_string(t.total_bytes) + "\n";
+                    DiagLog(s);
+                }
+            };
+            dump_tensors("in",  compiled_node.translated->input_tensors);
+            dump_tensors("out", compiled_node.translated->output_tensors);
+            return false;
+        }
+        for (size_t s = 0; s < compiled_node.translated->sub_nodes.size(); ++s) {
+            auto& sn = compiled_node.translated->sub_nodes[s];
+            HRESULT hr_sn = dml_device->CreateOperator(&sn.op_desc,
+                    IID_PPV_ARGS(sn.dml_operator.GetAddressOf()));
+            if (FAILED(hr_sn)) {
+                char hr_buf[32];
+                snprintf(hr_buf, sizeof(hr_buf), "0x%08X", (unsigned)hr_sn);
+                DiagLog(std::string("[TryCompilePartition] CreateOperator FAILED (sub_node) HR=") + hr_buf +
+                    " op=" + compiled_node.op_type + " sub=" + std::to_string(s) + "\n");
+                return false;
+            }
+        }
     }
 
     // Build graph descriptor (minimal — just enough for CompileGraph validation).
@@ -2154,6 +2203,9 @@ bool FullGraphFusion::TryCompilePartition(
                 }
                 me.push_back({(UINT)pdi,foi,(UINT)pdml,(UINT)dml_slot});
             } else {
+                DiagLog(std::string("[TryCompilePartition] UNRESOLVED input edge: node_idx=") +
+                    std::to_string(node_idx) + " op=" + compiled_node.op_type +
+                    " slot=" + std::to_string(s) + " name='" + name + "'\n");
                 return false;
             }
         }
