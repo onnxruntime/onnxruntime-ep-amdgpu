@@ -9,7 +9,7 @@ namespace hip {
 
 struct Allocator : OrtAllocator {
     Allocator(const OrtMemoryInfo* memory_info, const int device_id)
-        : OrtAllocator{ORT_API_VERSION}, device_id_{device_id}, memory_info_{memory_info}
+        : OrtAllocator{NegotiatedOrtApiVersion()}, device_id_{device_id}, memory_info_{memory_info}
     {
         OrtAllocator::Alloc = [](OrtAllocator* this_, size_t size) {
             return reinterpret_cast<Allocator*>(this_)->Alloc(size);
@@ -33,7 +33,7 @@ private:
 
 struct PinnedAllocator final : OrtAllocator {
     PinnedAllocator(const OrtMemoryInfo* memory_info, const int device_id)
-        : OrtAllocator{ORT_API_VERSION}, device_id_{device_id}, memory_info_{memory_info}
+        : OrtAllocator{NegotiatedOrtApiVersion()}, device_id_{device_id}, memory_info_{memory_info}
     {
         OrtAllocator::Alloc = [](OrtAllocator* this_, const size_t size) {
             return reinterpret_cast<PinnedAllocator*>(this_)->Alloc(size);

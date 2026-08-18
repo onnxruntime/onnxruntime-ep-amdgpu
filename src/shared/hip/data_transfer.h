@@ -9,7 +9,7 @@ namespace hip {
 
 struct DataTransfer final : OrtDataTransferImpl, ApiPtrs {
     DataTransfer() = delete;
-    DataTransfer(const ApiPtrs& api_ptrs) : OrtDataTransferImpl{ORT_API_VERSION}, ApiPtrs{api_ptrs}
+    DataTransfer(const ApiPtrs& api_ptrs) : OrtDataTransferImpl{NegotiatedOrtApiVersion()}, ApiPtrs{api_ptrs}
     {
         OrtDataTransferImpl::Release = [](OrtDataTransferImpl* this_) noexcept {
             // Factories should own and manage the DataTransfer object - do not delete it here!

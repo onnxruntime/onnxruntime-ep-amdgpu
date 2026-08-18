@@ -12,6 +12,7 @@ add_library(plugin-ep-utils STATIC
         common/make_string.h
         common/murmurhash3.cc
         common/murmurhash3.h
+        common/ort_api_version.h
         common/ort_graph_to_proto.cc
         common/ort_graph_to_proto.h
         common/parse_string.h
