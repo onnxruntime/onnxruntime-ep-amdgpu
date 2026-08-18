@@ -783,7 +783,7 @@ std::vector<IMLOperatorTensor*> PluginOpKernelContextWrapper::GetOutputTensors(c
         m_defaultAttributes(defaultAttributes),
         m_dmlPluginExecutionProvider(pluginDmlEp),
         m_ortKernelInfo(reinterpret_cast<const OrtKernelInfo*>(&kerneInfo)),
-        m_ortApi(OrtGetApiBase()->GetApi(ORT_API_VERSION))
+        m_ortApi(OrtGetApiBase()->GetApi(NegotiatedOrtApiVersion()))
     {
         assert(requiresInputShapesAtCreation || !requiresOutputShapesAtCreation);
 

@@ -5,6 +5,7 @@
 
 #include "dml_host_accessible_allocator.h"
 
+#include "common/ort_api_version.h"
 #include "DmlExecutionProvider/DmlResourceWrapper.h"
 #include "DmlExecutionProvider/ErrorHandling.h"
 
@@ -16,7 +17,7 @@ DmlHostAccessibleAllocator::DmlHostAccessibleAllocator(
     std::unique_ptr<DmlSubAllocator>&& subAllocator)
     : m_device(device), m_subAllocator(std::move(subAllocator)), m_memoryInfo(memory_info)
 {
-    OrtAllocator::version = ORT_API_VERSION;
+    OrtAllocator::version = NegotiatedOrtApiVersion();
     OrtAllocator::Alloc = [](OrtAllocator* self, size_t size) -> void* {
         return static_cast<DmlHostAccessibleAllocator*>(self)->AllocImpl(size);
     };
