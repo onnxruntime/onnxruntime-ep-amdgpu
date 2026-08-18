@@ -36,7 +36,11 @@ OrtStatus* CreateEpFactories(const char* registration_name, const OrtApiBase* or
     const OrtLogger* default_logger, OrtEpFactory** factories, size_t max_factories, size_t* num_factories)
 {
     try {
-        const OrtApi* ort_api{ort_api_base->GetApi(ORT_API_VERSION)};
+        const OrtApi* ort_api{NegotiateOrtApi(*ort_api_base, kMinOrtApiVersion)};
+        if (ort_api == nullptr) {
+            RETURN_STATUS(ORT_EP_FAIL, "onnxruntime runtime too old: hip-backend requires ORT API >= ",
+                kMinOrtApiVersion);
+        }
         Ort::InitApi(ort_api);
 
         if (g_refcount++ == 0) {
