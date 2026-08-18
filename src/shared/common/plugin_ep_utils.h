@@ -35,6 +35,7 @@ using namespace std::literals::string_view_literals;  // NOLINT(build/namespaces
 using ranges::views::zip;
 
 #include "make_string.h"
+#include "common/ort_api_version.h"
 
 namespace amd {
 constexpr uint32_t VendorId{0x1002};
