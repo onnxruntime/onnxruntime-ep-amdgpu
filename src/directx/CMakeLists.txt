@@ -660,6 +660,11 @@ target_link_libraries(directx-ep
         Microsoft::DirectX-Guids
 )
 
+# Compile directly into the DLL so the linker cannot discard DllMain from
+# the plugin-ep-utils static library.
+target_sources(directx-ep PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/shared/common/platform/windows/dll_main.cc)
+
 target_compile_definitions(directx-ep
     PRIVATE
         NOGDI

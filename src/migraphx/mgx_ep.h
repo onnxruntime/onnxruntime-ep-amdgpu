@@ -326,7 +326,7 @@ private:
 
 struct NodeComputeInfo : OrtNodeComputeInfo {
     explicit NodeComputeInfo(ExecutionProvider& ep)
-        : OrtNodeComputeInfo{ORT_API_VERSION}, ep_{ep}
+        : OrtNodeComputeInfo{NegotiatedOrtApiVersion()}, ep_{ep}
     {
         OrtNodeComputeInfo::CreateState = [](OrtNodeComputeInfo* this_,
             OrtNodeComputeContext* compute_context, void** compute_state) noexcept {
@@ -352,7 +352,7 @@ private:
 
 struct EpContextNodeComputeInfo : OrtNodeComputeInfo {
     explicit EpContextNodeComputeInfo(ExecutionProvider& ep)
-        : OrtNodeComputeInfo{ORT_API_VERSION}, ep_{ep}
+        : OrtNodeComputeInfo{NegotiatedOrtApiVersion()}, ep_{ep}
     {
         OrtNodeComputeInfo::CreateState = [](OrtNodeComputeInfo* this_,
             OrtNodeComputeContext* compute_context, void** compute_state) noexcept {

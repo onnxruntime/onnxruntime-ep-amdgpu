@@ -8,7 +8,7 @@ namespace gpu_ep {
 
 Allocator::Allocator(const ProviderFactory& factory,
         const OrtMemoryInfo* memory_info, const OrtKeyValuePairs* allocator_options)
-    : OrtAllocator{ORT_API_VERSION}, factory_{factory},
+    : OrtAllocator{NegotiatedOrtApiVersion()}, factory_{factory},
       allocator_options_{allocator_options}, memory_info_{memory_info}
 {
     OrtAllocator::Alloc = [](OrtAllocator* this_, size_t size) {

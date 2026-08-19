@@ -2212,7 +2212,7 @@ struct OpActivationNodeComputeInfo : OrtNodeComputeInfo {
     OpActivationKernelState* state = nullptr;
 
     OpActivationNodeComputeInfo() {
-        ort_version_supported = ORT_API_VERSION;
+        ort_version_supported = NegotiatedOrtApiVersion();
         CreateState = [](OrtNodeComputeInfo* self, OrtNodeComputeContext*, void** out) noexcept -> OrtStatus* {
             *out = static_cast<OpActivationNodeComputeInfo*>(self)->state;
             return nullptr;

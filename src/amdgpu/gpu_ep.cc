@@ -70,7 +70,7 @@ telemetry::Backend BackendForProfile(Profile profile) noexcept {
 
 ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view ep_name,
         const Ort::ConstSessionOptions& session_options, const OrtLogger* logger)
-    : OrtEp{ORT_API_VERSION},
+    : OrtEp{NegotiatedOrtApiVersion()},
       ApiPtrs{factory.ort_api, factory.ep_api, factory.model_editor_api},
       factory_{factory}, ep_name_{ep_name}, logger_{logger}
 {
@@ -234,6 +234,12 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 local_session_options,
                 get_name(mgx_ep::provider_option::kExhaustiveTune).c_str(),
                 std::to_string(info.exhaustive_tune.value()).c_str()));
+        }
+        if (info.compute_mode.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kComputeMode).c_str(),
+                info.compute_mode.value().c_str()));
         }
         if (info.mlss_use_specific_ops.has_value()) {
             THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
