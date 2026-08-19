@@ -1140,7 +1140,7 @@ struct FusedMatMulNodeComputeInfo : OrtNodeComputeInfo {
     FusedMatMulKernelState* state = nullptr;
 
     FusedMatMulNodeComputeInfo() {
-        ort_version_supported = ORT_API_VERSION;
+        ort_version_supported = NegotiatedOrtApiVersion();
         CreateState = [](OrtNodeComputeInfo* self, OrtNodeComputeContext*, void** out) noexcept -> OrtStatus* {
             *out = static_cast<FusedMatMulNodeComputeInfo*>(self)->state;
             return nullptr;

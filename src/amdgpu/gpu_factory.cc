@@ -53,7 +53,7 @@ constexpr auto hipBackend{LIBRARY_PREFIX ORT_TSTR("hip-backend") LIBRARY_SUFFIX}
 }
 
 ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_api_base, const char* ep_name, const OrtLogger* default_logger)
-    : OrtEpFactory{ORT_API_VERSION}, ApiPtrs{api_ptrs}, default_logger_{default_logger}, ep_name_{ep_name}
+    : OrtEpFactory{NegotiatedOrtApiVersion()}, ApiPtrs{api_ptrs}, default_logger_{default_logger}, ep_name_{ep_name}
 {
     OrtEpFactory::GetName = [](const OrtEpFactory* this_) noexcept {
         API_CALL_T(const ProviderFactory, this_, GetName, "invalid object pointer");
@@ -421,7 +421,11 @@ OrtStatus* CreateEpFactories(const char* registration_name, const OrtApiBase* or
             SetDllDirectoryW(path.parent_path().native().c_str());
         }
 #endif
-        const OrtApi* ort_api{ort_api_base->GetApi(ORT_API_VERSION)};
+        const OrtApi* ort_api{NegotiateOrtApi(*ort_api_base, kMinOrtApiVersion)};
+        if (ort_api == nullptr) {
+            RETURN_STATUS(ORT_EP_FAIL, "onnxruntime runtime too old: amdgpu-ep requires ORT API >= ",
+                kMinOrtApiVersion);
+        }
         const OrtEpApi* ep_api{ort_api->GetEpApi()};
         const OrtModelEditorApi* model_editor_api{ort_api->GetModelEditorApi()};
 

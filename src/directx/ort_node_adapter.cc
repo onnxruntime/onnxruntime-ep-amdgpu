@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include "ort_node_adapter.h"
+#include "common/ort_api_version.h"
 #include "core/framework/onnxruntime_typeinfo.h"
 #include "core/framework/tensor_type_and_shape.h"
 #include "core/framework/abi_safe_attr_utils.h"
@@ -208,7 +209,7 @@ size_t OrtGraphAdapter::GetNumNodes() const {
 
 OrtNodeAdapter::OrtNodeAdapter(const OrtNodePlugin* node)
 : id_(0), since_version_(0), parent_graph_(nullptr),
-  api_(OrtGetApiBase()->GetApi(ORT_API_VERSION))
+  api_(OrtGetApiBase()->GetApi(NegotiatedOrtApiVersion()))
 {
     if (!node) {
         throw std::invalid_argument("OrtNodePlugin cannot be nullptr");

@@ -201,7 +201,7 @@ D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* d3d12_device)
 }  // namespace
 
 ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, std::string_view ep_name, const Ort::Logger& default_logger)
-    : OrtEpFactory{ORT_API_VERSION},
+    : OrtEpFactory{NegotiatedOrtApiVersion()},
       ApiPtrs{api_ptrs},
       default_logger_{default_logger},
       ep_name_{ep_name},
@@ -680,7 +680,11 @@ OrtStatus* CreateEpFactories(const char* registration_name, const OrtApiBase* or
     const OrtLogger* default_logger, OrtEpFactory** factories, size_t max_factories, size_t* num_factories)
 {
     try {
-        const OrtApi* ort_api{ort_api_base->GetApi(ORT_API_VERSION)};
+        const OrtApi* ort_api{NegotiateOrtApi(*ort_api_base, kMinOrtApiVersion)};
+        if (ort_api == nullptr) {
+            RETURN_STATUS(ORT_EP_FAIL, "onnxruntime runtime too old: directx-ep requires ORT API >= ",
+                kMinOrtApiVersion);
+        }
         const OrtEpApi* ep_api{ort_api->GetEpApi()};
         const OrtModelEditorApi* model_editor_api{ort_api->GetModelEditorApi()};
 

@@ -426,7 +426,7 @@ void* GetGpuInputData(ComputeState& cs, const Ort::KernelContext& ctx, const std
     }
 
 ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string_view ep_name, Ort::ConstSessionOptions session_options, const Ort::Logger& logger)
-    : OrtEp{ORT_API_VERSION}, ApiPtrs{factory.ort_api, factory.ep_api, factory.model_editor_api}, factory_{factory}, logger_{logger}, ep_name_{ep_name}
+    : OrtEp{NegotiatedOrtApiVersion()}, ApiPtrs{factory.ort_api, factory.ep_api, factory.model_editor_api}, factory_{factory}, logger_{logger}, ep_name_{ep_name}
 {
     OrtEp::GetName = [](const OrtEp* this_) noexcept {
         API_CALL_T(const ExecutionProvider, this_, GetName, "invalid object pointer");
@@ -755,7 +755,7 @@ try {
         if (!ep_context_nodes.empty()) {
             // EPContext nodes must be fused (not added as single nodes) so that
             // ORT routes them through Compile() instead of looking for a kernel
-            OrtNodeFusionOptions node_fusion_options{ORT_API_VERSION, true};
+            OrtNodeFusionOptions node_fusion_options{NegotiatedOrtApiVersion(), true};
             RETURN_IF_STATUS(ep_api.EpGraphSupportInfo_AddNodesToFuse(graph_support_info,
                 reinterpret_cast<const OrtNode* const*>(ep_context_nodes.data()),
                 ep_context_nodes.size(), &node_fusion_options));
@@ -801,7 +801,7 @@ try {
         supported_nodes.emplace_back(node);
     }
     if (unsupported_nodes.empty()) {
-        OrtNodeFusionOptions node_fusion_options{ORT_API_VERSION, true};
+        OrtNodeFusionOptions node_fusion_options{NegotiatedOrtApiVersion(), true};
         RETURN_IF_STATUS(ep_api.EpGraphSupportInfo_AddNodesToFuse(graph_support_info,
             reinterpret_cast<const OrtNode* const*>(supported_nodes.data()), supported_nodes.size(),
             &node_fusion_options));
@@ -809,7 +809,7 @@ try {
         const auto subgraphs{GetPartitionedSubgraphs(sorted_nodes, unsupported_nodes)};
         /* TODO: log unsupported nodes */
         for (const auto& subgraph : subgraphs) {
-            OrtNodeFusionOptions node_fusion_options{ORT_API_VERSION, true};
+            OrtNodeFusionOptions node_fusion_options{NegotiatedOrtApiVersion(), true};
             RETURN_IF_STATUS(ep_api.EpGraphSupportInfo_AddNodesToFuse(graph_support_info,
                 reinterpret_cast<const OrtNode* const*>(subgraph.data()), subgraph.size(),
                 &node_fusion_options));

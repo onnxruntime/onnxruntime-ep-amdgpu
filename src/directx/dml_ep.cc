@@ -46,7 +46,7 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     Microsoft::WRL::ComPtr<ExecutionContext> executionContext,
     std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder,
     bool enableHostAccessible)
-    : OrtEp{ORT_API_VERSION}
+    : OrtEp{NegotiatedOrtApiVersion()}
     , ApiPtrs{api_ptrs}
     , name_{name}
     , d3d12_device{d3d12_device_}
@@ -67,6 +67,13 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     OrtEp::GetCompiledModelCompatibilityInfo = GetCompiledModelCompatibilityInfoImpl;
     OrtEp::GetKernelRegistry = GetKernelRegistryImpl;
     IsConcurrentRunSupported = IsConcurrentRunSupportedImpl;
+
+    // OrtEp::OnSessionInitializationEnd is a v27 callback. Only advertise it when the
+    // runtime can drive it; on older runtimes it stays null (aggregate-initialized) and
+    // OnRunStartImpl performs the one-time post-init trim as a fallback instead.
+    if (NegotiatedOrtApiVersion() >= kSessionInitEndApiVersion) {
+        OrtEp::OnSessionInitializationEnd = OnSessionInitializationEndImpl;
+    }
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS4 featureOptions = {};
     if (SUCCEEDED(d3d12_device->CheckFeatureSupport(
@@ -515,7 +522,7 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
 
         adapter->internal_kernel = std::move(op_kernel);
         adapter->ort_api_ptr = state->ort_api_ptr;
-        adapter->ort_version_supported = ORT_API_VERSION;
+        adapter->ort_version_supported = NegotiatedOrtApiVersion();
         adapter->flags = 0;
         adapter->Compute = DmlKernelImplAdapter_Compute;
         adapter->Release = DmlKernelImplAdapter_Release;
@@ -1325,7 +1332,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
             }
             DML_PERF_LOG("[Tier0] CLAIM: group passed pre-flight (", g.nodes.size(), " nodes)\n");
 
-            OrtNodeFusionOptions fusion_options{ORT_API_VERSION, true};
+            OrtNodeFusionOptions fusion_options{NegotiatedOrtApiVersion(), true};
             OrtStatus* st = ep->ep_api.EpGraphSupportInfo_AddNodesToFuse(
                 graph_support_info,
                 g.nodes.data(),
@@ -1583,7 +1590,12 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::OnRunStartImpl(
 {
     auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
 
-    ep->m_executionProvider->OnSessionInitializationEnd();
+    // On runtimes older than v27 ORT does not call OrtEp::OnSessionInitializationEnd,
+    // so run the one-time post-init trim here (idempotent via m_sessionInitialized).
+    // On v27+ the wired callback already handled it before the first run.
+    if (NegotiatedOrtApiVersion() < kSessionInitEndApiVersion) {
+        ep->m_executionProvider->OnSessionInitializationEnd();
+    }
 
     ep->m_executionProvider.get()->OnRunStart(*run_options);
     return nullptr;

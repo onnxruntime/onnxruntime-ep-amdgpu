@@ -7,7 +7,7 @@
 namespace gpu_ep {
 
 DataTransfer::DataTransfer(const ProviderFactory& factory)
-    : OrtDataTransferImpl{ORT_API_VERSION}, factory_{factory}
+    : OrtDataTransferImpl{NegotiatedOrtApiVersion()}, factory_{factory}
 {
     OrtDataTransferImpl::Release = [](OrtDataTransferImpl* this_) noexcept {
         // ORT creates one DataTransfer per session and owns it, delete on Release.

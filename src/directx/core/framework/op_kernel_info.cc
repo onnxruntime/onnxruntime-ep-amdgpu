@@ -7,6 +7,7 @@
 #include "core/framework/op_kernel_info.h"
 #include "core/framework/sequential_execution_plan.h"
 #include <onnxruntime_c_api.h>
+#include "common/ort_api_version.h"
 
 namespace onnxruntime {
 
@@ -66,7 +67,7 @@ const onnxruntime::Node& OpKernelInfo::node() const noexcept {
 }
 
 bool OpKernelInfo::TryGetConstantInput(int input_index, const Tensor** constant_input_value) const {
-  const OrtApi* api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+  const OrtApi* api = OrtGetApiBase()->GetApi(NegotiatedOrtApiVersion());
   if (!api || input_index < 0) return false;
 
   auto* ort_info = reinterpret_cast<const OrtKernelInfo*>(this);
@@ -82,7 +83,7 @@ bool OpKernelInfo::TryGetConstantInput(int input_index, const Tensor** constant_
 }
 
 bool OpKernelInfo::TryGetConstantInput(int input_index, const OrtValue** constant_input_value) const {
-  const OrtApi* api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+  const OrtApi* api = OrtGetApiBase()->GetApi(NegotiatedOrtApiVersion());
   if (!api || input_index < 0) return false;
 
   auto* ort_info = reinterpret_cast<const OrtKernelInfo*>(this);
