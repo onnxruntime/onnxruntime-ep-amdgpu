@@ -10,6 +10,10 @@
 #include <string_view>
 #include <unordered_set>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <gsl/span>
 
 #include <migraphx/migraphx.hpp>
@@ -653,11 +657,48 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
 
     /* TODO: print configured options for the session */
 
+    // Discover the read-only problem cache; paths are delivered to MIGraphX via the compile API.
+    setup_problem_cache_paths();
+
     // Register only after construction succeeds so the factory count is balanced
     // by the destructor.
     if (cpu_control_flow_enable_) {
         factory_.EnableCpuControlFlow();
     }
+}
+
+void ExecutionProvider::setup_problem_cache_paths() {
+    // Ordered read-only search list (highest priority first), delivered to MIGraphX via
+    // the compile API (set_advance_backend_option), not the MIGRAPHX_PROBLEM_CACHE env var.
+    problem_cache_paths_.clear();
+
+    // 1. App-provided override (ORT_MIGRAPHX_PROBLEM_CACHE), if set.
+    if (auto ep_override{platform::GetEnvironmentVar(env_var::kProblemCachePath)}; !ep_override.empty()) {
+        problem_cache_paths_.push_back(std::move(ep_override));
+    }
+
+#ifdef _WIN32
+    // 2. Read-only cache shipped beside this EP module: problem_cache.json in the same
+    //    directory (migraphx_gpu.dll is deployed there too).
+    static const char kAnchor{'\0'};  // address anchor in this module for GetModuleHandleEx
+    HMODULE module{nullptr};
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           &kAnchor, &module) != 0) {
+        std::vector<wchar_t> buffer;
+        for (;;) {
+            buffer.resize(buffer.size() + MAX_PATH);
+            if (const auto written{GetModuleFileNameW(module, buffer.data(),
+                    static_cast<DWORD>(buffer.size()))}; written < buffer.size()) {
+                break;
+            }
+        }
+        const fs::path cache_path{fs::path{buffer.data()}.parent_path() / "problem_cache.json"};
+        if (fs::exists(cache_path)) {
+            problem_cache_paths_.push_back(cache_path.string());
+        }
+    }
+#endif
 }
 
 ExecutionProvider::~ExecutionProvider() {
@@ -914,10 +955,25 @@ void calibrate_and_quantize(const migraphx::program& prog, const migraphx::targe
     }
 }
 
+// JSON-escape backslashes and double-quotes so a file path survives the relaxed-JSON
+// backend-options parser as a quoted string.
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        if (c == '\\' || c == '"') {
+            out.push_back('\\');
+        }
+        out.push_back(c);
+    }
+    return out;
+}
+
 // compute_mode has no default argument on purpose: every call site must state
 // which mode it compiles under.
 void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune,
-    const std::string& mlss_use_specific_ops, ComputeMode compute_mode) {
+    const std::string& mlss_use_specific_ops, ComputeMode compute_mode,
+    const std::vector<std::string>& problem_cache_paths) {
     migraphx::compile_options options;
     options.set_fast_math(false);
 
@@ -936,6 +992,23 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
     // options.exhaustive_tune, so on this build max would be close to a no-op.
     // Set the flag here so Maximum means something without patching migraphx.
     options.set_exhaustive_tune_flag(exhaustive_tune || compute_mode == ComputeMode::Maximum);
+
+    // Deliver the ordered read-only cache files as the "problem_cache_files" GPU backend
+    // option. Build the JSON explicitly with quoted, escaped paths: the typed
+    // set_advance_backend_option streams values unquoted, and the relaxed-JSON parser would
+    // shred ':' and '\\' in a path. Passed as a %s arg so any '%' in a path is not a format
+    // specifier. MIGraphX builds with the problem-cache feature consume the key; older ignore it.
+    if (!problem_cache_paths.empty()) {
+        std::string json = "{\"problem_cache_files\":[";
+        for (std::size_t i = 0; i < problem_cache_paths.size(); ++i) {
+            if (i != 0) {
+                json += ",";
+            }
+            json += "\"" + json_escape(problem_cache_paths[i]) + "\"";
+        }
+        json += "]}";
+        options.set_advance_backend_options("%s", json.c_str());
+    }
     if (!mlss_use_specific_ops.empty()) {
         // MIGraphX expects a list of op names; split the comma-separated value.
         std::vector<std::string> ops;
@@ -1029,7 +1102,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             migraphx::program_parameters params;
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
-            compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_, compute_mode_);
+            compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_, compute_mode_, problem_cache_paths_);
             // context_enable needs this file on disk even if caching is otherwise disabled.
             if (!disable_compiled_model_caching_ || context_enable_) {
                 save_compiled_program(program, mxr_path);
@@ -1078,6 +1151,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             force_recompile_,
             external_data_dir_,
             mxr_prefix,
+            problem_cache_paths_,
         });
 
     // Propagate hipGraph / dynamic-batch configuration onto the compute state.
@@ -1488,7 +1562,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 compute_state.enable_fp8, compute_state.int8_calibration_cache_available, compute_state.dynamic_ranges);
 
             compile_program(program, compute_state.t, compute_state.exhaustive_tune,
-                compute_state.mlss_use_specific_ops, compute_state.compute_mode);
+                compute_state.mlss_use_specific_ops, compute_state.compute_mode, compute_state.problem_cache_paths);
             if (!compute_state.disable_compiled_model_caching) {
                 save_compiled_program(program, mxr_path);
             }
