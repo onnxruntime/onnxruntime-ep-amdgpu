@@ -1282,7 +1282,6 @@ static std::optional<TranslatedOp> TranslateArgMaxMin(
 
     OrtNodeAdapter adapter(node, ort_api);
     int64_t axis      = adapter.GetAttributeInt("axis", 0);
-    int64_t keepdims  = adapter.GetAttributeInt("keepdims", 1);
     int64_t select_last = adapter.GetAttributeInt("select_last_index", 0);
 
     size_t padded_rank = in_info->sizes.size();
@@ -1292,20 +1291,18 @@ static std::optional<TranslatedOp> TranslateArgMaxMin(
     axis += static_cast<int64_t>(pad_offset);
     UINT dml_axis = static_cast<UINT>(axis);
 
-    auto* out_edge = LookupShape(value_shapes, outputs[0]);
-    std::vector<uint32_t> out_sizes;
-    if (out_edge) {
-        out_sizes = out_edge->sizes;
-    } else {
-        out_sizes = in_info->sizes;
-        if (keepdims) out_sizes[axis] = 1u;
-        else {
-            out_sizes.erase(out_sizes.begin() + axis);
-            if (out_sizes.empty()) out_sizes.push_back(1u);
-        }
-    }
-
     auto in_tensor  = MakeTensorInfo(in_info->sizes, in_info->data_type);
+    // DML ArgMax/ArgMin require the output tensor desc to have the SAME dimension
+    // count as the input, with the reduced axis set to size 1 — DML has no notion
+    // of ONNX's keepdims. Building the output from the ONNX output shape instead
+    // right-pads the size-1 to the wrong axis (e.g. input [1,1,10,77] reduced on
+    // axis 3 gave output [1,1,1,10] instead of [1,1,10,1]), which CreateOperator
+    // rejects with E_INVALIDARG. Mirror ORT's reducedDims logic (DmlOperatorReduce):
+    // take the padded input shape and set the reduced axis to 1.
+    std::vector<uint32_t> out_sizes = in_info->sizes;
+    out_sizes[dml_axis] = 1u;
+    // Output is int64 index data (ONNX ArgMax output type), matching ORT which keeps
+    // edgeDesc.tensorDataType (INT64) rather than coercing.
     auto out_tensor = MakeTensorInfo(out_sizes, DML_TENSOR_DATA_TYPE_INT64);
 
     struct ArgStorage {

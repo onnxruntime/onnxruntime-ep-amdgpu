@@ -70,7 +70,7 @@ telemetry::Backend BackendForProfile(Profile profile) noexcept {
 
 ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view ep_name,
         const Ort::ConstSessionOptions& session_options, const OrtLogger* logger)
-    : OrtEp{ORT_API_VERSION},
+    : OrtEp{NegotiatedOrtApiVersion()},
       ApiPtrs{factory.ort_api, factory.ep_api, factory.model_editor_api},
       factory_{factory}, ep_name_{ep_name}, logger_{logger}
 {
