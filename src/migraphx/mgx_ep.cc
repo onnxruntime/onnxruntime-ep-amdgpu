@@ -934,7 +934,9 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
             rest.remove_prefix(pos + 1);
         }
         options.set_advance_backend_option("mlss_use_specific_ops", ops);
-        options.set_advance_backend_option("convolution_layout", "channels_first");
+        if (ranges::any_of(ops, [](const std::string& op) { return op == "conv"; })) {
+            options.set_advance_backend_option("convolution_layout", "channels_first");
+        }
     }
     prog.compile(target, options);
 }
