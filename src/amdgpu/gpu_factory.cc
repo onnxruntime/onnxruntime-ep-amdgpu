@@ -197,12 +197,30 @@ ProviderFactory::~ProviderFactory() {
         ort_api.ReleaseMemoryInfo(pinned_memory_info_);
     }
 #ifdef USE_DML
+    if (dml_ep_factory_ != nullptr && dml_release_ep_factory_ != nullptr) {
+        if (OrtStatus* status = dml_release_ep_factory_(dml_ep_factory_)) {
+            ort_api.ReleaseStatus(status);
+        }
+        dml_ep_factory_ = nullptr;
+    }
     if (!UnloadDynamicLibrary(dml_backend_).IsOK()) {
         /* TODO: log failure while unloading DirectML EP library */
     }
 #endif
+    if (mgx_ep_factory_ != nullptr && mgx_release_ep_factory_ != nullptr) {
+        if (OrtStatus* status = mgx_release_ep_factory_(mgx_ep_factory_)) {
+            ort_api.ReleaseStatus(status);
+        }
+        mgx_ep_factory_ = nullptr;
+    }
     if (!UnloadDynamicLibrary(mgx_backend_).IsOK()) {
         /* TODO: log failure while unloading MIGraphX EP library */
+    }
+    if (hip_ep_factory_ != nullptr && hip_release_ep_factory_ != nullptr) {
+        if (OrtStatus* status = hip_release_ep_factory_(hip_ep_factory_)) {
+            ort_api.ReleaseStatus(status);
+        }
+        hip_ep_factory_ = nullptr;
     }
     if (!UnloadDynamicLibrary(hip_backend_).IsOK()) {
         /* TODO: log failure while unloading hip EP library */
