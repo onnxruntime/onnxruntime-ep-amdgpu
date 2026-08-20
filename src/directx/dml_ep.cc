@@ -665,9 +665,18 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         // Helper: check if a ValueInfo has missing or dynamic shape.
         auto HasDynamicShape = [&](const OrtValueInfo* vi) -> bool {
             if (!vi) return true;
-            // Check resolved_shapes first.
+            // A resolved_shapes entry counts as static only if every dim is > 0.
+            // An entry may still hold a placeholder dim (-1 or 0); such an entry is
+            // not authoritative, so fall through to the ValueInfo check below.
             auto name = fusion_utils::GetValueInfoName(ep->ort_api,vi);
-            if (!name.empty() && resolved_shapes.count(name)) return false;
+            if (!name.empty()) {
+                auto it = resolved_shapes.find(name);
+                if (it != resolved_shapes.end()) {
+                    bool all_static = !it->second.empty();
+                    for (int64_t d : it->second) if (d <= 0) { all_static = false; break; }
+                    if (all_static) return false;
+                }
+            }
             auto* ti = vi->GetTypeInfo();
             if (!ti || !ti->tensor_type_info) return true;
             auto* si = ti->tensor_type_info.get();
@@ -793,7 +802,11 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
 
     ep->m_tier0GroupHashes.clear();
 
-    if (AllGraphInputsStatic(ep->ort_api, graph)) {
+    // Tier-0 fusion runs for all models, including those with dynamic input dims.
+    // Eligibility is decided per-group: Phase 1 resolves shapes to a fixpoint, Phase 2
+    // cuts partitions at dynamic-shape boundaries, and Phase 3 skips any group that
+    // fails ValidateTier0 — so a whole-route static-input gate is unnecessary.
+    {
         OpTranslatorRegistry tier0_registry = BuildOpTranslatorRegistry();
 
         // ===================================================================
@@ -1355,7 +1368,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
             if (st) ep->ort_api.ReleaseStatus(st);
         }
 
-    } // end if (AllGraphInputsStatic)
+    } // end Tier-0 route
     } // end scope for helpers (GetStaticDims, HasDynamicShape, etc.)
 
     // Update m_resolvedShapes with shapes accumulated from successful
@@ -1914,7 +1927,6 @@ std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const O
                 ort_api.Node_GetNumOutputs(candidateNode, &nodeNumOutputs);
                 valueInfo.resize(nodeNumOutputs);
                 ort_api.Node_GetOutputs(candidateNode, valueInfo.data(), nodeNumOutputs);
-
 
                 for (auto* output : valueInfo) {
                     cpu_output_args.insert(output);
