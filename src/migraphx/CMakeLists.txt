@@ -23,6 +23,8 @@ add_library(migraphx-ep MODULE
         mgx_interop.h
         mgx_kernel_reg.cc
         mgx_kernel_reg.h
+        mgx_mlss_heuristics.cc
+        mgx_mlss_heuristics.h
         mgx_options.h
         mgx_utils.cc
         mgx_utils.h
