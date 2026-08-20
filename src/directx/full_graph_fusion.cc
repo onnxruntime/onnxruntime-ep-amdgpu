@@ -192,6 +192,12 @@ static OrtStatus* ORT_API_CALL FullGraph_Compute(
 
     state->provider->QueueReference(state->compiled_op.Get());
 
+    // Submit this partition's command list now instead of batching the whole graph
+    // into one deferred submission, so the GPU can execute it while the CPU records
+    // the next partition. Flush() is non-blocking; per-dispatch UAV barriers and
+    // command-queue fence ordering preserve correctness across the split lists.
+    state->provider->Flush();
+
 #ifdef DML_PERF_PROFILE
     { uint64_t _t = PerfNowUs(); DML_PERF_LOG("[PERF] INF#", _perf_inf_id, " FullGraph_Compute EXIT: ", _t, " us (+", _t - _perf_t_enter, " total)\n"); }
 #endif
@@ -252,7 +258,8 @@ bool FullGraphFusion::ValidateTier0(
             DiagLog("[ValidateTier0] resolved_shapes MISS: '" + name + "' (map has " + std::to_string(resolved_shapes.size()) + " entries)\n");
             return false;
         }
-        for (int64_t d : it->second) if (d < 0) return false;
+        if (it->second.empty()) return false;
+        for (int64_t d : it->second) if (d <= 0) return false;
         DiagLog("[ValidateTier0] resolved_shapes fallback: '" + name + "' accepted\n");
         return true;
     };
@@ -470,9 +477,34 @@ static SubgraphInfo BuildSubgraphInfo(
         if (rank > 0) {
             std::vector<int64_t> dims(rank, -1);
             ort_api.GetDimensions(si, dims.data(), rank);
+
+            // Recover dynamic boundary-input dims from the Phase-1 resolved shapes.
+            bool any_dynamic = false;
+            for (size_t d = 0; d < rank; ++d) if (dims[d] <= 0) { any_dynamic = true; break; }
+            if (any_dynamic) {
+                auto rit = resolved_shapes.find(name);
+                if (rit != resolved_shapes.end() && rit->second.size() == rank) {
+                    for (size_t d = 0; d < rank; ++d)
+                        if (dims[d] <= 0 && rit->second[d] > 0) dims[d] = rit->second[d];
+                }
+            }
+
+            // If a dim is still dynamic after the fallback, leave the input unseeded
+            // rather than coercing to 1. A coerced [1,1,1,3] would let translators
+            // produce a bogus static output that propagates a wrong shape downstream;
+            // leaving it unseeded makes dependent translators skip so the grouper keeps
+            // this boundary out of the fused partition (those nodes run per-op).
+            bool still_dynamic = false;
+            for (size_t d = 0; d < rank; ++d) if (dims[d] <= 0) { still_dynamic = true; break; }
+            if (still_dynamic) {
+                DML_PERF_LOG("[BuildSubgraphInfo] SKIP graph-input '", name,
+                             "' reason=unresolved_dynamic_input\n");
+                continue;
+            }
+
             sizes.resize(rank);
             for (size_t d = 0; d < rank; ++d)
-                sizes[d] = static_cast<uint32_t>(dims[d] > 0 ? dims[d] : 1);
+                sizes[d] = static_cast<uint32_t>(dims[d]);
         }
         // Scalars (rank 0) get an empty sizes vector; MakeTensorInfo pads to [1,1,1,1].
 
@@ -493,6 +525,55 @@ static SubgraphInfo BuildSubgraphInfo(
         if (!node) continue;
         const char* node_op = nullptr;
         ort_api.Node_GetOperatorType(node, &node_op);
+
+        // Capture constant inputs into all_initializers by reading each input's own
+        // ValueInfo. Graph_GetInitializers does not enumerate every consumed constant
+        // (a Constant-node output is not always a graph initializer), and under
+        // drop_constant_initializers=true ORT may release those the EP does not hold —
+        // so an uncaptured constant fails edge-wiring with "unresolved input" at
+        // compile. ValueInfo_GetInitializerValue resolves the value directly.
+        {
+            auto in_names = fusion_utils::GetNodeInputNames(ort_api, node);
+            size_t nnin = 0;
+            ort_api.Node_GetNumInputs(node, &nnin);
+            std::vector<const OrtValueInfo*> nin_vis(nnin, nullptr);
+            if (nnin > 0) ort_api.Node_GetInputs(node, nin_vis.data(), nnin);
+            for (size_t k = 0; k < nnin && k < in_names.size(); ++k) {
+                if (!nin_vis[k] || in_names[k].empty()) continue;
+                if (info.all_initializers.count(in_names[k])) continue;  // already captured
+                const OrtValue* cval = nullptr;
+                OrtStatus* cst = ort_api.ValueInfo_GetInitializerValue(nin_vis[k], &cval);
+                if (cst) { ort_api.ReleaseStatus(cst); continue; }
+                if (cval) {
+                    info.all_initializers[in_names[k]] = cval;
+                    // Seed value_shapes too — BuildDmlInputMap needs total_bytes to
+                    // inline/slot the constant; without it the constant is skipped.
+                    if (cval->IsAllocated() && !info.value_shapes.count(in_names[k])) {
+                        OrtTensorTypeAndShapeInfo* csi = nullptr;
+                        ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(cval), &csi);
+                        if (csi) {
+                            ONNXTensorElementDataType cdt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+                            ort_api.GetTensorElementType(csi, &cdt);
+                            DML_TENSOR_DATA_TYPE cdml = OnnxDtypeToDml(cdt);
+                            if (csi->HasShape() && cdml != DML_TENSOR_DATA_TYPE_UNKNOWN) {
+                                size_t crank = 0;
+                                ort_api.GetDimensionsCount(csi, &crank);
+                                std::vector<int64_t> cdims(crank, 0);
+                                if (crank > 0) ort_api.GetDimensions(csi, cdims.data(), crank);
+                                std::vector<uint32_t> csizes(crank);
+                                for (size_t d = 0; d < crank; ++d)
+                                    csizes[d] = static_cast<uint32_t>(cdims[d] > 0 ? cdims[d] : 1);
+                                auto cti = MakeTensorInfo(csizes, cdml);
+                                cti.original_rank = static_cast<uint32_t>(crank);
+                                info.value_shapes[in_names[k]] = cti;
+                            }
+                            ort_api.ReleaseTensorTypeAndShapeInfo(csi);
+                        }
+                    }
+                }
+            }
+        }
+
         auto output_names = fusion_utils::GetNodeOutputNames(ort_api, node);
         size_t node_num_outputs = 0;
         ort_api.Node_GetNumOutputs(node, &node_num_outputs);
