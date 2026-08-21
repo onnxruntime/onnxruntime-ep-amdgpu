@@ -41,9 +41,12 @@ constexpr bool starts_with(std::string_view s, std::string_view prefix) {
     return s.substr(0, prefix.size()) == prefix;
 }
 
-// fnv1a of the normalized model_arch, or kNoModelArch when the caller supplied none.
+// fnv1a of the normalized model_arch, or kNoModelArch when the caller supplied none (or whitespace
+// only). Empty-after-normalize is treated as absent so an empty provider option cannot trip HIP.
 inline std::uint64_t model_arch_hash(const std::optional<std::string>& model_arch) {
-    return model_arch.has_value() ? fnv1a(normalize_model_arch(model_arch.value())) : kNoModelArch;
+    if (!model_arch.has_value()) return kNoModelArch;
+    const std::string normalized = normalize_model_arch(model_arch.value());
+    return normalized.empty() ? kNoModelArch : fnv1a(normalized);
 }
 
 // True if the caller framework hint (model_fw provider option) names WebNN. Case-insensitive.
@@ -56,7 +59,8 @@ inline bool is_webnn(const std::optional<std::string>& model_fw) {
 // or Optimized) is honored/dispatched as-is. In Auto mode, in priority order:
 //   1. WebNN caller                   -> DirectML (browser/WebNN compatibility carve-out, all ASICs)
 //   2. kArchModelBackend (arch prefix + model_arch) override, if any row matches
-//   3. HIP-enabled gfx1151 + LLM      -> Hip
+//   3. HIP-enabled gfx1150 / gfx1151 + present model_arch -> Hip
+//      (OGA gen/LLM hint; any non-empty value, including future families. Not a kLlmModelArch scan.)
 //   4. Medusa gfx117x                 -> DirectML
 //   5. gfx11 and newer                -> MIGraphX
 //   6. everything below gfx11 (gfx9/gfx10) -> DirectML
@@ -75,8 +79,12 @@ inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_has
         }
     }
 #ifdef USE_HIP
-    // 3. Strix Halo LLMs use the HIP backend when it is included in this build.
-    if (starts_with(gfx, "gfx1151") && arch_model_hash == fnv1a("llm")) return Profile::Hip;
+    // 3. Strix (gfx1150) / Strix Halo (gfx1151): a present model_arch is an OGA gen/LLM
+    //    session hint → HIP. Do not match prefix "gfx115" (would include Krackan gfx1152+).
+    if ((starts_with(gfx, "gfx1150") || starts_with(gfx, "gfx1151")) &&
+        arch_model_hash != kNoModelArch) {
+        return Profile::Hip;
+    }
 #endif
     // 4-6. Prefix buckets (order matters: gfx117x before the general gfx11x).
     if (starts_with(gfx, "gfx117")) return Profile::DirectX;  // Medusa MDS1/MDS2 (temporary)
