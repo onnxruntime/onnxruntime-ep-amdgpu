@@ -4,7 +4,7 @@
 #pragma once
 
 // Routing DATA for the AMD GPU umbrella EP, Auto profile — the two tables maintainers edit:
-//   kLlmModelArch     : model_arch families treated as LLMs (no arch bucket reads this today)
+//   kLlmModelArch     : documented P0 LLM families (not a HIP routing gate; OGA names are open-ended)
 //   kArchModelBackend : per-(gfx prefix, model_arch) backend overrides (grows large over time)
 // Kept in its own header so the growable tables live in one small, self-contained file. The pure
 // decision logic that consumes them is in gpu_routing_policy.h; the EP-side glue is in gpu_ep.cc.
@@ -42,11 +42,10 @@ constexpr std::uint64_t kNoModelArch = 0;
 // ============================================================================================
 
 // (1) Known LLM model_arch families (hashed). Currently the Windows ML P0 LLM set that is tested and
-//     supported. "llm" is a generic forward-compat marker: a caller (e.g. a newer OGA whose specific
-//     arch this umbrella build doesn't yet recognize) can send model_arch="llm" to name itself an LLM.
-//     NOTE: no arch bucket distinguishes LLM from non-LLM today (gfx11 and newer all go to MIGraphX),
-//     so nothing reads this yet. Kept for the next arch that needs the split. Per-(arch, model)
-//     pinning goes in kArchModelBackend below, which IS live.
+//     supported. "llm" is a generic forward-compat marker. This list does not gate HIP: on gfx1150 /
+//     gfx1151, Auto routes to HIP whenever model_arch is present (any non-empty value OGA sends,
+//     including families this binary has never seen). kLlmModelArch is the documented P0 set only.
+//     Per-(arch, model) pinning goes in kArchModelBackend below, which IS live.
 //     TO ADD AN LLM FAMILY: add one `fnv1a("normalized_name")` entry (and bump the array size).
 constexpr std::array<std::uint64_t, 5> kLlmModelArch{{
     fnv1a("llama"), fnv1a("qwen2"), fnv1a("phi3"), fnv1a("mistral"),
@@ -54,8 +53,9 @@ constexpr std::array<std::uint64_t, 5> kLlmModelArch{{
 }};
 
 // (2) Per-(arch, model) backend override. Highest priority in Auto mode: a matching row wins over the
-//     arch defaults. This is the hook for specific GPU + model combinations (e.g. a customer model that
-//     must pin to a backend on a given ASIC). Empty today; expected to grow.
+//     arch defaults (including the gfx1150/gfx1151 HIP presence rule). This is the hook for specific
+//     GPU + model combinations (e.g. a named arch that must stay on MIGraphX on Strix/Halo). Empty
+//     today; expected to grow.
 //     TO ADD AN OVERRIDE: add a row `{"gfxNNNN", fnv1a("normalized_name"), Profile::X}` (and bump size).
 struct arch_model_backend {
     std::string_view arch_prefix;   // gfx-name prefix, e.g. "gfx1201"
