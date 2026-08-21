@@ -174,7 +174,7 @@ bool AnyPlannedTargetMissing(const PrecompilePlan& plan, const Map<std::size_t>&
         return true;
     }
     for (const auto& [hash, _] : build_plan_targets(bucketed, batch_sizes, shapes_by_name, input_name_indices)) {
-        if (!cached_programs.contains(hash)) {
+        if (cached_programs.count(hash) == 0) {
             return true;
         }
     }
@@ -191,7 +191,7 @@ Ort::Status PreloadMxrPrograms(const PrecompilePlan& plan, const Map<std::size_t
     }
 
     for (const auto& [hash, _] : build_plan_targets(bucketed, batch_sizes, shapes_by_name, input_name_indices)) {
-        if (cached_programs.contains(hash)) {
+        if (cached_programs.count(hash) != 0) {
             continue;
         }
         if (force_recompile) {
@@ -225,7 +225,7 @@ Ort::Status CompileMissingPrograms(const PrecompilePlan& plan, const Map<std::si
         model_path.parent_path() : external_data_dir};
 
     for (const auto& [hash, batch_size] : build_plan_targets(bucketed, batch_sizes, shapes_by_name, input_name_indices)) {
-        if (cached_programs.contains(hash)) {
+        if (cached_programs.count(hash) != 0) {
             continue;
         }
 

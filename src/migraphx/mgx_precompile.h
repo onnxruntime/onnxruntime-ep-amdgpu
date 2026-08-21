@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <filesystem>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -13,6 +14,8 @@
 #include "common/murmurhash3.h"
 #include "common/plugin_ep_utils.h"
 #include "mgx_dynamic_batch.h"
+
+namespace fs = std::filesystem;
 
 namespace mgx_ep {
 
