@@ -101,6 +101,16 @@ struct CapturedHipGraph {
     // Output buffers (ptr + bytes) that must be zeroed before every replay
     // because some captured kernels read-modify-write their output.
     std::vector<std::pair<void*, std::size_t>> captured_output_zeroes{};
+
+    // ── Direct-bind (zero-copy) capture metadata ──────────────────────────────
+    // When direct_bind is true the graph was captured against ORT's own device
+    // tensor pointers instead of EP staging buffers.  Those pointers are baked
+    // into the captured kernels, so before every replay we must confirm ORT still
+    // hands us the same device addresses (captured_input_ptrs/captured_output_ptrs
+    // keyed by MIGraphX program parameter name); any drift forces a re-capture.
+    bool direct_bind{false};
+    Map<void*> captured_input_ptrs{};
+    Map<void*> captured_output_ptrs{};
 };
 
 // Result of binding staging buffers (and the EP-owned scratch) as program
@@ -112,6 +122,21 @@ struct StagingBindResult {
     std::vector<std::size_t> prog_output_indices{};       // ORT output index per bound output
     std::vector<std::string> bound_output_names{};        // staging key per bound output
     std::vector<migraphx::shape> bound_output_shapes{};   // current bucket shape per bound output
+};
+
+// Result of binding ORT's own device tensor pointers directly as program
+// parameters (the zero-copy direct-bind path).  Unlike StagingBindResult this is
+// rebuilt every Compute call because ORT may hand back different device pointers;
+// the pointer maps let a captured graph confirm the addresses are unchanged
+// before it is replayed.  input_ptrs/output_ptrs are keyed by program parameter
+// name; output_zeroes are the (ptr, bytes) output buffers to clear before replay.
+struct DirectBindResult {
+    migraphx::program_parameters params{};
+    std::vector<std::size_t> prog_output_indices{};
+    Map<void*> input_ptrs{};
+    Map<void*> output_ptrs{};
+    std::vector<std::pair<void*, std::size_t>> output_zeroes{};
+    void* scratch_ptr{nullptr};
 };
 
 struct ComputeState {
@@ -145,6 +170,19 @@ struct ComputeState {
     bool hip_graph_enable{};
     std::size_t max_dynamic_batch{};
     std::string compile_batches{};
+
+    // ── Direct-bind (zero-copy) hipGraph state ────────────────────────────────
+    // Direct-bind captures/replays a hipGraph against ORT's own device tensor
+    // pointers, skipping the input gather / H2D and output D2D copies of the
+    // staging path.  Enabled at Compile time (hip_graph && !coalesce_io) and used
+    // only when every input is device-resident and no batch/seq padding applies.
+    // ORT normally reuses the same device buffers for a stable shape, so the
+    // captured pointers stay valid across runs; if they drift we re-capture, and
+    // after too many consecutive drifts we latch a permanent eager fallback.
+    bool use_direct_hip_graph{};
+    bool direct_eager_fallback{};   // latched: run eager (no capture) from here on
+    int direct_recapture_count{};   // consecutive pointer-drift re-captures
+    static constexpr int kMaxDirectRecaptures{3};
 
     // ── Static sequence-length padding (set at Compile time) ──────────────────
     // When static_pad_seq is set, named inputs are padded on their token axis up to

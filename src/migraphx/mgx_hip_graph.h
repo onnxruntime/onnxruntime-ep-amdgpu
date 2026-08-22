@@ -129,4 +129,33 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
     const std::string& shape_hash,
     const DynamicBatchContext& dyn);
 
+// ── Direct-bind (zero-copy) hipGraph ─────────────────────────────────────────
+
+// Build program parameters that bind ORT's own device tensor pointers directly
+// (no staging).  Inputs are taken from the ORT input tensors (which the caller
+// must have verified are device-resident); outputs are allocated on the ORT side
+// at the program's output shapes and their device pointers are bound in place;
+// the EP-owned scratch buffer is bound as usual.  The returned DirectBindResult
+// carries the pointer maps and output-zero list needed to capture/replay/verify.
+DirectBindResult BindDirectParams(ComputeState& cs,
+    const migraphx::program_parameter_shapes& param_shapes,
+    const Ort::KernelContext& ctx, const std::string& shape_hash, hipStream_t stream);
+
+// Return true iff every captured input/output pointer and the scratch pointer
+// still match the addresses ORT is currently handing us; a false result forces a
+// re-capture (the graph has stale pointers baked into its kernels).
+bool CheckCapturedPtrsMatch(const CapturedHipGraph& entry,
+    const Map<void*>& input_ptrs, const Map<void*>& output_ptrs, void* scratch_ptr);
+
+// Direct-bind analogue of RunProgramOrHipGraph: replay a graph captured against
+// ORT pointers when they still match, re-capture on drift (bounded), or fall
+// back to an eager zero-copy run.  Extra (non-pre-bound) outputs are materialized
+// into ORT after the launch.  `bind` must already bind the current ORT pointers.
+void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
+    const Ort::KernelContext& ctx,
+    migraphx::program& program,
+    const DirectBindResult& bind,
+    const std::string& shape_hash,
+    const DynamicBatchContext& dyn);
+
 }  // namespace mgx_ep

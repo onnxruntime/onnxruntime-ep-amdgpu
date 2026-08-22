@@ -1007,6 +1007,9 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     compute_state.max_dynamic_batch = max_dynamic_batch_;
     compute_state.compile_batches = compile_batches_;
     compute_state.coalesce_io = coalesce_io_enable_;
+    // Direct-bind is the zero-copy hipGraph path; it is mutually exclusive with
+    // coalesce_io (which gathers inputs through a shared staging arena).
+    compute_state.use_direct_hip_graph = hip_graph_enable_ && !coalesce_io_enable_;
     compute_state.static_pad_seq = static_pad_seq_;
     compute_state.static_pad_seq_len = static_pad_seq_len_;
     compute_state.static_pad_seq_len_from_env = static_pad_seq_len_from_env_;
@@ -1461,6 +1464,48 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         compute_state.last_input_shapes = std::move(current_input_shapes);
         compute_state.last_input_shapes_hash = input_shapes_hash;
         compute_state.has_last_input_shapes = true;
+    }
+
+    // Direct-bind (zero-copy) path: when hipGraph is enabled without coalescing,
+    // every program input is already device-resident, and this call needs no batch
+    // or seq padding, bind ORT's own device tensors directly and replay/capture a
+    // graph against them -- skipping the staging gather/H2D and output D2D copies
+    // that dominate batch-1 / low-concurrency latency.  Anything that disqualifies
+    // this (a host-resident input, or any padding) falls through to the staging
+    // path below, which remains correct for those cases.
+    if (compute_state.use_direct_hip_graph && compute_state.hip_graph_enable &&
+        param_shapes.size() > 0) {
+        const bool batch_no_pad{!dyn.active || dyn.target_batch == dyn.requested_batch};
+        const bool seq_no_pad{!seq.active || seq.target_len == seq.real_len};
+        bool all_device{batch_no_pad && seq_no_pad};
+        if (all_device) {
+            for (const auto& name : param_shapes.names()) {
+                const auto idx_it{input_name_indices.find(std::string{name})};
+                if (idx_it == input_name_indices.end()) {
+                    continue;
+                }
+                const auto mem{kernel_context.GetInput(idx_it->second).GetTensorMemoryInfo()};
+                if (mem.GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
+                    all_device = false;
+                    break;
+                }
+            }
+        }
+        if (all_device) {
+            const auto shape_hash{hash::ToHex(input_shapes_hash)};
+            const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
+            HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
+            const auto bind{BindDirectParams(compute_state, param_shapes, kernel_context,
+                shape_hash, hip_stream)};
+            RunProgramOrHipGraphDirect(compute_state, hip_stream, kernel_context, program,
+                bind, shape_hash, dyn);
+            // ORT fetches the outputs before its run-end Flush, and reaches
+            // DataTransfer with a null stream on some paths, which orders nothing
+            // against this hipStreamNonBlocking stream. Sync so that read cannot
+            // race in-flight compute.
+            HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+            return STATUS_OK;
+        }
     }
 
     // Staging path: required for hipGraph capture (pointer stability) and for
