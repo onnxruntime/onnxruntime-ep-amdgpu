@@ -74,6 +74,16 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
                     return STATUS_OK;
                 })
             .AddValueParser(
+                provider_option::kUserComputeStream,
+                [this](const std::string_view value) -> Ort::Status {
+                    // The handle is passed as a decimal pointer address, matching
+                    // the classic built-in MIGraphXExecutionProvider.
+                    std::size_t address{};
+                    RETURN_IF_ERROR(ParseStringWithClassicLocale(value, address));
+                    user_compute_stream = reinterpret_cast<void*>(address);
+                    return STATUS_OK;
+                })
+            .AddValueParser(
                 provider_option::kComputeMode,
                 [this](const std::string_view value) -> Ort::Status {
                     std::string lower{value};
@@ -114,7 +124,14 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kMlssUseSpecificOps, mlss_use_specific_ops)
             .AddAssignmentToReference(provider_option::kCpuControlFlow, cpu_control_flow)
             .AddAssignmentToReference(provider_option::kModelArch, model_arch)
+            .AddAssignmentToReference(provider_option::kHasUserComputeStream, has_user_compute_stream)
             .Parse(ApplyLegacyOptionAliases(provider_options)));
+
+    // A non-null stream handle implies the feature is enabled, regardless of
+    // whether has_user_compute_stream was passed explicitly (mirrors built-in EP).
+    if (user_compute_stream != nullptr) {
+        has_user_compute_stream = true;
+    }
 }
 
 }  // namespace mgx_ep

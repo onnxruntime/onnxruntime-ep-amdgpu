@@ -46,6 +46,12 @@ struct ProviderInfo {
     std::string static_pad_inputs{};
     std::string static_pad_outputs{};
 
+    // External application-owned compute stream (see mgx_options.h). When
+    // has_user_compute_stream is set the EP adopts user_compute_stream rather than
+    // creating its own, mirroring the classic built-in MIGraphXExecutionProvider.
+    bool has_user_compute_stream{};
+    void* user_compute_stream{};
+
     ProviderInfo() = default;
 
     explicit ProviderInfo(const ProviderOptions& provider_options);

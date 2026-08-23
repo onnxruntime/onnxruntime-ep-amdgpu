@@ -53,6 +53,12 @@ constexpr auto kStaticPadSeq = "ORT_MIGRAPHX_STATIC_PAD_SEQ"sv;
 constexpr auto kStaticPadSeqLen = "ORT_MIGRAPHX_STATIC_PAD_SEQ_LEN"sv;
 constexpr auto kStaticPadInputs = "ORT_MIGRAPHX_STATIC_PAD_INPUTS"sv;
 constexpr auto kStaticPadOutputs = "ORT_MIGRAPHX_STATIC_PAD_OUTPUTS"sv;
+// TEMPORARY A/B gate: when set (1/true), restore the legacy unconditional
+// per-Compute hipStreamSynchronize instead of relying on stream-ordered copies
+// plus the per-Run OnSessionRunEnd sync. Lets the old (full-drain) and new
+// (pipelined) behaviors be compared in one build. Remove once the new path is
+// confirmed and the drain is deleted for good.
+constexpr auto kLegacyComputeSync = "ORT_MIGRAPHX_LEGACY_COMPUTE_SYNC"sv;
 }  // namespace env_vars
 
 // EP-owned device staging buffer (pointer-stable across runs so it can be
@@ -314,6 +320,11 @@ private:
     bool static_pad_seq_len_from_env_{};  // set explicitly via env -> overrides the mask
     std::string static_pad_inputs_{};
     std::string static_pad_outputs_{};
+
+    // External application-owned compute stream to adopt (see mgx_options.h). Null
+    // means the EP creates and owns its own non-blocking stream per device.
+    void* user_compute_stream_{};
+    bool has_user_compute_stream_{};
 
     std::mutex mutex_{};
 };

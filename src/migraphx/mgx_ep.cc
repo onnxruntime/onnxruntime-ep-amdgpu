@@ -41,6 +41,31 @@ const char* ExecutionProvider::GetName() const noexcept {
 
 namespace {
 
+// TEMPORARY A/B gate (env ORT_MIGRAPHX_LEGACY_COMPUTE_SYNC). When true, Compute
+// keeps the legacy unconditional per-fused-node hipStreamSynchronize. When false
+// (default), the hot path stays async and correctness comes from stream-ordered
+// copies (DataTransfer issues on the compute stream ORT hands us) plus the single
+// per-Run SyncStream::OnSessionRunEnd drain -- matching the built-in EP, which
+// never drained per-Compute. Cached once; remove this gate (and the legacy branch)
+// once the pipelined path is confirmed. See mgx_ep.h env_var::kLegacyComputeSync.
+bool LegacyComputeSyncEnabled() {
+    static const bool enabled{
+        ParseEnvironmentVariableWithDefault<bool>(env_var::kLegacyComputeSync, false)};
+    return enabled;
+}
+
+// Post-Compute synchronization for a fused subgraph. With a real compute stream
+// (the common Triton path), skip the drain and let the stream-ordered D2H fetch
+// plus the per-Run OnSessionRunEnd sync serialize the read; only drain when either
+// the legacy gate is on or ORT gave us no stream (null == default stream), where a
+// later null-stream copy would not order against a non-blocking producer.
+[[nodiscard]] Ort::Status FinishComputeStream(hipStream_t hip_stream) {
+    if (LegacyComputeSyncEnabled() || hip_stream == nullptr) {
+        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+    }
+    return STATUS_OK;
+}
+
 ONNXTensorElementDataType GetElementType(const Ort::ConstTypeInfo& type_info) {
     switch (type_info.GetONNXType()) {
     case ONNX_TYPE_TENSOR:
@@ -524,6 +549,8 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     static_pad_seq_len_ = info.static_pad_seq_len;
     static_pad_inputs_ = info.static_pad_inputs;
     static_pad_outputs_ = info.static_pad_outputs;
+    has_user_compute_stream_ = info.has_user_compute_stream;
+    user_compute_stream_ = info.user_compute_stream;
 
     HIP_CALL_THROW(hipSetDevice(device_id_));
     HIP_CALL_THROW(hipGetDeviceProperties(&device_prop_, device_id_));
@@ -1184,7 +1211,12 @@ try {
 
 Ort::Status ExecutionProvider::CreateSyncStreamForDevice(const OrtMemoryDevice* memory_device, OrtSyncStreamImpl** stream)
 try {
-    *stream = std::make_unique<hip::SyncStream>(*this, device_id_, nullptr).release();
+    // Adopt the application-owned stream when one was supplied via provider
+    // options (mirrors the built-in EP); otherwise SyncStream creates+owns its own.
+    const auto external_stream{has_user_compute_stream_
+        ? static_cast<hipStream_t>(user_compute_stream_)
+        : static_cast<hipStream_t>(nullptr)};
+    *stream = std::make_unique<hip::SyncStream>(*this, device_id_, external_stream).release();
     return STATUS_OK;
 } catch (const Ort::Exception& e) {
     return Ort::Status{e};
@@ -1486,10 +1518,10 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
             bind.params, bind.prog_output_indices, shape_hash, dyn);
         CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn, seq);
-        // ORT fetches the outputs before its run-end Flush, and reaches DataTransfer
-        // with a null stream on some paths, which orders nothing against this
-        // hipStreamNonBlocking stream. Sync so that read cannot race in-flight compute.
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        // Async by default: the stream-ordered D2H fetch plus the per-Run
+        // OnSessionRunEnd sync order the read. Legacy full-drain is gated (see
+        // FinishComputeStream / env_var::kLegacyComputeSync).
+        RETURN_IF_ERROR(FinishComputeStream(hip_stream));
         return STATUS_OK;
     }
 
@@ -1557,10 +1589,10 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                     hipMemcpyDeviceToDevice, hip_stream));
             }
         }
-        // ORT fetches the outputs before its run-end Flush, and reaches DataTransfer
-        // with a null stream on some paths, which orders nothing against this
-        // hipStreamNonBlocking stream. Sync so that read cannot race in-flight compute.
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        // Async by default: the stream-ordered D2H fetch plus the per-Run
+        // OnSessionRunEnd sync order the read. Legacy full-drain is gated (see
+        // FinishComputeStream / env_var::kLegacyComputeSync).
+        RETURN_IF_ERROR(FinishComputeStream(hip_stream));
     }
     return STATUS_OK;
 } catch (const Ort::Exception& e) {
@@ -1651,10 +1683,10 @@ try {
                     hipMemcpyDeviceToDevice, hip_stream));
             }
         }
-        // ORT fetches the outputs before its run-end Flush, and reaches DataTransfer
-        // with a null stream on some paths, which orders nothing against this
-        // hipStreamNonBlocking stream. Sync so that read cannot race in-flight compute.
-        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
+        // Async by default: the stream-ordered D2H fetch plus the per-Run
+        // OnSessionRunEnd sync order the read. Legacy full-drain is gated (see
+        // FinishComputeStream / env_var::kLegacyComputeSync).
+        RETURN_IF_ERROR(FinishComputeStream(hip_stream));
     }
     return STATUS_OK;
 } catch (const Ort::Exception& e) {

@@ -16,6 +16,7 @@
 #include "mgx_ep.h"
 #include "mgx_factory.h"
 #include "mgx_interop.h"
+#include "mgx_options.h"
 
 #include "mgx_kernel_reg.h"
 
@@ -259,7 +260,20 @@ try {
         return ORT_MAKE_STATUS(ORT_INVALID_ARGUMENT, "memory_device cannot be nullptr");
     }
     const int device_id{static_cast<int>(ep_api.MemoryDevice_GetDeviceId(memory_device))};
-    auto sync_stream{std::make_unique<hip::SyncStream>(*this, device_id, stream_options)};
+    // Adopt an application-owned stream if one was supplied via stream_options,
+    // mirroring the built-in EP's user_compute_stream path. Otherwise SyncStream
+    // creates and owns its own non-blocking stream.
+    hipStream_t external_stream{nullptr};
+    if (static_cast<const OrtKeyValuePairs*>(stream_options) != nullptr) {
+        if (const char* value{stream_options.GetValue(std::string{provider_option::kUserComputeStream}.c_str())};
+            value != nullptr) {
+            std::size_t address{};
+            if (TryParseStringWithClassicLocale(value, address) && address != 0) {
+                external_stream = reinterpret_cast<hipStream_t>(address);
+            }
+        }
+    }
+    auto sync_stream{std::make_unique<hip::SyncStream>(*this, device_id, external_stream)};
     stream = sync_stream.release();
     return STATUS_OK;
 } catch (const Ort::Exception& e) {
