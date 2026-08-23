@@ -129,4 +129,23 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
     const std::string& shape_hash,
     const DynamicBatchContext& dyn);
 
+// Direct-bind (zero-copy) dispatch: replay a cached hipGraph captured against
+// ORT tensor pointers, capture one on first use, or fall back to eager on
+// pointer drift.  Unlike RunProgramOrHipGraph, `params` here is bound to the
+// caller's ORT input/output tensor pointers (plus EP-owned scratch) rather than
+// staging buffers, so no per-input H2D/D2D staging copy is performed.  The
+// `input_ptrs`/`output_ptrs` maps (program-parameter name -> device pointer)
+// are stored on capture and compared on every replay; a mismatch re-captures,
+// and repeated drift disables the direct path for the session.  Requires that
+// no batch/seq padding is needed for this call (the caller guarantees this).
+void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
+    const Ort::KernelContext& ctx,
+    migraphx::program& program,
+    migraphx::program_parameters& params,
+    const std::vector<std::size_t>& prog_output_indices,
+    const std::string& shape_hash,
+    const Map<void*>& input_ptrs,
+    const Map<void*>& output_ptrs,
+    const DynamicBatchContext& dyn);
+
 }  // namespace mgx_ep

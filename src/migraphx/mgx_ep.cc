@@ -1034,6 +1034,10 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     compute_state.max_dynamic_batch = max_dynamic_batch_;
     compute_state.compile_batches = compile_batches_;
     compute_state.coalesce_io = coalesce_io_enable_;
+    // Direct-bind zero-copy hipGraph is the default when hipGraph is enabled and
+    // coalesce_io is off; coalesce_io routes inputs through the pinned staging
+    // arena and is therefore mutually exclusive with the direct-bind path.
+    compute_state.use_direct_hip_graph = hip_graph_enable_ && !coalesce_io_enable_;
     compute_state.static_pad_seq = static_pad_seq_;
     compute_state.static_pad_seq_len = static_pad_seq_len_;
     compute_state.static_pad_seq_len_from_env = static_pad_seq_len_from_env_;
@@ -1493,6 +1497,86 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         compute_state.last_input_shapes = std::move(current_input_shapes);
         compute_state.last_input_shapes_hash = input_shapes_hash;
         compute_state.has_last_input_shapes = true;
+    }
+
+    // Whether this call needs the program run at a larger shape than the request
+    // (batch bucketed up, or seq padded up).  Padding requires the staging path
+    // (input pad / output slice); the direct-bind path cannot be used.
+    const bool needs_batch_pad{dyn.active && dyn.target_batch > dyn.requested_batch};
+    const bool needs_seq_pad{seq.active && seq.target_len > seq.real_len};
+    const bool needs_padding{needs_batch_pad || needs_seq_pad};
+
+    // ── Direct-bind (zero-copy) hipGraph fast path ────────────────────────────
+    // Bind ORT input/output tensor pointers straight into the program and
+    // capture/replay a hipGraph with no staging copies, matching the built-in
+    // EP's use_direct_hip_graph path.  Only taken when every input is
+    // device-resident (a host input has no stable device pointer to bake into
+    // the graph) and no batch/seq padding is needed.  Any disqualifying case
+    // falls through to the staging path below; sustained ORT pointer drift
+    // disables the direct path at runtime (see RunProgramOrHipGraphDirect), which
+    // also lands on the staging path.
+    if (compute_state.use_direct_hip_graph && !needs_padding && param_shapes.size() > 0) {
+        const auto shape_hash{hash::ToHex(input_shapes_hash)};
+        const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
+        HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
+
+        migraphx::program_parameters direct_params;
+        std::vector<std::size_t> prog_output_indices;
+        Map<void*> input_ptrs;
+        Map<void*> output_ptrs;
+        bool direct_ok{true};
+
+        for (std::string name : param_shapes.names()) {
+            if (input_name_indices.count(name) > 0) {
+                const auto index{input_name_indices.at(name)};
+                const auto input_tensor{kernel_context.GetInput(index)};
+                // A host-resident input has no stable device pointer to bake into
+                // the captured graph; bail to the staging path (which uploads it).
+                if (input_tensor.GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
+                    direct_ok = false;
+                    break;
+                }
+                const auto prog_shape{param_shapes[name.c_str()]};
+                migraphx_shape_datatype_t datatype;
+                GetMIGraphXType(input_tensor.GetTensorTypeAndShapeInfo().GetElementType(), datatype);
+                if (datatype != prog_shape.type()) {
+                    throw std::runtime_error{"NodeComputeInfo::Compute(): tensor parameter type mismatch"};
+                }
+                void* ptr{const_cast<void*>(input_tensor.GetTensorRawData())};
+                direct_params.add(name.c_str(), migraphx::argument{prog_shape, ptr});
+                input_ptrs.emplace(name, ptr);
+            } else if (std::string_view{name} == "scratch") {
+                // EP-owned scratch (zeroed before capture/replay for determinism).
+                if (const auto scratch{
+                        GetOrAllocScratch(compute_state, param_shapes, shape_hash, hip_stream)}) {
+                    direct_params.add(name.c_str(), migraphx::argument{scratch->shape, scratch->ptr});
+                }
+            } else if (const auto oi{ComputeOutputIndex(name)}; oi != -1) {
+                const auto out_shape{param_shapes[name.c_str()]};
+                const auto lengths{out_shape.lengths()};
+                std::vector<std::int64_t> tensor_shape{lengths.begin(), lengths.end()};
+                auto output_tensor{kernel_context.GetOutput(static_cast<std::size_t>(oi),
+                    tensor_shape.data(), tensor_shape.size())};
+                void* ptr{output_tensor.GetTensorMutableRawData()};
+                direct_params.add(name.c_str(), migraphx::argument{out_shape, ptr});
+                output_ptrs.emplace(name, ptr);
+                prog_output_indices.push_back(static_cast<std::size_t>(oi));
+            } else {
+                // Unrecognized/unbound parameter: let the staging path handle it.
+                direct_ok = false;
+                break;
+            }
+        }
+
+        if (direct_ok) {
+            RunProgramOrHipGraphDirect(compute_state, hip_stream, kernel_context, program,
+                direct_params, prog_output_indices, shape_hash, input_ptrs, output_ptrs, dyn);
+            // Async by default: stream-ordered work is ordered by OnSessionRunEnd;
+            // legacy full-drain is gated (see FinishComputeStream).
+            RETURN_IF_ERROR(FinishComputeStream(hip_stream));
+            return STATUS_OK;
+        }
+        // Fall through to the staging path (e.g. a host-resident input was found).
     }
 
     // Staging path: required for hipGraph capture (pointer stability) and for

@@ -107,6 +107,16 @@ struct CapturedHipGraph {
     // Output buffers (ptr + bytes) that must be zeroed before every replay
     // because some captured kernels read-modify-write their output.
     std::vector<std::pair<void*, std::size_t>> captured_output_zeroes{};
+
+    // ── Direct-bind hipGraph (zero-copy) metadata ────────────────────────────
+    // When direct_bind is true the graph was captured against ORT tensor
+    // pointers directly (no staging copies), matching the built-in EP's
+    // use_direct_hip_graph path.  The captured input/output pointer maps are
+    // compared against the current ORT pointers on every replay; a mismatch
+    // (e.g. ORT allocator recycled a buffer) forces a re-capture.
+    bool direct_bind{false};
+    Map<void*> captured_input_ptrs{};
+    Map<void*> captured_output_ptrs{};
 };
 
 // Result of binding staging buffers (and the EP-owned scratch) as program
@@ -151,6 +161,19 @@ struct ComputeState {
     bool hip_graph_enable{};
     std::size_t max_dynamic_batch{};
     std::string compile_batches{};
+
+    // Direct-bind (zero-copy) hipGraph: bind ORT tensor pointers straight into
+    // the program and capture/replay without staging copies.  Enabled when
+    // hipGraph is on and coalesce_io is off (the two are mutually exclusive:
+    // coalesce_io deliberately routes inputs through the pinned staging arena).
+    // Mirrors the built-in EP's `use_direct_hip_graph = hip_graph && !coalesce`.
+    // May be disabled at runtime after repeated pointer drift (see below), after
+    // which Compute falls back to the staging hipGraph path.
+    bool use_direct_hip_graph{};
+    // Consecutive direct-bind re-captures caused by ORT pointer drift.  Once it
+    // exceeds kMaxDirectRecaptures the direct path is disabled for the session.
+    static constexpr int kMaxDirectRecaptures{3};
+    int direct_recapture_count{};
 
     // ── Static sequence-length padding (set at Compile time) ──────────────────
     // When static_pad_seq is set, named inputs are padded on their token axis up to

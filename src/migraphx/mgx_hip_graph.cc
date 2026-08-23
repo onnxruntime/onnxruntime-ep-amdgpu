@@ -155,6 +155,7 @@ bool WarmupAndCaptureHipGraph(ComputeState& cs, hipStream_t stream,
 
         HIP_CALL_THROW(hipGraphInstantiate(&entry.exec, entry.graph, nullptr, nullptr, 0));
         entry.captured = true;
+        entry.direct_bind = false;  // staging capture: replayed via ReplayHipGraph
 
         // Record the scratch pointer baked into the graph for drift detection.
         if (const auto it{cs.scratch_bufs.find(shape_hash)}; it != cs.scratch_bufs.end()) {
@@ -222,6 +223,171 @@ void ReplayHipGraph(ComputeState& cs, hipStream_t stream,
         HIP_CALL_THROW(hipMemsetAsync(ptr, 0, bytes, stream));
     }
     HIP_CALL_THROW(hipGraphLaunch(entry.exec, stream));
+}
+
+// True when every current ORT input/output pointer (and the EP-owned scratch)
+// matches the address baked into the captured direct-bind graph.  Any mismatch
+// means an ORT buffer moved (e.g. allocator recycling) and the graph -- which
+// hard-codes device addresses -- must be re-captured.
+bool CheckCapturedPtrsMatch(const CapturedHipGraph& entry,
+    const Map<void*>& input_ptrs, const Map<void*>& output_ptrs, void* scratch_ptr)
+{
+    for (const auto& [name, ptr] : input_ptrs) {
+        const auto it{entry.captured_input_ptrs.find(name)};
+        if (it == entry.captured_input_ptrs.end() || it->second != ptr) {
+            return false;
+        }
+    }
+    for (const auto& [name, ptr] : output_ptrs) {
+        const auto it{entry.captured_output_ptrs.find(name)};
+        if (it == entry.captured_output_ptrs.end() || it->second != ptr) {
+            return false;
+        }
+    }
+    return entry.captured_scratch_ptr == scratch_ptr;
+}
+
+// Direct-bind capture: `params` is already bound to the caller's ORT tensor
+// pointers (plus EP-owned scratch), so there are no staging copies to make.
+// Warm up to finalize MIGraphX's lazy allocations, then capture the graph
+// against those pointers.  Records the input/output pointer maps so replay can
+// detect drift.  Returns false (and disables the direct path) on capture
+// failure so the caller falls back to eager execution.
+bool WarmupAndCaptureHipGraphDirect(ComputeState& cs, hipStream_t stream,
+    migraphx::program& program, migraphx::program_parameters& params,
+    const std::vector<std::size_t>& prog_output_indices, const std::string& shape_hash,
+    const Map<void*>& input_ptrs, const Map<void*>& output_ptrs)
+{
+    const auto param_shapes{program.get_parameter_shapes()};
+
+    // Zero ORT-bound outputs (NOT inputs -- those carry the caller's data) and
+    // scratch so read-modify-write kernels are anchored to a known baseline.
+    const auto zero_outputs{[&]() {
+        for (const auto& [name, ptr] : output_ptrs) {
+            if (ptr == nullptr) {
+                continue;
+            }
+            const std::size_t bytes{param_shapes[name.c_str()].bytes()};
+            if (bytes > 0) {
+                HIP_CALL_THROW(hipMemsetAsync(ptr, 0, bytes, stream));
+            }
+        }
+    }};
+    zero_outputs();
+    ZeroScratchFor(cs, shape_hash, stream);
+
+    // Pre-capture eager loop to finalize MIGraphX's lazy allocations.
+    std::optional<migraphx::arguments> warmup_outputs;
+    for (int i{0}; i < kCaptureFinalizeIterations; ++i) {
+        std::lock_guard<std::mutex> lock{cs.mutex};
+        warmup_outputs = program.run_async(params, stream);
+    }
+    HIP_CALL_THROW(hipStreamSynchronize(stream));
+
+    // The warmup runs wrote real values into the outputs/scratch; re-zero right
+    // before capture so the captured sequence starts from the baseline.
+    zero_outputs();
+    ZeroScratchFor(cs, shape_hash, stream);
+    HIP_CALL_THROW(hipStreamSynchronize(stream));
+
+    const std::size_t compiled_batch{
+        InferCompiledBatchFromParams(param_shapes, cs.input_name_indices)};
+    const int post_warmin{PostCaptureWarminFor(compiled_batch)};
+
+    auto& entry{cs.hip_graph_cache[shape_hash]};
+
+    // Drop any stale capture for this hash (e.g. a prior staging-path entry for
+    // the same shape) before overwriting so its graph/exec are not leaked.
+    if (entry.exec != nullptr) {
+        (void)hipGraphExecDestroy(entry.exec);
+        entry.exec = nullptr;
+    }
+    if (entry.graph != nullptr) {
+        (void)hipGraphDestroy(entry.graph);
+        entry.graph = nullptr;
+    }
+
+    try {
+        HIP_CALL_THROW(hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal));
+        {
+            std::lock_guard<std::mutex> lock{cs.mutex};
+            program.run_async(params, stream);
+        }
+        const hipError_t err{hipStreamEndCapture(stream, &entry.graph)};
+        if (err != hipSuccess || entry.graph == nullptr) {
+            entry.graph = nullptr;
+            entry.captured = false;
+            cs.use_direct_hip_graph = false;
+            return false;
+        }
+
+        HIP_CALL_THROW(hipGraphInstantiate(&entry.exec, entry.graph, nullptr, nullptr, 0));
+        entry.captured = true;
+        entry.direct_bind = true;
+        entry.captured_input_ptrs = input_ptrs;
+        entry.captured_output_ptrs = output_ptrs;
+
+        if (const auto it{cs.scratch_bufs.find(shape_hash)}; it != cs.scratch_bufs.end()) {
+            entry.captured_scratch_ptr = it->second.data;
+        } else {
+            entry.captured_scratch_ptr = nullptr;
+        }
+
+        // Outputs to zero before every replay (some captured kernels RMW them).
+        entry.captured_output_zeroes.clear();
+        entry.captured_output_zeroes.reserve(output_ptrs.size());
+        for (const auto& [name, ptr] : output_ptrs) {
+            if (ptr == nullptr) {
+                continue;
+            }
+            const std::size_t bytes{param_shapes[name.c_str()].bytes()};
+            if (bytes > 0) {
+                entry.captured_output_zeroes.emplace_back(ptr, bytes);
+            }
+        }
+
+        // Post-capture warm-in replays to settle workspace before first real use.
+        for (int i{0}; i < post_warmin; ++i) {
+            ZeroScratchFor(cs, shape_hash, stream);
+            for (const auto& [ptr, bytes] : entry.captured_output_zeroes) {
+                HIP_CALL_THROW(hipMemsetAsync(ptr, 0, bytes, stream));
+            }
+            HIP_CALL_THROW(hipGraphLaunch(entry.exec, stream));
+        }
+        HIP_CALL_THROW(hipStreamSynchronize(stream));
+
+        // Record extra (non-pre-bound) outputs returned by run_async.
+        const std::unordered_set<std::size_t> pre_alloc{
+            prog_output_indices.begin(), prog_output_indices.end()};
+        entry.extra_outputs.clear();
+        if (warmup_outputs) {
+            const auto output_num{warmup_outputs->size()};
+            for (std::size_t i{0}; i < output_num; ++i) {
+                if (pre_alloc.count(i) > 0) {
+                    continue;
+                }
+                auto gpu_res{(*warmup_outputs)[i]};
+                const migraphx::shape res_shape{gpu_res.get_shape()};
+                const auto res_lens{res_shape.lengths()};
+                std::vector<std::int64_t> ort_shape{res_lens.begin(), res_lens.end()};
+                entry.extra_outputs.push_back(
+                    CapturedHipGraph::ExtraOutput{i, std::move(ort_shape),
+                        gpu_res.data(), res_shape.bytes()});
+            }
+        }
+        return true;
+    } catch (...) {
+        hipGraph_t dummy{nullptr};
+        (void)hipStreamEndCapture(stream, &dummy);
+        if (dummy != nullptr) {
+            (void)hipGraphDestroy(dummy);
+        }
+        entry.graph = nullptr;
+        entry.exec = nullptr;
+        entry.captured = false;
+        cs.use_direct_hip_graph = false;
+        return false;
+    }
 }
 
 }  // namespace
@@ -727,6 +893,25 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
         return;
     }
 
+    // A direct-bind capture (against ORT pointers) cannot be replayed through the
+    // staging path.  This happens when the direct path was disabled at runtime
+    // (pointer drift) and the same shape_hash falls back here; drop the stale
+    // entry so a staging graph is captured fresh below.
+    if (const auto it{cs.hip_graph_cache.find(shape_hash)};
+        it != cs.hip_graph_cache.end() && it->second.direct_bind)
+    {
+        if (it->second.exec != nullptr) {
+            (void)hipGraphExecDestroy(it->second.exec);
+            it->second.exec = nullptr;
+        }
+        if (it->second.graph != nullptr) {
+            (void)hipGraphDestroy(it->second.graph);
+            it->second.graph = nullptr;
+        }
+        it->second.captured = false;
+        it->second.direct_bind = false;
+    }
+
     if (const auto it{cs.hip_graph_cache.find(shape_hash)};
         it != cs.hip_graph_cache.end() && it->second.captured)
     {
@@ -751,6 +936,95 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
     }
 
     if (!WarmupAndCaptureHipGraph(cs, stream, program, params, prog_output_indices, shape_hash)) {
+        eager_run_with_extras();
+        return;
+    }
+    MaterializeExtraOutputs(ctx, stream, cs.hip_graph_cache.at(shape_hash).extra_outputs, dyn);
+}
+
+void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
+    const Ort::KernelContext& ctx,
+    migraphx::program& program,
+    migraphx::program_parameters& params,
+    const std::vector<std::size_t>& prog_output_indices,
+    const std::string& shape_hash,
+    const Map<void*>& input_ptrs,
+    const Map<void*>& output_ptrs,
+    const DynamicBatchContext& dyn)
+{
+    // Eager fallback: run against the already-bound ORT pointers and copy any
+    // non-pre-bound (extra) outputs to their ORT tensors.  Used when capture
+    // fails or the direct path has been permanently disabled by pointer drift.
+    const auto eager_run_with_extras{[&]() {
+        std::optional<migraphx::arguments> outputs;
+        {
+            std::lock_guard<std::mutex> lock{cs.mutex};
+            outputs = program.run_async(params, stream);
+        }
+        if (!outputs) {
+            return;
+        }
+        const std::unordered_set<std::size_t> pre_bound{
+            prog_output_indices.begin(), prog_output_indices.end()};
+        for (std::size_t i{0}; i < outputs->size(); ++i) {
+            if (pre_bound.count(i) > 0) {
+                continue;
+            }
+            const auto out{(*outputs)[i]};
+            const auto shape{out.get_shape()};
+            const auto lens{shape.lengths()};
+            std::vector<std::int64_t> ort_shape{lens.begin(), lens.end()};
+            auto dst{ctx.GetOutput(i, ort_shape.data(), ort_shape.size())};
+            if (shape.bytes() > 0) {
+                HIP_CALL_THROW(hipMemcpyWithStream(dst.GetTensorMutableRawData(), out.data(),
+                    shape.bytes(), hipMemcpyDeviceToDevice, stream));
+            }
+        }
+    }};
+
+    void* current_scratch{nullptr};
+    if (const auto sit{cs.scratch_bufs.find(shape_hash)}; sit != cs.scratch_bufs.end()) {
+        current_scratch = sit->second.data;
+    }
+
+    if (const auto it{cs.hip_graph_cache.find(shape_hash)};
+        it != cs.hip_graph_cache.end() && it->second.captured && it->second.direct_bind)
+    {
+        if (!CheckCapturedPtrsMatch(it->second, input_ptrs, output_ptrs, current_scratch)) {
+            // ORT recycled a buffer under us.  Re-capture, but if drift is
+            // sustained give up on the direct path (permanent eager/staging
+            // fallback) rather than re-capturing on every call.
+            ++cs.direct_recapture_count;
+            if (cs.direct_recapture_count > ComputeState::kMaxDirectRecaptures) {
+                cs.use_direct_hip_graph = false;
+                eager_run_with_extras();
+                return;
+            }
+            if (it->second.exec != nullptr) {
+                (void)hipGraphExecDestroy(it->second.exec);
+                it->second.exec = nullptr;
+            }
+            if (it->second.graph != nullptr) {
+                (void)hipGraphDestroy(it->second.graph);
+                it->second.graph = nullptr;
+            }
+            it->second.captured = false;
+        } else {
+            // Pointers matched: reset the drift counter so only *consecutive*
+            // mismatches can trip the permanent fallback above.
+            cs.direct_recapture_count = 0;
+            ZeroScratchFor(cs, shape_hash, stream);
+            for (const auto& [ptr, bytes] : it->second.captured_output_zeroes) {
+                HIP_CALL_THROW(hipMemsetAsync(ptr, 0, bytes, stream));
+            }
+            HIP_CALL_THROW(hipGraphLaunch(it->second.exec, stream));
+            MaterializeExtraOutputs(ctx, stream, it->second.extra_outputs, dyn);
+            return;
+        }
+    }
+
+    if (!WarmupAndCaptureHipGraphDirect(cs, stream, program, params, prog_output_indices,
+            shape_hash, input_ptrs, output_ptrs)) {
         eager_run_with_extras();
         return;
     }
