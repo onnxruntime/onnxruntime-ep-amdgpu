@@ -76,7 +76,15 @@ Ort::Status DataTransfer::CopyTensors(const std::vector<Ort::ConstValue>& src_te
                 }
             }
         } else if (src_device_type == OrtMemoryInfoDeviceType_GPU) {
-            HIP_RETURN_IF_ERROR(hipMemcpy(dst_data, src_data, bytes, hipMemcpyDeviceToHost));
+            if (stream_handle != nullptr) {
+                // Order the read against the producer stream ORT gave us. A plain hipMemcpy
+                // runs on the null stream, which does not wait for a hipStreamNonBlocking
+                // one (hip/stream_support.h) and so can read a buffer still being written.
+                HIP_RETURN_IF_ERROR(hipMemcpyWithStream(dst_data, src_data, bytes,
+                    hipMemcpyDeviceToHost, stream_handle));
+            } else {
+                HIP_RETURN_IF_ERROR(hipMemcpy(dst_data, src_data, bytes, hipMemcpyDeviceToHost));
+            }
         } else {
             memcpy(dst_data, src_data, bytes);
         }

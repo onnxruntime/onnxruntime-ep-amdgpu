@@ -6,6 +6,7 @@
 #include "core/framework/func_api.h"
 #include "core/framework/op_kernel_context_internal.h"
 #include "core/graph/function.h"
+#include "common/ort_api_version.h"
 
 namespace onnxruntime {
 
@@ -49,8 +50,8 @@ class FunctionKernel : public OpKernel {
 
   virtual Ort::Status Compute(OpKernelContext* context) const override {
     auto* context_internal = static_cast<OpKernelContextInternal*>(context);
-    const OrtApi* api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
-    if (api == nullptr) return ORT_MAKE_STATUS(INVALID_ARGUMENT, "API VERSION ", ORT_API_VERSION, " is invalid.");
+    const OrtApi* api = OrtGetApiBase()->GetApi(NegotiatedOrtApiVersion());
+    if (api == nullptr) return ORT_MAKE_STATUS(INVALID_ARGUMENT, "API VERSION ", NegotiatedOrtApiVersion(), " is invalid.");
     return compute_info_->compute_func(func_state_, api,
                                        reinterpret_cast<OrtKernelContext*>(context_internal));
   }

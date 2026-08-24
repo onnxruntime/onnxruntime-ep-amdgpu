@@ -46,7 +46,7 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     Microsoft::WRL::ComPtr<ExecutionContext> executionContext,
     std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder,
     bool enableHostAccessible)
-    : OrtEp{ORT_API_VERSION}
+    : OrtEp{NegotiatedOrtApiVersion()}
     , ApiPtrs{api_ptrs}
     , name_{name}
     , d3d12_device{d3d12_device_}
@@ -67,6 +67,13 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     OrtEp::GetCompiledModelCompatibilityInfo = GetCompiledModelCompatibilityInfoImpl;
     OrtEp::GetKernelRegistry = GetKernelRegistryImpl;
     IsConcurrentRunSupported = IsConcurrentRunSupportedImpl;
+
+    //// OrtEp::OnSessionInitializationEnd is a v27 callback. Only advertise it when the
+    //// runtime can drive it; on older runtimes it stays null (aggregate-initialized) and
+    //// OnRunStartImpl performs the one-time post-init trim as a fallback instead.
+    //if (NegotiatedOrtApiVersion() >= kSessionInitEndApiVersion) {
+    //    OrtEp::OnSessionInitializationEnd = OnSessionInitializationEndImpl;
+    //}
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS4 featureOptions = {};
     if (SUCCEEDED(d3d12_device->CheckFeatureSupport(
@@ -515,7 +522,7 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
 
         adapter->internal_kernel = std::move(op_kernel);
         adapter->ort_api_ptr = state->ort_api_ptr;
-        adapter->ort_version_supported = ORT_API_VERSION;
+        adapter->ort_version_supported = NegotiatedOrtApiVersion();
         adapter->flags = 0;
         adapter->Compute = DmlKernelImplAdapter_Compute;
         adapter->Release = DmlKernelImplAdapter_Release;
@@ -541,6 +548,15 @@ const char* ORT_API_CALL ExecutionProviderPlugin::GetNameImpl(const OrtEp* this_
 {
     const auto* ep = static_cast<const ExecutionProviderPlugin*>(this_ptr);
     return ep->name_.c_str();
+}
+
+// Returns true if the registry has an op translator for this node.
+static bool HasTranslator(const OpTranslatorRegistry& reg,
+                          const OrtApi& ort_api,
+                          const OrtNode* node) {
+    const char* op_type = nullptr;
+    ort_api.Node_GetOperatorType(node, &op_type);
+    return op_type && reg.find(op_type) != reg.end();
 }
 
 OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_ptr, const OrtGraph* graph,
@@ -616,14 +632,6 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
     std::unordered_set<size_t> tier0ClaimedNodeIds;
     {
 
-        // Helper: get the name of an OrtValueInfo.
-        auto GetViName = [&](const OrtValueInfo* vi) -> std::string {
-            if (!vi) return {};
-            const char* n = nullptr;
-            ep->ort_api.GetValueInfoName(vi, &n);
-            return n ? std::string(n) : std::string{};
-        };
-
         // Helper: get static dims from a node's input/output ValueInfo.
         // Returns empty vector if shape is missing or has any dynamic dim.
         // Falls back to resolved_shapes map.
@@ -646,7 +654,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                 }
             }
             // Fallback: check resolved_shapes by name.
-            auto name = GetViName(vi);
+            auto name = fusion_utils::GetValueInfoName(ep->ort_api,vi);
             if (!name.empty()) {
                 auto it = resolved_shapes.find(name);
                 if (it != resolved_shapes.end()) return it->second;
@@ -657,9 +665,18 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         // Helper: check if a ValueInfo has missing or dynamic shape.
         auto HasDynamicShape = [&](const OrtValueInfo* vi) -> bool {
             if (!vi) return true;
-            // Check resolved_shapes first.
-            auto name = GetViName(vi);
-            if (!name.empty() && resolved_shapes.count(name)) return false;
+            // A resolved_shapes entry counts as static only if every dim is > 0.
+            // An entry may still hold a placeholder dim (-1 or 0); such an entry is
+            // not authoritative, so fall through to the ValueInfo check below.
+            auto name = fusion_utils::GetValueInfoName(ep->ort_api,vi);
+            if (!name.empty()) {
+                auto it = resolved_shapes.find(name);
+                if (it != resolved_shapes.end()) {
+                    bool all_static = !it->second.empty();
+                    for (int64_t d : it->second) if (d <= 0) { all_static = false; break; }
+                    if (all_static) return false;
+                }
+            }
             auto* ti = vi->GetTypeInfo();
             if (!ti || !ti->tensor_type_info) return true;
             auto* si = ti->tensor_type_info.get();
@@ -681,7 +698,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                 auto* si = const_cast<OrtTensorTypeAndShapeInfo*>(ti->tensor_type_info.get());
                 ep->ort_api.SetDimensions(si, dims.data(), dims.size());
             }
-            auto name = GetViName(vi);
+            auto name = fusion_utils::GetValueInfoName(ep->ort_api,vi);
             if (!name.empty()) {
                 resolved_shapes[name] = dims;
                 DML_PERF_LOG("[ShapeResolve] SetResolvedDims: '", name, "' = [");
@@ -783,97 +800,31 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
     // Shape/Size/GRU/LSTM/RNN boundary ops to still fuse the rest.
     // -----------------------------------------------------------------------
 
-    // Returns true if the registry has an op translator for this node.
-    auto HasTranslator = [](const OpTranslatorRegistry& reg,
-                            const OrtApi& ort_api,
-                            const OrtNode* node) -> bool {
-        const char* op_type = nullptr;
-        ort_api.Node_GetOperatorType(node, &op_type);
-        return op_type && reg.find(op_type) != reg.end();
-    };
-
     ep->m_tier0GroupHashes.clear();
 
-    if (AllGraphInputsStatic(ep->ort_api, graph)) {
+    // Tier-0 fusion runs for all models, including those with dynamic input dims.
+    // Eligibility is decided per-group: Phase 1 resolves shapes to a fixpoint, Phase 2
+    // cuts partitions at dynamic-shape boundaries, and Phase 3 skips any group that
+    // fails ValidateTier0 — so a whole-route static-input gate is unnecessary.
+    {
         OpTranslatorRegistry tier0_registry = BuildOpTranslatorRegistry();
 
-        // Build partition groups once — graph topology is fixed.
-        struct PartitionGroup {
-            bool finalized = false;
-            bool claimed = false;
-            std::vector<const OrtNode*> nodes;
-        };
-        std::vector<PartitionGroup> groups;
-        std::unordered_map<std::string, size_t> output_to_group;
-
-        auto new_group = [&]() -> size_t {
-            groups.push_back(PartitionGroup{});
-            return groups.size() - 1;
-        };
-
-        for (const OrtNode* node : nodesInTopologicalOrder) {
-            size_t nid = 0;
-            ep->ort_api.Node_GetId(node, &nid);
-
-            auto input_names  = fusion_utils::GetNodeInputNames(ep->ort_api, node);
-            auto output_names = fusion_utils::GetNodeOutputNames(ep->ort_api, node);
-
-            bool is_fuseable = !cpuPreferredNodes.count(nid)
-                && ep->IsNodeSupportedByDml(node, graph_support_info, deviceDataTypeMask)
-                && HasTranslator(tier0_registry, ep->ort_api, node)
-                && !fusion_utils::NodeHasEmptyEdge(ep->ort_api, node, ep->m_graphInitializerMap);
-
-            if (!is_fuseable) {
-                // Boundary node: finalize any open upstream group feeding it so
-                // the static work before this point still fuses.
-                for (const auto& name : input_names) {
-                    auto it = output_to_group.find(name);
-                    if (it != output_to_group.end() && !groups[it->second].finalized)
-                        groups[it->second].finalized = true;
-                }
-                DML_PERF_LOG("[Tier0] BOUNDARY node=", nid, "\n");
-                continue;
-            }
-
-            std::vector<size_t> open_upstream;
-            for (const auto& name : input_names) {
-                auto it = output_to_group.find(name);
-                if (it == output_to_group.end()) continue;
-                size_t gid = it->second;
-                if (groups[gid].finalized) continue;
-                if (std::find(open_upstream.begin(), open_upstream.end(), gid) == open_upstream.end())
-                    open_upstream.push_back(gid);
-            }
-
-            size_t target_gid;
-            if (open_upstream.empty()) {
-                target_gid = new_group();
-            } else {
-                target_gid = open_upstream[0];
-                for (size_t k = 1; k < open_upstream.size(); ++k) {
-                    size_t src = open_upstream[k];
-                    for (auto* n : groups[src].nodes)
-                        groups[target_gid].nodes.push_back(n);
-                    groups[src].nodes.clear();
-                    groups[src].finalized = true;
-                    for (auto& [name, gid] : output_to_group)
-                        if (gid == src) gid = target_gid;
-                }
-            }
-
-            groups[target_gid].nodes.push_back(node);
-            for (const auto& name : output_names)
-                output_to_group[name] = target_gid;
-        }
-
-        // Iterative resolve-and-claim loop.
-        // Each iteration: re-run the Upsample shape resolution pass (cheap —
-        // resolved_values is cached), then try to claim unclaimed groups.
-        // Successful TryTranslateNodes exports shapes to resolved_shapes,
-        // enabling subsequent iterations to resolve more Upsamples.
+        // ===================================================================
+        // PHASE 1 — Resolve shapes to a fixpoint. NO claiming happens here.
+        //
+        // The grouper (Phase 2) treats dynamic shape as a partition boundary,
+        // so it needs shapes resolved BEFORE it runs. Each iteration runs the
+        // Upsample/Resize value+shape resolution pass, then a graph-wide
+        // TryTranslateNodes forward-propagation whose write-back seeds output
+        // shapes for the remaining ops. Loop until resolved_shapes /
+        // resolved_values stop growing (bounded at 10). TryTranslateNodes only
+        // COMPUTES shapes here — it does not fuse (fusion is AddNodesToFuse in
+        // Phase 3), so running it graph-wide is side-effect-free besides shape
+        // export.
+        // ===================================================================
         for (int iter = 0; iter < 10; ++iter) {
             size_t prev_resolved = resolved_shapes.size();
-            size_t prev_claimed = tier0ClaimedNodeIds.size();
+            size_t prev_resolved_values = resolved_values.size();
 
             // Re-run Upsample resolution with accumulated resolved_shapes.
             // The inner while(changed) loop and resolved_values cache make
@@ -947,7 +898,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
 
                         if (should_evaluate) {
                             if (std::strcmp(op_type, "Shape") == 0 && num_inputs > 0) {
-                                auto in_name = GetViName(in_vis[0]);
+                                auto in_name = fusion_utils::GetValueInfoName(ep->ort_api,in_vis[0]);
                                 auto dims = GetStaticDims(in_vis[0]);
                                 DML_PERF_LOG("[ShapeResolve] iter=", iter, " Shape: in='", in_name,
                                     "' out='", output_names[0], "' dims=", (dims.empty() ? "EMPTY" : "OK"),
@@ -1182,7 +1133,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                             DML_PERF_LOG("]\n");
                             SetResolvedDims(out_vis[0], out_dims);
                             if (!output_names.empty() && !output_names[0].empty()) {
-                                auto upsample_out_name = GetViName(out_vis[0]);
+                                auto upsample_out_name = fusion_utils::GetValueInfoName(ep->ort_api,out_vis[0]);
                                 if (output_names[0] != upsample_out_name)
                                     resolved_shapes[output_names[0]] = out_dims;
                             }
@@ -1193,7 +1144,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                                 if (!c_op || std::strcmp(c_op, "Cast") != 0) continue;
                                 auto c_inputs = fusion_utils::GetNodeInputNames(ep->ort_api, consumer);
                                 if (c_inputs.empty()) continue;
-                                auto upsample_out_name = GetViName(out_vis[0]);
+                                auto upsample_out_name = fusion_utils::GetValueInfoName(ep->ort_api,out_vis[0]);
                                 bool matches = (c_inputs[0] == upsample_out_name);
                                 if (!matches && !output_names.empty()) matches = (c_inputs[0] == output_names[0]);
                                 if (!matches) {
@@ -1202,7 +1153,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                                     if (c_nin > 0) {
                                         std::vector<const OrtValueInfo*> c_in(c_nin, nullptr);
                                         ep->ort_api.Node_GetInputs(consumer, c_in.data(), c_nin);
-                                        if (GetViName(c_in[0]) == upsample_out_name) matches = true;
+                                        if (fusion_utils::GetValueInfoName(ep->ort_api,c_in[0]) == upsample_out_name) matches = true;
                                     }
                                 }
                                 if (!matches) continue;
@@ -1213,7 +1164,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                                 if (c_nout > 0) ep->ort_api.Node_GetOutputs(consumer, c_out_vis.data(), c_nout);
                                 for (size_t co = 0; co < c_nout && co < c_outputs.size(); ++co) {
                                     if (!c_outputs[co].empty()) resolved_shapes[c_outputs[co]] = out_dims;
-                                    auto co_vi_name = GetViName(c_out_vis[co]);
+                                    auto co_vi_name = fusion_utils::GetValueInfoName(ep->ort_api,c_out_vis[co]);
                                     if (!co_vi_name.empty() && co_vi_name != c_outputs[co])
                                         resolved_shapes[co_vi_name] = out_dims;
                                 }
@@ -1227,69 +1178,198 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                     resolved_values.size(), " resolved_shapes=", resolved_shapes.size(), "\n");
             }
 
-            // Try to claim unclaimed groups.
-            for (auto& g : groups) {
-                if (g.nodes.empty() || g.claimed) continue;
-
-                std::string group_ops;
-                for (const OrtNode* n : g.nodes) {
-                    const char* ot = nullptr;
-                    ep->ort_api.Node_GetOperatorType(n, &ot);
-                    if (ot) { group_ops += ot; group_ops += " "; }
+            // Graph-wide forward shape propagation: run TryTranslateNodes over
+            // all translatable, DML-supported, non-CPU-preferred nodes. Its
+            // write-back exports computed output shapes into resolved_shapes so
+            // downstream ops (and Phase 2's boundary test) can see them without
+            // any group being claimed. Untranslatable nodes are boundaries in
+            // Phase 2 anyway; TryTranslateNodes tolerates them internally, but
+            // we pre-filter so a single unsupported op never aborts the pass.
+            {
+                std::vector<const OrtNode*> translatable;
+                translatable.reserve(nodesInTopologicalOrder.size());
+                for (const OrtNode* node : nodesInTopologicalOrder) {
+                    size_t nid = 0;
+                    ep->ort_api.Node_GetId(node, &nid);
+                    if (cpuPreferredNodes.count(nid)) continue;
+                    if (!ep->IsNodeSupportedByDml(node, graph_support_info, deviceDataTypeMask)) continue;
+                    if (!HasTranslator(tier0_registry, ep->ort_api, node)) continue;
+                    translatable.push_back(node);
                 }
-                DML_PERF_LOG("[Tier0] iter=", iter, " candidate group (", g.nodes.size(), " nodes): ", group_ops, "\n");
-
-                if (!FullGraphFusion::ValidateTier0(ep->ort_api, g.nodes, resolved_shapes,
-                                                    ep->m_graphInitializerMap)) {
-                    DML_PERF_LOG("[Tier0] SKIP: ValidateTier0 failed\n");
-                    continue;
+                if (!translatable.empty()) {
+                    FullGraphFusion::TryTranslateNodes(ep->ort_api, graph,
+                        ep->m_graphInitializerMap, translatable, resolved_shapes, &resolved_shapes);
                 }
-                if (!FullGraphFusion::TryTranslateNodes(ep->ort_api, graph,
-                                                        ep->m_graphInitializerMap, g.nodes, resolved_shapes, &resolved_shapes)) {
-                    DML_PERF_LOG("[Tier0] SKIP: TryTranslateNodes failed\n");
-                    continue;
-                }
-                if (!FullGraphFusion::TryCompilePartition(ep->ort_api, graph,
-                                                          ep->m_graphInitializerMap,
-                                                          ep->m_executionProvider.get(), g.nodes, resolved_shapes)) {
-                    DML_PERF_LOG("[Tier0] SKIP: TryCompilePartition failed\n");
-                    continue;
-                }
-                DML_PERF_LOG("[Tier0] CLAIM: group passed pre-flight (", g.nodes.size(), " nodes)\n");
-
-                OrtNodeFusionOptions fusion_options{ORT_API_VERSION, true};
-                OrtStatus* st = ep->ep_api.EpGraphSupportInfo_AddNodesToFuse(
-                    graph_support_info,
-                    g.nodes.data(),
-                    g.nodes.size(),
-                    &fusion_options);
-                if (!st) {
-                    std::vector<size_t> node_ids;
-                    node_ids.reserve(g.nodes.size());
-                    for (const OrtNode* n : g.nodes) {
-                        size_t nid = 0;
-                        ep->ort_api.Node_GetId(n, &nid);
-                        node_ids.push_back(nid);
-                        tier0ClaimedNodeIds.insert(nid);
-                    }
-                    std::sort(node_ids.begin(), node_ids.end());
-                    ep->m_tier0GroupHashes.insert(HashNodeIds(node_ids));
-                    tier0_claimed = true;
-                    g.claimed = true;
-                }
-                if (st) ep->ort_api.ReleaseStatus(st);
             }
 
-            // Stop if no progress.
+            // Fixpoint: stop when neither map grows.
             bool made_progress = resolved_shapes.size() > prev_resolved
-                || tier0ClaimedNodeIds.size() > prev_claimed;
-            DML_PERF_LOG("[Tier0] iter=", iter, " resolved_shapes=", resolved_shapes.size(),
-                " claimed=", tier0ClaimedNodeIds.size(), " progress=", made_progress, "\n");
+                || resolved_values.size() > prev_resolved_values;
+            DML_PERF_LOG("[Tier0] ShapeFixpoint iter=", iter, " resolved_shapes=", resolved_shapes.size(),
+                " resolved_values=", resolved_values.size(), " progress=", made_progress, "\n");
             if (!made_progress) break;
         }
 
-    } // end if (AllGraphInputsStatic)
-    } // end scope for helpers (GetViName, GetStaticDims, etc.)
+        // ===================================================================
+        // PHASE 2 — Shape-aware grouping (single pass).
+        //
+        // Merge-based partitioning: a node is a boundary if it is CPU-preferred,
+        // not DML-supported, has no translator, OR has any dynamic-shaped input
+        // or output ValueInfo (HasDynamicShape consults the resolved_shapes
+        // fixpoint from Phase 1, so recovered static islands are NOT over-cut).
+        // Boundary nodes finalize open upstream partitions; fuseable nodes
+        // extend/merge partitions their inputs come from.
+        // ===================================================================
+        struct PartitionGroup {
+            bool finalized = false;
+            bool claimed = false;
+            std::vector<const OrtNode*> nodes;
+        };
+        std::vector<PartitionGroup> groups;
+        std::unordered_map<std::string, size_t> output_to_group;
+
+        auto new_group = [&]() -> size_t {
+            groups.push_back(PartitionGroup{});
+            return groups.size() - 1;
+        };
+
+        for (const OrtNode* node : nodesInTopologicalOrder) {
+            size_t nid = 0;
+            ep->ort_api.Node_GetId(node, &nid);
+
+            auto input_names  = fusion_utils::GetNodeInputNames(ep->ort_api, node);
+            auto output_names = fusion_utils::GetNodeOutputNames(ep->ort_api, node);
+
+            bool is_fuseable = !cpuPreferredNodes.count(nid)
+                && ep->IsNodeSupportedByDml(node, graph_support_info, deviceDataTypeMask)
+                && HasTranslator(tier0_registry, ep->ort_api, node)
+                && !fusion_utils::NodeHasEmptyEdge(ep->ort_api, node, ep->m_graphInitializerMap);
+
+            // Dynamic shape is a partition boundary: reject if any input or
+            // output ValueInfo is dynamic per the Phase-1 resolved shapes.
+            if (is_fuseable) {
+                size_t num_inputs = 0;
+                ep->ort_api.Node_GetNumInputs(node, &num_inputs);
+                std::vector<const OrtValueInfo*> in_vis(num_inputs, nullptr);
+                if (num_inputs > 0) ep->ort_api.Node_GetInputs(node, in_vis.data(), num_inputs);
+                size_t num_outputs = 0;
+                ep->ort_api.Node_GetNumOutputs(node, &num_outputs);
+                std::vector<const OrtValueInfo*> out_vis(num_outputs, nullptr);
+                if (num_outputs > 0) ep->ort_api.Node_GetOutputs(node, out_vis.data(), num_outputs);
+                bool any_dynamic = false;
+                for (size_t k = 0; k < num_inputs && !any_dynamic; ++k)
+                    if (HasDynamicShape(in_vis[k])) any_dynamic = true;
+                for (size_t k = 0; k < num_outputs && !any_dynamic; ++k)
+                    if (HasDynamicShape(out_vis[k])) any_dynamic = true;
+                if (any_dynamic) {
+                    is_fuseable = false;
+                    DML_PERF_LOG("[Tier0] BOUNDARY node=", nid, " reason=dynamic_shape\n");
+                }
+            }
+
+            if (!is_fuseable) {
+                for (const auto& name : input_names) {
+                    auto it = output_to_group.find(name);
+                    if (it != output_to_group.end() && !groups[it->second].finalized) {
+                        groups[it->second].finalized = true;
+                    }
+                }
+                DML_PERF_LOG("[Tier0] BOUNDARY node=", nid, "\n");
+                continue;
+            }
+
+            std::vector<size_t> open_upstream;
+            for (const auto& name : input_names) {
+                auto it = output_to_group.find(name);
+                if (it == output_to_group.end()) continue;
+                size_t gid = it->second;
+                if (groups[gid].finalized) continue;
+                if (std::find(open_upstream.begin(), open_upstream.end(), gid) == open_upstream.end())
+                    open_upstream.push_back(gid);
+            }
+
+            size_t target_gid;
+            if (open_upstream.empty()) {
+                target_gid = new_group();
+            } else {
+                target_gid = open_upstream[0];
+                for (size_t k = 1; k < open_upstream.size(); ++k) {
+                    size_t src = open_upstream[k];
+                    for (auto* n : groups[src].nodes)
+                        groups[target_gid].nodes.push_back(n);
+                    groups[src].nodes.clear();
+                    groups[src].finalized = true;
+                    for (auto& [name, gid] : output_to_group)
+                        if (gid == src) gid = target_gid;
+                }
+            }
+
+            groups[target_gid].nodes.push_back(node);
+            for (const auto& name : output_names)
+                output_to_group[name] = target_gid;
+        }
+
+        // ===================================================================
+        // PHASE 3 — Claim each group once (no iteration).
+        //
+        // Shapes are resolved and groups contain only static-shaped nodes, so
+        // ValidateTier0 should pass by construction; it is kept as a correctness
+        // guard. On any failure the group is skipped and its nodes fall through
+        // to Tier-2/Tier-1 (they are absent from tier0ClaimedNodeIds).
+        for (auto& g : groups) {
+            if (g.nodes.empty() || g.claimed) continue;
+
+            std::string group_ops;
+            for (const OrtNode* n : g.nodes) {
+                const char* ot = nullptr;
+                ep->ort_api.Node_GetOperatorType(n, &ot);
+                if (ot) { group_ops += ot; group_ops += " "; }
+            }
+            DML_PERF_LOG("[Tier0] candidate group (", g.nodes.size(), " nodes): ", group_ops, "\n");
+
+            if (!FullGraphFusion::ValidateTier0(ep->ort_api, g.nodes, resolved_shapes,
+                ep->m_graphInitializerMap)) {
+                DML_PERF_LOG("[Tier0] SKIP: ValidateTier0 failed\n");
+                continue;
+            }
+            if (!FullGraphFusion::TryTranslateNodes(ep->ort_api, graph,
+                                                    ep->m_graphInitializerMap, g.nodes, resolved_shapes, &resolved_shapes)) {
+                DML_PERF_LOG("[Tier0] SKIP: TryTranslateNodes failed\n");
+                continue;
+            }
+            if (!FullGraphFusion::TryCompilePartition(ep->ort_api, graph,
+                                                      ep->m_graphInitializerMap,
+                                                      ep->m_executionProvider.get(), g.nodes, resolved_shapes)) {
+                DML_PERF_LOG("[Tier0] SKIP: TryCompilePartition failed\n");
+                continue;
+            }
+            DML_PERF_LOG("[Tier0] CLAIM: group passed pre-flight (", g.nodes.size(), " nodes)\n");
+
+            OrtNodeFusionOptions fusion_options{NegotiatedOrtApiVersion(), true};
+            OrtStatus* st = ep->ep_api.EpGraphSupportInfo_AddNodesToFuse(
+                graph_support_info,
+                g.nodes.data(),
+                g.nodes.size(),
+                &fusion_options);
+            if (!st) {
+                std::vector<size_t> node_ids;
+                node_ids.reserve(g.nodes.size());
+                for (const OrtNode* n : g.nodes) {
+                    size_t nid = 0;
+                    ep->ort_api.Node_GetId(n, &nid);
+                    node_ids.push_back(nid);
+                    tier0ClaimedNodeIds.insert(nid);
+                }
+                std::sort(node_ids.begin(), node_ids.end());
+                ep->m_tier0GroupHashes.insert(HashNodeIds(node_ids));
+                tier0_claimed = true;
+                g.claimed = true;
+            }
+            if (st) ep->ort_api.ReleaseStatus(st);
+        }
+
+    } // end Tier-0 route
+    } // end scope for helpers (GetStaticDims, HasDynamicShape, etc.)
 
     // Update m_resolvedShapes with shapes accumulated from successful
     // TryTranslateNodes calls so CompileImpl can seed BuildSubgraphInfo.
@@ -1523,7 +1603,12 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::OnRunStartImpl(
 {
     auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
 
-    ep->m_executionProvider->OnSessionInitializationEnd();
+    // On runtimes older than v27 ORT does not call OrtEp::OnSessionInitializationEnd,
+    // so run the one-time post-init trim here (idempotent via m_sessionInitialized).
+    // On v27+ the wired callback already handled it before the first run.
+    //if (NegotiatedOrtApiVersion() < kSessionInitEndApiVersion) {
+        ep->m_executionProvider->OnSessionInitializationEnd();
+    //}
 
     ep->m_executionProvider.get()->OnRunStart(*run_options);
     return nullptr;
@@ -1842,7 +1927,6 @@ std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const O
                 ort_api.Node_GetNumOutputs(candidateNode, &nodeNumOutputs);
                 valueInfo.resize(nodeNumOutputs);
                 ort_api.Node_GetOutputs(candidateNode, valueInfo.data(), nodeNumOutputs);
-
 
                 for (auto* output : valueInfo) {
                     cpu_output_args.insert(output);

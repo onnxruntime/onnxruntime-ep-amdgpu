@@ -426,7 +426,7 @@ void* GetGpuInputData(ComputeState& cs, const Ort::KernelContext& ctx, const std
     }
 
 ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string_view ep_name, Ort::ConstSessionOptions session_options, const Ort::Logger& logger)
-    : OrtEp{ORT_API_VERSION}, ApiPtrs{factory.ort_api, factory.ep_api, factory.model_editor_api}, factory_{factory}, logger_{logger}, ep_name_{ep_name}
+    : OrtEp{NegotiatedOrtApiVersion()}, ApiPtrs{factory.ort_api, factory.ep_api, factory.model_editor_api}, factory_{factory}, logger_{logger}, ep_name_{ep_name}
 {
     OrtEp::GetName = [](const OrtEp* this_) noexcept {
         API_CALL_T(const ExecutionProvider, this_, GetName, "invalid object pointer");
@@ -755,7 +755,7 @@ try {
         if (!ep_context_nodes.empty()) {
             // EPContext nodes must be fused (not added as single nodes) so that
             // ORT routes them through Compile() instead of looking for a kernel
-            OrtNodeFusionOptions node_fusion_options{ORT_API_VERSION, true};
+            OrtNodeFusionOptions node_fusion_options{NegotiatedOrtApiVersion(), true};
             RETURN_IF_STATUS(ep_api.EpGraphSupportInfo_AddNodesToFuse(graph_support_info,
                 reinterpret_cast<const OrtNode* const*>(ep_context_nodes.data()),
                 ep_context_nodes.size(), &node_fusion_options));
@@ -801,7 +801,7 @@ try {
         supported_nodes.emplace_back(node);
     }
     if (unsupported_nodes.empty()) {
-        OrtNodeFusionOptions node_fusion_options{ORT_API_VERSION, true};
+        OrtNodeFusionOptions node_fusion_options{NegotiatedOrtApiVersion(), true};
         RETURN_IF_STATUS(ep_api.EpGraphSupportInfo_AddNodesToFuse(graph_support_info,
             reinterpret_cast<const OrtNode* const*>(supported_nodes.data()), supported_nodes.size(),
             &node_fusion_options));
@@ -809,7 +809,7 @@ try {
         const auto subgraphs{GetPartitionedSubgraphs(sorted_nodes, unsupported_nodes)};
         /* TODO: log unsupported nodes */
         for (const auto& subgraph : subgraphs) {
-            OrtNodeFusionOptions node_fusion_options{ORT_API_VERSION, true};
+            OrtNodeFusionOptions node_fusion_options{NegotiatedOrtApiVersion(), true};
             RETURN_IF_STATUS(ep_api.EpGraphSupportInfo_AddNodesToFuse(graph_support_info,
                 reinterpret_cast<const OrtNode* const*>(subgraph.data()), subgraph.size(),
                 &node_fusion_options));
@@ -951,6 +951,9 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
             rest.remove_prefix(pos + 1);
         }
         options.set_advance_backend_option("mlss_use_specific_ops", ops);
+        if (ranges::any_of(ops, [](const std::string& op) { return op == "conv"; })) {
+            options.set_advance_backend_option("convolution_layout", "channels_first");
+        }
     }
     prog.compile(target, options);
 }
@@ -1537,11 +1540,10 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
             bind.params, bind.prog_output_indices, shape_hash, dyn);
         CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn, seq);
-        // No per-Compute sync: all work above is enqueued on ORT's compute stream,
-        // which ORT flushes at run end (DeviceStreamCollection::CleanUp ->
-        // SyncStream::Flush) honoring the run's sync_stream setting.  Cross-stream
-        // consumers are ordered via ORT notifications.  Syncing here would only
-        // serialize CPU/GPU and defeat that overlap.
+        // ORT fetches the outputs before its run-end Flush, and reaches DataTransfer
+        // with a null stream on some paths, which orders nothing against this
+        // hipStreamNonBlocking stream. Sync so that read cannot race in-flight compute.
+        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
         return STATUS_OK;
     }
 
@@ -1593,7 +1595,6 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         std::lock_guard lock{compute_state.mutex};
 
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-        // Enqueue only; ORT flushes the compute stream at run end (see OnRunEnd).
 
         if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
             for (size_t i{}; i < output_size; ++i) {
@@ -1610,6 +1611,10 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                     hipMemcpyDeviceToDevice, hip_stream));
             }
         }
+        // ORT fetches the outputs before its run-end Flush, and reaches DataTransfer
+        // with a null stream on some paths, which orders nothing against this
+        // hipStreamNonBlocking stream. Sync so that read cannot race in-flight compute.
+        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
     }
     return STATUS_OK;
 } catch (const Ort::Exception& e) {
@@ -1684,7 +1689,6 @@ try {
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-        // Enqueue only; ORT flushes the compute stream at run end (see OnRunEnd).
 
         if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
             for (size_t i{}; i < output_size; ++i) {
@@ -1701,6 +1705,10 @@ try {
                     hipMemcpyDeviceToDevice, hip_stream));
             }
         }
+        // ORT fetches the outputs before its run-end Flush, and reaches DataTransfer
+        // with a null stream on some paths, which orders nothing against this
+        // hipStreamNonBlocking stream. Sync so that read cannot race in-flight compute.
+        HIP_RETURN_IF_ERROR(hipStreamSynchronize(hip_stream));
     }
     return STATUS_OK;
 } catch (const Ort::Exception& e) {

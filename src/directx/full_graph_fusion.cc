@@ -192,6 +192,12 @@ static OrtStatus* ORT_API_CALL FullGraph_Compute(
 
     state->provider->QueueReference(state->compiled_op.Get());
 
+    // Submit this partition's command list now instead of batching the whole graph
+    // into one deferred submission, so the GPU can execute it while the CPU records
+    // the next partition. Flush() is non-blocking; per-dispatch UAV barriers and
+    // command-queue fence ordering preserve correctness across the split lists.
+    state->provider->Flush();
+
 #ifdef DML_PERF_PROFILE
     { uint64_t _t = PerfNowUs(); DML_PERF_LOG("[PERF] INF#", _perf_inf_id, " FullGraph_Compute EXIT: ", _t, " us (+", _t - _perf_t_enter, " total)\n"); }
 #endif
@@ -207,7 +213,7 @@ struct FullGraphNodeComputeInfo : OrtNodeComputeInfo {
     std::unique_ptr<FullGraphKernelState> state;
 
     FullGraphNodeComputeInfo() {
-        ort_version_supported = ORT_API_VERSION;
+        ort_version_supported = NegotiatedOrtApiVersion();
         CreateState = [](OrtNodeComputeInfo* self, OrtNodeComputeContext*, void** out) noexcept -> OrtStatus* {
             *out = static_cast<FullGraphNodeComputeInfo*>(self)->state.get();
             return nullptr;
@@ -252,7 +258,8 @@ bool FullGraphFusion::ValidateTier0(
             DiagLog("[ValidateTier0] resolved_shapes MISS: '" + name + "' (map has " + std::to_string(resolved_shapes.size()) + " entries)\n");
             return false;
         }
-        for (int64_t d : it->second) if (d < 0) return false;
+        if (it->second.empty()) return false;
+        for (int64_t d : it->second) if (d <= 0) return false;
         DiagLog("[ValidateTier0] resolved_shapes fallback: '" + name + "' accepted\n");
         return true;
     };
@@ -470,9 +477,34 @@ static SubgraphInfo BuildSubgraphInfo(
         if (rank > 0) {
             std::vector<int64_t> dims(rank, -1);
             ort_api.GetDimensions(si, dims.data(), rank);
+
+            // Recover dynamic boundary-input dims from the Phase-1 resolved shapes.
+            bool any_dynamic = false;
+            for (size_t d = 0; d < rank; ++d) if (dims[d] <= 0) { any_dynamic = true; break; }
+            if (any_dynamic) {
+                auto rit = resolved_shapes.find(name);
+                if (rit != resolved_shapes.end() && rit->second.size() == rank) {
+                    for (size_t d = 0; d < rank; ++d)
+                        if (dims[d] <= 0 && rit->second[d] > 0) dims[d] = rit->second[d];
+                }
+            }
+
+            // If a dim is still dynamic after the fallback, leave the input unseeded
+            // rather than coercing to 1. A coerced [1,1,1,3] would let translators
+            // produce a bogus static output that propagates a wrong shape downstream;
+            // leaving it unseeded makes dependent translators skip so the grouper keeps
+            // this boundary out of the fused partition (those nodes run per-op).
+            bool still_dynamic = false;
+            for (size_t d = 0; d < rank; ++d) if (dims[d] <= 0) { still_dynamic = true; break; }
+            if (still_dynamic) {
+                DML_PERF_LOG("[BuildSubgraphInfo] SKIP graph-input '", name,
+                             "' reason=unresolved_dynamic_input\n");
+                continue;
+            }
+
             sizes.resize(rank);
             for (size_t d = 0; d < rank; ++d)
-                sizes[d] = static_cast<uint32_t>(dims[d] > 0 ? dims[d] : 1);
+                sizes[d] = static_cast<uint32_t>(dims[d]);
         }
         // Scalars (rank 0) get an empty sizes vector; MakeTensorInfo pads to [1,1,1,1].
 
@@ -493,6 +525,55 @@ static SubgraphInfo BuildSubgraphInfo(
         if (!node) continue;
         const char* node_op = nullptr;
         ort_api.Node_GetOperatorType(node, &node_op);
+
+        // Capture constant inputs into all_initializers by reading each input's own
+        // ValueInfo. Graph_GetInitializers does not enumerate every consumed constant
+        // (a Constant-node output is not always a graph initializer), and under
+        // drop_constant_initializers=true ORT may release those the EP does not hold —
+        // so an uncaptured constant fails edge-wiring with "unresolved input" at
+        // compile. ValueInfo_GetInitializerValue resolves the value directly.
+        {
+            auto in_names = fusion_utils::GetNodeInputNames(ort_api, node);
+            size_t nnin = 0;
+            ort_api.Node_GetNumInputs(node, &nnin);
+            std::vector<const OrtValueInfo*> nin_vis(nnin, nullptr);
+            if (nnin > 0) ort_api.Node_GetInputs(node, nin_vis.data(), nnin);
+            for (size_t k = 0; k < nnin && k < in_names.size(); ++k) {
+                if (!nin_vis[k] || in_names[k].empty()) continue;
+                if (info.all_initializers.count(in_names[k])) continue;  // already captured
+                const OrtValue* cval = nullptr;
+                OrtStatus* cst = ort_api.ValueInfo_GetInitializerValue(nin_vis[k], &cval);
+                if (cst) { ort_api.ReleaseStatus(cst); continue; }
+                if (cval) {
+                    info.all_initializers[in_names[k]] = cval;
+                    // Seed value_shapes too — BuildDmlInputMap needs total_bytes to
+                    // inline/slot the constant; without it the constant is skipped.
+                    if (cval->IsAllocated() && !info.value_shapes.count(in_names[k])) {
+                        OrtTensorTypeAndShapeInfo* csi = nullptr;
+                        ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(cval), &csi);
+                        if (csi) {
+                            ONNXTensorElementDataType cdt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+                            ort_api.GetTensorElementType(csi, &cdt);
+                            DML_TENSOR_DATA_TYPE cdml = OnnxDtypeToDml(cdt);
+                            if (csi->HasShape() && cdml != DML_TENSOR_DATA_TYPE_UNKNOWN) {
+                                size_t crank = 0;
+                                ort_api.GetDimensionsCount(csi, &crank);
+                                std::vector<int64_t> cdims(crank, 0);
+                                if (crank > 0) ort_api.GetDimensions(csi, cdims.data(), crank);
+                                std::vector<uint32_t> csizes(crank);
+                                for (size_t d = 0; d < crank; ++d)
+                                    csizes[d] = static_cast<uint32_t>(cdims[d] > 0 ? cdims[d] : 1);
+                                auto cti = MakeTensorInfo(csizes, cdml);
+                                cti.original_rank = static_cast<uint32_t>(crank);
+                                info.value_shapes[in_names[k]] = cti;
+                            }
+                            ort_api.ReleaseTensorTypeAndShapeInfo(csi);
+                        }
+                    }
+                }
+            }
+        }
+
         auto output_names = fusion_utils::GetNodeOutputNames(ort_api, node);
         size_t node_num_outputs = 0;
         ort_api.Node_GetNumOutputs(node, &node_num_outputs);
@@ -979,7 +1060,19 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         auto translated_ptr = std::make_unique<TranslatedOp>(std::move(*translated));
         translated_ptr->FixupPointers();
 
+        // A passthrough (shape-only) op is normally elided from the DML graph.
+        // But if any of its outputs is a partition graph output, that output
+        // needs a real DML node to source its outgoing output edge — an elided
+        // alias has none, which later fails as "unresolved output". In that
+        // case materialize a real ELEMENT_WISE_IDENTITY (as ORT does), so the
+        // output is produced by an actual node.
+        bool passthrough_is_graph_output = false;
         if (translated_ptr->passthrough) {
+            for (const auto& oname : output_names)
+                if (subgraph.graph_output_map.count(oname)) { passthrough_is_graph_output = true; break; }
+        }
+
+        if (translated_ptr->passthrough && !passthrough_is_graph_output) {
             // Elide this node from the DML graph. Its outputs alias input[0]'s
             // source, so downstream consumers connect directly to the upstream
             // producer. This handles Reshape (no-op reinterpretation).
@@ -997,6 +1090,17 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
                 }
             }
             continue;
+        }
+
+        if (passthrough_is_graph_output) {
+            // Replace the elided passthrough with a real identity op that copies
+            // input[0] to the output. Fall through to the normal compiled-node
+            // path so its input edge and output edge are wired like any op.
+            DmlTensorInfo out_info = translated_ptr->output_tensors.empty()
+                ? DmlTensorInfo{} : translated_ptr->output_tensors[0];
+            translated_ptr = std::make_unique<TranslatedOp>(BuildIdentityOp(out_info));
+            DML_PERF_LOG("[Compile] passthrough op=", op_type,
+                " materialized as IDENTITY (output is a partition output)\n");
         }
 
         // Track which input names will become actual DML edges. The DML operator
@@ -1718,12 +1822,23 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         // the final reshaped dimensions.
         const auto& vs = it->second;
         const OrtValueInfo* out_vi = subgraph.graph_output_vis[i];
+        // Determine the true (unpadded) output rank. Prefer ORT's shape inference
+        // on the graph-output ValueInfo; a rank of 0 there means a genuine scalar
+        // and MUST be honored. Only when ORT has no shape info at all do we fall
+        // back to the tensor's own original_rank, then to the 4D-padded size.
+        //
+        // Getting this wrong reports a scalar/low-rank output as the padded rank-4
+        // [1,1,1,1], which changes ONNX broadcast semantics for a downstream
+        // consumer — e.g. a materialized Squeeze->identity feeding Min/Max, where
+        // [1,1,1,1] vs [] injects a spurious dimension and explodes shapes.
+        bool rank_known = false;
         size_t orig_rank = 0;
         if (out_vi && out_vi->GetTypeInfo() && out_vi->GetTypeInfo()->tensor_type_info
             && out_vi->GetTypeInfo()->tensor_type_info->HasShape()) {
             ort_api.GetDimensionsCount(out_vi->GetTypeInfo()->tensor_type_info.get(), &orig_rank);
+            rank_known = true;  // includes rank==0 (scalar)
         }
-        if (orig_rank == 0) orig_rank = vs.sizes.size();
+        if (!rank_known) orig_rank = vs.original_rank ? vs.original_rank : vs.sizes.size();
         size_t skip = vs.sizes.size() > orig_rank ? vs.sizes.size() - orig_rank : 0;
         kernel_state->output_dims[i].reserve(vs.sizes.size() - skip);
         for (size_t d = skip; d < vs.sizes.size(); ++d)
@@ -1818,11 +1933,19 @@ bool FullGraphFusion::TryTranslateNodes(
         }
 
         // Export value_shapes under both producer and consumer names.
+        // Export the UNPADDED dims: info.sizes is padded to 4D, but original_rank
+        // records the true rank. Exporting the padded [1,1,1,1] for a scalar/low-
+        // rank tensor would round-trip through resolved_shapes and be re-seeded
+        // (SeedFromVi) with original_rank = 4, corrupting a downstream partition's
+        // reported output rank the same way the Squeeze->identity scalar did.
         auto ExportDims = [&](const std::string& name, const DmlTensorInfo& info) {
             if (out_shapes->count(name)) return;
-            std::vector<int64_t> dims(info.sizes.size());
-            for (size_t d = 0; d < info.sizes.size(); ++d)
-                dims[d] = static_cast<int64_t>(info.sizes[d]);
+            size_t rank = (info.original_rank && info.original_rank <= info.sizes.size())
+                ? info.original_rank : info.sizes.size();
+            size_t skip = info.sizes.size() - rank;  // strip leading padding 1s
+            std::vector<int64_t> dims(rank);
+            for (size_t d = 0; d < rank; ++d)
+                dims[d] = static_cast<int64_t>(info.sizes[skip + d]);
             (*out_shapes)[name] = std::move(dims);
         };
 
@@ -1884,13 +2007,23 @@ bool FullGraphFusion::TryCompilePartition(
         if (!node) continue;
         const char* op_type = nullptr;
         ort_api.Node_GetOperatorType(node, &op_type);
-        if (!op_type) return false;
+        if (!op_type) {
+            DiagLog("[TryCompilePartition] translate FAIL: null op_type\n");
+            return false;
+        }
         auto reg_it = registry.find(op_type);
-        if (reg_it == registry.end()) return false;
+        if (reg_it == registry.end()) {
+            DiagLog(std::string("[TryCompilePartition] translate FAIL: no translator for op=") + op_type + "\n");
+            return false;
+        }
         auto input_names  = fusion_utils::GetNodeInputNames(ort_api, node);
         auto output_names = fusion_utils::GetNodeOutputNames(ort_api, node);
         auto translated = reg_it->second(ort_api, node, subgraph.value_shapes, subgraph.all_initializers);
-        if (!translated) return false;
+        if (!translated) {
+            DiagLog(std::string("[TryCompilePartition] translate FAIL: op=") + op_type +
+                " out0=" + (output_names.empty() ? "?" : output_names[0]) + "\n");
+            return false;
+        }
         // Write-back: translator computed output shapes; seed them for downstream.
         for (size_t k = 0; k < output_names.size() && k < translated->output_tensors.size(); ++k) {
             if (!subgraph.value_shapes.count(output_names[k]))
@@ -1898,7 +2031,16 @@ bool FullGraphFusion::TryCompilePartition(
         }
         auto translated_ptr = std::make_unique<TranslatedOp>(std::move(*translated));
         translated_ptr->FixupPointers();
+        // Mirror Compile: a passthrough whose output is a partition output must
+        // be materialized as a real identity node (an elided alias has no DML
+        // node to source the output edge). Keeping this in lockstep with Compile
+        // ensures the pre-flight verdict matches the actual compile.
+        bool passthrough_is_graph_output = false;
         if (translated_ptr->passthrough) {
+            for (const auto& oname : output_names)
+                if (subgraph.graph_output_map.count(oname)) { passthrough_is_graph_output = true; break; }
+        }
+        if (translated_ptr->passthrough && !passthrough_is_graph_output) {
             if (!input_names.empty()) {
                 const auto& src = input_names[0];
                 auto prod_it = value_producer.find(src);
@@ -1909,6 +2051,11 @@ bool FullGraphFusion::TryCompilePartition(
                 }
             }
             continue;
+        }
+        if (passthrough_is_graph_output) {
+            DmlTensorInfo out_info = translated_ptr->output_tensors.empty()
+                ? DmlTensorInfo{} : translated_ptr->output_tensors[0];
+            translated_ptr = std::make_unique<TranslatedOp>(BuildIdentityOp(out_info));
         }
         size_t dml_input_count = translated_ptr->input_tensors.size();
         for (size_t s = 0; s < input_names.size() && s < dml_input_count; ++s) {
@@ -1932,15 +2079,54 @@ bool FullGraphFusion::TryCompilePartition(
 
     // CreateOperator.
     ComPtr<IDMLDevice> dml_device;
-    if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf()))) return false;
+    if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf()))) {
+        DiagLog("[TryCompilePartition] GetDmlDevice failed\n");
+        return false;
+    }
     ComPtr<IDMLDevice1> dml_device1;
-    if (FAILED(dml_device.As(&dml_device1))) return false;
+    if (FAILED(dml_device.As(&dml_device1))) {
+        DiagLog("[TryCompilePartition] IDMLDevice1 QI failed\n");
+        return false;
+    }
     for (auto& compiled_node : compiled_nodes) {
-        if (FAILED(dml_device->CreateOperator(&compiled_node.translated->op_desc,
-                IID_PPV_ARGS(compiled_node.translated->dml_operator.GetAddressOf())))) return false;
-        for (auto& sn : compiled_node.translated->sub_nodes)
-            if (FAILED(dml_device->CreateOperator(&sn.op_desc,
-                    IID_PPV_ARGS(sn.dml_operator.GetAddressOf())))) return false;
+        HRESULT hr_op = dml_device->CreateOperator(&compiled_node.translated->op_desc,
+                IID_PPV_ARGS(compiled_node.translated->dml_operator.GetAddressOf()));
+        if (FAILED(hr_op)) {
+            char hr_buf[32];
+            snprintf(hr_buf, sizeof(hr_buf), "0x%08X", (unsigned)hr_op);
+            DiagLog(std::string("[TryCompilePartition] CreateOperator FAILED HR=") + hr_buf +
+                " op=" + compiled_node.op_type + "\n");
+            auto dump_tensors = [](const char* tag, const std::vector<DmlTensorInfo>& tensors) {
+                for (size_t ti = 0; ti < tensors.size(); ++ti) {
+                    const auto& t = tensors[ti];
+                    std::string s = std::string("[TryCompilePartition]   ") + tag + "[" +
+                        std::to_string(ti) + "] dtype=" + std::to_string((int)t.data_type) +
+                        " rank=" + std::to_string(t.original_rank) + " sizes=[";
+                    for (size_t d = 0; d < t.sizes.size(); ++d)
+                        s += (d ? "," : "") + std::to_string(t.sizes[d]);
+                    s += "] strides=[";
+                    for (size_t d = 0; d < t.strides.size(); ++d)
+                        s += (d ? "," : "") + std::to_string(t.strides[d]);
+                    s += "] total_bytes=" + std::to_string(t.total_bytes) + "\n";
+                    DiagLog(s);
+                }
+            };
+            dump_tensors("in",  compiled_node.translated->input_tensors);
+            dump_tensors("out", compiled_node.translated->output_tensors);
+            return false;
+        }
+        for (size_t s = 0; s < compiled_node.translated->sub_nodes.size(); ++s) {
+            auto& sn = compiled_node.translated->sub_nodes[s];
+            HRESULT hr_sn = dml_device->CreateOperator(&sn.op_desc,
+                    IID_PPV_ARGS(sn.dml_operator.GetAddressOf()));
+            if (FAILED(hr_sn)) {
+                char hr_buf[32];
+                snprintf(hr_buf, sizeof(hr_buf), "0x%08X", (unsigned)hr_sn);
+                DiagLog(std::string("[TryCompilePartition] CreateOperator FAILED (sub_node) HR=") + hr_buf +
+                    " op=" + compiled_node.op_type + " sub=" + std::to_string(s) + "\n");
+                return false;
+            }
+        }
     }
 
     // Build graph descriptor (minimal — just enough for CompileGraph validation).
@@ -2098,6 +2284,9 @@ bool FullGraphFusion::TryCompilePartition(
                 }
                 me.push_back({(UINT)pdi,foi,(UINT)pdml,(UINT)dml_slot});
             } else {
+                DiagLog(std::string("[TryCompilePartition] UNRESOLVED input edge: node_idx=") +
+                    std::to_string(node_idx) + " op=" + compiled_node.op_type +
+                    " slot=" + std::to_string(s) + " name='" + name + "'\n");
                 return false;
             }
         }

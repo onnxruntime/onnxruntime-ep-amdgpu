@@ -584,11 +584,50 @@ static std::optional<TranslatedOp> TranslateShapeOnly(
     if (!in_info || !out_info) return std::nullopt;
 
     auto out_tensor = MakeTensorInfo(out_info->sizes, in_info->data_type);
+    // Preserve the true (unpadded) rank of the shape-only op's output. When this
+    // passthrough is elided the rank is irrelevant, but when it must be
+    // materialized as a real identity (BuildIdentityOp, output is a partition
+    // output) the identity's DML output tensor would otherwise carry the 4D-padded
+    // rank. A Squeeze that yields a rank-0 scalar must stay rank-0, or a downstream
+    // broadcasting consumer (Min/Max/Mul) sees [1,1,1,1] instead of [] and injects
+    // a spurious dimension.
+    out_tensor.original_rank = out_info->original_rank;
 
     TranslatedOp result;
     result.input_tensors = { out_tensor };
     result.output_tensors = { out_tensor };
     result.passthrough = true;
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// BuildIdentityOp — materialize a real ELEMENT_WISE_IDENTITY for a shape-only
+// passthrough whose output must be a genuine DML node (see header comment).
+// Mirrors the safe shared_ptr desc-storage + fixup pattern used by Transpose.
+// ---------------------------------------------------------------------------
+TranslatedOp BuildIdentityOp(const DmlTensorInfo& tensor) {
+    auto storage = std::make_shared<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>();
+    storage->ScaleBias = nullptr;
+
+    TranslatedOp result;
+    result.input_tensors = { tensor };
+    result.output_tensors = { tensor };
+
+    result.input_buffer_descs = { tensor.ToBufferDesc() };
+    result.input_tensor_descs.resize(1);
+    result.output_buffer_descs = { tensor.ToBufferDesc() };
+    result.output_tensor_descs.resize(1);
+
+    result.desc_storage = storage;
+    result.op_desc = { DML_OPERATOR_ELEMENT_WISE_IDENTITY, storage.get() };
+
+    result.fixup = [storage](TranslatedOp& self) {
+        RebuildTensorDescPointers(self);
+        storage->InputTensor = &self.input_tensor_descs[0];
+        storage->OutputTensor = &self.output_tensor_descs[0];
+    };
+    result.FixupPointers();
+
     return result;
 }
 
@@ -1243,7 +1282,6 @@ static std::optional<TranslatedOp> TranslateArgMaxMin(
 
     OrtNodeAdapter adapter(node, ort_api);
     int64_t axis      = adapter.GetAttributeInt("axis", 0);
-    int64_t keepdims  = adapter.GetAttributeInt("keepdims", 1);
     int64_t select_last = adapter.GetAttributeInt("select_last_index", 0);
 
     size_t padded_rank = in_info->sizes.size();
@@ -1253,20 +1291,18 @@ static std::optional<TranslatedOp> TranslateArgMaxMin(
     axis += static_cast<int64_t>(pad_offset);
     UINT dml_axis = static_cast<UINT>(axis);
 
-    auto* out_edge = LookupShape(value_shapes, outputs[0]);
-    std::vector<uint32_t> out_sizes;
-    if (out_edge) {
-        out_sizes = out_edge->sizes;
-    } else {
-        out_sizes = in_info->sizes;
-        if (keepdims) out_sizes[axis] = 1u;
-        else {
-            out_sizes.erase(out_sizes.begin() + axis);
-            if (out_sizes.empty()) out_sizes.push_back(1u);
-        }
-    }
-
     auto in_tensor  = MakeTensorInfo(in_info->sizes, in_info->data_type);
+    // DML ArgMax/ArgMin require the output tensor desc to have the SAME dimension
+    // count as the input, with the reduced axis set to size 1 — DML has no notion
+    // of ONNX's keepdims. Building the output from the ONNX output shape instead
+    // right-pads the size-1 to the wrong axis (e.g. input [1,1,10,77] reduced on
+    // axis 3 gave output [1,1,1,10] instead of [1,1,10,1]), which CreateOperator
+    // rejects with E_INVALIDARG. Mirror ORT's reducedDims logic (DmlOperatorReduce):
+    // take the padded input shape and set the reduced axis to 1.
+    std::vector<uint32_t> out_sizes = in_info->sizes;
+    out_sizes[dml_axis] = 1u;
+    // Output is int64 index data (ONNX ArgMax output type), matching ORT which keeps
+    // edgeDesc.tensorDataType (INT64) rather than coercing.
     auto out_tensor = MakeTensorInfo(out_sizes, DML_TENSOR_DATA_TYPE_INT64);
 
     struct ArgStorage {

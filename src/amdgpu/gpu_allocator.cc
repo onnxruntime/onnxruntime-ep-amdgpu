@@ -8,7 +8,7 @@ namespace gpu_ep {
 
 Allocator::Allocator(const ProviderFactory& factory,
         const OrtMemoryInfo* memory_info, const OrtKeyValuePairs* allocator_options)
-    : OrtAllocator{ORT_API_VERSION}, factory_{factory},
+    : OrtAllocator{NegotiatedOrtApiVersion()}, factory_{factory},
       allocator_options_{allocator_options}, memory_info_{memory_info}
 {
     OrtAllocator::Alloc = [](OrtAllocator* this_, size_t size) {
@@ -30,6 +30,9 @@ Allocator::~Allocator() {
     }
 }
 
+// Always lazy. Sessions no longer reach this wrapper — they resolve allocators per-session
+// through OrtEp::CreateAllocator (gpu_ep.cc). What is left is the factory-level fallback,
+// notably ORT's environment shared allocator, which is shared and has no session to pin to.
 OrtAllocator* Allocator::GetBackendAllocator() const noexcept {
     const auto backend_factory{factory_.GetBackendFactory()};
     if (backend_factory == nullptr) {

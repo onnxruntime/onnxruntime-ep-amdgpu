@@ -9,7 +9,7 @@ namespace hip {
 
 struct SyncStream : OrtSyncStreamImpl, ApiPtrs {
     SyncStream(const ApiPtrs& api_ptrs, int device_id, const OrtKeyValuePairs* /* stream_options */)
-        : OrtSyncStreamImpl{ORT_API_VERSION}, ApiPtrs{api_ptrs}
+        : OrtSyncStreamImpl{NegotiatedOrtApiVersion()}, ApiPtrs{api_ptrs}
     {
         HIP_CALL_THROW(hipSetDevice(device_id));
         HIP_CALL_THROW(hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking));
@@ -47,7 +47,7 @@ private:
 
 struct SyncNotification : OrtSyncNotificationImpl, ApiPtrs {
     SyncNotification(const ApiPtrs& apis, hipStream_t stream)
-        : OrtSyncNotificationImpl{ORT_API_VERSION}, ApiPtrs{apis}, stream_{stream}
+        : OrtSyncNotificationImpl{NegotiatedOrtApiVersion()}, ApiPtrs{apis}, stream_{stream}
     {
         HIP_CALL_THROW(hipEventCreateWithFlags(&event_, hipEventDisableTiming));
 
