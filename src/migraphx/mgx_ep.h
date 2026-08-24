@@ -130,6 +130,39 @@ struct StagingBindResult {
     std::vector<migraphx::shape> bound_output_shapes{};   // current bucket shape per bound output
 };
 
+// ── Direct-bind ultra-fast binding cache ─────────────────────────────────────
+// Precomputed per-parameter binding metadata for the direct-bind path so the hot
+// path skips the per-call name lookups, dtype checks, and device-residency probes
+// that building the binding from scratch requires.  Mirrors the built-in EP's
+// cached_inputs / cached_outputs + a reused program_parameters, but is cached
+// per compiled shape (keyed by shape hash) rather than in a single slot, so
+// alternating dynamic-batch buckets each keep their binding instead of thrashing.
+struct CachedDirectInput {
+    std::string name;              // MIGraphX program parameter name
+    std::size_t ort_index{};       // KernelContext input index
+    migraphx::shape mgx_shape{};   // program-side shape to bind with
+};
+
+struct CachedDirectOutput {
+    std::string name;                    // MIGraphX "#output_N" parameter name
+    std::size_t output_index{};          // ORT output index
+    migraphx::shape mgx_shape{};         // program-side shape to bind with
+    std::vector<std::int64_t> ort_shape; // ORT output shape (== program shape; no padding)
+};
+
+// One shape's direct-bind binding.  `params` is reused across calls for this
+// shape: the hot path re-adds the current ORT pointers (migraphx add() overwrites
+// by name), skipping the name lookups / dtype checks captured in `inputs`/
+// `outputs`.  `eligible` is false when the shape cannot use direct-bind (a
+// host-resident input, dtype mismatch, or an unbound parameter), in which case
+// the call falls through to the staging path.
+struct DirectBindCache {
+    std::vector<CachedDirectInput> inputs{};
+    std::vector<CachedDirectOutput> outputs{};
+    migraphx::program_parameters params{};
+    bool eligible{};
+};
+
 struct ComputeState {
     std::mutex& mutex;
     int device_id;
@@ -174,6 +207,14 @@ struct ComputeState {
     // exceeds kMaxDirectRecaptures the direct path is disabled for the session.
     static constexpr int kMaxDirectRecaptures{3};
     int direct_recapture_count{};
+
+    // ── Direct-bind ultra-fast binding cache (keyed by shape hash) ────────────
+    // Populated once per compiled shape; the hot path rebinds ORT pointers into
+    // the cached (reused) program_parameters without re-doing name lookups /
+    // dtype checks.  Multi-entry so alternating dynamic-batch buckets each keep
+    // their binding.  Invalidated per-hash on recompile (mirrors
+    // staging_bind_cache) and cleared wholesale on the unbounded-shape path.
+    Map<DirectBindCache> direct_bind_cache{};
 
     // ── Static sequence-length padding (set at Compile time) ──────────────────
     // When static_pad_seq is set, named inputs are padded on their token axis up to

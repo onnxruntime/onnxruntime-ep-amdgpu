@@ -444,6 +444,54 @@ void* GetGpuInputData(ComputeState& cs, const Ort::KernelContext& ctx, const std
     return buf.data;
 }
 
+// Populate the direct-bind binding cache for the current compiled shape.  Walks
+// the program parameters once, recording each input's (name, ORT index, shape)
+// and each output's (name, ORT index, shape) so the hot path can rebind without
+// per-call name lookups or dtype checks.  Returns whether the shape is eligible
+// for the direct-bind path: every input must be device-resident (a host input
+// has no stable device pointer to bake into the graph) and its dtype must match
+// the program.  A non-input, non-output, non-"scratch" parameter also makes the
+// shape ineligible (it falls back to the staging path).  Device residency and
+// dtype are assumed stable across calls for a given shape (as they are under
+// Triton io-binding), matching the built-in EP's populate-once design.
+bool PopulateDirectCaches(std::vector<CachedDirectInput>& inputs,
+    std::vector<CachedDirectOutput>& outputs, const Ort::KernelContext& ctx,
+    const migraphx::program_parameter_shapes& param_shapes,
+    const Map<std::size_t>& input_name_indices)
+{
+    inputs.clear();
+    outputs.clear();
+    inputs.reserve(input_name_indices.size());
+
+    bool eligible{true};
+    for (std::string name : param_shapes.names()) {
+        if (const auto it{input_name_indices.find(name)}; it != input_name_indices.end()) {
+            const auto prog_shape{param_shapes[name.c_str()]};
+            const auto input_tensor{ctx.GetInput(it->second)};
+            if (input_tensor.GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
+                eligible = false;  // host input -> no device pointer to bind
+            }
+            migraphx_shape_datatype_t datatype;
+            GetMIGraphXType(input_tensor.GetTensorTypeAndShapeInfo().GetElementType(), datatype);
+            if (datatype != prog_shape.type()) {
+                eligible = false;
+            }
+            inputs.push_back(CachedDirectInput{std::move(name), it->second, prog_shape});
+        } else if (std::string_view{name} == "scratch") {
+            // Bound separately each call (pointer-stable EP-owned buffer).
+        } else if (const auto oi{ComputeOutputIndex(name)}; oi != -1) {
+            const auto prog_shape{param_shapes[name.c_str()]};
+            const auto lens{prog_shape.lengths()};
+            std::vector<std::int64_t> ort_shape{lens.begin(), lens.end()};
+            outputs.push_back(CachedDirectOutput{
+                std::move(name), static_cast<std::size_t>(oi), prog_shape, std::move(ort_shape)});
+        } else {
+            eligible = false;  // unbound/unknown parameter -> use staging path
+        }
+    }
+    return eligible;
+}
+
 }  // namespace
 
 #define PARSE_ENV_VAR(__name__, __value__)                                               \
@@ -1433,6 +1481,9 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             // graph/staging, so invalidate before the program changes.
             DestroyHipGraphs(compute_state);
             FreeStaging(compute_state);
+            // Direct-bind bindings reference the graphs just destroyed; drop them
+            // so they are repopulated (and re-captured) against the new program.
+            compute_state.direct_bind_cache.clear();
         }
 
         if (!loaded_from_cache) {
@@ -1486,6 +1537,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             // The program for this hash was (re)built, so any binding cached
             // against the previous program for the same hash is stale.
             compute_state.staging_bind_cache.erase(current_hash);
+            compute_state.direct_bind_cache.erase(current_hash);
         }
         param_shapes = program.get_parameter_shapes();
     }
@@ -1520,55 +1572,50 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
 
-        migraphx::program_parameters direct_params;
-        std::vector<std::size_t> prog_output_indices;
-        Map<void*> input_ptrs;
-        Map<void*> output_ptrs;
-        bool direct_ok{true};
-
-        for (std::string name : param_shapes.names()) {
-            if (input_name_indices.count(name) > 0) {
-                const auto index{input_name_indices.at(name)};
-                const auto input_tensor{kernel_context.GetInput(index)};
-                // A host-resident input has no stable device pointer to bake into
-                // the captured graph; bail to the staging path (which uploads it).
-                if (input_tensor.GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
-                    direct_ok = false;
-                    break;
-                }
-                const auto prog_shape{param_shapes[name.c_str()]};
-                migraphx_shape_datatype_t datatype;
-                GetMIGraphXType(input_tensor.GetTensorTypeAndShapeInfo().GetElementType(), datatype);
-                if (datatype != prog_shape.type()) {
-                    throw std::runtime_error{"NodeComputeInfo::Compute(): tensor parameter type mismatch"};
-                }
-                void* ptr{const_cast<void*>(input_tensor.GetTensorRawData())};
-                direct_params.add(name.c_str(), migraphx::argument{prog_shape, ptr});
-                input_ptrs.emplace(name, ptr);
-            } else if (std::string_view{name} == "scratch") {
-                // EP-owned scratch (zeroed before capture/replay for determinism).
-                if (const auto scratch{
-                        GetOrAllocScratch(compute_state, param_shapes, shape_hash, hip_stream)}) {
-                    direct_params.add(name.c_str(), migraphx::argument{scratch->shape, scratch->ptr});
-                }
-            } else if (const auto oi{ComputeOutputIndex(name)}; oi != -1) {
-                const auto out_shape{param_shapes[name.c_str()]};
-                const auto lengths{out_shape.lengths()};
-                std::vector<std::int64_t> tensor_shape{lengths.begin(), lengths.end()};
-                auto output_tensor{kernel_context.GetOutput(static_cast<std::size_t>(oi),
-                    tensor_shape.data(), tensor_shape.size())};
-                void* ptr{output_tensor.GetTensorMutableRawData()};
-                direct_params.add(name.c_str(), migraphx::argument{out_shape, ptr});
-                output_ptrs.emplace(name, ptr);
-                prog_output_indices.push_back(static_cast<std::size_t>(oi));
-            } else {
-                // Unrecognized/unbound parameter: let the staging path handle it.
-                direct_ok = false;
-                break;
-            }
+        // Populate the binding cache once per compiled shape (keyed by hash), so
+        // subsequent calls for the same shape -- and alternating dynamic-batch
+        // buckets -- reuse it and only rebind the (possibly moved) ORT pointers,
+        // skipping the per-call name lookups and dtype checks.
+        auto dbc_it{compute_state.direct_bind_cache.find(shape_hash)};
+        if (dbc_it == compute_state.direct_bind_cache.end()) {
+            DirectBindCache dbc;
+            dbc.eligible = PopulateDirectCaches(dbc.inputs, dbc.outputs, kernel_context,
+                param_shapes, input_name_indices);
+            dbc_it = compute_state.direct_bind_cache.emplace(shape_hash, std::move(dbc)).first;
         }
+        auto& dbc{dbc_it->second};
 
-        if (direct_ok) {
+        if (dbc.eligible) {
+            auto& direct_params{dbc.params};
+            std::vector<std::size_t> prog_output_indices;
+            prog_output_indices.reserve(dbc.outputs.size());
+            Map<void*> input_ptrs;
+            Map<void*> output_ptrs;
+            input_ptrs.reserve(dbc.inputs.size());
+            output_ptrs.reserve(dbc.outputs.size());
+
+            // Rebind current ORT input pointers (add() overwrites by name).
+            for (const auto& inp : dbc.inputs) {
+                void* ptr{const_cast<void*>(
+                    kernel_context.GetInput(inp.ort_index).GetTensorRawData())};
+                direct_params.add(inp.name.c_str(), migraphx::argument{inp.mgx_shape, ptr});
+                input_ptrs.emplace(inp.name, ptr);
+            }
+            // Rebind current ORT output pointers.
+            for (const auto& out : dbc.outputs) {
+                auto output_tensor{kernel_context.GetOutput(out.output_index,
+                    out.ort_shape.data(), out.ort_shape.size())};
+                void* ptr{output_tensor.GetTensorMutableRawData()};
+                direct_params.add(out.name.c_str(), migraphx::argument{out.mgx_shape, ptr});
+                output_ptrs.emplace(out.name, ptr);
+                prog_output_indices.push_back(out.output_index);
+            }
+            // EP-owned scratch (allocate-and-zero on first use, zero thereafter).
+            if (const auto scratch{
+                    GetOrAllocScratch(compute_state, param_shapes, shape_hash, hip_stream)}) {
+                direct_params.add("scratch", migraphx::argument{scratch->shape, scratch->ptr});
+            }
+
             RunProgramOrHipGraphDirect(compute_state, hip_stream, kernel_context, program,
                 direct_params, prog_output_indices, shape_hash, input_ptrs, output_ptrs, dyn);
             // Async by default: stream-ordered work is ordered by OnSessionRunEnd;
@@ -1576,7 +1623,8 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             RETURN_IF_ERROR(FinishComputeStream(hip_stream));
             return STATUS_OK;
         }
-        // Fall through to the staging path (e.g. a host-resident input was found).
+        // Not eligible for direct-bind (host-resident input, dtype mismatch, or
+        // an unbound parameter) -> fall through to the staging path below.
     }
 
     // Staging path: required for hipGraph capture (pointer stability) and for
