@@ -6,6 +6,8 @@
 #include <windows.h>
 #endif
 
+#include <algorithm>
+
 #include "common/enumerate.h"
 #include "common/dynamic_library.h"
 
@@ -378,29 +380,61 @@ Ort::Status ProviderFactory::GetHardwareDeviceIncompatibilityDetails(const OrtHa
 }
 
 Ort::Status ProviderFactory::GetNumCustomOpDomains(size_t* num_domains) const {
-    // Forward to the directml backend factory so ORT registers com.microsoft schemas
-    // (e.g. GroupNorm, SkipLayerNormalization) that the directml EP claims during GetCapability.
-    // The backend factory is available at factory init time, before any session is created.
-    // Only DirectML contributes custom op domains; MIGraphX does not.
+    // Forward to every backend factory that is loaded so ORT registers all custom
+    // op schemas any backend may claim during GetCapability -- e.g. com.microsoft
+    // schemas (GroupNorm, SkipLayerNormalization) from directml, and com.amd
+    // schemas (e.g. QMoE) from hip. Which backend a given model actually uses is
+    // only decided later in CreateEp (profile option), but schema registration
+    // happens during Model::Load, before any session/EP exists -- so the union of
+    // every built backend's domains must be reported here regardless of the
+    // eventual profile selection. MIGraphX does not contribute custom op domains.
+    *num_domains = 0;
 #ifdef USE_DML
     if (dml_ep_factory_ != nullptr && dml_ep_factory_->GetNumCustomOpDomains != nullptr) {
-        RETURN_IF_ERROR(dml_ep_factory_->GetNumCustomOpDomains(dml_ep_factory_, num_domains));
-        return STATUS_OK;
+        size_t dml_num_domains{};
+        RETURN_IF_ERROR(dml_ep_factory_->GetNumCustomOpDomains(dml_ep_factory_, &dml_num_domains));
+        *num_domains += dml_num_domains;
     }
 #endif
-    *num_domains = 0;
+#ifdef USE_HIP
+    if (hip_ep_factory_ != nullptr && hip_ep_factory_->GetNumCustomOpDomains != nullptr) {
+        size_t hip_num_domains{};
+        RETURN_IF_ERROR(hip_ep_factory_->GetNumCustomOpDomains(hip_ep_factory_, &hip_num_domains));
+        *num_domains += hip_num_domains;
+    }
+#endif
     return STATUS_OK;
 }
 
 Ort::Status ProviderFactory::GetCustomOpDomains(OrtCustomOpDomain** domains, size_t num_domains) const {
+    size_t offset = 0;
 #ifdef USE_DML
     if (dml_ep_factory_ != nullptr && dml_ep_factory_->GetCustomOpDomains != nullptr) {
-        RETURN_IF_ERROR(dml_ep_factory_->GetCustomOpDomains(dml_ep_factory_, domains, num_domains));
+        size_t dml_num_domains{};
+        RETURN_IF_ERROR(dml_ep_factory_->GetNumCustomOpDomains(dml_ep_factory_, &dml_num_domains));
+        dml_num_domains = std::min(dml_num_domains, num_domains - offset);
+        if (dml_num_domains > 0) {
+            RETURN_IF_ERROR(dml_ep_factory_->GetCustomOpDomains(dml_ep_factory_, domains + offset, dml_num_domains));
+            offset += dml_num_domains;
+        }
     }
-#else
+#endif
+#ifdef USE_HIP
+    if (hip_ep_factory_ != nullptr && hip_ep_factory_->GetCustomOpDomains != nullptr) {
+        size_t hip_num_domains{};
+        RETURN_IF_ERROR(hip_ep_factory_->GetNumCustomOpDomains(hip_ep_factory_, &hip_num_domains));
+        hip_num_domains = std::min(hip_num_domains, num_domains - offset);
+        if (hip_num_domains > 0) {
+            RETURN_IF_ERROR(hip_ep_factory_->GetCustomOpDomains(hip_ep_factory_, domains + offset, hip_num_domains));
+            offset += hip_num_domains;
+        }
+    }
+#endif
+#if !defined(USE_DML) && !defined(USE_HIP)
     (void)domains;
     (void)num_domains;
 #endif
+    (void)offset;
     return STATUS_OK;
 }
 
