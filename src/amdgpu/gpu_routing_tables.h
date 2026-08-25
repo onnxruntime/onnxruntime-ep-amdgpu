@@ -42,9 +42,9 @@ constexpr std::uint64_t kNoModelArch = 0;
 // ============================================================================================
 
 // (1) Known LLM model_arch families (hashed). Currently the Windows ML P0 LLM set that is tested and
-//     supported. "llm" is a generic forward-compat marker. This list does not gate HIP: on gfx1150 /
-//     gfx1151, Auto routes to HIP whenever model_arch is present (any non-empty value OGA sends,
-//     including families this binary has never seen). kLlmModelArch is the documented P0 set only.
+//     supported. "llm" is a generic forward-compat marker. This list does not gate HIP: on gfx1151,
+//     Auto routes to HIP whenever model_arch is present (any non-empty value OGA sends, including
+//     families this binary has never seen). kLlmModelArch is the documented P0 set only.
 //     Per-(arch, model) pinning goes in kArchModelBackend below, which IS live.
 //     TO ADD AN LLM FAMILY: add one `fnv1a("normalized_name")` entry (and bump the array size).
 constexpr std::array<std::uint64_t, 5> kLlmModelArch{{
@@ -53,8 +53,8 @@ constexpr std::array<std::uint64_t, 5> kLlmModelArch{{
 }};
 
 // (2) Per-(arch, model) backend override. Highest priority in Auto mode: a matching row wins over the
-//     arch defaults (including the gfx1150/gfx1151 HIP presence rule). This is the hook for specific
-//     GPU + model combinations (e.g. a named arch that must stay on MIGraphX on Strix/Halo). Empty
+//     arch defaults (including the gfx1151 HIP presence rule). This is the hook for specific
+//     GPU + model combinations (e.g. a named arch that must stay on MIGraphX on Strix Halo). Empty
 //     today; expected to grow.
 //     TO ADD AN OVERRIDE: add a row `{"gfxNNNN", fnv1a("normalized_name"), Profile::X}` (and bump size).
 struct arch_model_backend {
