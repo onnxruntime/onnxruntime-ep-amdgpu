@@ -41,6 +41,30 @@ const char* ExecutionProvider::GetName() const noexcept {
 
 namespace {
 
+// HIP's current device is a per-thread setting.  ORT/Triton can run Compile()
+// and the compute functions on pool threads that never hit the constructor's
+// hipSetDevice (so they default to device 0), which then loads code objects /
+// launches kernels on the wrong GPU on a non-zero-device instance -- surfacing
+// as "no kernel image is available" / "invalid resource handle".  This RAII
+// guard pins the calling thread to the EP's device for the enclosing scope and
+// restores the previous device on exit, so the device is set once per call (and
+// only when it actually differs) instead of unconditionally on every branch.
+// Mirrors the built-in EP's HipDeviceGuard.
+struct HipDeviceGuard {
+    int prev_{0};
+    explicit HipDeviceGuard(int dev) {
+        HIP_CALL_THROW(hipGetDevice(&prev_));
+        if (dev != prev_) {
+            HIP_CALL_THROW(hipSetDevice(dev));
+        }
+    }
+    ~HipDeviceGuard() {
+        (void)hipSetDevice(prev_);  // best-effort restore; never throw from a dtor
+    }
+    HipDeviceGuard(const HipDeviceGuard&) = delete;
+    HipDeviceGuard& operator=(const HipDeviceGuard&) = delete;
+};
+
 // TEMPORARY A/B gate (env ORT_MIGRAPHX_LEGACY_COMPUTE_SYNC). When true, Compute
 // keeps the legacy unconditional per-fused-node hipStreamSynchronize. When false
 // (default), the hot path stays async and correctness comes from stream-ordered
@@ -1483,6 +1507,12 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // paths, so none of them build a hex string or hash a string key per call.
     const ShapeKey shape_key{ShapeKeyOf(input_shapes_hash)};
 
+    // Pin this (possibly pool-owned) thread to the EP's GPU for the rest of Compute:
+    // deferred (re)compilation below loads code objects and every run branch launches
+    // kernels, all of which must target compute_state.device_id.  Set once here (only
+    // if the thread isn't already on it) rather than before each branch.
+    const HipDeviceGuard dev_guard{compute_state.device_id};
+
     // If the input shapes are different (e.g., LLMs), the EP needs to reparse and recompile the program
     if (!input_shapes_match) {
         const std::string current_hash{hash::ToHex(input_shapes_hash)};
@@ -1598,7 +1628,6 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // also lands on the staging path.
     if (compute_state.use_direct_hip_graph && !needs_padding && param_shapes.size() > 0) {
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
-        HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
 
         // Populate the binding cache once per compiled shape (keyed by hash), so
         // subsequent calls for the same shape -- and alternating dynamic-batch
@@ -1656,7 +1685,6 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // buffers, bind scratch, then replay/capture a graph or run eagerly
     if ((compute_state.hip_graph_enable || dyn.active || seq.active) && param_shapes.size() > 0) {
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
-        HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
         CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn, seq);
         // Item 3: reuse a cached binding for this shape hash.  Staging buffers and
@@ -1683,7 +1711,6 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     migraphx::program_parameters compute_params;
     auto output_shapes{program.get_output_shapes()};
     std::vector<size_t> output_indices;
-    HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
     const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
     if (param_shapes.size() > 0) {
         for (std::string name : param_shapes.names()) {
@@ -1773,6 +1800,10 @@ try {
     const auto& input_name_indices{compute_state.input_name_indices};
     auto& program{compute_state.program};
 
+    // Pin this (possibly pool-owned) thread to the EP's GPU before the kernel
+    // launch below (see HipDeviceGuard); set once instead of before run_async.
+    const HipDeviceGuard dev_guard{compute_state.device_id};
+
     auto param_shapes{program.get_parameter_shapes()};
     auto output_shapes{program.get_output_shapes()};
 
@@ -1819,7 +1850,6 @@ try {
     {
         std::lock_guard lock{compute_state.mutex};
 
-        HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
 
