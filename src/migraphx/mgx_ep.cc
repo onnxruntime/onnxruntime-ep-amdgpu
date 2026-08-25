@@ -974,13 +974,14 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
     migraphx::compile_options options;
     options.set_fast_math(false);
     options.set_exhaustive_tune_flag(exhaustive_tune);
-    // Deliver the ordered read-only cache files as the "problem_cache_files" GPU backend
-    // option. Build the JSON explicitly with quoted, escaped paths: the typed
-    // set_advance_backend_option streams values unquoted, and the relaxed-JSON parser would
-    // shred ':' and '\\' in a path. Passed as a %s arg so any '%' in a path is not a format
-    // specifier. MIGraphX builds with the problem-cache feature consume the key; older ignore it.
+    // Deliver the ordered read-only cache files as the "read_only_problem_cache_files" GPU
+    // backend option (system-level/shipped caches that must never be written back). Build the
+    // JSON explicitly with quoted, escaped paths: the typed set_advance_backend_option streams
+    // values unquoted, and the relaxed-JSON parser would shred ':' and '\\' in a path. Passed
+    // as a %s arg so any '%' in a path is not a format specifier. MIGraphX builds with the
+    // problem-cache feature consume the key; older ignore it.
     if (!problem_cache_paths.empty()) {
-        std::string json = "{\"problem_cache_files\":[";
+        std::string json = "{\"read_only_problem_cache_files\":[";
         for (std::size_t i = 0; i < problem_cache_paths.size(); ++i) {
             if (i != 0) {
                 json += ",";
