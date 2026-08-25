@@ -19,6 +19,10 @@ add_library(migraphx-ep MODULE
         mgx_hip_graph.h
         mgx_info.cc
         mgx_info.h
+        mgx_precompile.cc
+        mgx_precompile.h
+        mgx_program_ops.cc
+        mgx_program_ops.h
         mgx_interop.cc
         mgx_interop.h
         mgx_kernel_reg.cc
