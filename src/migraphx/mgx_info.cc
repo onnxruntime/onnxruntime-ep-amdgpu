@@ -122,6 +122,7 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kForceRecompile, force_recompile)
             .AddAssignmentToReference(provider_option::kHipGraphEnable, hip_graph_enable)
             .AddAssignmentToReference(provider_option::kMaxDynamicBatch, max_dynamic_batch)
+            .AddAssignmentToReference(provider_option::kPrecompileAtLoad, precompile_at_load)
             .AddAssignmentToReference(provider_option::kStaticPadSeq, static_pad_seq)
             .AddAssignmentToReference(provider_option::kStaticPadSeqLen, static_pad_seq_len)
             .AddAssignmentToReference(provider_option::kCoalesceIO, coalesce_io)
