@@ -1307,7 +1307,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     auto& onnx_options{compute_state.onnx_options};
 
     bool input_shapes_match{compute_state.has_input_shapes};
-    migraphx::program_parameter_shapes param_shapes;
+    auto& cached_param_shapes{compute_state.cached_param_shapes};
     hash::Value input_shapes_hash{};
 
     // Resolve dynamic-batch bucketing for this call (no-op when disabled).  The
@@ -1423,7 +1423,6 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     if (shapes_unchanged) {
         input_shapes_hash = compute_state.last_input_shapes_hash;
         input_shapes_match = true;
-        param_shapes = program.get_parameter_shapes();
     } else if (!compute_state.has_input_shapes) {
         for (auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
@@ -1433,7 +1432,9 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         }
         compute_state.has_input_shapes = true;
     } else {
-        param_shapes = program.get_parameter_shapes();
+        // Compare against the currently-active program's shapes to decide whether a
+        // recompile is needed; local since that program may not be the one that runs.
+        const auto param_shapes{program.get_parameter_shapes()};
 
         // check whether input shapes match with shapes of program inputs
         if (param_shapes.size() > 0) {
@@ -1487,7 +1488,9 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 static_cast<hipStream_t>(kernel_context.GetGPUComputeStream()));
             // Direct-bind bindings reference the graphs just destroyed; drop them
             // so they are repopulated (and re-captured) against the new program.
+            // Clear param shapes too so the map does not grow per token length.
             compute_state.direct_bind_cache.clear();
+            compute_state.cached_param_shapes.clear();
         }
 
         if (!loaded_from_cache) {
@@ -1501,9 +1504,10 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 compute_state.model_path.parent_path() : compute_state.external_data_dir};
             onnx_options.set_external_data_path(external_data_dir.string());
             program = migraphx::parse_onnx_buffer(compute_state.onnx_string, onnx_options);
-            param_shapes = program.get_parameter_shapes();
+            // Pre-compile shapes, for calibration only.
+            const auto calib_param_shapes{program.get_parameter_shapes()};
             if ((compute_state.enable_int8 ^ compute_state.enable_fp8) && compute_state.int8_calibration_cache_available) {
-                for (const auto& name : param_shapes.names()) {
+                for (const auto& name : calib_param_shapes.names()) {
                     if (input_name_indices.count(name) > 0) {
                         const auto index{input_name_indices.at(name)};
                         auto value{kernel_context.GetInput(index)};
@@ -1514,12 +1518,12 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                         migraphx_shape_datatype_t datatype;
                         GetMIGraphXType(tensor_type, datatype);
 
-                        if (const auto prog_shapes{param_shapes[name]}; datatype != prog_shapes.type()) {
+                        if (const auto prog_shapes{calib_param_shapes[name]}; datatype != prog_shapes.type()) {
                             throw std::runtime_error{"NodeComputeInfo::Compute(): input parameter type mismatch"};
                         }
 
-                        compile_params.add(name, migraphx::argument{param_shapes[name],
-                            GetGpuInputData(compute_state, kernel_context, name, index, param_shapes[name], nullptr)});
+                        compile_params.add(name, migraphx::argument{calib_param_shapes[name],
+                            GetGpuInputData(compute_state, kernel_context, name, index, calib_param_shapes[name], nullptr)});
                     }
                 }
             }
@@ -1538,13 +1542,23 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             if (dyn.active || !compute_state.defer_compilation) {
                 compute_state.cached_programs.emplace(current_hash, program);
             }
-            // The program for this hash was (re)built, so any binding cached
-            // against the previous program for the same hash is stale.
+            // Program for this hash was (re)built -> anything cached against the old
+            // one for the same hash is stale.
             compute_state.staging_bind_cache.erase(current_hash);
             compute_state.direct_bind_cache.erase(current_hash);
+            compute_state.cached_param_shapes.erase(current_hash);
         }
-        param_shapes = program.get_parameter_shapes();
     }
+
+    // Bind param_shapes for the program that will run this call (cached per hash;
+    // built once on a miss).
+    const auto param_shape_key{hash::ToHex(input_shapes_hash)};
+    auto param_shapes_it{cached_param_shapes.find(param_shape_key)};
+    if (param_shapes_it == cached_param_shapes.end()) {
+        param_shapes_it = cached_param_shapes.emplace(
+            param_shape_key, program.get_parameter_shapes()).first;
+    }
+    const auto& param_shapes{param_shapes_it->second};
 
     // Item 4: remember these shapes so the next identical call takes the fast path.
     // Set only after the (possible) recompile above, so the recorded hash always

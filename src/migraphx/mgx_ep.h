@@ -5,6 +5,7 @@
 
 #include <ciso646>
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <mutex>
 #include <string>
@@ -270,6 +271,11 @@ struct ComputeState {
     std::vector<std::int64_t> last_input_shapes{};
     hash::Value last_input_shapes_hash{};
     bool has_last_input_shapes{};
+
+    // Program parameter shapes keyed by shape hash, so each bucket keeps its shapes
+    // and the hot path skips the get_parameter_shapes() rebuild. Dropped per-hash on
+    // recompile, alongside the binding caches.
+    Map<migraphx::program_parameter_shapes> cached_param_shapes{};
 };
 
 struct EpContextComputeState {
