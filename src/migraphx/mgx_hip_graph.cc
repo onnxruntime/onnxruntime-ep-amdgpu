@@ -674,16 +674,23 @@ void CopyInputsToStaging(ComputeState& cs,
     const bool seq_no_pad{!seq.active || seq.target_len == seq.real_len};
     const bool no_padding{batch_no_pad && seq_no_pad};
     if (cs.staging_inputs_coalesced && cs.in_staging_host != nullptr && no_padding) {
-        bool all_host{true};
-        for (const auto& ib : bind.input_copies) {
-            const auto mem{ctx.GetInput(ib.ort_index).GetTensorMemoryInfo()};
-            if (mem.GetDeviceType() != OrtMemoryInfoDeviceType_CPU) {
-                all_host = false;
-                break;
+        // Coalesce eligibility (all inputs host-resident) is determined once and
+        // cached on the ComputeState: the caller binds each input to the same memory
+        // type on every call, so rescanning N inputs with GetTensorMemoryInfo per
+        // inference is wasted work.  FreeStaging resets it on any structural change.
+        if (cs.coalesce_residency == ComputeState::CoalesceResidency::kUnknown) {
+            auto residency{ComputeState::CoalesceResidency::kAllHost};
+            for (const auto& ib : bind.input_copies) {
+                const auto mem{ctx.GetInput(ib.ort_index).GetTensorMemoryInfo()};
+                if (mem.GetDeviceType() != OrtMemoryInfoDeviceType_CPU) {
+                    residency = ComputeState::CoalesceResidency::kHasDevice;
+                    break;
+                }
             }
+            cs.coalesce_residency = residency;
         }
 
-        if (all_host) {
+        if (cs.coalesce_residency == ComputeState::CoalesceResidency::kAllHost) {
             char* host_base{static_cast<char*>(cs.in_staging_host)};
             for (const auto& ib : bind.input_copies) {
                 const void* src{ctx.GetInput(ib.ort_index).GetTensorRawData()};
@@ -925,6 +932,8 @@ void FreeStaging(ComputeState& cs, hipStream_t stream) {
     }
     cs.in_arena_bytes = 0;
     cs.staging_inputs_coalesced = false;
+    // Re-verify coalesce eligibility against the next allocation's inputs.
+    cs.coalesce_residency = ComputeState::CoalesceResidency::kUnknown;
     for (auto& [name, buf] : cs.staging_outputs) {
         if (buf.data != nullptr) {
             (void)hipFreeAsync(buf.data, stream);
