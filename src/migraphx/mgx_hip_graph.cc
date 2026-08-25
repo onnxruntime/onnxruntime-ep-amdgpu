@@ -493,7 +493,10 @@ void AllocateStaging(ComputeState& cs,
     const auto alloc_buffer{[&](const migraphx::shape& shape) -> StagingBuffer {
         const std::size_t bytes{buffer_bytes(shape)};
         void* ptr{nullptr};
-        HIP_CALL_THROW(hipMalloc(&ptr, bytes));
+        // Stream-ordered: the alloc rides the compute stream (no device-wide sync)
+        // and is completed by the hipStreamSynchronize at the end of AllocateStaging.
+        // Must be released with hipFreeAsync (see FreeStaging / ~ExecutionProvider).
+        HIP_CALL_THROW(hipMallocAsync(&ptr, bytes, stream));
         HIP_CALL_THROW(hipMemsetAsync(ptr, 0, bytes, stream));
         return StagingBuffer{ptr, bytes, shape};
     }};
@@ -522,7 +525,9 @@ void AllocateStaging(ComputeState& cs,
         cs.in_arena_bytes = offset;
 
         if (cs.in_arena_bytes > 0) {
-            HIP_CALL_THROW(hipMalloc(&cs.in_arena_dev, cs.in_arena_bytes));
+            // Stream-ordered arena alloc (freed via hipFreeAsync); completed by the
+            // hipStreamSynchronize at the end of AllocateStaging before first use.
+            HIP_CALL_THROW(hipMallocAsync(&cs.in_arena_dev, cs.in_arena_bytes, stream));
             HIP_CALL_THROW(hipMemsetAsync(cs.in_arena_dev, 0, cs.in_arena_bytes, stream));
             HIP_CALL_THROW(hipHostMalloc(&cs.in_staging_host, cs.in_arena_bytes, hipHostMallocDefault));
             std::memset(cs.in_staging_host, 0, cs.in_arena_bytes);
@@ -804,16 +809,20 @@ void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
     }
 }
 
-void FreeStaging(ComputeState& cs) {
+void FreeStaging(ComputeState& cs, hipStream_t stream) {
+    // Staging inputs/outputs and the coalesce arena are allocated with
+    // hipMallocAsync (AllocateStaging), so they must be released with hipFreeAsync
+    // on a valid stream.  The subsequent AllocateStaging on the same stream reuses
+    // the freed pool memory in stream order.
     for (auto& [name, buf] : cs.staging_inputs) {
         // Arena sub-views are not independent allocations; the arena is freed below.
         if (buf.data != nullptr && !buf.is_arena_view) {
-            (void)hipFree(buf.data);
+            (void)hipFreeAsync(buf.data, stream);
         }
         buf.data = nullptr;
     }
     if (cs.in_arena_dev != nullptr) {
-        (void)hipFree(cs.in_arena_dev);
+        (void)hipFreeAsync(cs.in_arena_dev, stream);
         cs.in_arena_dev = nullptr;
     }
     if (cs.in_staging_host != nullptr) {
@@ -824,7 +833,7 @@ void FreeStaging(ComputeState& cs) {
     cs.staging_inputs_coalesced = false;
     for (auto& [name, buf] : cs.staging_outputs) {
         if (buf.data != nullptr) {
-            (void)hipFree(buf.data);
+            (void)hipFreeAsync(buf.data, stream);
             buf.data = nullptr;
         }
     }

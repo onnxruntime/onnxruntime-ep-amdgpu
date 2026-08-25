@@ -755,15 +755,18 @@ ExecutionProvider::~ExecutionProvider() {
             }
             entry.captured = false;
         }
+        // Staging inputs/outputs and the coalesce arena come from hipMallocAsync, so
+        // they are released with hipFreeAsync.  Best-effort teardown: the free is
+        // queued on the default stream and reclaimed with the context at exit.
         for (auto& [param_name, buf] : cs.staging_inputs) {
             // Arena sub-views are not independent allocations; the arena is freed below.
             if (buf.data != nullptr && !buf.is_arena_view) {
-                (void)hipFree(buf.data);
+                (void)hipFreeAsync(buf.data, nullptr);
             }
             buf.data = nullptr;
         }
         if (cs.in_arena_dev != nullptr) {
-            (void)hipFree(cs.in_arena_dev);
+            (void)hipFreeAsync(cs.in_arena_dev, nullptr);
             cs.in_arena_dev = nullptr;
         }
         if (cs.in_staging_host != nullptr) {
@@ -772,7 +775,7 @@ ExecutionProvider::~ExecutionProvider() {
         }
         for (auto& [param_name, buf] : cs.staging_outputs) {
             if (buf.data != nullptr) {
-                (void)hipFree(buf.data);
+                (void)hipFreeAsync(buf.data, nullptr);
                 buf.data = nullptr;
             }
         }
@@ -1480,7 +1483,8 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             // Unbounded dynamic-shape (e.g. LLM) path: keep only the current shape's
             // graph/staging, so invalidate before the program changes.
             DestroyHipGraphs(compute_state);
-            FreeStaging(compute_state);
+            FreeStaging(compute_state,
+                static_cast<hipStream_t>(kernel_context.GetGPUComputeStream()));
             // Direct-bind bindings reference the graphs just destroyed; drop them
             // so they are repopulated (and re-captured) against the new program.
             compute_state.direct_bind_cache.clear();

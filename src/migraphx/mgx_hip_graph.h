@@ -108,8 +108,10 @@ void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
     const StaticSeqContext& seq);
 
 // Free all staging buffers and reset the allocation flag (used when the program
-// is recompiled for a new shape so buffers are re-sized on next use).
-void FreeStaging(ComputeState& cs);
+// is recompiled for a new shape so buffers are re-sized on next use).  Buffers are
+// allocated with hipMallocAsync, so a stream is required to release them via
+// hipFreeAsync (freed in stream order with any following AllocateStaging).
+void FreeStaging(ComputeState& cs, hipStream_t stream);
 
 // ── hipGraph capture / replay ────────────────────────────────────────────────
 
