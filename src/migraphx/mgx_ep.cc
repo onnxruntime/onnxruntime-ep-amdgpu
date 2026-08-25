@@ -445,23 +445,25 @@ void* GetGpuInputData(ComputeState& cs, const Ort::KernelContext& ctx, const std
 }
 
 // Populate the direct-bind binding cache for the current compiled shape.  Walks
-// the program parameters once, recording each input's (name, ORT index, shape)
-// and each output's (name, ORT index, shape) so the hot path can rebind without
-// per-call name lookups or dtype checks.  Returns whether the shape is eligible
+// the program parameters once, recording each input's (name, ORT index, shape),
+// each output's (name, ORT index, shape), and whether a "scratch" parameter is
+// present (plus its shape) so the hot path can rebind and allocate scratch without
+// per-call name lookups, dtype checks, or a scratch scan.  Returns whether the shape
+// is eligible
 // for the direct-bind path: every input must be device-resident (a host input
 // has no stable device pointer to bake into the graph) and its dtype must match
 // the program.  A non-input, non-output, non-"scratch" parameter also makes the
 // shape ineligible (it falls back to the staging path).  Device residency and
 // dtype are assumed stable across calls for a given shape (as they are under
 // Triton io-binding), matching the built-in EP's populate-once design.
-bool PopulateDirectCaches(std::vector<CachedDirectInput>& inputs,
-    std::vector<CachedDirectOutput>& outputs, const Ort::KernelContext& ctx,
+bool PopulateDirectCaches(DirectBindCache& dbc, const Ort::KernelContext& ctx,
     const migraphx::program_parameter_shapes& param_shapes,
     const Map<std::size_t>& input_name_indices)
 {
-    inputs.clear();
-    outputs.clear();
-    inputs.reserve(input_name_indices.size());
+    dbc.inputs.clear();
+    dbc.outputs.clear();
+    dbc.inputs.reserve(input_name_indices.size());
+    dbc.has_scratch = false;
 
     bool eligible{true};
     for (std::string name : param_shapes.names()) {
@@ -476,14 +478,18 @@ bool PopulateDirectCaches(std::vector<CachedDirectInput>& inputs,
             if (datatype != prog_shape.type()) {
                 eligible = false;
             }
-            inputs.push_back(CachedDirectInput{std::move(name), it->second, prog_shape});
+            dbc.inputs.push_back(CachedDirectInput{std::move(name), it->second, prog_shape});
         } else if (std::string_view{name} == "scratch") {
-            // Bound separately each call (pointer-stable EP-owned buffer).
+            // Bound separately each call (pointer-stable EP-owned buffer).  Record
+            // its presence + shape once so the hot path allocates/zeros scratch
+            // without re-scanning all parameter names for it every call (#4).
+            dbc.has_scratch = true;
+            dbc.scratch_shape = param_shapes[name.c_str()];
         } else if (const auto oi{ComputeOutputIndex(name)}; oi != -1) {
             const auto prog_shape{param_shapes[name.c_str()]};
             const auto lens{prog_shape.lengths()};
             std::vector<std::int64_t> ort_shape{lens.begin(), lens.end()};
-            outputs.push_back(CachedDirectOutput{
+            dbc.outputs.push_back(CachedDirectOutput{
                 std::move(name), static_cast<std::size_t>(oi), prog_shape, std::move(ort_shape)});
         } else {
             eligible = false;  // unbound/unknown parameter -> use staging path
@@ -1471,6 +1477,12 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         }
     }
 
+    // Integer cache key for the per-shape hot caches, derived once from the input
+    // shapes hash (the same low 64 bits the former hex-string key encoded).  Reused
+    // by the recompile invalidation, the param-shapes lookup, and the direct/staging
+    // paths, so none of them build a hex string or hash a string key per call.
+    const ShapeKey shape_key{ShapeKeyOf(input_shapes_hash)};
+
     // If the input shapes are different (e.g., LLMs), the EP needs to reparse and recompile the program
     if (!input_shapes_match) {
         const std::string current_hash{hash::ToHex(input_shapes_hash)};
@@ -1544,19 +1556,18 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             }
             // Program for this hash was (re)built -> anything cached against the old
             // one for the same hash is stale.
-            compute_state.staging_bind_cache.erase(current_hash);
-            compute_state.direct_bind_cache.erase(current_hash);
-            compute_state.cached_param_shapes.erase(current_hash);
+            compute_state.staging_bind_cache.erase(shape_key);
+            compute_state.direct_bind_cache.erase(shape_key);
+            compute_state.cached_param_shapes.erase(shape_key);
         }
     }
 
     // Bind param_shapes for the program that will run this call (cached per hash;
     // built once on a miss).
-    const auto param_shape_key{hash::ToHex(input_shapes_hash)};
-    auto param_shapes_it{cached_param_shapes.find(param_shape_key)};
+    auto param_shapes_it{cached_param_shapes.find(shape_key)};
     if (param_shapes_it == cached_param_shapes.end()) {
         param_shapes_it = cached_param_shapes.emplace(
-            param_shape_key, program.get_parameter_shapes()).first;
+            shape_key, program.get_parameter_shapes()).first;
     }
     const auto& param_shapes{param_shapes_it->second};
 
@@ -1586,24 +1597,23 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // disables the direct path at runtime (see RunProgramOrHipGraphDirect), which
     // also lands on the staging path.
     if (compute_state.use_direct_hip_graph && !needs_padding && param_shapes.size() > 0) {
-        const auto shape_hash{hash::ToHex(input_shapes_hash)};
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
 
         // Populate the binding cache once per compiled shape (keyed by hash), so
         // subsequent calls for the same shape -- and alternating dynamic-batch
         // buckets -- reuse it, skipping the per-call name lookups and dtype checks.
-        auto dbc_it{compute_state.direct_bind_cache.find(shape_hash)};
+        auto dbc_it{compute_state.direct_bind_cache.find(shape_key)};
         if (dbc_it == compute_state.direct_bind_cache.end()) {
             DirectBindCache dbc;
-            dbc.eligible = PopulateDirectCaches(dbc.inputs, dbc.outputs, kernel_context,
+            dbc.eligible = PopulateDirectCaches(dbc, kernel_context,
                 param_shapes, input_name_indices);
             // ORT output indices are constant per shape -- build once here.
             dbc.prog_output_indices.reserve(dbc.outputs.size());
             for (const auto& out : dbc.outputs) {
                 dbc.prog_output_indices.push_back(out.output_index);
             }
-            dbc_it = compute_state.direct_bind_cache.emplace(shape_hash, std::move(dbc)).first;
+            dbc_it = compute_state.direct_bind_cache.emplace(shape_key, std::move(dbc)).first;
         }
         auto& dbc{dbc_it->second};
 
@@ -1625,11 +1635,13 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 dbc.cur_output_ptrs[i] = output_tensor.GetTensorMutableRawData();
             }
             // EP-owned scratch (allocate-and-zero on first use, zero thereafter).
-            const auto scratch{
-                GetOrAllocScratch(compute_state, param_shapes, shape_hash, hip_stream)};
+            // Presence + shape were resolved once in PopulateDirectCaches, and the
+            // scratch_bufs slot is cached on the dbc, so this does no scan and (after
+            // the first call) no map lookup.
+            const auto scratch{GetOrAllocScratchCached(compute_state, dbc, shape_key, hip_stream)};
 
             RunProgramOrHipGraphDirect(compute_state, hip_stream, kernel_context, program,
-                dbc, shape_hash, scratch, dyn);
+                dbc, shape_key, scratch, dyn);
             // Async by default: stream-ordered work is ordered by OnSessionRunEnd;
             // legacy full-drain is gated (see FinishComputeStream).
             RETURN_IF_ERROR(FinishComputeStream(hip_stream));
@@ -1643,7 +1655,6 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // dynamic batching (input padding / output slicing).  Stage I/O into EP-owned
     // buffers, bind scratch, then replay/capture a graph or run eagerly
     if ((compute_state.hip_graph_enable || dyn.active || seq.active) && param_shapes.size() > 0) {
-        const auto shape_hash{hash::ToHex(input_shapes_hash)};
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         HIP_RETURN_IF_ERROR(hipSetDevice(compute_state.device_id));
         AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
@@ -1652,15 +1663,15 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         // scratch are pointer-stable until FreeStaging, so binding once and replaying
         // avoids re-doing N program_parameters.add() calls, string work, and a
         // scratch lookup on every inference.
-        auto bind_it{compute_state.staging_bind_cache.find(shape_hash)};
+        auto bind_it{compute_state.staging_bind_cache.find(shape_key)};
         if (bind_it == compute_state.staging_bind_cache.end()) {
             bind_it = compute_state.staging_bind_cache.emplace(
-                shape_hash,
-                BindStagingParams(compute_state, param_shapes, shape_hash, hip_stream)).first;
+                shape_key,
+                BindStagingParams(compute_state, param_shapes, shape_key, hip_stream)).first;
         }
         auto& bind{bind_it->second};
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
-            bind.params, bind.prog_output_indices, shape_hash, dyn);
+            bind.params, bind.prog_output_indices, shape_key, dyn);
         CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn, seq);
         // Async by default: the stream-ordered D2H fetch plus the per-Run
         // OnSessionRunEnd sync order the read. Legacy full-drain is gated (see

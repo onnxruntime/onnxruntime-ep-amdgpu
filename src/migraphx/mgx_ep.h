@@ -172,13 +172,41 @@ struct DirectBindCache {
     std::vector<CachedDirectOutput> outputs{};
     migraphx::program_parameters params{};
     bool eligible{};
+    // Scratch presence + shape, resolved once when this entry is populated so the
+    // hot path allocates/zeros scratch without re-scanning all 200+ program
+    // parameter names for a "scratch" entry on every call.
+    bool has_scratch{false};
+    migraphx::shape scratch_shape{};
     // ORT output indices in `outputs` order; constant per shape, built once.
     std::vector<std::size_t> prog_output_indices{};
     // Current ORT device pointers gathered each call (inputs/outputs order).
     // Reused across calls so the hot path does no per-call heap allocation.
     std::vector<void*> cur_input_ptrs{};
     std::vector<void*> cur_output_ptrs{};
+    // Resolved pointers into the ComputeState maps (this shape's captured graph and
+    // scratch slot), so the steady-state replay skips re-searching hip_graph_cache /
+    // scratch_bufs with the same key it already used to find this dbc.  std::unordered_map
+    // keeps element addresses stable across insert/rehash, so these stay valid until
+    // their entry is erased: scratch_bufs entries are never erased mid-session, and
+    // hip_graph_cache is only cleared by DestroyHipGraphs -- which runs together with
+    // direct_bind_cache.clear() (unbounded-shape path), dropping this dbc too.  `graph`
+    // is (re)set on each capture; a null `graph` forces the (cold) capture path.
+    CapturedHipGraph* graph{nullptr};
+    ScratchBuffer* scratch_slot{nullptr};
 };
+
+// Integer key for the per-shape hot caches (direct_bind_cache, hip_graph_cache,
+// scratch_bufs, staging_bind_cache, cached_param_shapes).  Uses the same low 64
+// bits that hash::ToHex(input_shapes_hash) encodes, so the collision domain is
+// identical to the former hex-string key -- but keying the maps by the integer
+// avoids the per-call hex-string heap allocation and the string hashing that
+// each std::string-keyed lookup incurred.
+using ShapeKey = std::uint64_t;
+inline ShapeKey ShapeKeyOf(const hash::Value& v) {
+    // Cast before the shift: shifting a 32-bit value by 32 would be UB.  v.at(0)
+    // widens to uint64_t via operator| on its own.  Matches hash::ToHex(Value).
+    return v.at(0) | static_cast<std::uint64_t>(v.at(1)) << 32;
+}
 
 struct ComputeState {
     std::mutex& mutex;
@@ -231,7 +259,7 @@ struct ComputeState {
     // dtype checks.  Multi-entry so alternating dynamic-batch buckets each keep
     // their binding.  Invalidated per-hash on recompile (mirrors
     // staging_bind_cache) and cleared wholesale on the unbounded-shape path.
-    Map<DirectBindCache> direct_bind_cache{};
+    std::unordered_map<ShapeKey, DirectBindCache> direct_bind_cache{};
 
     // ── Static sequence-length padding (set at Compile time) ──────────────────
     // When static_pad_seq is set, named inputs are padded on their token axis up to
@@ -271,9 +299,9 @@ struct ComputeState {
     Map<StagingBuffer> staging_outputs{};
     bool staging_allocated{};
     // Scratch buffers keyed by shape hash.
-    Map<ScratchBuffer> scratch_bufs{};
+    std::unordered_map<ShapeKey, ScratchBuffer> scratch_bufs{};
     // Captured graphs keyed by shape hash.
-    Map<CapturedHipGraph> hip_graph_cache{};
+    std::unordered_map<ShapeKey, CapturedHipGraph> hip_graph_cache{};
     // Host inputs (e.g. scalar alpha) staged to device before run_async.
     Map<StagingBuffer> cpu_input_upload_bufs{};
 
@@ -281,7 +309,7 @@ struct ComputeState {
     // Staging parameter bindings keyed by shape hash (multi-entry, so alternating
     // dynamic-batch buckets each keep their binding).  Invalidated by FreeStaging
     // (staging pointers change) and per-hash on recompile.
-    Map<StagingBindResult> staging_bind_cache{};
+    std::unordered_map<ShapeKey, StagingBindResult> staging_bind_cache{};
     // Last call's actual input shapes and their hash, for skipping the shape-compare
     // and rehash loops when the shapes are unchanged from the previous Compute call.
     std::vector<std::int64_t> last_input_shapes{};
@@ -291,7 +319,7 @@ struct ComputeState {
     // Program parameter shapes keyed by shape hash, so each bucket keeps its shapes
     // and the hot path skips the get_parameter_shapes() rebuild. Dropped per-hash on
     // recompile, alongside the binding caches.
-    Map<migraphx::program_parameter_shapes> cached_param_shapes{};
+    std::unordered_map<ShapeKey, migraphx::program_parameter_shapes> cached_param_shapes{};
 };
 
 struct EpContextComputeState {

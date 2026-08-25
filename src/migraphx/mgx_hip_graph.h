@@ -56,16 +56,24 @@ struct ScratchBindInfo {
     migraphx::shape shape{};
 };
 
-// Ensure an EP-owned scratch buffer exists (and is large enough) for shape_hash.
-// Freshly allocated buffers are zeroed; existing buffers are left as-is (callers
-// zero them via ZeroScratchFor immediately before use).  Returns std::nullopt
-// when the program has no "scratch" parameter.
+// Ensure an EP-owned scratch buffer exists (and is large enough) for shape_key.
+// Scans the program parameters for a "scratch" entry; freshly allocated buffers
+// are zeroed while existing buffers are left as-is (callers zero them via
+// ZeroScratchFor immediately before use).  Returns std::nullopt when the program
+// has no "scratch" parameter.
 std::optional<ScratchBindInfo> GetOrAllocScratch(ComputeState& cs,
     const migraphx::program_parameter_shapes& param_shapes,
-    const std::string& shape_hash, hipStream_t stream);
+    ShapeKey shape_key, hipStream_t stream);
 
-// Zero an already-allocated scratch buffer (no-op if none exists for shape_hash).
-void ZeroScratchFor(ComputeState& cs, const std::string& shape_hash, hipStream_t stream);
+// Same as GetOrAllocScratch but reads scratch presence + shape from the (already
+// populated) DirectBindCache, so it skips the per-call scan over all program
+// parameter names.  Also caches the resolved scratch_bufs slot on the dbc so later
+// calls skip the map lookup entirely.  Returns std::nullopt when dbc.has_scratch is false.
+std::optional<ScratchBindInfo> GetOrAllocScratchCached(ComputeState& cs,
+    DirectBindCache& dbc, ShapeKey shape_key, hipStream_t stream);
+
+// Zero an already-allocated scratch buffer (no-op if none exists for shape_key).
+void ZeroScratchFor(ComputeState& cs, ShapeKey shape_key, hipStream_t stream);
 
 // ── Staging buffer substrate ─────────────────────────────────────────────────
 // EP-owned device buffers that give pointer stability for hipGraph capture.
@@ -97,7 +105,7 @@ void CopyInputsToStaging(ComputeState& cs,
 // parameters for the given compiled shape.
 StagingBindResult BindStagingParams(ComputeState& cs,
     const migraphx::program_parameter_shapes& param_shapes,
-    const std::string& shape_hash, hipStream_t stream);
+    ShapeKey shape_key, hipStream_t stream);
 
 // Copy staging output buffers back into the ORT output tensors, slicing batched
 // outputs down to the requested batch when dynamic batching is active, and slicing
@@ -119,7 +127,7 @@ void FreeStaging(ComputeState& cs, hipStream_t stream);
 // cache when the underlying program is recompiled).
 void DestroyHipGraphs(ComputeState& cs);
 
-// Dispatch a program run: replay a cached hipGraph for shape_hash, capture one
+// Dispatch a program run: replay a cached hipGraph for shape_key, capture one
 // on first use, or fall back to an eager run if capture fails.  `params` must
 // already be bound to staging buffers/scratch and inputs already staged.
 // Extra (non-pre-bound) outputs are materialized into ORT after the launch.
@@ -128,7 +136,7 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
     migraphx::program& program,
     migraphx::program_parameters& params,
     const std::vector<std::size_t>& prog_output_indices,
-    const std::string& shape_hash,
+    ShapeKey shape_key,
     const DynamicBatchContext& dyn);
 
 // Direct-bind (zero-copy) dispatch: replay a cached hipGraph captured against
@@ -145,7 +153,7 @@ void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
     const Ort::KernelContext& ctx,
     migraphx::program& program,
     DirectBindCache& dbc,
-    const std::string& shape_hash,
+    ShapeKey shape_key,
     const std::optional<ScratchBindInfo>& scratch,
     const DynamicBatchContext& dyn);
 

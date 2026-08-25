@@ -120,7 +120,7 @@ void MaterializeExtraOutputs(const Ort::KernelContext& ctx, hipStream_t stream,
 // replay memset fan-out this removes is what dominates batch-1 many-output models.
 // On any error it conservatively returns all outputs (zero everything).
 std::vector<std::pair<void*, std::size_t>> DetectRmwOutputs(ComputeState& cs,
-    const std::string& shape_hash, hipGraphExec_t exec, hipStream_t stream,
+    ShapeKey shape_key, hipGraphExec_t exec, hipStream_t stream,
     const std::vector<std::pair<void*, std::size_t>>& outputs)
 {
     // Gate / degenerate cases: fall back to zeroing everything (original behavior).
@@ -136,7 +136,7 @@ std::vector<std::pair<void*, std::size_t>> DetectRmwOutputs(ComputeState& cs,
 
         // Fill every output with `pattern`, replay once, then digest each output.
         const auto run_and_digest{[&](unsigned char pattern, std::vector<hash::Value>& digests) {
-            ZeroScratchFor(cs, shape_hash, stream);
+            ZeroScratchFor(cs, shape_key, stream);
             for (const auto& [ptr, bytes] : outputs) {
                 HIP_CALL_THROW(hipMemsetAsync(ptr, pattern, bytes, stream));
             }
@@ -173,7 +173,7 @@ std::vector<std::pair<void*, std::size_t>> DetectRmwOutputs(ComputeState& cs,
 // eager execution.
 bool WarmupAndCaptureHipGraph(ComputeState& cs, hipStream_t stream,
     migraphx::program& program, migraphx::program_parameters& params,
-    const std::vector<std::size_t>& prog_output_indices, const std::string& shape_hash)
+    const std::vector<std::size_t>& prog_output_indices, ShapeKey shape_key)
 {
     // Zero staging outputs and scratch so warmup-derived bytes are not baked into
     // the capture.
@@ -182,7 +182,7 @@ bool WarmupAndCaptureHipGraph(ComputeState& cs, hipStream_t stream,
             HIP_CALL_THROW(hipMemsetAsync(buf.data, 0, buf.size_bytes, stream));
         }
     }
-    ZeroScratchFor(cs, shape_hash, stream);
+    ZeroScratchFor(cs, shape_key, stream);
 
     // Pre-capture eager loop to finalize MIGraphX's lazy allocations.
     std::optional<migraphx::arguments> warmup_outputs;
@@ -196,11 +196,11 @@ bool WarmupAndCaptureHipGraph(ComputeState& cs, hipStream_t stream,
         InferCompiledBatchFromParams(program.get_parameter_shapes(), cs.input_name_indices)};
     const int post_warmin{PostCaptureWarminFor(compiled_batch)};
 
-    auto& entry{cs.hip_graph_cache[shape_hash]};
+    auto& entry{cs.hip_graph_cache[shape_key]};
 
     // Re-zero scratch right before capture so the captured kernel sequence is
     // anchored to a known baseline (the warmup loop just dirtied it).
-    ZeroScratchFor(cs, shape_hash, stream);
+    ZeroScratchFor(cs, shape_key, stream);
     HIP_CALL_THROW(hipStreamSynchronize(stream));
 
     try {
@@ -224,7 +224,7 @@ bool WarmupAndCaptureHipGraph(ComputeState& cs, hipStream_t stream,
         entry.direct_bind = false;  // staging capture: replayed via ReplayHipGraph
 
         // Record the scratch pointer baked into the graph for drift detection.
-        if (const auto it{cs.scratch_bufs.find(shape_hash)}; it != cs.scratch_bufs.end()) {
+        if (const auto it{cs.scratch_bufs.find(shape_key)}; it != cs.scratch_bufs.end()) {
             entry.captured_scratch_ptr = it->second.data;
         } else {
             entry.captured_scratch_ptr = nullptr;
@@ -241,7 +241,7 @@ bool WarmupAndCaptureHipGraph(ComputeState& cs, hipStream_t stream,
             }
         }
         entry.captured_output_zeroes =
-            DetectRmwOutputs(cs, shape_hash, entry.exec, stream, output_bufs);
+            DetectRmwOutputs(cs, shape_key, entry.exec, stream, output_bufs);
 
         // Post-capture warm-in replays to settle workspace before first real use.
         for (int i{0}; i < post_warmin; ++i) {
@@ -285,9 +285,9 @@ bool WarmupAndCaptureHipGraph(ComputeState& cs, hipStream_t stream,
 
 // Replay a previously captured graph: zero scratch + RMW outputs, then launch.
 void ReplayHipGraph(ComputeState& cs, hipStream_t stream,
-    CapturedHipGraph& entry, const std::string& shape_hash)
+    CapturedHipGraph& entry, ShapeKey shape_key)
 {
-    ZeroScratchFor(cs, shape_hash, stream);
+    ZeroScratchFor(cs, shape_key, stream);
     for (const auto& [ptr, bytes] : entry.captured_output_zeroes) {
         HIP_CALL_THROW(hipMemsetAsync(ptr, 0, bytes, stream));
     }
@@ -327,7 +327,7 @@ bool CheckCapturedPtrsMatch(const CapturedHipGraph& entry,
 // dbc order) so replay can detect drift.  Returns false (and disables the direct
 // path) on capture failure so the caller falls back to eager execution.
 bool WarmupAndCaptureHipGraphDirect(ComputeState& cs, hipStream_t stream,
-    migraphx::program& program, DirectBindCache& dbc, const std::string& shape_hash)
+    migraphx::program& program, DirectBindCache& dbc, ShapeKey shape_key)
 {
     auto& params{dbc.params};
 
@@ -350,7 +350,7 @@ bool WarmupAndCaptureHipGraphDirect(ComputeState& cs, hipStream_t stream,
         }
     }};
     zero_outputs();
-    ZeroScratchFor(cs, shape_hash, stream);
+    ZeroScratchFor(cs, shape_key, stream);
 
     // Pre-capture eager loop to finalize MIGraphX's lazy allocations.
     std::optional<migraphx::arguments> warmup_outputs;
@@ -363,14 +363,17 @@ bool WarmupAndCaptureHipGraphDirect(ComputeState& cs, hipStream_t stream,
     // The warmup runs wrote real values into the outputs/scratch; re-zero right
     // before capture so the captured sequence starts from the baseline.
     zero_outputs();
-    ZeroScratchFor(cs, shape_hash, stream);
+    ZeroScratchFor(cs, shape_key, stream);
     HIP_CALL_THROW(hipStreamSynchronize(stream));
 
     const std::size_t compiled_batch{
         InferCompiledBatchFromParams(program.get_parameter_shapes(), cs.input_name_indices)};
     const int post_warmin{PostCaptureWarminFor(compiled_batch)};
 
-    auto& entry{cs.hip_graph_cache[shape_hash]};
+    auto& entry{cs.hip_graph_cache[shape_key]};
+    // Cache the entry on the dbc so the steady-state replay path (and MaterializeExtraOutputs)
+    // reaches it directly, without re-searching hip_graph_cache by key every call.
+    dbc.graph = &entry;
 
     // Drop any stale capture for this hash (e.g. a prior staging-path entry for
     // the same shape) before overwriting so its graph/exec are not leaked.
@@ -403,7 +406,7 @@ bool WarmupAndCaptureHipGraphDirect(ComputeState& cs, hipStream_t stream,
         entry.captured_input_ptrs = dbc.cur_input_ptrs;
         entry.captured_output_ptrs = dbc.cur_output_ptrs;
 
-        if (const auto it{cs.scratch_bufs.find(shape_hash)}; it != cs.scratch_bufs.end()) {
+        if (const auto it{cs.scratch_bufs.find(shape_key)}; it != cs.scratch_bufs.end()) {
             entry.captured_scratch_ptr = it->second.data;
         } else {
             entry.captured_scratch_ptr = nullptr;
@@ -413,11 +416,11 @@ bool WarmupAndCaptureHipGraphDirect(ComputeState& cs, hipStream_t stream,
         // contents each replay (detected by replaying twice from two fill
         // patterns), instead of blindly zeroing every output.
         entry.captured_output_zeroes =
-            DetectRmwOutputs(cs, shape_hash, entry.exec, stream, output_bufs);
+            DetectRmwOutputs(cs, shape_key, entry.exec, stream, output_bufs);
 
         // Post-capture warm-in replays to settle workspace before first real use.
         for (int i{0}; i < post_warmin; ++i) {
-            ZeroScratchFor(cs, shape_hash, stream);
+            ZeroScratchFor(cs, shape_key, stream);
             for (const auto& [ptr, bytes] : entry.captured_output_zeroes) {
                 HIP_CALL_THROW(hipMemsetAsync(ptr, 0, bytes, stream));
             }
@@ -486,28 +489,14 @@ int ComputeOutputIndex(std::string_view name) {
     return value;
 }
 
-std::optional<ScratchBindInfo> GetOrAllocScratch(ComputeState& cs,
-    const migraphx::program_parameter_shapes& param_shapes,
-    const std::string& shape_hash, hipStream_t stream)
+// Ensure `slot` holds a buffer of at least `shape` bytes and return its bind info.
+// (Re)allocates when missing or grown; plain hipMalloc (not hipMallocAsync) keeps
+// these out of the stream-ordered pool.  Fresh/grown buffers are zeroed; callers
+// re-zero before use.
+static ScratchBindInfo AllocScratchSlot(ScratchBuffer& slot,
+    const migraphx::shape& scratch_shape, hipStream_t stream)
 {
-    bool has_scratch{false};
-    for (const auto& name : param_shapes.names()) {
-        if (std::string_view{name} == kScratchParam) {
-            has_scratch = true;
-            break;
-        }
-    }
-    if (!has_scratch) {
-        return std::nullopt;
-    }
-
-    const auto scratch_shape{param_shapes["scratch"]};
     const std::size_t needed_bytes{scratch_shape.bytes()};
-
-    auto& slot{cs.scratch_bufs[shape_hash]};
-
-    // (Re)allocate when missing or the required size has grown.  Plain hipMalloc
-    // (not hipMallocAsync) keeps these allocations out of the stream-ordered pool.
     if (slot.data == nullptr || needed_bytes > slot.size_bytes) {
         if (slot.data != nullptr) {
             (void)hipFree(slot.data);
@@ -519,17 +508,47 @@ std::optional<ScratchBindInfo> GetOrAllocScratch(ComputeState& cs,
         slot.data = ptr;
         slot.size_bytes = needed_bytes;
         slot.shape = scratch_shape;
-        // Zero on fresh allocation only; callers re-zero via ZeroScratchFor.
         HIP_CALL_THROW(hipMemsetAsync(slot.data, 0, slot.size_bytes, stream));
     } else {
         slot.shape = scratch_shape;
     }
-
     return ScratchBindInfo{slot.data, slot.shape};
 }
 
-void ZeroScratchFor(ComputeState& cs, const std::string& shape_hash, hipStream_t stream) {
-    const auto it{cs.scratch_bufs.find(shape_hash)};
+std::optional<ScratchBindInfo> GetOrAllocScratchCached(ComputeState& cs,
+    DirectBindCache& dbc, ShapeKey shape_key, hipStream_t stream)
+{
+    if (!dbc.has_scratch) {
+        return std::nullopt;
+    }
+    // Resolve the scratch slot once and cache it on the dbc: scratch_bufs entries
+    // are never erased mid-session, so the pointer stays valid and later calls skip
+    // the map lookup (and ZeroScratchFor uses the same slot -- see the replay path).
+    if (dbc.scratch_slot == nullptr) {
+        dbc.scratch_slot = &cs.scratch_bufs[shape_key];
+    }
+    return AllocScratchSlot(*dbc.scratch_slot, dbc.scratch_shape, stream);
+}
+
+std::optional<ScratchBindInfo> GetOrAllocScratch(ComputeState& cs,
+    const migraphx::program_parameter_shapes& param_shapes,
+    ShapeKey shape_key, hipStream_t stream)
+{
+    bool has_scratch{false};
+    for (const auto& name : param_shapes.names()) {
+        if (std::string_view{name} == kScratchParam) {
+            has_scratch = true;
+            break;
+        }
+    }
+    if (!has_scratch) {
+        return std::nullopt;
+    }
+    return AllocScratchSlot(cs.scratch_bufs[shape_key], param_shapes[kScratchParam.data()], stream);
+}
+
+void ZeroScratchFor(ComputeState& cs, ShapeKey shape_key, hipStream_t stream) {
+    const auto it{cs.scratch_bufs.find(shape_key)};
     if (it == cs.scratch_bufs.end() || it->second.data == nullptr || it->second.size_bytes == 0) {
         return;
     }
@@ -766,7 +785,7 @@ void CopyInputsToStaging(ComputeState& cs,
 
 StagingBindResult BindStagingParams(ComputeState& cs,
     const migraphx::program_parameter_shapes& param_shapes,
-    const std::string& shape_hash, hipStream_t stream)
+    ShapeKey shape_key, hipStream_t stream)
 {
     StagingBindResult result;
     for (const auto& name : param_shapes.names()) {
@@ -778,7 +797,7 @@ StagingBindResult BindStagingParams(ComputeState& cs,
             }
             result.params.add(name, migraphx::argument{param_shapes[name], stage_it->second.data});
         } else if (std::string_view{name} == kScratchParam) {
-            if (const auto scratch{GetOrAllocScratch(cs, param_shapes, shape_hash, stream)}) {
+            if (const auto scratch{GetOrAllocScratch(cs, param_shapes, shape_key, stream)}) {
                 result.params.add(name, migraphx::argument{scratch->shape, scratch->ptr});
             }
         } else if (const auto oi{ComputeOutputIndex(name)}; oi != -1) {
@@ -934,7 +953,7 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
     migraphx::program& program,
     migraphx::program_parameters& params,
     const std::vector<std::size_t>& prog_output_indices,
-    const std::string& shape_hash,
+    ShapeKey shape_key,
     const DynamicBatchContext& dyn)
 {
     // Eager run + copy non-pre-bound outputs (KV present) to ORT tensors; without this the KV is
@@ -973,9 +992,9 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
 
     // A direct-bind capture (against ORT pointers) cannot be replayed through the
     // staging path.  This happens when the direct path was disabled at runtime
-    // (pointer drift) and the same shape_hash falls back here; drop the stale
+    // (pointer drift) and the same shape_key falls back here; drop the stale
     // entry so a staging graph is captured fresh below.
-    if (const auto it{cs.hip_graph_cache.find(shape_hash)};
+    if (const auto it{cs.hip_graph_cache.find(shape_key)};
         it != cs.hip_graph_cache.end() && it->second.direct_bind)
     {
         if (it->second.exec != nullptr) {
@@ -990,11 +1009,11 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
         it->second.direct_bind = false;
     }
 
-    if (const auto it{cs.hip_graph_cache.find(shape_hash)};
+    if (const auto it{cs.hip_graph_cache.find(shape_key)};
         it != cs.hip_graph_cache.end() && it->second.captured)
     {
         // Re-capture if the scratch buffer was reallocated since capture.
-        const auto scratch_it{cs.scratch_bufs.find(shape_hash)};
+        const auto scratch_it{cs.scratch_bufs.find(shape_key)};
         void* current_scratch{scratch_it != cs.scratch_bufs.end() ? scratch_it->second.data : nullptr};
         if (it->second.captured_scratch_ptr != current_scratch) {
             if (it->second.exec != nullptr) {
@@ -1007,24 +1026,24 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
             }
             it->second.captured = false;
         } else {
-            ReplayHipGraph(cs, stream, it->second, shape_hash);
+            ReplayHipGraph(cs, stream, it->second, shape_key);
             MaterializeExtraOutputs(ctx, stream, it->second.extra_outputs, dyn);
             return;
         }
     }
 
-    if (!WarmupAndCaptureHipGraph(cs, stream, program, params, prog_output_indices, shape_hash)) {
+    if (!WarmupAndCaptureHipGraph(cs, stream, program, params, prog_output_indices, shape_key)) {
         eager_run_with_extras();
         return;
     }
-    MaterializeExtraOutputs(ctx, stream, cs.hip_graph_cache.at(shape_hash).extra_outputs, dyn);
+    MaterializeExtraOutputs(ctx, stream, cs.hip_graph_cache.at(shape_key).extra_outputs, dyn);
 }
 
 void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
     const Ort::KernelContext& ctx,
     migraphx::program& program,
     DirectBindCache& dbc,
-    const std::string& shape_hash,
+    ShapeKey shape_key,
     const std::optional<ScratchBindInfo>& scratch,
     const DynamicBatchContext& dyn)
 {
@@ -1078,10 +1097,12 @@ void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
         }
     }};
 
-    if (const auto it{cs.hip_graph_cache.find(shape_hash)};
-        it != cs.hip_graph_cache.end() && it->second.captured && it->second.direct_bind)
+    // The captured graph for this shape is cached on the dbc (resolved at capture),
+    // so the steady-state replay reaches it directly -- no hip_graph_cache lookup.
+    if (CapturedHipGraph* entry{dbc.graph};
+        entry != nullptr && entry->captured && entry->direct_bind)
     {
-        if (!CheckCapturedPtrsMatch(it->second, dbc.cur_input_ptrs, dbc.cur_output_ptrs,
+        if (!CheckCapturedPtrsMatch(*entry, dbc.cur_input_ptrs, dbc.cur_output_ptrs,
                 current_scratch)) {
             // ORT recycled a buffer under us.  Re-capture, but if drift is
             // sustained give up on the direct path (permanent eager/staging
@@ -1092,38 +1113,44 @@ void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
                 eager_run_with_extras();
                 return;
             }
-            if (it->second.exec != nullptr) {
-                (void)hipGraphExecDestroy(it->second.exec);
-                it->second.exec = nullptr;
+            if (entry->exec != nullptr) {
+                (void)hipGraphExecDestroy(entry->exec);
+                entry->exec = nullptr;
             }
-            if (it->second.graph != nullptr) {
-                (void)hipGraphDestroy(it->second.graph);
-                it->second.graph = nullptr;
+            if (entry->graph != nullptr) {
+                (void)hipGraphDestroy(entry->graph);
+                entry->graph = nullptr;
             }
-            it->second.captured = false;
+            entry->captured = false;
         } else {
             // Pointers matched: reset the drift counter so only *consecutive*
-            // mismatches can trip the permanent fallback above.  No param rebind
-            // and no map build -- just zero the RMW outputs + scratch and replay.
+            // mismatches can trip the permanent fallback above.  No param rebind and
+            // no map lookups -- zero scratch via the cached slot + the RMW outputs,
+            // then replay.
             cs.direct_recapture_count = 0;
-            ZeroScratchFor(cs, shape_hash, stream);
-            for (const auto& [ptr, bytes] : it->second.captured_output_zeroes) {
+            if (dbc.scratch_slot != nullptr && dbc.scratch_slot->data != nullptr &&
+                dbc.scratch_slot->size_bytes > 0) {
+                HIP_CALL_THROW(hipMemsetAsync(dbc.scratch_slot->data, 0,
+                    dbc.scratch_slot->size_bytes, stream));
+            }
+            for (const auto& [ptr, bytes] : entry->captured_output_zeroes) {
                 HIP_CALL_THROW(hipMemsetAsync(ptr, 0, bytes, stream));
             }
-            HIP_CALL_THROW(hipGraphLaunch(it->second.exec, stream));
-            MaterializeExtraOutputs(ctx, stream, it->second.extra_outputs, dyn);
+            HIP_CALL_THROW(hipGraphLaunch(entry->exec, stream));
+            MaterializeExtraOutputs(ctx, stream, entry->extra_outputs, dyn);
             return;
         }
     }
 
     // Capture path (first use for this shape or a re-capture after drift): bind
-    // params to the current pointers, then warm up + capture.
+    // params to the current pointers, then warm up + capture.  WarmupAndCaptureHipGraphDirect
+    // sets dbc.graph to the freshly captured entry.
     rebind_params();
-    if (!WarmupAndCaptureHipGraphDirect(cs, stream, program, dbc, shape_hash)) {
+    if (!WarmupAndCaptureHipGraphDirect(cs, stream, program, dbc, shape_key)) {
         eager_run_with_extras();
         return;
     }
-    MaterializeExtraOutputs(ctx, stream, cs.hip_graph_cache.at(shape_hash).extra_outputs, dyn);
+    MaterializeExtraOutputs(ctx, stream, dbc.graph->extra_outputs, dyn);
 }
 
 }  // namespace mgx_ep
