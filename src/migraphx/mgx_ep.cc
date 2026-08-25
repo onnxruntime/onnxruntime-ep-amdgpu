@@ -1592,50 +1592,44 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
 
         // Populate the binding cache once per compiled shape (keyed by hash), so
         // subsequent calls for the same shape -- and alternating dynamic-batch
-        // buckets -- reuse it and only rebind the (possibly moved) ORT pointers,
-        // skipping the per-call name lookups and dtype checks.
+        // buckets -- reuse it, skipping the per-call name lookups and dtype checks.
         auto dbc_it{compute_state.direct_bind_cache.find(shape_hash)};
         if (dbc_it == compute_state.direct_bind_cache.end()) {
             DirectBindCache dbc;
             dbc.eligible = PopulateDirectCaches(dbc.inputs, dbc.outputs, kernel_context,
                 param_shapes, input_name_indices);
+            // ORT output indices are constant per shape -- build once here.
+            dbc.prog_output_indices.reserve(dbc.outputs.size());
+            for (const auto& out : dbc.outputs) {
+                dbc.prog_output_indices.push_back(out.output_index);
+            }
             dbc_it = compute_state.direct_bind_cache.emplace(shape_hash, std::move(dbc)).first;
         }
         auto& dbc{dbc_it->second};
 
         if (dbc.eligible) {
-            auto& direct_params{dbc.params};
-            std::vector<std::size_t> prog_output_indices;
-            prog_output_indices.reserve(dbc.outputs.size());
-            Map<void*> input_ptrs;
-            Map<void*> output_ptrs;
-            input_ptrs.reserve(dbc.inputs.size());
-            output_ptrs.reserve(dbc.outputs.size());
-
-            // Rebind current ORT input pointers (add() overwrites by name).
-            for (const auto& inp : dbc.inputs) {
-                void* ptr{const_cast<void*>(
-                    kernel_context.GetInput(inp.ort_index).GetTensorRawData())};
-                direct_params.add(inp.name.c_str(), migraphx::argument{inp.mgx_shape, ptr});
-                input_ptrs.emplace(inp.name, ptr);
+            // Gather the current ORT device pointers into reused flat vectors (no
+            // per-call maps, string hashing, or program_parameters.add(): those are
+            // deferred to the capture/eager path).  Order matches dbc.inputs/outputs
+            // so RunProgramOrHipGraphDirect can compare them positionally for drift.
+            dbc.cur_input_ptrs.resize(dbc.inputs.size());
+            for (std::size_t i{0}; i < dbc.inputs.size(); ++i) {
+                dbc.cur_input_ptrs[i] = const_cast<void*>(
+                    kernel_context.GetInput(dbc.inputs[i].ort_index).GetTensorRawData());
             }
-            // Rebind current ORT output pointers.
-            for (const auto& out : dbc.outputs) {
+            dbc.cur_output_ptrs.resize(dbc.outputs.size());
+            for (std::size_t i{0}; i < dbc.outputs.size(); ++i) {
+                const auto& out{dbc.outputs[i]};
                 auto output_tensor{kernel_context.GetOutput(out.output_index,
                     out.ort_shape.data(), out.ort_shape.size())};
-                void* ptr{output_tensor.GetTensorMutableRawData()};
-                direct_params.add(out.name.c_str(), migraphx::argument{out.mgx_shape, ptr});
-                output_ptrs.emplace(out.name, ptr);
-                prog_output_indices.push_back(out.output_index);
+                dbc.cur_output_ptrs[i] = output_tensor.GetTensorMutableRawData();
             }
             // EP-owned scratch (allocate-and-zero on first use, zero thereafter).
-            if (const auto scratch{
-                    GetOrAllocScratch(compute_state, param_shapes, shape_hash, hip_stream)}) {
-                direct_params.add("scratch", migraphx::argument{scratch->shape, scratch->ptr});
-            }
+            const auto scratch{
+                GetOrAllocScratch(compute_state, param_shapes, shape_hash, hip_stream)};
 
             RunProgramOrHipGraphDirect(compute_state, hip_stream, kernel_context, program,
-                direct_params, prog_output_indices, shape_hash, input_ptrs, output_ptrs, dyn);
+                dbc, shape_hash, scratch, dyn);
             // Async by default: stream-ordered work is ordered by OnSessionRunEnd;
             // legacy full-drain is gated (see FinishComputeStream).
             RETURN_IF_ERROR(FinishComputeStream(hip_stream));

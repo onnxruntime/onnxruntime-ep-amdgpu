@@ -60,6 +60,11 @@ constexpr auto kStaticPadOutputs = "ORT_MIGRAPHX_STATIC_PAD_OUTPUTS"sv;
 // (pipelined) behaviors be compared in one build. Remove once the new path is
 // confirmed and the drain is deleted for good.
 constexpr auto kLegacyComputeSync = "ORT_MIGRAPHX_LEGACY_COMPUTE_SYNC"sv;
+// A/B / safety gate: when set (1/true), zero ALL captured graph output buffers
+// before every replay (the original behavior) instead of only the read-modify-
+// write outputs detected at capture. Lets the pre-replay memset fan-out reduction
+// be disabled if a model's outputs are misclassified. Default off (detect + skip).
+constexpr auto kForceZeroAllGraphOutputs = "ORT_MIGRAPHX_FORCE_ZERO_ALL_OUTPUTS"sv;
 }  // namespace env_vars
 
 // EP-owned device staging buffer (pointer-stable across runs so it can be
@@ -116,8 +121,11 @@ struct CapturedHipGraph {
     // compared against the current ORT pointers on every replay; a mismatch
     // (e.g. ORT allocator recycled a buffer) forces a re-capture.
     bool direct_bind{false};
-    Map<void*> captured_input_ptrs{};
-    Map<void*> captured_output_ptrs{};
+    // Captured ORT device pointers in DirectBindCache inputs/outputs order (not a
+    // name->ptr map), compared positionally against the current pointers on every
+    // replay to detect drift.  Flat vectors avoid the per-call map build + hashing.
+    std::vector<void*> captured_input_ptrs{};
+    std::vector<void*> captured_output_ptrs{};
 };
 
 // Result of binding staging buffers (and the EP-owned scratch) as program
@@ -151,10 +159,12 @@ struct CachedDirectOutput {
     std::vector<std::int64_t> ort_shape; // ORT output shape (== program shape; no padding)
 };
 
-// One shape's direct-bind binding.  `params` is reused across calls for this
-// shape: the hot path re-adds the current ORT pointers (migraphx add() overwrites
-// by name), skipping the name lookups / dtype checks captured in `inputs`/
-// `outputs`.  `eligible` is false when the shape cannot use direct-bind (a
+// One shape's direct-bind binding.  The hot path gathers the current ORT pointers
+// into `cur_input_ptrs`/`cur_output_ptrs` (reused, no per-call allocation) and
+// compares them positionally against the captured graph's pointers.  `params` is
+// (re)bound lazily -- only when a capture or eager run is actually needed -- since
+// the steady-state replay path uses the captured graph directly and never reads
+// `params`.  `eligible` is false when the shape cannot use direct-bind (a
 // host-resident input, dtype mismatch, or an unbound parameter), in which case
 // the call falls through to the staging path.
 struct DirectBindCache {
@@ -162,6 +172,12 @@ struct DirectBindCache {
     std::vector<CachedDirectOutput> outputs{};
     migraphx::program_parameters params{};
     bool eligible{};
+    // ORT output indices in `outputs` order; constant per shape, built once.
+    std::vector<std::size_t> prog_output_indices{};
+    // Current ORT device pointers gathered each call (inputs/outputs order).
+    // Reused across calls so the hot path does no per-call heap allocation.
+    std::vector<void*> cur_input_ptrs{};
+    std::vector<void*> cur_output_ptrs{};
 };
 
 struct ComputeState {
