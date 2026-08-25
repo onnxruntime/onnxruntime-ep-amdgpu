@@ -1340,32 +1340,10 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     auto& cached_param_shapes{compute_state.cached_param_shapes};
     hash::Value input_shapes_hash{};
 
-    // Resolve dynamic-batch bucketing for this call (no-op when disabled).  The
-    // batch is assumed to live on axis 0 of the model inputs.
+    // Dynamic-batch bucketing is resolved below, folded into the single input-shape
+    // gather so all inputs are traversed once instead of being scanned here too.
+    // The batch is assumed to live on axis 0 of the model inputs.
     DynamicBatchContext dyn{};
-    if (compute_state.max_dynamic_batch > 0) {
-        if (compute_state.compiled_batch_sizes.empty()) {
-            compute_state.compiled_batch_sizes = GenerateCompiledBatchSizes(
-                compute_state.max_dynamic_batch, compute_state.compile_batches);
-        }
-        bool have_min{false};
-        size_t min_index{0};
-        size_t requested{0};
-        for (const auto& [name, index] : input_name_indices) {
-            const auto shape{kernel_context.GetInput(index).GetTensorTypeAndShapeInfo().GetShape()};
-            if (!shape.empty() && (!have_min || index < min_index)) {
-                have_min = true;
-                min_index = index;
-                requested = static_cast<size_t>(shape.front());
-            }
-        }
-        if (requested > 0) {
-            const auto bucket{FindNearestCompiledBatchSize(requested, compute_state.compiled_batch_sizes)};
-            dyn.requested_batch = requested;
-            dyn.target_batch = bucket > 0 ? bucket : requested;
-            dyn.active = true;
-        }
-    }
 
     // Resolve static seq-padding for this call (no-op when disabled).  A named input
     // is padded on its token axis to the fixed target length, only for prefill: the
@@ -1441,11 +1419,32 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // previous call we can skip both the shape-compare loop and the rehash loop:
     // identical actual shapes imply an identical effective shape, dyn bucket, and
     // hash, and (since the program was already compiled for them last time) a match.
+    // The same pass captures the dynamic-batch request (front extent of the
+    // lowest-index input), so the batch is resolved without a second traversal.
     std::vector<std::int64_t> current_input_shapes;
     current_input_shapes.reserve(input_name_indices.size() * 4);
+    const bool track_batch{compute_state.max_dynamic_batch > 0};
+    bool have_batch_min{false};
+    std::size_t batch_min_index{0};
+    std::size_t requested_batch{0};
     for (const auto& [name, index] : input_name_indices) {
         const auto shape{kernel_context.GetInput(index).GetTensorTypeAndShapeInfo().GetShape()};
         current_input_shapes.insert(current_input_shapes.end(), shape.begin(), shape.end());
+        if (track_batch && !shape.empty() && (!have_batch_min || index < batch_min_index)) {
+            have_batch_min = true;
+            batch_min_index = index;
+            requested_batch = static_cast<std::size_t>(shape.front());
+        }
+    }
+    if (track_batch && requested_batch > 0) {
+        if (compute_state.compiled_batch_sizes.empty()) {
+            compute_state.compiled_batch_sizes = GenerateCompiledBatchSizes(
+                compute_state.max_dynamic_batch, compute_state.compile_batches);
+        }
+        const auto bucket{FindNearestCompiledBatchSize(requested_batch, compute_state.compiled_batch_sizes)};
+        dyn.requested_batch = requested_batch;
+        dyn.target_batch = bucket > 0 ? bucket : requested_batch;
+        dyn.active = true;
     }
     const bool shapes_unchanged{compute_state.has_last_input_shapes &&
                                 current_input_shapes == compute_state.last_input_shapes};
@@ -1686,11 +1685,12 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     if ((compute_state.hip_graph_enable || dyn.active || seq.active) && param_shapes.size() > 0) {
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
-        CopyInputsToStaging(compute_state, param_shapes, kernel_context, hip_stream, dyn, seq);
         // Item 3: reuse a cached binding for this shape hash.  Staging buffers and
         // scratch are pointer-stable until FreeStaging, so binding once and replaying
         // avoids re-doing N program_parameters.add() calls, string work, and a
-        // scratch lookup on every inference.
+        // scratch lookup on every inference.  The binding is resolved before the input
+        // copy because it also carries the flat input-copy plan the copy consumes, so
+        // the per-call copy touches no parameter names, std::strings, or map lookups.
         auto bind_it{compute_state.staging_bind_cache.find(shape_key)};
         if (bind_it == compute_state.staging_bind_cache.end()) {
             bind_it = compute_state.staging_bind_cache.emplace(
@@ -1698,6 +1698,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 BindStagingParams(compute_state, param_shapes, shape_key, hip_stream)).first;
         }
         auto& bind{bind_it->second};
+        CopyInputsToStaging(compute_state, bind, kernel_context, hip_stream, dyn, seq);
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
             bind.params, bind.prog_output_indices, shape_key, dyn);
         CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn, seq);

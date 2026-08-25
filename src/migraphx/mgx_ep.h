@@ -128,6 +128,23 @@ struct CapturedHipGraph {
     std::vector<void*> captured_output_ptrs{};
 };
 
+// One input's resolved staging-copy plan, built once per compiled shape so the
+// per-call input copy touches no parameter names, std::strings, or map lookups: it
+// just reads the ORT tensor at ort_index and copies into the staging buffer.  For
+// the coalesced arena, staging_data is a sub-view at arena_offset in the pinned
+// host buffer; otherwise it is a standalone device buffer.  prog_lens/element_size
+// are retained for the (non-steady-state) dynamic-batch / seq padding paths.
+struct StagingInputBind {
+    std::size_t ort_index{};                 // KernelContext input index
+    void* staging_data{nullptr};             // staging buffer device ptr (stable until FreeStaging)
+    std::size_t arena_offset{};              // byte offset into the pinned host arena (coalesced)
+    std::size_t stage_capacity{};            // staging buffer size in bytes (copy clamp)
+    std::size_t prog_bytes{};                // full program-shape byte size for this input
+    std::vector<std::size_t> prog_lens{};    // program-shape lengths (padding math)
+    std::size_t element_size{};              // prog_bytes / product(prog_lens) (padding math)
+    std::string name{};                      // parameter name (seq-axis lookup, padding path only)
+};
+
 // Result of binding staging buffers (and the EP-owned scratch) as program
 // parameters for a given compiled shape.  Cached per shape hash in ComputeState:
 // staging buffers and scratch are pointer-stable until FreeStaging, so a binding
@@ -137,6 +154,8 @@ struct StagingBindResult {
     std::vector<std::size_t> prog_output_indices{};       // ORT output index per bound output
     std::vector<std::string> bound_output_names{};        // staging key per bound output
     std::vector<migraphx::shape> bound_output_shapes{};   // current bucket shape per bound output
+    std::vector<std::vector<std::int64_t>> bound_output_ort_shapes{};  // bucket ORT shape (int64) per bound output
+    std::vector<StagingInputBind> input_copies{};         // flat per-input copy plan (built once)
 };
 
 // ── Direct-bind ultra-fast binding cache ─────────────────────────────────────

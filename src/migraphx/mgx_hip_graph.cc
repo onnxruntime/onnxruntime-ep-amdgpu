@@ -654,7 +654,7 @@ void AllocateStaging(ComputeState& cs,
 }
 
 void CopyInputsToStaging(ComputeState& cs,
-    const migraphx::program_parameter_shapes& param_shapes,
+    const StagingBindResult& bind,
     const Ort::KernelContext& ctx, hipStream_t stream,
     const DynamicBatchContext& dyn,
     const StaticSeqContext& seq)
@@ -668,17 +668,15 @@ void CopyInputsToStaging(ComputeState& cs,
     // still correct because each staging buffer's data points into the arena.
     // Both batch padding AND seq padding disqualify the fast path: the memcpy below
     // copies only the real bytes and would skip the pad tail-zero / prefix stride.
+    // Driven entirely by the precomputed bind.input_copies plan: no parameter
+    // names, std::strings, or map lookups on this hot path.
     const bool batch_no_pad{!dyn.active || dyn.target_batch == dyn.requested_batch};
     const bool seq_no_pad{!seq.active || seq.target_len == seq.real_len};
     const bool no_padding{batch_no_pad && seq_no_pad};
     if (cs.staging_inputs_coalesced && cs.in_staging_host != nullptr && no_padding) {
         bool all_host{true};
-        for (const auto& name : param_shapes.names()) {
-            const auto idx_it{cs.input_name_indices.find(std::string{name})};
-            if (idx_it == cs.input_name_indices.end()) {
-                continue;
-            }
-            const auto mem{ctx.GetInput(idx_it->second).GetTensorMemoryInfo()};
+        for (const auto& ib : bind.input_copies) {
+            const auto mem{ctx.GetInput(ib.ort_index).GetTensorMemoryInfo()};
             if (mem.GetDeviceType() != OrtMemoryInfoDeviceType_CPU) {
                 all_host = false;
                 break;
@@ -687,25 +685,14 @@ void CopyInputsToStaging(ComputeState& cs,
 
         if (all_host) {
             char* host_base{static_cast<char*>(cs.in_staging_host)};
-            for (const auto& name : param_shapes.names()) {
-                const std::string param_name{name};
-                const auto idx_it{cs.input_name_indices.find(param_name)};
-                if (idx_it == cs.input_name_indices.end()) {
-                    continue;
-                }
-                const auto stage_it{cs.staging_inputs.find(param_name)};
-                if (stage_it == cs.staging_inputs.end()) {
-                    continue;
-                }
-                const auto& stage{stage_it->second};
-                const auto input_tensor{ctx.GetInput(idx_it->second)};
-                const void* src{input_tensor.GetTensorRawData()};
-                std::size_t copy_bytes{param_shapes[name].bytes()};
-                if (copy_bytes > stage.size_bytes) {
-                    copy_bytes = stage.size_bytes;
+            for (const auto& ib : bind.input_copies) {
+                const void* src{ctx.GetInput(ib.ort_index).GetTensorRawData()};
+                std::size_t copy_bytes{ib.prog_bytes};
+                if (copy_bytes > ib.stage_capacity) {
+                    copy_bytes = ib.stage_capacity;
                 }
                 if (copy_bytes > 0) {
-                    std::memcpy(host_base + stage.arena_offset, src, copy_bytes);
+                    std::memcpy(host_base + ib.arena_offset, src, copy_bytes);
                 }
             }
             // One transfer for every input.  Copying the whole arena (including the
@@ -717,22 +704,19 @@ void CopyInputsToStaging(ComputeState& cs,
         }
     }
 
-    for (const auto& name : param_shapes.names()) {
-        const std::string param_name{name};
-        const auto idx_it{cs.input_name_indices.find(param_name)};
-        if (idx_it == cs.input_name_indices.end()) {
-            continue;
-        }
-        const auto stage_it{cs.staging_inputs.find(param_name)};
-        if (stage_it == cs.staging_inputs.end()) {
-            continue;
-        }
-        const auto& stage{stage_it->second};
-        const auto input_tensor{ctx.GetInput(idx_it->second)};
+    // Per-input fallback (a device-resident input, or padding is active).  Only the
+    // padding branches need the actual ORT shape, so fetch it lazily.
+    const bool maybe_pad{(dyn.active && dyn.target_batch > dyn.requested_batch) ||
+                         (seq.active && seq.input_axes != nullptr)};
+    for (const auto& ib : bind.input_copies) {
+        const auto input_tensor{ctx.GetInput(ib.ort_index)};
         const void* src{input_tensor.GetTensorRawData()};
-        const auto prog_shape{param_shapes[name]};
-        const auto prog_lens{prog_shape.lengths()};
-        const auto actual_shape{input_tensor.GetTensorTypeAndShapeInfo().GetShape()};
+        const auto& prog_lens{ib.prog_lens};
+
+        std::vector<std::int64_t> actual_shape;
+        if (maybe_pad) {
+            actual_shape = input_tensor.GetTensorTypeAndShapeInfo().GetShape();
+        }
 
         // A batched input arrives with requested_batch rows but the program (and
         // staging) expect target_batch rows; replicate the last row to pad.
@@ -745,7 +729,7 @@ void CopyInputsToStaging(ComputeState& cs,
         // target_len; copy the real tokens per slice and zero-fill the pad tail.
         int seq_axis{-1};
         if (seq.active && seq.input_axes != nullptr && !batched) {
-            if (const auto it{seq.input_axes->find(param_name)}; it != seq.input_axes->end()) {
+            if (const auto it{seq.input_axes->find(ib.name)}; it != seq.input_axes->end()) {
                 const int axis{it->second};
                 if (axis >= 0 && static_cast<std::size_t>(axis) < prog_lens.size() &&
                     prog_lens[axis] == seq.target_len && axis < static_cast<int>(actual_shape.size()) &&
@@ -756,28 +740,24 @@ void CopyInputsToStaging(ComputeState& cs,
         }
 
         if (seq_axis >= 0) {
-            const std::size_t total_elems{ProductOf(prog_lens)};
-            const std::size_t element_size{total_elems > 0 ? prog_shape.bytes() / total_elems : 0};
             std::size_t outer{1};
             for (int a{0}; a < seq_axis; ++a) outer *= prog_lens[a];
             std::size_t inner{1};
             for (std::size_t a{static_cast<std::size_t>(seq_axis) + 1}; a < prog_lens.size(); ++a)
                 inner *= prog_lens[a];
-            PadSeqTensor(src, stage.data, outer, seq.real_len, seq.target_len,
-                inner, element_size, stream);
+            PadSeqTensor(src, ib.staging_data, outer, seq.real_len, seq.target_len,
+                inner, ib.element_size, stream);
         } else if (batched) {
-            const std::size_t total_elems{ProductOf(prog_lens)};
-            const std::size_t elements_per_row{total_elems / dyn.target_batch};
-            const std::size_t element_size{total_elems > 0 ? prog_shape.bytes() / total_elems : 0};
-            PadInputTensor(src, stage.data, dyn.requested_batch, dyn.target_batch,
-                element_size, elements_per_row, stream);
+            const std::size_t elements_per_row{ProductOf(prog_lens) / dyn.target_batch};
+            PadInputTensor(src, ib.staging_data, dyn.requested_batch, dyn.target_batch,
+                ib.element_size, elements_per_row, stream);
         } else {
-            std::size_t bytes{prog_shape.bytes()};
-            if (bytes > stage.size_bytes) {
-                bytes = stage.size_bytes;
+            std::size_t bytes{ib.prog_bytes};
+            if (bytes > ib.stage_capacity) {
+                bytes = ib.stage_capacity;
             }
             if (bytes > 0) {
-                HIP_CALL_THROW(hipMemcpyAsync(stage.data, src, bytes, hipMemcpyDefault, stream));
+                HIP_CALL_THROW(hipMemcpyAsync(ib.staging_data, src, bytes, hipMemcpyDefault, stream));
             }
         }
     }
@@ -790,12 +770,27 @@ StagingBindResult BindStagingParams(ComputeState& cs,
     StagingBindResult result;
     for (const auto& name : param_shapes.names()) {
         const std::string param_name{name};
-        if (cs.input_name_indices.count(param_name) > 0) {
+        if (const auto idx_it{cs.input_name_indices.find(param_name)};
+            idx_it != cs.input_name_indices.end()) {
             const auto stage_it{cs.staging_inputs.find(param_name)};
             if (stage_it == cs.staging_inputs.end()) {
                 continue;
             }
-            result.params.add(name, migraphx::argument{param_shapes[name], stage_it->second.data});
+            const auto in_shape{param_shapes[name]};
+            result.params.add(name, migraphx::argument{in_shape, stage_it->second.data});
+            // Flat copy-plan entry so the per-call input copy needs no name/string/map work.
+            StagingInputBind ib;
+            ib.ort_index = idx_it->second;
+            ib.staging_data = stage_it->second.data;
+            ib.arena_offset = stage_it->second.arena_offset;
+            ib.stage_capacity = stage_it->second.size_bytes;
+            ib.prog_bytes = in_shape.bytes();
+            const auto in_lens{in_shape.lengths()};
+            ib.prog_lens.assign(in_lens.begin(), in_lens.end());
+            const std::size_t total_elems{ProductOf(ib.prog_lens)};
+            ib.element_size = total_elems > 0 ? ib.prog_bytes / total_elems : 0;
+            ib.name = param_name;
+            result.input_copies.push_back(std::move(ib));
         } else if (std::string_view{name} == kScratchParam) {
             if (const auto scratch{GetOrAllocScratch(cs, param_shapes, shape_key, stream)}) {
                 result.params.add(name, migraphx::argument{scratch->shape, scratch->ptr});
@@ -805,10 +800,15 @@ StagingBindResult BindStagingParams(ComputeState& cs,
             if (stage_it == cs.staging_outputs.end()) {
                 continue;
             }
-            result.params.add(name, migraphx::argument{param_shapes[name], stage_it->second.data});
+            const auto out_shape{param_shapes[name]};
+            result.params.add(name, migraphx::argument{out_shape, stage_it->second.data});
             result.prog_output_indices.push_back(static_cast<std::size_t>(oi));
             result.bound_output_names.push_back(param_name);
-            result.bound_output_shapes.push_back(param_shapes[name]);
+            result.bound_output_shapes.push_back(out_shape);
+            // Precompute the ORT (int64) bucket shape so the per-call output copy
+            // does not rebuild it every inference (it only slices it when padding).
+            const auto out_lens{out_shape.lengths()};
+            result.bound_output_ort_shapes.emplace_back(out_lens.begin(), out_lens.end());
         }
     }
     return result;
@@ -820,7 +820,8 @@ void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
     const StaticSeqContext& seq)
 {
     for (std::size_t i{}; i < bind.prog_output_indices.size() &&
-        i < bind.bound_output_names.size() && i < bind.bound_output_shapes.size(); ++i)
+        i < bind.bound_output_names.size() && i < bind.bound_output_shapes.size() &&
+        i < bind.bound_output_ort_shapes.size(); ++i)
     {
         const auto oi{bind.prog_output_indices[i]};
         const auto& param_name{bind.bound_output_names[i]};
@@ -829,23 +830,18 @@ void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
             continue;
         }
         const auto& stage{stage_it->second};
-        // Use the current bucket's output shape, not the (first-bucket) staging
-        // shape, so dynamic-batch buckets report the correct dimensions.
+        // Bucket shapes were precomputed at bind time; reuse the cached ORT (int64)
+        // shape so the common (no-slice) path allocates nothing per output.  Use the
+        // current bucket's shape, not the (first-bucket) staging shape, so dynamic
+        // batch buckets report the correct dimensions.
         const auto& out_shape{bind.bound_output_shapes[i]};
-        const auto lengths{out_shape.lengths()};
-        std::vector<std::int64_t> ort_shape{lengths.begin(), lengths.end()};
+        const auto& cached_ort_shape{bind.bound_output_ort_shapes[i]};
         std::size_t bytes{out_shape.bytes()};
 
         // Slice a batched output down to the requested batch.
         const bool batch_sliced{dyn.active && dyn.target_batch > dyn.requested_batch &&
-            !ort_shape.empty() &&
-            static_cast<std::size_t>(ort_shape.front()) == dyn.target_batch};
-        if (batch_sliced)
-        {
-            const std::size_t row_bytes{bytes / dyn.target_batch};
-            ort_shape.front() = static_cast<std::int64_t>(dyn.requested_batch);
-            bytes = row_bytes * dyn.requested_batch;
-        }
+            !cached_ort_shape.empty() &&
+            static_cast<std::size_t>(cached_ort_shape.front()) == dyn.target_batch};
 
         // Slice a named seq output (e.g. logits) back to real_len on its token axis.
         // Excludes batch-slicing: element_size below uses the un-shrunk `bytes`.
@@ -854,32 +850,42 @@ void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
             !batch_sliced) {
             if (const auto it{seq.output_axes_by_index->find(oi)}; it != seq.output_axes_by_index->end()) {
                 const int axis{it->second};
-                if (axis >= 0 && static_cast<std::size_t>(axis) < ort_shape.size() &&
-                    static_cast<std::size_t>(ort_shape[axis]) == seq.target_len) {
+                if (axis >= 0 && static_cast<std::size_t>(axis) < cached_ort_shape.size() &&
+                    static_cast<std::size_t>(cached_ort_shape[axis]) == seq.target_len) {
                     seq_axis = axis;
                 }
             }
         }
 
-        auto output_tensor{[&]() {
-            if (seq_axis < 0) {
-                return ctx.GetOutput(oi, ort_shape.data(), ort_shape.size());
-            }
-            // Report the sliced (real_len) shape to ORT.
-            std::vector<std::int64_t> real_shape{ort_shape};
-            real_shape[seq_axis] = static_cast<std::int64_t>(seq.real_len);
-            return ctx.GetOutput(oi, real_shape.data(), real_shape.size());
-        }()};
+        // Report the cached bucket shape as-is unless a slice is needed (batch or
+        // seq), in which case work on a local copy.  The batch-1 steady state needs
+        // neither, so no per-output allocation happens there.
+        const std::vector<std::int64_t>* report_shape{&cached_ort_shape};
+        std::vector<std::int64_t> sliced_shape;
+        if (batch_sliced) {
+            const std::size_t row_bytes{bytes / dyn.target_batch};
+            sliced_shape = cached_ort_shape;
+            sliced_shape.front() = static_cast<std::int64_t>(dyn.requested_batch);
+            bytes = row_bytes * dyn.requested_batch;
+            report_shape = &sliced_shape;
+        } else if (seq_axis >= 0) {
+            sliced_shape = cached_ort_shape;
+            sliced_shape[seq_axis] = static_cast<std::int64_t>(seq.real_len);
+            report_shape = &sliced_shape;
+        }
+
+        auto output_tensor{ctx.GetOutput(oi, report_shape->data(), report_shape->size())};
         void* dst{output_tensor.GetTensorMutableRawData()};
 
         if (seq_axis >= 0) {
             // Per outer slice, copy the first real_len rows (inner_count elems each).
             std::size_t outer{1};
-            for (int a{0}; a < seq_axis; ++a) outer *= static_cast<std::size_t>(ort_shape[a]);
+            for (int a{0}; a < seq_axis; ++a) outer *= static_cast<std::size_t>(cached_ort_shape[a]);
             std::size_t inner{1};
-            for (std::size_t a{static_cast<std::size_t>(seq_axis) + 1}; a < ort_shape.size(); ++a)
-                inner *= static_cast<std::size_t>(ort_shape[a]);
-            const std::size_t total_elems{ProductOf({lengths.begin(), lengths.end()})};
+            for (std::size_t a{static_cast<std::size_t>(seq_axis) + 1}; a < cached_ort_shape.size(); ++a)
+                inner *= static_cast<std::size_t>(cached_ort_shape[a]);
+            const auto lengths{out_shape.lengths()};
+            const std::size_t total_elems{ProductOf(lengths)};
             const std::size_t element_size{total_elems > 0 ? bytes / total_elems : 0};
             const std::size_t src_slice_bytes{seq.target_len * inner * element_size};
             const std::size_t dst_slice_bytes{seq.real_len * inner * element_size};

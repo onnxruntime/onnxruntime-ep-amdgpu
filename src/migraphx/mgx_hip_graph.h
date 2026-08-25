@@ -93,8 +93,10 @@ void AllocateStaging(ComputeState& cs,
 // Copy ORT input tensors into their staging buffers, padding batched inputs up to
 // the target bucket batch when dynamic batching is active, and padding named
 // inputs up to target_len on their token axis when static seq-padding is active.
+// Driven by the flat `bind.input_copies` plan (built once by BindStagingParams),
+// so the steady-state copy does no parameter-name/std::string/map-lookup work.
 void CopyInputsToStaging(ComputeState& cs,
-    const migraphx::program_parameter_shapes& param_shapes,
+    const StagingBindResult& bind,
     const Ort::KernelContext& ctx, hipStream_t stream,
     const DynamicBatchContext& dyn,
     const StaticSeqContext& seq);
