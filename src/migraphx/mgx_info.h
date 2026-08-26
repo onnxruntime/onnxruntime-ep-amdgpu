@@ -14,7 +14,7 @@ namespace mgx_ep {
 // The enumerator values are load-bearing: they are migraphx's compile_modes
 // values, so the value can be passed straight to
 // migraphx::compile_options::set_compile_mode() without translation (see the
-// static_asserts in mgx_ep.cc's compile_program()). Never renumber these
+// static_asserts in mgx_program_ops.cc's compile_program()). Never renumber these
 // positionally; migraphx snaps an out-of-range value to the nearest mode
 // instead of rejecting it, so a mismatch fails silently.
 enum class ComputeMode : std::int8_t {

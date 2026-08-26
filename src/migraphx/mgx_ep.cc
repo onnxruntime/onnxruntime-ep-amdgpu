@@ -1047,7 +1047,8 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             RETURN_IF_ERROR(CompileMissingPrograms(pre_plan, input_name_indices, onnx_string,
                 compute_state.cached_programs, t_, enable_fp16_, enable_bf16_, enable_int8_, enable_fp8_,
                 int8_calibration_cache_available_, dynamic_ranges_, exhaustive_tune_, mlss_use_specific_ops_,
-                disable_compiled_model_caching_, model_path, external_data_dir_, effective_cache_dir, mxr_prefix));
+                compute_mode_, disable_compiled_model_caching_, model_path, external_data_dir_,
+                effective_cache_dir, mxr_prefix));
         }
         if (!compute_state.cached_programs.empty()) {
             compute_state.program = SelectDefaultProgram(compute_state.cached_programs, pre_bucketed,

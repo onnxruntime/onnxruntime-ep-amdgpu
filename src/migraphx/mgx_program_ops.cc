@@ -59,10 +59,25 @@ void calibrate_and_quantize(const migraphx::program& prog, const migraphx::targe
 }
 
 void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune,
-    const std::string& mlss_use_specific_ops) {
+    const std::string& mlss_use_specific_ops, ComputeMode compute_mode) {
     migraphx::compile_options options;
     options.set_fast_math(false);
-    options.set_exhaustive_tune_flag(exhaustive_tune);
+
+    // The EP calls this a compute mode; migraphx calls the same concept a compile
+    // mode. ComputeMode's enumerator values are migraphx's compile_modes values
+    // (see mgx_info.h), so this cast is a straight pass-through. migraphx snaps
+    // an unknown value to the nearest mode rather than reporting an error, so
+    // assert the correspondence at compile time instead.
+    static_assert(static_cast<std::int8_t>(ComputeMode::Eager) == migraphx_compile_mode_eager);
+    static_assert(static_cast<std::int8_t>(ComputeMode::Balanced) == migraphx_compile_mode_balanced);
+    static_assert(static_cast<std::int8_t>(ComputeMode::Maximum) == migraphx_compile_mode_max);
+    options.set_compile_mode(static_cast<std::int8_t>(compute_mode));
+
+    // migraphx's own max mode sets the exhaustive-tune flag on the context
+    // (target.cpp), but constructs compile_ops from the unmutated
+    // options.exhaustive_tune, so on this build max would be close to a no-op.
+    // Set the flag here so Maximum means something without patching migraphx.
+    options.set_exhaustive_tune_flag(exhaustive_tune || compute_mode == ComputeMode::Maximum);
     if (!mlss_use_specific_ops.empty()) {
         // MIGraphX expects a list of op names; split the comma-separated value.
         std::vector<std::string> ops;
