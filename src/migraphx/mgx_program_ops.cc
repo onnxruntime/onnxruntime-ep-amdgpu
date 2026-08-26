@@ -60,38 +60,23 @@ void calibrate_and_quantize(const migraphx::program& prog, const migraphx::targe
     }
 }
 
-// JSON-escape backslashes and double-quotes so a file path survives the relaxed-JSON
-// backend-options parser as a quoted string.
-static std::string json_escape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 8);
-    for (char c : s) {
-        if (c == '\\' || c == '"') {
-            out.push_back('\\');
-        }
-        out.push_back(c);
-    }
-    return out;
-}
-
 void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune,
     const std::string& mlss_use_specific_ops, const std::vector<std::string>& problem_cache_paths) {
     migraphx::compile_options options;
     options.set_fast_math(false);
     options.set_exhaustive_tune_flag(exhaustive_tune);
     // Deliver the ordered read-only cache files as the "read_only_problem_cache_files" GPU
-    // backend option (system-level/shipped caches that must never be written back). Build the
-    // JSON explicitly with quoted, escaped paths: the typed set_advance_backend_option streams
-    // values unquoted, and the relaxed-JSON parser would shred ':' and '\\' in a path. Passed
-    // as a %s arg so any '%' in a path is not a format specifier. MIGraphX builds with the
-    // problem-cache feature consume the key; older ignore it.
+    // backend option (system-level/shipped caches that must never be written back). The paths
+    // arrive already JSON-escaped from setup_problem_cache_paths, so we just quote and join
+    // them. Passed as a %s arg so any '%' in a path is not a format specifier. MIGraphX builds
+    // with the problem-cache feature consume the key; older ignore it.
     if (!problem_cache_paths.empty()) {
         std::string json = "{\"read_only_problem_cache_files\":[";
         for (std::size_t i = 0; i < problem_cache_paths.size(); ++i) {
             if (i != 0) {
                 json += ",";
             }
-            json += "\"" + json_escape(problem_cache_paths[i]) + "\"";
+            json += "\"" + problem_cache_paths[i] + "\"";
         }
         json += "]}";
         options.set_advance_backend_options("%s", json.c_str());

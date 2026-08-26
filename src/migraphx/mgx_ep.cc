@@ -5,6 +5,7 @@
 #include <array>
 #include <charconv>
 #include <cstdio>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -671,35 +672,60 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     }
 }
 
-void ExecutionProvider::setup_problem_cache_paths() {
-    // Ordered read-only search list (highest priority first), delivered to MIGraphX via
-    // the compile API (set_advance_backend_option), not the MIGRAPHX_PROBLEM_CACHE env var.
-    problem_cache_paths_.clear();
-
-    // 1. App-provided override (ORT_MIGRAPHX_PROBLEM_CACHE), if set.
-    if (auto ep_override{platform::GetEnvironmentVar(env_var::kProblemCachePath)}; !ep_override.empty()) {
-        problem_cache_paths_.push_back(std::move(ep_override));
-    }
-
 #ifdef _WIN32
-    // 2. Read-only cache shipped beside this EP module: problem_cache.json in the same
-    //    directory (migraphx_gpu.dll is deployed there too).
+// Directory of this EP module (independent of the host process's exe or cwd).
+static std::optional<fs::path> this_module_dir() {
     static const char kAnchor{'\0'};  // address anchor in this module for GetModuleHandleEx
     HMODULE module{nullptr};
     if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           &kAnchor, &module) != 0) {
-        std::vector<wchar_t> buffer;
-        for (;;) {
-            buffer.resize(buffer.size() + MAX_PATH);
-            if (const auto written{GetModuleFileNameW(module, buffer.data(),
-                    static_cast<DWORD>(buffer.size()))}; written < buffer.size()) {
-                break;
-            }
+                           &kAnchor, &module) == 0) {
+        return std::nullopt;
+    }
+    std::vector<wchar_t> buffer;
+    for (;;) {
+        buffer.resize(buffer.size() + MAX_PATH);
+        if (const auto written{GetModuleFileNameW(module, buffer.data(),
+                static_cast<DWORD>(buffer.size()))}; written < buffer.size()) {
+            break;
         }
-        const fs::path cache_path{fs::path{buffer.data()}.parent_path() / "problem_cache.json"};
+    }
+    return fs::path{buffer.data()}.parent_path();
+}
+#endif
+
+// JSON-escape backslashes and double-quotes so a file path survives the relaxed-JSON
+// backend-options parser as a quoted string.
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '\\' || c == '"') {
+            out.push_back('\\');
+        }
+        out.push_back(c);
+    }
+    return out;
+}
+
+void ExecutionProvider::setup_problem_cache_paths() {
+    // Ordered read-only search list (highest priority first), delivered to MIGraphX via the
+    // compile API (set_advance_backend_option), not the MIGRAPHX_PROBLEM_CACHE env var. Paths
+    // are JSON-escaped once here so the delivery builder can drop them straight into the JSON.
+    problem_cache_paths_.clear();
+
+    // 1. App-provided override (ORT_MIGRAPHX_PROBLEM_CACHE), if set.
+    if (auto ep_override{platform::GetEnvironmentVar(env_var::kProblemCachePath)}; !ep_override.empty()) {
+        problem_cache_paths_.push_back(json_escape(ep_override));
+    }
+
+#ifdef _WIN32
+    // 2. Read-only problem_cache.json shipped in this EP module's own install directory
+    //    (deployed there by the MIGRAPHX_EP_PROBLEM_CACHE CMake option).
+    if (const auto module_dir{this_module_dir()}) {
+        const fs::path cache_path{*module_dir / "problem_cache.json"};
         if (fs::exists(cache_path)) {
-            problem_cache_paths_.push_back(cache_path.string());
+            problem_cache_paths_.push_back(json_escape(cache_path.string()));
         }
     }
 #endif

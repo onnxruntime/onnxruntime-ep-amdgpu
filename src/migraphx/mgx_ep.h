@@ -141,7 +141,8 @@ struct ComputeState {
     bool force_recompile{};
     fs::path external_data_dir;
     std::string mxr_prefix;
-    // Ordered read-only problem-cache paths (app override, then DLL-adjacent shipped).
+    // Ordered read-only problem-cache paths (app override, then DLL-adjacent shipped),
+    // JSON-escaped for backend-option delivery.
     std::vector<std::string> problem_cache_paths{};
 
     // ── Configuration (set at Compile time) ──────────────────────────────────
@@ -295,7 +296,8 @@ private:
     bool enable_int8_{};
     bool exhaustive_tune_{};
     std::string mlss_use_specific_ops_{};
-    // Ordered read-only problem-cache paths (app override, then DLL-adjacent shipped).
+    // Ordered read-only problem-cache paths (app override, then DLL-adjacent shipped),
+    // JSON-escaped for backend-option delivery.
     std::vector<std::string> problem_cache_paths_{};
     std::string model_arch_{};
     bool int8_calibration_cache_available_{};
