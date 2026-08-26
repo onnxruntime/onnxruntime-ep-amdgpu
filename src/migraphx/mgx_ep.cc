@@ -1119,6 +1119,11 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     // coalesce_io is off; coalesce_io routes inputs through the pinned staging
     // arena and is therefore mutually exclusive with the direct-bind path.
     compute_state.use_direct_hip_graph = hip_graph_enable_ && !coalesce_io_enable_;
+    // Item 1 hybrid: with coalesce_io on, inputs stay coalesced but outputs are
+    // bound directly to ORT tensors (drift-checked), skipping the staging->ORT D2D
+    // copies.  Re-set each call so a transient-drift disable can recover; a sustained
+    // drift keeps hybrid_recapture_count past the cap, holding it on the staging path.
+    compute_state.hybrid_output_enable = hip_graph_enable_ && coalesce_io_enable_;
     compute_state.static_pad_seq = static_pad_seq_;
     compute_state.static_pad_seq_len = static_pad_seq_len_;
     compute_state.static_pad_seq_len_from_env = static_pad_seq_len_from_env_;
@@ -1423,17 +1428,35 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // lowest-index input), so the batch is resolved without a second traversal.
     std::vector<std::int64_t> current_input_shapes;
     current_input_shapes.reserve(input_name_indices.size() * 4);
+    // Item 6: raw input data pointers for this call (indexed by ORT input index),
+    // reused by the coalesced input copy so it does not call GetInput a second time
+    // for every input.  Cleared to nullptr so any index the scan skips stays unset.
+    compute_state.cur_input_data.assign(input_name_indices.size(), nullptr);
+    // Item 5: reused across inputs -- each input's dims are read into this buffer via
+    // the (non-deprecated) C API instead of allocating a fresh vector per input as
+    // TensorTypeAndShapeInfo::GetShape() would on every one of the 200+ inputs.
+    std::vector<std::int64_t> dims;
     const bool track_batch{compute_state.max_dynamic_batch > 0};
     bool have_batch_min{false};
     std::size_t batch_min_index{0};
     std::size_t requested_batch{0};
     for (const auto& [name, index] : input_name_indices) {
-        const auto shape{kernel_context.GetInput(index).GetTensorTypeAndShapeInfo().GetShape()};
-        current_input_shapes.insert(current_input_shapes.end(), shape.begin(), shape.end());
-        if (track_batch && !shape.empty() && (!have_batch_min || index < batch_min_index)) {
+        const auto input_value{kernel_context.GetInput(index)};
+        const auto info{input_value.GetTensorTypeAndShapeInfo()};
+        const OrtTensorTypeAndShapeInfo* info_handle{info};
+        const std::size_t rank{info.GetDimensionsCount()};
+        dims.resize(rank);
+        if (rank > 0) {
+            Ort::ThrowOnError(Ort::GetApi().GetDimensions(info_handle, dims.data(), rank));
+        }
+        current_input_shapes.insert(current_input_shapes.end(), dims.begin(), dims.end());
+        if (index < compute_state.cur_input_data.size()) {
+            compute_state.cur_input_data[index] = input_value.GetTensorRawData();
+        }
+        if (track_batch && rank > 0 && (!have_batch_min || index < batch_min_index)) {
             have_batch_min = true;
             batch_min_index = index;
-            requested_batch = static_cast<std::size_t>(shape.front());
+            requested_batch = static_cast<std::size_t>(dims.front());
         }
     }
     if (track_batch && requested_batch > 0) {
@@ -1669,7 +1692,8 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             const auto scratch{GetOrAllocScratchCached(compute_state, dbc, shape_key, hip_stream)};
 
             RunProgramOrHipGraphDirect(compute_state, hip_stream, kernel_context, program,
-                dbc, shape_key, scratch, dyn);
+                dbc, shape_key, scratch, dyn,
+                compute_state.use_direct_hip_graph, compute_state.direct_recapture_count);
             // Async by default: stream-ordered work is ordered by OnSessionRunEnd;
             // legacy full-drain is gated (see FinishComputeStream).
             RETURN_IF_ERROR(FinishComputeStream(hip_stream));
@@ -1699,9 +1723,40 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         }
         auto& bind{bind_it->second};
         CopyInputsToStaging(compute_state, bind, kernel_context, hip_stream, dyn, seq);
-        RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
-            bind.params, bind.prog_output_indices, shape_key, dyn);
-        CopyStagingOutputsToOrt(compute_state, bind, kernel_context, hip_stream, dyn, seq);
+
+        // Item 1 (hybrid direct-bound outputs): when this call needs no padding, bind
+        // the program outputs directly to the ORT tensors (drift-checked) and skip the
+        // per-output staging->ORT D2D copies entirely.  Inputs are already coalesced
+        // into the (pointer-stable) arena, so cur_input_ptrs never drift and only the
+        // ORT output pointers are gathered + drift-checked here.  Reuses the direct
+        // path's capture/replay/drift machinery with the hybrid's own enable flag +
+        // recapture counter; on ineligibility or sustained output drift it falls back
+        // to the staging copy path below.  Padding disqualifies the hybrid because the
+        // program writes target-batch/target-len rows that the staging path must slice
+        // down to the requested shape.
+        const bool no_padding{
+            (!dyn.active || dyn.target_batch == dyn.requested_batch) &&
+            (!seq.active || seq.target_len == seq.real_len)};
+        if (compute_state.hybrid_output_enable && no_padding && bind.hybrid.eligible &&
+            compute_state.staging_inputs_coalesced) {
+            auto& hyb{bind.hybrid};
+            hyb.cur_output_ptrs.resize(hyb.outputs.size());
+            for (std::size_t i{0}; i < hyb.outputs.size(); ++i) {
+                const auto& out{hyb.outputs[i]};
+                auto output_tensor{kernel_context.GetOutput(out.output_index,
+                    out.ort_shape.data(), out.ort_shape.size())};
+                hyb.cur_output_ptrs[i] = output_tensor.GetTensorMutableRawData();
+            }
+            // cur_input_ptrs are the arena sub-views resolved once in BindStagingParams.
+            const auto scratch{GetOrAllocScratchCached(compute_state, hyb, shape_key, hip_stream)};
+            RunProgramOrHipGraphDirect(compute_state, hip_stream, kernel_context, program,
+                hyb, shape_key, scratch, dyn,
+                compute_state.hybrid_output_enable, compute_state.hybrid_recapture_count);
+        } else {
+            RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
+                bind, shape_key, dyn);
+            CopyStagingOutputsToOrt(bind, kernel_context, hip_stream, dyn, seq);
+        }
         // Async by default: the stream-ordered D2H fetch plus the per-Run
         // OnSessionRunEnd sync order the read. Legacy full-drain is gated (see
         // FinishComputeStream / env_var::kLegacyComputeSync).

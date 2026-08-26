@@ -112,7 +112,9 @@ StagingBindResult BindStagingParams(ComputeState& cs,
 // Copy staging output buffers back into the ORT output tensors, slicing batched
 // outputs down to the requested batch when dynamic batching is active, and slicing
 // named outputs down to real_len on their token axis when static seq-padding is active.
-void CopyStagingOutputsToOrt(ComputeState& cs, const StagingBindResult& bind,
+// The per-output staging source pointer is read from bind.bound_output_data (resolved
+// once by BindStagingParams), so no per-call staging_outputs map lookup is needed.
+void CopyStagingOutputsToOrt(const StagingBindResult& bind,
     const Ort::KernelContext& ctx, hipStream_t stream,
     const DynamicBatchContext& dyn,
     const StaticSeqContext& seq);
@@ -130,33 +132,38 @@ void FreeStaging(ComputeState& cs, hipStream_t stream);
 void DestroyHipGraphs(ComputeState& cs);
 
 // Dispatch a program run: replay a cached hipGraph for shape_key, capture one
-// on first use, or fall back to an eager run if capture fails.  `params` must
-// already be bound to staging buffers/scratch and inputs already staged.
+// on first use, or fall back to an eager run if capture fails.  `bind.params` must
+// already be bound to staging buffers/scratch and inputs already staged.  The
+// captured-graph and scratch-slot pointers are cached on `bind` after the first
+// call so steady-state replay does no hip_graph_cache / scratch_bufs lookups.
 // Extra (non-pre-bound) outputs are materialized into ORT after the launch.
 void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
     const Ort::KernelContext& ctx,
     migraphx::program& program,
-    migraphx::program_parameters& params,
-    const std::vector<std::size_t>& prog_output_indices,
+    StagingBindResult& bind,
     ShapeKey shape_key,
     const DynamicBatchContext& dyn);
 
-// Direct-bind (zero-copy) dispatch: replay a cached hipGraph captured against
-// ORT tensor pointers, capture one on first use, or fall back to eager on
-// pointer drift.  No per-input H2D/D2D staging copy is performed.  The caller
-// fills `dbc.cur_input_ptrs`/`cur_output_ptrs` with the current ORT device
-// pointers (in `dbc.inputs`/`outputs` order); these are compared positionally
-// against the captured graph's pointers on every replay.  `dbc.params` is
-// (re)bound here only when a capture or eager run is needed -- the steady-state
-// replay never touches it.  A drift mismatch re-captures, and repeated drift
-// disables the direct path for the session.  Requires that no batch/seq padding
-// is needed for this call (the caller guarantees this).
+// Direct-bind (zero-copy) dispatch: replay a cached hipGraph captured against the
+// device pointers in `dbc`, capture one on first use, or fall back to eager on
+// pointer drift.  The caller fills `dbc.cur_input_ptrs`/`cur_output_ptrs` with the
+// current device pointers (in `dbc.inputs`/`outputs` order); these are compared
+// positionally against the captured graph's pointers on every replay.  `dbc.params`
+// is (re)bound here only when a capture or eager run is needed -- the steady-state
+// replay never touches it.  A drift mismatch re-captures, and repeated drift flips
+// `enable_flag` false (per-session disable) using `recapture_count`.  Requires that
+// no batch/seq padding is needed for this call (the caller guarantees this).
+// Two callers share this: the pure-direct path (ORT input+output pointers, no
+// staging copy) and the coalesced hybrid (item 1: arena input pointers + ORT output
+// pointers), each passing its own enable flag + recapture counter.
 void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
     const Ort::KernelContext& ctx,
     migraphx::program& program,
     DirectBindCache& dbc,
     ShapeKey shape_key,
     const std::optional<ScratchBindInfo>& scratch,
-    const DynamicBatchContext& dyn);
+    const DynamicBatchContext& dyn,
+    bool& enable_flag,
+    int& recapture_count);
 
 }  // namespace mgx_ep

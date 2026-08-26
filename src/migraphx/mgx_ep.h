@@ -113,6 +113,10 @@ struct CapturedHipGraph {
     // Output buffers (ptr + bytes) that must be zeroed before every replay
     // because some captured kernels read-modify-write their output.
     std::vector<std::pair<void*, std::size_t>> captured_output_zeroes{};
+    // When true (item 7), the pre-replay zeroing (scratch + the RMW outputs above)
+    // was folded into the captured graph, so replay is a single launch and the
+    // out-of-graph memsets are skipped.  Reset on every (re)capture.
+    bool zeroing_in_graph{false};
 
     // ── Direct-bind hipGraph (zero-copy) metadata ────────────────────────────
     // When direct_bind is true the graph was captured against ORT tensor
@@ -143,19 +147,6 @@ struct StagingInputBind {
     std::vector<std::size_t> prog_lens{};    // program-shape lengths (padding math)
     std::size_t element_size{};              // prog_bytes / product(prog_lens) (padding math)
     std::string name{};                      // parameter name (seq-axis lookup, padding path only)
-};
-
-// Result of binding staging buffers (and the EP-owned scratch) as program
-// parameters for a given compiled shape.  Cached per shape hash in ComputeState:
-// staging buffers and scratch are pointer-stable until FreeStaging, so a binding
-// built once can be replayed unchanged instead of rebuilt every Compute call.
-struct StagingBindResult {
-    migraphx::program_parameters params{};
-    std::vector<std::size_t> prog_output_indices{};       // ORT output index per bound output
-    std::vector<std::string> bound_output_names{};        // staging key per bound output
-    std::vector<migraphx::shape> bound_output_shapes{};   // current bucket shape per bound output
-    std::vector<std::vector<std::int64_t>> bound_output_ort_shapes{};  // bucket ORT shape (int64) per bound output
-    std::vector<StagingInputBind> input_copies{};         // flat per-input copy plan (built once)
 };
 
 // ── Direct-bind ultra-fast binding cache ─────────────────────────────────────
@@ -198,8 +189,11 @@ struct DirectBindCache {
     migraphx::shape scratch_shape{};
     // ORT output indices in `outputs` order; constant per shape, built once.
     std::vector<std::size_t> prog_output_indices{};
-    // Current ORT device pointers gathered each call (inputs/outputs order).
-    // Reused across calls so the hot path does no per-call heap allocation.
+    // Current device pointers gathered each call (inputs/outputs order).  Reused
+    // across calls so the hot path does no per-call heap allocation.  For the pure
+    // direct path these are ORT tensor pointers; for the coalesced hybrid (item 1)
+    // cur_input_ptrs are the pointer-stable arena sub-views (set once, never drift)
+    // and only cur_output_ptrs are ORT pointers gathered + drift-checked per call.
     std::vector<void*> cur_input_ptrs{};
     std::vector<void*> cur_output_ptrs{};
     // Resolved pointers into the ComputeState maps (this shape's captured graph and
@@ -212,6 +206,38 @@ struct DirectBindCache {
     // is (re)set on each capture; a null `graph` forces the (cold) capture path.
     CapturedHipGraph* graph{nullptr};
     ScratchBuffer* scratch_slot{nullptr};
+};
+
+// Result of binding staging buffers (and the EP-owned scratch) as program
+// parameters for a given compiled shape.  Cached per shape hash in ComputeState:
+// staging buffers and scratch are pointer-stable until FreeStaging, so a binding
+// built once can be replayed unchanged instead of rebuilt every Compute call.
+struct StagingBindResult {
+    migraphx::program_parameters params{};
+    std::vector<std::size_t> prog_output_indices{};       // ORT output index per bound output
+    std::vector<std::string> bound_output_names{};        // staging key per bound output
+    std::vector<migraphx::shape> bound_output_shapes{};   // current bucket shape per bound output
+    std::vector<std::vector<std::int64_t>> bound_output_ort_shapes{};  // bucket ORT shape (int64) per bound output
+    std::vector<void*> bound_output_data{};               // staging src ptr per bound output (resolved once)
+    std::vector<StagingInputBind> input_copies{};         // flat per-input copy plan (built once)
+
+    // Resolved pointers into the ComputeState maps for this shape's captured graph
+    // and scratch slot, so the steady-state replay skips re-searching hip_graph_cache
+    // and scratch_bufs with the same key every call.  Same stability invariant as
+    // DirectBindCache: scratch_bufs entries are never erased mid-session, and
+    // hip_graph_cache is only cleared by DestroyHipGraphs -- which runs together with
+    // FreeStaging (staging_bind_cache.clear()), dropping this bind too.  `graph` is
+    // (re)set on capture; a null `graph` forces the (cold) capture path.
+    CapturedHipGraph* graph{nullptr};
+    ScratchBuffer* scratch_slot{nullptr};
+
+    // Item 1 (hybrid): when this shape has no padding, outputs can be bound directly
+    // to the ORT tensors (drift-checked) while inputs stay coalesced in the arena,
+    // eliminating the per-output staging->ORT D2D copies.  Built once by
+    // BindStagingParams; hybrid.cur_input_ptrs are the (pointer-stable) arena
+    // sub-views, so only the ORT output pointers are gathered + drift-checked per
+    // call.  Ineligible (extra/unbound params) -> the staging copy path is used.
+    DirectBindCache hybrid{};
 };
 
 // Integer key for the per-shape hot caches (direct_bind_cache, hip_graph_cache,
@@ -271,6 +297,14 @@ struct ComputeState {
     // exceeds kMaxDirectRecaptures the direct path is disabled for the session.
     static constexpr int kMaxDirectRecaptures{3};
     int direct_recapture_count{};
+
+    // Hybrid direct-bound outputs (item 1): the dual of use_direct_hip_graph for the
+    // coalesce_io path -- inputs stay coalesced in the arena, but outputs are bound
+    // directly to the ORT tensors (drift-checked) so the per-output staging->ORT D2D
+    // copies are skipped.  Enabled when hipGraph is on and coalesce_io is on.  Uses
+    // its own recapture counter so drift here does not disturb the pure-direct path.
+    bool hybrid_output_enable{};
+    int hybrid_recapture_count{};
 
     // ── Direct-bind ultra-fast binding cache (keyed by shape hash) ────────────
     // Populated once per compiled shape; the hot path rebinds ORT pointers into
@@ -341,6 +375,10 @@ struct ComputeState {
     std::vector<std::int64_t> last_input_shapes{};
     hash::Value last_input_shapes_hash{};
     bool has_last_input_shapes{};
+    // Raw input data pointers gathered during the per-call input-shape scan (indexed
+    // by ORT input index), reused so the coalesced input copy does not have to call
+    // GetInput a second time for every input.  Rewritten on every Compute call.
+    std::vector<const void*> cur_input_data{};
 
     // Program parameter shapes keyed by shape hash, so each bucket keeps its shapes
     // and the hot path skips the get_parameter_shapes() rebuild. Dropped per-hash on
