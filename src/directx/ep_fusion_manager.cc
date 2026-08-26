@@ -263,7 +263,7 @@ void EpFusionManager::ApplyFusions(
         std::sort(node_ids.begin(), node_ids.end());
         const size_t group_hash = HashNodeIds(node_ids);
 
-        OrtNodeFusionOptions fusion_options{ORT_API_VERSION, true};
+        OrtNodeFusionOptions fusion_options{NegotiatedOrtApiVersion(), true};
         OrtStatus* st = ep_api.EpGraphSupportInfo_AddNodesToFuse(
             graph_support_info,
             nodes_to_fuse.data(),

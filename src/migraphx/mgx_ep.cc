@@ -33,6 +33,8 @@
 #include "mgx_ep_ctx.h"
 #include "mgx_hip_graph.h"
 #include "mgx_info.h"
+#include "mgx_precompile.h"
+#include "mgx_program_ops.h"
 #include "mgx_utils.h"
 
 namespace mgx_ep {
@@ -430,7 +432,7 @@ void* GetGpuInputData(ComputeState& cs, const Ort::KernelContext& ctx, const std
     }
 
 ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string_view ep_name, Ort::ConstSessionOptions session_options, const Ort::Logger& logger)
-    : OrtEp{ORT_API_VERSION}, ApiPtrs{factory.ort_api, factory.ep_api, factory.model_editor_api}, factory_{factory}, logger_{logger}, ep_name_{ep_name}
+    : OrtEp{NegotiatedOrtApiVersion()}, ApiPtrs{factory.ort_api, factory.ep_api, factory.model_editor_api}, factory_{factory}, logger_{logger}, ep_name_{ep_name}
 {
     OrtEp::GetName = [](const OrtEp* this_) noexcept {
         API_CALL_T(const ExecutionProvider, this_, GetName, "invalid object pointer");
@@ -519,6 +521,7 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     hip_graph_enable_ = info.hip_graph_enable;
     max_dynamic_batch_ = info.max_dynamic_batch;
     compile_batches_ = info.compile_batches;
+    precompile_at_load_ = info.precompile_at_load;
     coalesce_io_enable_ = info.coalesce_io;
     cpu_control_flow_enable_ = info.cpu_control_flow;
     static_pad_seq_ = info.static_pad_seq;
@@ -546,6 +549,7 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kHipGraphEnable, hip_graph_enable_);
     PARSE_ENV_VAR(env_var::kMaxDynamicBatch, max_dynamic_batch_);
     PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
+    PARSE_ENV_VAR(env_var::kPrecompileAtLoad, precompile_at_load_);
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
     PARSE_ENV_VAR(env_var::kStaticPadSeq, static_pad_seq_);
     // Not PARSE_ENV_VAR: we need to know whether the value was given, not just what it is.
@@ -796,7 +800,7 @@ try {
         if (!ep_context_nodes.empty()) {
             // EPContext nodes must be fused (not added as single nodes) so that
             // ORT routes them through Compile() instead of looking for a kernel
-            OrtNodeFusionOptions node_fusion_options{ORT_API_VERSION, true};
+            OrtNodeFusionOptions node_fusion_options{NegotiatedOrtApiVersion(), true};
             RETURN_IF_STATUS(ep_api.EpGraphSupportInfo_AddNodesToFuse(graph_support_info,
                 reinterpret_cast<const OrtNode* const*>(ep_context_nodes.data()),
                 ep_context_nodes.size(), &node_fusion_options));
@@ -842,7 +846,7 @@ try {
         supported_nodes.emplace_back(node);
     }
     if (unsupported_nodes.empty()) {
-        OrtNodeFusionOptions node_fusion_options{ORT_API_VERSION, true};
+        OrtNodeFusionOptions node_fusion_options{NegotiatedOrtApiVersion(), true};
         RETURN_IF_STATUS(ep_api.EpGraphSupportInfo_AddNodesToFuse(graph_support_info,
             reinterpret_cast<const OrtNode* const*>(supported_nodes.data()), supported_nodes.size(),
             &node_fusion_options));
@@ -850,7 +854,7 @@ try {
         const auto subgraphs{GetPartitionedSubgraphs(sorted_nodes, unsupported_nodes)};
         /* TODO: log unsupported nodes */
         for (const auto& subgraph : subgraphs) {
-            OrtNodeFusionOptions node_fusion_options{ORT_API_VERSION, true};
+            OrtNodeFusionOptions node_fusion_options{NegotiatedOrtApiVersion(), true};
             RETURN_IF_STATUS(ep_api.EpGraphSupportInfo_AddNodesToFuse(graph_support_info,
                 reinterpret_cast<const OrtNode* const*>(subgraph.data()), subgraph.size(),
                 &node_fusion_options));
@@ -905,112 +909,7 @@ bool get_input_output_names(const Ort::Graph& graph, std::vector<std::string>& i
         });
 }
 
-bool load_compiled_program(migraphx::program& prog, const fs::path& path)
-try {
-    if (!path.empty() && exists(path)) {
-        prog = migraphx::load(path.string().c_str());
-        return true;
-    }
-    return false;
-} catch (const std::exception&) {
-    return false;
-}
-
-void save_compiled_program(const migraphx::program& prog, const fs::path& path) {
-    if (!path.empty()) {
-        migraphx::file_options options;
-        options.set_file_format("msgpack");
-        migraphx::save(prog, path.string().c_str(), options);
-    }
-}
-
-void calibrate_and_quantize(const migraphx::program& prog, const migraphx::target& target,
-    const migraphx::program_parameters& params,
-    bool fp16_enable, bool bf16_enable, bool int8_enable, bool fp8_enable, bool int8_calibration_cache_available,
-    const std::unordered_map<std::string, float>& dynamic_range_map)
-{
-    if ((int8_enable ^ fp8_enable) && int8_calibration_cache_available) {
-        const auto param_shapes{prog.get_parameter_shapes()};
-        for (const auto& [key, value] : dynamic_range_map) {
-            const auto shape{migraphx::shape(migraphx_shape_float_type)};
-            params.add(key.c_str(), migraphx::argument(shape, const_cast<float*>(&value)));
-        }
-        if (int8_enable) {
-            migraphx::quantize_int8_options options;
-            options.add_calibration_data(params);
-            options.add_op_name("convolution");
-            options.add_op_name("dot");
-            migraphx::quantize_int8(prog, target, options);
-        } else if (fp8_enable) {
-            migraphx::quantize_fp8_options options;
-            options.add_calibration_data(params);
-            migraphx::quantize_fp8(prog, target, options);
-        }
-    }
-    if (fp16_enable) {
-        migraphx::quantize_fp16(prog);
-    }
-    if (bf16_enable) {
-        migraphx::quantize_bf16(prog);
-    }
-}
-
-// JSON-escape backslashes and double-quotes so a file path survives the relaxed-JSON
-// backend-options parser as a quoted string.
-static std::string json_escape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 8);
-    for (char c : s) {
-        if (c == '\\' || c == '"') {
-            out.push_back('\\');
-        }
-        out.push_back(c);
-    }
-    return out;
-}
-
-void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune,
-    const std::string& mlss_use_specific_ops, const std::vector<std::string>& problem_cache_paths) {
-    migraphx::compile_options options;
-    options.set_fast_math(false);
-    options.set_exhaustive_tune_flag(exhaustive_tune);
-    // Deliver the ordered read-only cache files as the "read_only_problem_cache_files" GPU
-    // backend option (system-level/shipped caches that must never be written back). Build the
-    // JSON explicitly with quoted, escaped paths: the typed set_advance_backend_option streams
-    // values unquoted, and the relaxed-JSON parser would shred ':' and '\\' in a path. Passed
-    // as a %s arg so any '%' in a path is not a format specifier. MIGraphX builds with the
-    // problem-cache feature consume the key; older ignore it.
-    if (!problem_cache_paths.empty()) {
-        std::string json = "{\"read_only_problem_cache_files\":[";
-        for (std::size_t i = 0; i < problem_cache_paths.size(); ++i) {
-            if (i != 0) {
-                json += ",";
-            }
-            json += "\"" + json_escape(problem_cache_paths[i]) + "\"";
-        }
-        json += "]}";
-        options.set_advance_backend_options("%s", json.c_str());
-    }
-    if (!mlss_use_specific_ops.empty()) {
-        // MIGraphX expects a list of op names; split the comma-separated value.
-        std::vector<std::string> ops;
-        std::string_view rest{mlss_use_specific_ops};
-        while (!rest.empty()) {
-            const auto pos{rest.find(',')};
-            if (const auto op{rest.substr(0, pos)}; !op.empty()) {
-                ops.emplace_back(op);
-            }
-            if (pos == std::string_view::npos) {
-                break;
-            }
-            rest.remove_prefix(pos + 1);
-        }
-        options.set_advance_backend_option("mlss_use_specific_ops", ops);
-    }
-    prog.compile(target, options);
-}
-
-}  // namespace <anonymous>
+}  // namespace
 
 void ExecutionProvider::CollectTelemetry(telemetry::BackendData& out) const noexcept {
     out = backend_telemetry_;
@@ -1061,6 +960,12 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     migraphx::program program;
     migraphx::onnx_options onnx_options;
 
+    const PrecompilePlan pre_plan = (!static_pad_seq_ && !context_enable_) ?
+        BuildPrecompilePlan(graph, fused_node, input_name_indices, max_dynamic_batch_, compile_batches_) :
+        PrecompilePlan{false, false, {}, {}};
+    const auto& [pre_eligible, pre_bucketed, pre_batch_sizes, pre_shapes_by_name] = pre_plan;
+    const bool use_plan_cache{pre_eligible && !effective_cache_dir.empty()};
+
     std::string input_shapes_hash_hex;
     if (has_input_shape) {
         hash::Value input_shapes_hash{};
@@ -1070,6 +975,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         }
         input_shapes_hash_hex = hash::ToHex(input_shapes_hash);
 
+        if (!use_plan_cache) {
         fs::path mxr_path;
         if (!effective_cache_dir.empty()) {
             mxr_path = effective_cache_dir / (mxr_prefix + input_shapes_hash_hex + ".mxr");
@@ -1093,6 +999,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         const auto output_shapes{program.get_output_shapes()};
         for (const auto& [n, s] : zip(output_names, output_shapes)) {
             onnx_options.set_input_parameter_shape(n, s.lengths());
+        }
         }
     }
 
@@ -1166,6 +1073,43 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         if (compute_state.static_pad_input_axes.empty()) {
             compute_state.static_pad_seq = false;
         }
+    }
+
+    if (max_dynamic_batch_ > 0 || !compile_batches_.empty()) {
+        compute_state.has_dynamic_batch = max_dynamic_batch_ > 0;
+        compute_state.compiled_batch_sizes = GenerateCompiledBatchSizes(
+            max_dynamic_batch_, compile_batches_);
+    }
+
+    compute_state.defer_compilation = true;
+    if (use_plan_cache) {
+        RETURN_IF_ERROR(PreloadMxrPrograms(pre_plan, input_name_indices, compute_state.cached_programs,
+            force_recompile_, effective_cache_dir, mxr_prefix));
+        if (precompile_at_load_) {
+            RETURN_IF_ERROR(CompileMissingPrograms(pre_plan, input_name_indices, onnx_string,
+                compute_state.cached_programs, t_, enable_fp16_, enable_bf16_, enable_int8_, enable_fp8_,
+                int8_calibration_cache_available_, dynamic_ranges_, exhaustive_tune_, mlss_use_specific_ops_,
+                problem_cache_paths_, disable_compiled_model_caching_, model_path, external_data_dir_, effective_cache_dir, mxr_prefix));
+        }
+        if (!compute_state.cached_programs.empty()) {
+            compute_state.program = SelectDefaultProgram(compute_state.cached_programs, pre_bucketed,
+                pre_batch_sizes, pre_shapes_by_name, input_name_indices);
+            if (pre_bucketed) {
+                compute_state.compiled_batch_sizes = pre_batch_sizes;
+                compute_state.has_dynamic_batch = true;
+            } else {
+                compute_state.has_input_shapes = true;
+                const auto output_shapes{compute_state.program.get_output_shapes()};
+                for (const auto& [n, s] : zip(output_names, output_shapes)) {
+                    compute_state.onnx_options.set_input_parameter_shape(n, s.lengths());
+                }
+            }
+            backend_telemetry_.loaded_from_cache = true;
+        }
+        compute_state.defer_compilation = AnyPlannedTargetMissing(pre_plan, input_name_indices,
+            compute_state.cached_programs);
+    } else if (has_input_shape && program.get_parameter_shapes().size() > 0) {
+        compute_state.defer_compilation = false;
     }
 
     node_compute_info = std::make_unique<NodeComputeInfo>(*this).release();
@@ -1486,16 +1430,11 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         const std::string current_hash{hash::ToHex(input_shapes_hash)};
         bool loaded_from_cache{false};
 
-        if (dyn.active) {
-            // Bounded bucket set: reuse a previously compiled bucket program to keep
-            // it (and its captured graph) alive and avoid recompilation when batch
-            // sizes alternate between buckets.
-            if (const auto cit{compute_state.cached_programs.find(current_hash)};
-                cit != compute_state.cached_programs.end()) {
-                program = cit->second;
-                loaded_from_cache = true;
-            }
-        } else if (compute_state.hip_graph_enable) {
+        if (const auto cit{compute_state.cached_programs.find(current_hash)};
+            cit != compute_state.cached_programs.end()) {
+            program = cit->second;
+            loaded_from_cache = true;
+        } else if (compute_state.hip_graph_enable && !dyn.active) {
             // Unbounded dynamic-shape (e.g. LLM) path: keep only the current shape's
             // graph/staging, so invalidate before the program changes.
             DestroyHipGraphs(compute_state);
@@ -1545,9 +1484,9 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 save_compiled_program(program, mxr_path);
             }
         }
-            // Keep a copy of the freshly compiled bucket program so it (and any
-            // graph captured against it) survives later bucket switches.
-            if (dyn.active) {
+            // Keep a copy of the freshly compiled program so it (and any graph
+            // captured against it) survives later shape/bucket switches.
+            if (dyn.active || !compute_state.defer_compilation) {
                 compute_state.cached_programs.emplace(current_hash, program);
             }
             // The program for this hash was (re)built, so any binding cached

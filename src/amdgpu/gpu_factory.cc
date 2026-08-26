@@ -53,7 +53,7 @@ constexpr auto hipBackend{LIBRARY_PREFIX ORT_TSTR("hip-backend") LIBRARY_SUFFIX}
 }
 
 ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_api_base, const char* ep_name, const OrtLogger* default_logger)
-    : OrtEpFactory{ORT_API_VERSION}, ApiPtrs{api_ptrs}, default_logger_{default_logger}, ep_name_{ep_name}
+    : OrtEpFactory{NegotiatedOrtApiVersion()}, ApiPtrs{api_ptrs}, default_logger_{default_logger}, ep_name_{ep_name}
 {
     OrtEpFactory::GetName = [](const OrtEpFactory* this_) noexcept {
         API_CALL_T(const ProviderFactory, this_, GetName, "invalid object pointer");
@@ -197,12 +197,30 @@ ProviderFactory::~ProviderFactory() {
         ort_api.ReleaseMemoryInfo(pinned_memory_info_);
     }
 #ifdef USE_DML
+    if (dml_ep_factory_ != nullptr && dml_release_ep_factory_ != nullptr) {
+        if (OrtStatus* status = dml_release_ep_factory_(dml_ep_factory_)) {
+            ort_api.ReleaseStatus(status);
+        }
+        dml_ep_factory_ = nullptr;
+    }
     if (!UnloadDynamicLibrary(dml_backend_).IsOK()) {
         /* TODO: log failure while unloading DirectML EP library */
     }
 #endif
+    if (mgx_ep_factory_ != nullptr && mgx_release_ep_factory_ != nullptr) {
+        if (OrtStatus* status = mgx_release_ep_factory_(mgx_ep_factory_)) {
+            ort_api.ReleaseStatus(status);
+        }
+        mgx_ep_factory_ = nullptr;
+    }
     if (!UnloadDynamicLibrary(mgx_backend_).IsOK()) {
         /* TODO: log failure while unloading MIGraphX EP library */
+    }
+    if (hip_ep_factory_ != nullptr && hip_release_ep_factory_ != nullptr) {
+        if (OrtStatus* status = hip_release_ep_factory_(hip_ep_factory_)) {
+            ort_api.ReleaseStatus(status);
+        }
+        hip_ep_factory_ = nullptr;
     }
     if (!UnloadDynamicLibrary(hip_backend_).IsOK()) {
         /* TODO: log failure while unloading hip EP library */
@@ -421,7 +439,11 @@ OrtStatus* CreateEpFactories(const char* registration_name, const OrtApiBase* or
             SetDllDirectoryW(path.parent_path().native().c_str());
         }
 #endif
-        const OrtApi* ort_api{ort_api_base->GetApi(ORT_API_VERSION)};
+        const OrtApi* ort_api{NegotiateOrtApi(*ort_api_base, kMinOrtApiVersion)};
+        if (ort_api == nullptr) {
+            RETURN_STATUS(ORT_EP_FAIL, "onnxruntime runtime too old: amdgpu-ep requires ORT API >= ",
+                kMinOrtApiVersion);
+        }
         const OrtEpApi* ep_api{ort_api->GetEpApi()};
         const OrtModelEditorApi* model_editor_api{ort_api->GetModelEditorApi()};
 

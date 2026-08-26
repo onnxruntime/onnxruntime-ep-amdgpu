@@ -3181,7 +3181,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
 
         // Construct OrtKernelImpl
         OrtKernelImpl* impl = new (memory) OrtKernelImpl();
-        impl->ort_version_supported = ORT_API_VERSION;
+        impl->ort_version_supported = NegotiatedOrtApiVersion();
         impl->flags = 0;
         impl->Compute = DmlAbiKernel_Compute;
         impl->Release = DmlAbiKernel_Release;

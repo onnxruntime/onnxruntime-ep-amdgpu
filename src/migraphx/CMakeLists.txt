@@ -19,6 +19,10 @@ add_library(migraphx-ep MODULE
         mgx_hip_graph.h
         mgx_info.cc
         mgx_info.h
+        mgx_precompile.cc
+        mgx_precompile.h
+        mgx_program_ops.cc
+        mgx_program_ops.h
         mgx_interop.cc
         mgx_interop.h
         mgx_kernel_reg.cc
@@ -30,7 +34,17 @@ add_library(migraphx-ep MODULE
 
 target_link_libraries(migraphx-ep PRIVATE migraphx::c hip-shared flatbuffers)
 
+if(MSVC)
+    target_link_options(migraphx-ep PRIVATE "/DELAYLOAD:amdhip64_7.dll")
+    target_link_libraries(migraphx-ep PRIVATE delayimp)
+endif()
+
 if(WIN32)
+    # Compile directly into the DLL so the linker cannot discard DllMain from
+    # the plugin-ep-utils static library.
+    target_sources(migraphx-ep PRIVATE
+            ${PROJECT_SOURCE_DIR}/src/shared/common/platform/windows/dll_main.cc)
+
     set_property(TARGET migraphx-ep APPEND_STRING
             PROPERTY LINK_FLAGS /DEF:${PROJECT_SOURCE_DIR}/src/migraphx/symbols.def)
 

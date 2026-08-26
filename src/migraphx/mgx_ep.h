@@ -45,6 +45,7 @@ constexpr auto kProblemCachePath = "ORT_MIGRAPHX_PROBLEM_CACHE"sv;
 constexpr auto kHipGraphEnable = "ORT_MIGRAPHX_HIP_GRAPH_ENABLE"sv;
 constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
 constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
+constexpr auto kPrecompileAtLoad = "ORT_MIGRAPHX_PRECOMPILE_AT_LOAD"sv;
 constexpr auto kCoalesceIO = "ORT_MIGRAPHX_COALESCE_IO"sv;
 constexpr auto kMlssUseSpecificOps = "ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS"sv;
 constexpr auto kCpuControlFlow = "ORT_MIGRAPHX_CPU_CONTROL_FLOW"sv;
@@ -313,6 +314,7 @@ private:
     bool hip_graph_enable_{};
     std::size_t max_dynamic_batch_{};
     std::string compile_batches_{};
+    bool precompile_at_load_{};
     bool coalesce_io_enable_{};
     bool cpu_control_flow_enable_{};
     bool static_pad_seq_{};
@@ -326,7 +328,7 @@ private:
 
 struct NodeComputeInfo : OrtNodeComputeInfo {
     explicit NodeComputeInfo(ExecutionProvider& ep)
-        : OrtNodeComputeInfo{ORT_API_VERSION}, ep_{ep}
+        : OrtNodeComputeInfo{NegotiatedOrtApiVersion()}, ep_{ep}
     {
         OrtNodeComputeInfo::CreateState = [](OrtNodeComputeInfo* this_,
             OrtNodeComputeContext* compute_context, void** compute_state) noexcept {
@@ -352,7 +354,7 @@ private:
 
 struct EpContextNodeComputeInfo : OrtNodeComputeInfo {
     explicit EpContextNodeComputeInfo(ExecutionProvider& ep)
-        : OrtNodeComputeInfo{ORT_API_VERSION}, ep_{ep}
+        : OrtNodeComputeInfo{NegotiatedOrtApiVersion()}, ep_{ep}
     {
         OrtNodeComputeInfo::CreateState = [](OrtNodeComputeInfo* this_,
             OrtNodeComputeContext* compute_context, void** compute_state) noexcept {

@@ -46,7 +46,7 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     Microsoft::WRL::ComPtr<ExecutionContext> executionContext,
     std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder,
     bool enableHostAccessible)
-    : OrtEp{ORT_API_VERSION}
+    : OrtEp{NegotiatedOrtApiVersion()}
     , ApiPtrs{api_ptrs}
     , name_{name}
     , d3d12_device{d3d12_device_}
@@ -67,6 +67,13 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     OrtEp::GetCompiledModelCompatibilityInfo = GetCompiledModelCompatibilityInfoImpl;
     OrtEp::GetKernelRegistry = GetKernelRegistryImpl;
     IsConcurrentRunSupported = IsConcurrentRunSupportedImpl;
+
+    //// OrtEp::OnSessionInitializationEnd is a v27 callback. Only advertise it when the
+    //// runtime can drive it; on older runtimes it stays null (aggregate-initialized) and
+    //// OnRunStartImpl performs the one-time post-init trim as a fallback instead.
+    //if (NegotiatedOrtApiVersion() >= kSessionInitEndApiVersion) {
+    //    OrtEp::OnSessionInitializationEnd = OnSessionInitializationEndImpl;
+    //}
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS4 featureOptions = {};
     if (SUCCEEDED(d3d12_device->CheckFeatureSupport(
@@ -515,7 +522,7 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
 
         adapter->internal_kernel = std::move(op_kernel);
         adapter->ort_api_ptr = state->ort_api_ptr;
-        adapter->ort_version_supported = ORT_API_VERSION;
+        adapter->ort_version_supported = NegotiatedOrtApiVersion();
         adapter->flags = 0;
         adapter->Compute = DmlKernelImplAdapter_Compute;
         adapter->Release = DmlKernelImplAdapter_Release;
@@ -658,9 +665,18 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         // Helper: check if a ValueInfo has missing or dynamic shape.
         auto HasDynamicShape = [&](const OrtValueInfo* vi) -> bool {
             if (!vi) return true;
-            // Check resolved_shapes first.
+            // A resolved_shapes entry counts as static only if every dim is > 0.
+            // An entry may still hold a placeholder dim (-1 or 0); such an entry is
+            // not authoritative, so fall through to the ValueInfo check below.
             auto name = fusion_utils::GetValueInfoName(ep->ort_api,vi);
-            if (!name.empty() && resolved_shapes.count(name)) return false;
+            if (!name.empty()) {
+                auto it = resolved_shapes.find(name);
+                if (it != resolved_shapes.end()) {
+                    bool all_static = !it->second.empty();
+                    for (int64_t d : it->second) if (d <= 0) { all_static = false; break; }
+                    if (all_static) return false;
+                }
+            }
             auto* ti = vi->GetTypeInfo();
             if (!ti || !ti->tensor_type_info) return true;
             auto* si = ti->tensor_type_info.get();
@@ -786,7 +802,11 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
 
     ep->m_tier0GroupHashes.clear();
 
-    if (AllGraphInputsStatic(ep->ort_api, graph)) {
+    // Tier-0 fusion runs for all models, including those with dynamic input dims.
+    // Eligibility is decided per-group: Phase 1 resolves shapes to a fixpoint, Phase 2
+    // cuts partitions at dynamic-shape boundaries, and Phase 3 skips any group that
+    // fails ValidateTier0 — so a whole-route static-input gate is unnecessary.
+    {
         OpTranslatorRegistry tier0_registry = BuildOpTranslatorRegistry();
 
         // ===================================================================
@@ -1325,7 +1345,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
             }
             DML_PERF_LOG("[Tier0] CLAIM: group passed pre-flight (", g.nodes.size(), " nodes)\n");
 
-            OrtNodeFusionOptions fusion_options{ORT_API_VERSION, true};
+            OrtNodeFusionOptions fusion_options{NegotiatedOrtApiVersion(), true};
             OrtStatus* st = ep->ep_api.EpGraphSupportInfo_AddNodesToFuse(
                 graph_support_info,
                 g.nodes.data(),
@@ -1348,7 +1368,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
             if (st) ep->ort_api.ReleaseStatus(st);
         }
 
-    } // end if (AllGraphInputsStatic)
+    } // end Tier-0 route
     } // end scope for helpers (GetStaticDims, HasDynamicShape, etc.)
 
     // Update m_resolvedShapes with shapes accumulated from successful
@@ -1583,7 +1603,12 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::OnRunStartImpl(
 {
     auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
 
-    ep->m_executionProvider->OnSessionInitializationEnd();
+    // On runtimes older than v27 ORT does not call OrtEp::OnSessionInitializationEnd,
+    // so run the one-time post-init trim here (idempotent via m_sessionInitialized).
+    // On v27+ the wired callback already handled it before the first run.
+    //if (NegotiatedOrtApiVersion() < kSessionInitEndApiVersion) {
+        ep->m_executionProvider->OnSessionInitializationEnd();
+    //}
 
     ep->m_executionProvider.get()->OnRunStart(*run_options);
     return nullptr;
@@ -1902,7 +1927,6 @@ std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const O
                 ort_api.Node_GetNumOutputs(candidateNode, &nodeNumOutputs);
                 valueInfo.resize(nodeNumOutputs);
                 ort_api.Node_GetOutputs(candidateNode, valueInfo.data(), nodeNumOutputs);
-
 
                 for (auto* output : valueInfo) {
                     cpu_output_args.insert(output);
