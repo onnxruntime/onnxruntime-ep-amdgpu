@@ -56,10 +56,10 @@ inline bool is_webnn(const std::optional<std::string>& model_fw) {
 // or Optimized) is honored/dispatched as-is. In Auto mode, in priority order:
 //   1. WebNN caller                   -> DirectML (browser/WebNN compatibility carve-out, all ASICs)
 //   2. kArchModelBackend (arch prefix + model_arch) override, if any row matches
-//   3. HIP-enabled gfx1151 + LLM      -> Hip
-//   4. Medusa gfx117x                 -> DirectML
-//   5. gfx11 and newer                -> MIGraphX
-//   6. everything below gfx11 (gfx9/gfx10) -> DirectML
+//   3. HIP-enabled gfx1151 + present model_arch -> Hip
+//      (OGA gen/LLM hint; any non-empty value, including future families. Not a kLlmModelArch scan.)
+//   4. gfx11 and newer                -> MIGraphX (includes Medusa gfx117x)
+//   5. everything below gfx11 (gfx9/gfx10) -> DirectML
 inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_hash, bool is_webnn,
                               Profile profile) {
     if (profile != Profile::Auto) {
@@ -78,9 +78,8 @@ inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_has
     // 3. Strix Halo LLMs use the HIP backend when it is included in this build.
     if (starts_with(gfx, "gfx1151") && arch_model_hash == fnv1a("llm")) return Profile::Hip;
 #endif
-    // 4-6. Prefix buckets (order matters: gfx117x before the general gfx11x).
-    if (starts_with(gfx, "gfx117")) return Profile::DirectX;  // Medusa MDS1/MDS2 (temporary)
-    if (starts_with(gfx, "gfx11")) return Profile::MIGraphX;   // RDNA3 / RDNA3.5
+    // 4-5. Prefix buckets. gfx117 (Medusa) is gfx11, so it uses MIGraphX with the rest of RDNA3.5.
+    if (starts_with(gfx, "gfx11")) return Profile::MIGraphX;   // RDNA3 / RDNA3.5 (incl. Medusa)
     if (starts_with(gfx, "gfx12")) return Profile::MIGraphX;   // RDNA4
     return Profile::DirectX;                                   // pre-gfx11 (gfx9/gfx10)
 }
