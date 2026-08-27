@@ -42,13 +42,13 @@ std::optional<ComputeMode> ParseComputeMode(const std::string_view value) {
     std::string lower{value};
     std::transform(lower.begin(), lower.end(), lower.begin(),
         [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (lower == "eager" || lower == "0") {
+    if (lower == "eager") {
         return ComputeMode::Eager;
     }
-    if (lower == "balanced" || lower == "50") {
+    if (lower == "balanced") {
         return ComputeMode::Balanced;
     }
-    if (lower == "maximum" || lower == "100") {
+    if (lower == "maximum") {
         return ComputeMode::Maximum;
     }
     return std::nullopt;
