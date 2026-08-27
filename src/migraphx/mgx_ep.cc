@@ -472,15 +472,14 @@ void* GetGpuInputData(ComputeState& cs, const Ort::KernelContext& ctx, const std
 // the program parameters once, recording each input's (name, ORT index, shape),
 // each output's (name, ORT index, shape), and whether a "scratch" parameter is
 // present (plus its shape) so the hot path can rebind and allocate scratch without
-// per-call name lookups, dtype checks, or a scratch scan.  Returns whether the shape
-// is eligible
-// for the direct-bind path: every input must be device-resident (a host input
-// has no stable device pointer to bake into the graph) and its dtype must match
-// the program.  A non-input, non-output, non-"scratch" parameter also makes the
-// shape ineligible (it falls back to the staging path).  Device residency and
-// dtype are assumed stable across calls for a given shape (as they are under
-// Triton io-binding), matching the built-in EP's populate-once design.
-bool PopulateDirectCaches(DirectBindCache& dbc, const Ort::KernelContext& ctx,
+// per-call name lookups or a scratch scan.  Any parameter that is not an input,
+// output, or "scratch" is simply skipped, as in the built-in EP -- the direct path
+// is taken whenever it is configured (no per-shape eligibility gate).  Inputs are
+// recorded straight from the program's parameter shapes (name, ORT index,
+// mgx_shape) with no ORT tensor introspection: under Triton's GPU-first io-binding
+// they are device-resident and their dtype matches the compiled program by
+// construction, mirroring the built-in EP's populate-once design.
+void PopulateDirectCaches(DirectBindCache& dbc,
     const migraphx::program_parameter_shapes& param_shapes,
     const Map<std::size_t>& input_name_indices)
 {
@@ -489,19 +488,9 @@ bool PopulateDirectCaches(DirectBindCache& dbc, const Ort::KernelContext& ctx,
     dbc.inputs.reserve(input_name_indices.size());
     dbc.has_scratch = false;
 
-    bool eligible{true};
     for (std::string name : param_shapes.names()) {
         if (const auto it{input_name_indices.find(name)}; it != input_name_indices.end()) {
             const auto prog_shape{param_shapes[name.c_str()]};
-            const auto input_tensor{ctx.GetInput(it->second)};
-            if (input_tensor.GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
-                eligible = false;  // host input -> no device pointer to bind
-            }
-            migraphx_shape_datatype_t datatype;
-            GetMIGraphXType(input_tensor.GetTensorTypeAndShapeInfo().GetElementType(), datatype);
-            if (datatype != prog_shape.type()) {
-                eligible = false;
-            }
             dbc.inputs.push_back(CachedDirectInput{std::move(name), it->second, prog_shape});
         } else if (std::string_view{name} == "scratch") {
             // Bound separately each call (pointer-stable EP-owned buffer).  Record
@@ -515,11 +504,8 @@ bool PopulateDirectCaches(DirectBindCache& dbc, const Ort::KernelContext& ctx,
             std::vector<std::int64_t> ort_shape{lens.begin(), lens.end()};
             dbc.outputs.push_back(CachedDirectOutput{
                 std::move(name), static_cast<std::size_t>(oi), prog_shape, std::move(ort_shape)});
-        } else {
-            eligible = false;  // unbound/unknown parameter -> use staging path
         }
     }
-    return eligible;
 }
 
 }  // namespace
@@ -1642,12 +1628,12 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // ── Direct-bind (zero-copy) hipGraph fast path ────────────────────────────
     // Bind ORT input/output tensor pointers straight into the program and
     // capture/replay a hipGraph with no staging copies, matching the built-in
-    // EP's use_direct_hip_graph path.  Only taken when every input is
-    // device-resident (a host input has no stable device pointer to bake into
-    // the graph) and no batch/seq padding is needed.  Any disqualifying case
-    // falls through to the staging path below; sustained ORT pointer drift
-    // disables the direct path at runtime (see RunProgramOrHipGraphDirect), which
-    // also lands on the staging path.
+    // EP's use_direct_hip_graph path.  Inputs are assumed device-resident
+    // (Triton's GPU-first io-binding hands the EP device pointers); this path is
+    // gated here only on no batch/seq padding.  Any disqualifying case falls
+    // through to the staging path below; sustained ORT pointer drift disables the
+    // direct path at runtime (see RunProgramOrHipGraphDirect), which also lands on
+    // the staging path.
     if (compute_state.use_direct_hip_graph && !needs_padding && param_shapes.size() > 0) {
         const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
 
@@ -1657,8 +1643,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         auto dbc_it{compute_state.direct_bind_cache.find(shape_key)};
         if (dbc_it == compute_state.direct_bind_cache.end()) {
             DirectBindCache dbc;
-            dbc.eligible = PopulateDirectCaches(dbc, kernel_context,
-                param_shapes, input_name_indices);
+            PopulateDirectCaches(dbc, param_shapes, input_name_indices);
             // ORT output indices are constant per shape -- build once here.
             dbc.prog_output_indices.reserve(dbc.outputs.size());
             for (const auto& out : dbc.outputs) {
@@ -1668,39 +1653,35 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         }
         auto& dbc{dbc_it->second};
 
-        if (dbc.eligible) {
-            // Gather the current ORT device pointers into reused flat vectors (no
-            // per-call maps, string hashing, or program_parameters.add(): those are
-            // deferred to the capture/eager path).  Order matches dbc.inputs/outputs
-            // so RunProgramOrHipGraphDirect can compare them positionally for drift.
-            dbc.cur_input_ptrs.resize(dbc.inputs.size());
-            for (std::size_t i{0}; i < dbc.inputs.size(); ++i) {
-                dbc.cur_input_ptrs[i] = const_cast<void*>(
-                    kernel_context.GetInput(dbc.inputs[i].ort_index).GetTensorRawData());
-            }
-            dbc.cur_output_ptrs.resize(dbc.outputs.size());
-            for (std::size_t i{0}; i < dbc.outputs.size(); ++i) {
-                const auto& out{dbc.outputs[i]};
-                auto output_tensor{kernel_context.GetOutput(out.output_index,
-                    out.ort_shape.data(), out.ort_shape.size())};
-                dbc.cur_output_ptrs[i] = output_tensor.GetTensorMutableRawData();
-            }
-            // EP-owned scratch (allocate-and-zero on first use, zero thereafter).
-            // Presence + shape were resolved once in PopulateDirectCaches, and the
-            // scratch_bufs slot is cached on the dbc, so this does no scan and (after
-            // the first call) no map lookup.
-            const auto scratch{GetOrAllocScratchCached(compute_state, dbc, shape_key, hip_stream)};
-
-            RunProgramOrHipGraphDirect(compute_state, hip_stream, kernel_context, program,
-                dbc, shape_key, scratch, dyn,
-                compute_state.use_direct_hip_graph, compute_state.direct_recapture_count);
-            // Async by default: stream-ordered work is ordered by OnSessionRunEnd;
-            // legacy full-drain is gated (see FinishComputeStream).
-            RETURN_IF_ERROR(FinishComputeStream(hip_stream));
-            return STATUS_OK;
+        // Gather the current ORT device pointers into reused flat vectors (no
+        // per-call maps, string hashing, or program_parameters.add(): those are
+        // deferred to the capture/eager path).  Order matches dbc.inputs/outputs
+        // so RunProgramOrHipGraphDirect can compare them positionally for drift.
+        dbc.cur_input_ptrs.resize(dbc.inputs.size());
+        for (std::size_t i{0}; i < dbc.inputs.size(); ++i) {
+            dbc.cur_input_ptrs[i] = const_cast<void*>(
+                kernel_context.GetInput(dbc.inputs[i].ort_index).GetTensorRawData());
         }
-        // Not eligible for direct-bind (host-resident input, dtype mismatch, or
-        // an unbound parameter) -> fall through to the staging path below.
+        dbc.cur_output_ptrs.resize(dbc.outputs.size());
+        for (std::size_t i{0}; i < dbc.outputs.size(); ++i) {
+            const auto& out{dbc.outputs[i]};
+            auto output_tensor{kernel_context.GetOutput(out.output_index,
+                out.ort_shape.data(), out.ort_shape.size())};
+            dbc.cur_output_ptrs[i] = output_tensor.GetTensorMutableRawData();
+        }
+        // EP-owned scratch (allocate-and-zero on first use, zero thereafter).
+        // Presence + shape were resolved once in PopulateDirectCaches, and the
+        // scratch_bufs slot is cached on the dbc, so this does no scan and (after
+        // the first call) no map lookup.
+        const auto scratch{GetOrAllocScratchCached(compute_state, dbc, shape_key, hip_stream)};
+
+        RunProgramOrHipGraphDirect(compute_state, hip_stream, kernel_context, program,
+            dbc, shape_key, scratch, dyn,
+            compute_state.use_direct_hip_graph, compute_state.direct_recapture_count);
+        // Async by default: stream-ordered work is ordered by OnSessionRunEnd;
+        // legacy full-drain is gated (see FinishComputeStream).
+        RETURN_IF_ERROR(FinishComputeStream(hip_stream));
+        return STATUS_OK;
     }
 
     // Staging path: required for hipGraph capture (pointer stability) and for

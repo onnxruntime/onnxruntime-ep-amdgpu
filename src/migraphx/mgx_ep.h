@@ -174,9 +174,10 @@ struct CachedDirectOutput {
 // compares them positionally against the captured graph's pointers.  `params` is
 // (re)bound lazily -- only when a capture or eager run is actually needed -- since
 // the steady-state replay path uses the captured graph directly and never reads
-// `params`.  `eligible` is false when the shape cannot use direct-bind (a
-// host-resident input, dtype mismatch, or an unbound parameter), in which case
-// the call falls through to the staging path.
+// `params`.  `eligible` is used only by the hybrid staging binding
+// (StagingBindResult::hybrid) to mark whether outputs can be bound directly to ORT
+// tensors; the standalone direct_bind_cache does not gate on it (the direct path is
+// taken whenever use_direct_hip_graph is set and there is no padding).
 struct DirectBindCache {
     std::vector<CachedDirectInput> inputs{};
     std::vector<CachedDirectOutput> outputs{};
