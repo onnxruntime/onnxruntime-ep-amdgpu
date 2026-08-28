@@ -1418,6 +1418,10 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // reused by the coalesced input copy so it does not call GetInput a second time
     // for every input.  Cleared to nullptr so any index the scan skips stays unset.
     compute_state.cur_input_data.assign(input_name_indices.size(), nullptr);
+    // Per-input dim counts in iteration order, so the shape-changed rehash below can
+    // slice current_input_shapes by a running offset instead of re-fetching shapes.
+    compute_state.cur_input_ranks.clear();
+    compute_state.cur_input_ranks.reserve(input_name_indices.size());
     // Item 5: reused across inputs -- each input's dims are read into this buffer via
     // the (non-deprecated) C API instead of allocating a fresh vector per input as
     // TensorTypeAndShapeInfo::GetShape() would on every one of the 200+ inputs.
@@ -1436,6 +1440,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             Ort::ThrowOnError(Ort::GetApi().GetDimensions(info_handle, dims.data(), rank));
         }
         current_input_shapes.insert(current_input_shapes.end(), dims.begin(), dims.end());
+        compute_state.cur_input_ranks.push_back(static_cast<std::uint32_t>(rank));
         if (index < compute_state.cur_input_data.size()) {
             compute_state.cur_input_data[index] = input_value.GetTensorRawData();
         }
@@ -1462,50 +1467,57 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         input_shapes_hash = compute_state.last_input_shapes_hash;
         input_shapes_match = true;
     } else if (!compute_state.has_input_shapes) {
+        // First call: seed the shapes hash.  onnx_options input parameter shapes are
+        // set on the (rare) parse path below -- its only consumer -- so the common
+        // cache-hit paths never pay for it.
         for (auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
             auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape(), name)};
-            onnx_options.set_input_parameter_shape(name, {shape.begin(), shape.end()});
             hash::Hash(input_shapes_hash, shape);
         }
         compute_state.has_input_shapes = true;
     } else {
-        // Compare against the currently-active program's shapes to decide whether a
-        // recompile is needed; local since that program may not be the one that runs.
-        const auto param_shapes{program.get_parameter_shapes()};
-
-        // check whether input shapes match with shapes of program inputs
-        if (param_shapes.size() > 0) {
-            for (const auto& name : param_shapes.names()) {
-                if (input_name_indices.count(name) > 0) {
-                    auto value{kernel_context.GetInput(input_name_indices.at(name))};
-                    auto shape{value.GetTensorTypeAndShapeInfo().GetShape()};
-                    auto prog_shape{param_shapes[name]};
-                    auto prog_lengths{prog_shape.lengths()};
-                    auto prog_strides{prog_shape.strides()};
-                    if (prog_lengths.size() == 1 && prog_lengths.front() == 1 &&
-                        prog_strides.size() == 1 && prog_strides.front() == 0) {
-                        prog_lengths.clear();
-                    }
-                    const auto eff{effective_shape(shape, name)};
-                    std::vector<size_t> lengths{eff.begin(), eff.end()};
-                    if (prog_lengths != lengths) {
-                        onnx_options.set_input_parameter_shape(name, lengths);
-                        input_shapes_match = false;
+        // Shapes changed from the previous call.  Whether the currently-active program
+        // still matches is decided by a single shape-key compare after the hash (see
+        // active_program_shape_key below) rather than by re-deriving and comparing
+        // every parameter shape -- the old path called program.get_parameter_shapes()
+        // and re-fetched each input's shape via the allocating GetShape() on every
+        // alternating request.  A real mismatch is resolved by the recompile block,
+        // which locates the program by hash (or builds it, setting onnx_options).
+        //
+        // Compute the hash over all model inputs, consistent with the first-call path.
+        //
+        // Reuse the raw dims already gathered in current_input_shapes (via the
+        // alloc-free C-API scan) instead of re-fetching each input's shape through
+        // the allocating GetShape()/effective_shape()/Hash-copy path.  The effective
+        // transform (batch bucket-up, seq pad-up) is applied in place into the reused
+        // `dims` buffer and hashed over a span, so this shape-changed rehash does no
+        // per-input heap allocation.  Walks input_name_indices in the same order the
+        // scan filled current_input_shapes (aligned by cur_input_ranks + a running
+        // offset), and stays byte-identical to the first-call hash above -- same int64
+        // values, same per-input murmur chaining -- so both paths agree on the key.
+        std::size_t shape_off{0};
+        std::size_t rank_idx{0};
+        for (const auto& [name, index] : input_name_indices) {
+            const std::size_t rank{compute_state.cur_input_ranks[rank_idx++]};
+            dims.assign(current_input_shapes.begin() + shape_off,
+                        current_input_shapes.begin() + shape_off + rank);
+            shape_off += rank;
+            if (dyn.active && rank > 0 &&
+                static_cast<std::size_t>(dims.front()) == dyn.requested_batch) {
+                dims.front() = static_cast<std::int64_t>(dyn.target_batch);
+            }
+            if (seq.active && seq.input_axes != nullptr) {
+                if (const auto it{seq.input_axes->find(name)}; it != seq.input_axes->end()) {
+                    const int axis{it->second};
+                    if (axis >= 0 && static_cast<std::size_t>(axis) < rank &&
+                        static_cast<std::size_t>(dims[axis]) == seq.real_len) {
+                        dims[axis] = static_cast<std::int64_t>(seq.target_len);
                     }
                 }
             }
-        }
-
-        // Compute hash over all model inputs, consistent with the first-call path.
-        // The shape comparison above iterates param_shapes.names() which may be a
-        // subset of input_name_indices if MIGraphX optimized away parameters during
-        // compilation. Using input_name_indices ensures the cache key is identical
-        // for identical input shapes regardless of which program is currently active.
-        for (const auto& [name, index] : input_name_indices) {
-            auto value{kernel_context.GetInput(index)};
-            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape(), name)};
-            hash::Hash(input_shapes_hash, shape);
+            hash::Hash(input_shapes_hash,
+                gsl::span<const std::int64_t>{dims.data(), dims.size()});
         }
     }
 
@@ -1514,6 +1526,17 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // by the recompile invalidation, the param-shapes lookup, and the direct/staging
     // paths, so none of them build a hex string or hash a string key per call.
     const ShapeKey shape_key{ShapeKeyOf(input_shapes_hash)};
+
+    // Decide whether the active program already matches this call's shapes with a
+    // single integer compare against the key it was compiled for.  shapes_unchanged
+    // already set the flag true; the first call leaves it false (has_input_shapes was
+    // false) so the program is compiled below and its key recorded.  A shape change
+    // that no longer matches drops into the recompile block, which swaps in (or
+    // builds) the right program and updates the key.
+    if (!shapes_unchanged && input_shapes_match) {
+        input_shapes_match = compute_state.has_active_program_shape_key &&
+                             shape_key == compute_state.active_program_shape_key;
+    }
 
     // Pin this (possibly pool-owned) thread to the EP's GPU for the rest of Compute:
     // deferred (re)compilation below loads code objects and every run branch launches
@@ -1553,6 +1576,17 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             const auto external_data_dir{compute_state.external_data_dir.empty() ?
                 compute_state.model_path.parent_path() : compute_state.external_data_dir};
             onnx_options.set_external_data_path(external_data_dir.string());
+            // Populate onnx_options with this call's (effective) input parameter
+            // shapes before parsing.  This was formerly done incrementally by the
+            // per-parameter compare loop; with the match check now a single key
+            // compare, set them here on the rare parse path only (parse_onnx_buffer
+            // is the sole consumer of onnx_options).
+            for (const auto& [pname, pindex] : input_name_indices) {
+                const auto pvalue{kernel_context.GetInput(pindex)};
+                const auto pshape{effective_shape(
+                    pvalue.GetTensorTypeAndShapeInfo().GetShape(), pname)};
+                onnx_options.set_input_parameter_shape(pname, {pshape.begin(), pshape.end()});
+            }
             program = migraphx::parse_onnx_buffer(compute_state.onnx_string, onnx_options);
             // Pre-compile shapes, for calibration only.
             const auto calib_param_shapes{program.get_parameter_shapes()};
@@ -1598,6 +1632,10 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
             compute_state.direct_bind_cache.erase(shape_key);
             compute_state.cached_param_shapes.erase(shape_key);
         }
+        // The active program now matches this call's shapes (loaded from cache or
+        // freshly compiled); record its key for the next call's single-compare check.
+        compute_state.active_program_shape_key = shape_key;
+        compute_state.has_active_program_shape_key = true;
     }
 
     // Bind param_shapes for the program that will run this call (cached per hash;

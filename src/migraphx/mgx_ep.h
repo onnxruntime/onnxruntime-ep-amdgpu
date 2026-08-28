@@ -376,10 +376,24 @@ struct ComputeState {
     std::vector<std::int64_t> last_input_shapes{};
     hash::Value last_input_shapes_hash{};
     bool has_last_input_shapes{};
+    // Shape key the currently-active `program` was compiled/loaded for.  The
+    // shape-changed path decides "does the active program already match?" with one
+    // integer compare against this, instead of re-deriving and comparing every
+    // parameter shape (which called get_parameter_shapes() and re-fetched each
+    // input's shape via GetShape() on every alternating request).  Set whenever
+    // `program` is (re)compiled or swapped in from the cache.
+    ShapeKey active_program_shape_key{};
+    bool has_active_program_shape_key{};
     // Raw input data pointers gathered during the per-call input-shape scan (indexed
     // by ORT input index), reused so the coalesced input copy does not have to call
     // GetInput a second time for every input.  Rewritten on every Compute call.
     std::vector<const void*> cur_input_data{};
+    // Per-input dim counts recorded during the same scan, in input_name_indices
+    // iteration order (parallel to how current_input_shapes is concatenated).  Lets
+    // the shape-changed rehash walk current_input_shapes by a running offset instead
+    // of re-fetching every input's shape through the allocating GetShape() path.
+    // Rewritten on every Compute call.
+    std::vector<std::uint32_t> cur_input_ranks{};
 
     // Program parameter shapes keyed by shape hash, so each bucket keeps its shapes
     // and the hot path skips the get_parameter_shapes() rebuild. Dropped per-hash on
