@@ -36,20 +36,24 @@ ProviderOptions ApplyLegacyOptionAliases(const ProviderOptions& options) {
     return normalized;
 }
 
+// Accepted spellings of the compute_mode option, matched against the
+// lowercased input so the option is case-insensitive.
+constexpr std::pair<std::string_view, ComputeMode> kComputeModeNames[] = {
+    {"eager", ComputeMode::Eager},
+    {"balanced", ComputeMode::Balanced},
+    {"maximum", ComputeMode::Maximum},
+};
+
 }  // namespace
 
 std::optional<ComputeMode> ParseComputeMode(const std::string_view value) {
     std::string lower{value};
     std::transform(lower.begin(), lower.end(), lower.begin(),
         [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (lower == "eager") {
-        return ComputeMode::Eager;
-    }
-    if (lower == "balanced") {
-        return ComputeMode::Balanced;
-    }
-    if (lower == "maximum") {
-        return ComputeMode::Maximum;
+    for (const auto& [name, mode] : kComputeModeNames) {
+        if (lower == name) {
+            return mode;
+        }
     }
     return std::nullopt;
 }
