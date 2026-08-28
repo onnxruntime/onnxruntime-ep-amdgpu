@@ -6,6 +6,7 @@
 #include <charconv>
 #include <cstdio>
 #include <optional>
+#include <regex>
 #include <set>
 #include <string>
 #include <string_view>
@@ -697,15 +698,8 @@ static std::optional<fs::path> this_module_dir() {
 // JSON-escape backslashes and double-quotes so a file path survives the relaxed-JSON
 // backend-options parser as a quoted string.
 static std::string json_escape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (char c : s) {
-        if (c == '\\' || c == '"') {
-            out.push_back('\\');
-        }
-        out.push_back(c);
-    }
-    return out;
+    static const std::regex escape_chars{R"([\\"])"};
+    return std::regex_replace(s, escape_chars, R"(\$&)");  // $& = the matched backslash or quote
 }
 
 void ExecutionProvider::setup_problem_cache_paths() {
