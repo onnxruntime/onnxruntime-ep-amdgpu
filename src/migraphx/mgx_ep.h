@@ -337,13 +337,6 @@ struct ComputeState {
     void* in_arena_dev{nullptr};
     void* in_staging_host{nullptr};
     std::size_t in_arena_bytes{};
-    // Coalesce eligibility (every input host-resident) is stable for a given
-    // deployment: a caller such as Triton binds each input to the same memory type
-    // on every call, so the single-H2D fast path either always qualifies or never
-    // does.  Determine it once and reuse it instead of rescanning N inputs with
-    // GetTensorMemoryInfo each inference.  Reset by FreeStaging (structural change).
-    enum class CoalesceResidency : std::uint8_t { kUnknown, kAllHost, kHasDevice };
-    CoalesceResidency coalesce_residency{CoalesceResidency::kUnknown};
 
     // ── hipGraph / staging / scratch runtime state (owned device memory) ──────
     // Staging buffers keyed by MIGraphX program parameter name.

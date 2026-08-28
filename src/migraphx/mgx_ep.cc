@@ -5,6 +5,7 @@
 #include <array>
 #include <charconv>
 #include <cstdio>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -1321,8 +1322,27 @@ try {
     return Ort::Status{e.what(), ORT_EP_FAIL};
 }
 
-Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::KernelContext& kernel_context) noexcept
-    try {
+namespace {
+
+// Resolved once per Compute call and threaded to each mechanism path so the
+// direct / staging / eager branches never re-read shapes or re-derive the batch.
+struct ComputeIOInfo {
+    DynamicBatchContext dyn{};
+    StaticSeqContext seq{};
+    ShapeKey shape_key{};
+    bool needs_padding{false};
+    const migraphx::program_parameter_shapes* param_shapes{nullptr};
+    hipStream_t hip_stream{nullptr};  // ORT compute stream, resolved once per call
+};
+
+// Cache-tier stage: gather the input shapes once, resolve dynamic-batch / seq
+// padding, then hash and look up (or compile) the program for this shape,
+// recording everything the mechanism paths need into `io`.  This collapses the
+// built-in EP's ultra-fast / fast / standard tiers into a single deterministic
+// pass so no mechanism path re-reads shapes.  Throws on failure (the Compute
+// function-try-block converts it to a Status).
+Ort::Status ResolveComputeIO(ComputeState& compute_state,
+    const Ort::KernelContext& kernel_context, ComputeIOInfo& io) {
     const auto& input_name_indices{compute_state.input_name_indices};
     auto& program{compute_state.program};
     auto& onnx_options{compute_state.onnx_options};
@@ -1509,12 +1529,6 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                              shape_key == compute_state.active_program_shape_key;
     }
 
-    // Pin this (possibly pool-owned) thread to the EP's GPU for the rest of Compute:
-    // deferred (re)compilation below loads code objects and every run branch launches
-    // kernels, all of which must target compute_state.device_id.  Set once here (only
-    // if the thread isn't already on it) rather than before each branch.
-    const HipDeviceGuard dev_guard{compute_state.device_id};
-
     // Shapes differ from the active program (e.g. LLMs / bucket switch): look up the
     // program for this shape by its integer key, or (re)compile it.
     if (!input_shapes_match) {
@@ -1629,17 +1643,33 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     const bool needs_seq_pad{seq.active && seq.target_len > seq.real_len};
     const bool needs_padding{needs_batch_pad || needs_seq_pad};
 
-    // ── Direct-bind (zero-copy) hipGraph fast path ────────────────────────────
-    // Bind ORT input/output tensor pointers straight into the program and
-    // capture/replay a hipGraph with no staging copies, matching the built-in
-    // EP's use_direct_hip_graph path.  Inputs are assumed device-resident
-    // (Triton's GPU-first io-binding hands the EP device pointers); this path is
-    // gated here only on no batch/seq padding.  Any disqualifying case falls
-    // through to the staging path below; sustained ORT pointer drift disables the
-    // direct path at runtime (see RunProgramOrHipGraphDirect), which also lands on
-    // the staging path.
+    io.dyn = dyn;
+    io.seq = seq;
+    io.shape_key = shape_key;
+    io.needs_padding = needs_padding;
+    io.param_shapes = &param_shapes;
+    return STATUS_OK;
+}
+
+// Mechanism (built-in EP's use_direct_hip_graph): direct-bind (zero-copy)
+// hipGraph.  Bind ORT input/output tensor pointers straight into the program and
+// capture/replay with no staging copies.  Returns nullopt when this path does not
+// apply (fall through to staging); otherwise the terminal Status.  Inputs are
+// assumed device-resident (Triton's GPU-first io-binding hands the EP device
+// pointers); gated on no batch/seq padding.  Any disqualifying case falls through;
+// sustained ORT pointer drift disables the direct path at runtime (see
+// RunProgramOrHipGraphDirect), which also lands on the staging path.
+std::optional<Ort::Status> TryDirectBind(ComputeState& compute_state,
+    const Ort::KernelContext& kernel_context, const ComputeIOInfo& io) {
+    const auto& input_name_indices{compute_state.input_name_indices};
+    auto& program{compute_state.program};
+    const auto& param_shapes{*io.param_shapes};
+    const auto& dyn{io.dyn};
+    const auto shape_key{io.shape_key};
+    const bool needs_padding{io.needs_padding};
+
     if (compute_state.use_direct_hip_graph && !needs_padding && param_shapes.size() > 0) {
-        const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
+        const auto hip_stream{io.hip_stream};
 
         // Populate the binding cache once per compiled shape (keyed by hash), so
         // subsequent calls for the same shape -- and alternating dynamic-batch
@@ -1682,17 +1712,26 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         RunProgramOrHipGraphDirect(compute_state, hip_stream, kernel_context, program,
             dbc, shape_key, scratch, dyn,
             compute_state.use_direct_hip_graph, compute_state.direct_recapture_count);
-        // Async by default: stream-ordered work is ordered by OnSessionRunEnd;
-        // legacy full-drain is gated (see FinishComputeStream).
-        RETURN_IF_ERROR(FinishComputeStream(hip_stream));
         return STATUS_OK;
     }
+    return std::nullopt;
+}
 
-    // Staging path: required for hipGraph capture (pointer stability) and for
-    // dynamic batching (input padding / output slicing).  Stage I/O into EP-owned
-    // buffers, bind scratch, then replay/capture a graph or run eagerly
+// Mechanism (built-in EP's staging hipGraph path): stage I/O into EP-owned
+// buffers, bind scratch, then replay/capture a graph.  Required for hipGraph
+// capture (pointer stability) and for dynamic batching (input padding / output
+// slicing).  Returns nullopt when this path does not apply (fall through to
+// eager); otherwise the terminal Status.
+std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
+    const Ort::KernelContext& kernel_context, const ComputeIOInfo& io) {
+    auto& program{compute_state.program};
+    const auto& param_shapes{*io.param_shapes};
+    const auto& dyn{io.dyn};
+    const auto& seq{io.seq};
+    const auto shape_key{io.shape_key};
+
     if ((compute_state.hip_graph_enable || dyn.active || seq.active) && param_shapes.size() > 0) {
-        const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
+        const auto hip_stream{io.hip_stream};
         AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
         // Item 3: reuse a cached binding for this shape hash.  Staging buffers and
         // scratch are pointer-stable until FreeStaging, so binding once and replaying
@@ -1742,17 +1781,25 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 bind, shape_key, dyn);
             CopyStagingOutputsToOrt(bind, kernel_context, hip_stream, dyn, seq);
         }
-        // Async by default: the stream-ordered D2H fetch plus the per-Run
-        // OnSessionRunEnd sync order the read. Legacy full-drain is gated (see
-        // FinishComputeStream / env_var::kLegacyComputeSync).
-        RETURN_IF_ERROR(FinishComputeStream(hip_stream));
         return STATUS_OK;
     }
+    return std::nullopt;
+}
+
+// Mechanism (built-in EP's standard run): eager fallback with no hipGraph.  Build
+// program_parameters against the ORT tensors, run the program, and materialize any
+// extra outputs.  Terminal: the last path in the chain always runs and returns a
+// Status.
+Ort::Status RunEager(ComputeState& compute_state,
+    const Ort::KernelContext& kernel_context, const ComputeIOInfo& io) {
+    const auto& input_name_indices{compute_state.input_name_indices};
+    auto& program{compute_state.program};
+    const auto& param_shapes{*io.param_shapes};
 
     migraphx::program_parameters compute_params;
     auto output_shapes{program.get_output_shapes()};
     std::vector<size_t> output_indices;
-    const auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
+    const auto hip_stream{io.hip_stream};
     if (param_shapes.size() > 0) {
         for (std::string name : param_shapes.names()) {
             if (input_name_indices.count(name) > 0) {
@@ -1796,28 +1843,49 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         std::lock_guard lock{compute_state.mutex};
 
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-
-        if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
-            for (size_t i{}; i < output_size; ++i) {
-                if (ranges::find(output_indices, i) != output_indices.end()) {
-                    continue;
-                }
-                auto gpu_resource{prog_outputs[i]};
-                migraphx::shape resource_shape{gpu_resource.get_shape()};
-                auto resource_lengths{resource_shape.lengths()};
-                std::vector<int64_t> shapes{resource_lengths.begin(), resource_lengths.end()};
-                auto output_tensor{kernel_context.GetOutput(i, shapes)};
-                void* output_data{output_tensor.GetTensorMutableRawData()};
-                HIP_CALL_THROW(hipMemcpyWithStream(output_data, gpu_resource.data(), resource_shape.bytes(),
-                    hipMemcpyDeviceToDevice, hip_stream));
-            }
-        }
-        // Async by default: the stream-ordered D2H fetch plus the per-Run
-        // OnSessionRunEnd sync order the read. Legacy full-drain is gated (see
-        // FinishComputeStream / env_var::kLegacyComputeSync).
-        RETURN_IF_ERROR(FinishComputeStream(hip_stream));
+        CopyUnboundOutputsToOrt(kernel_context, hip_stream, prog_outputs, output_indices);
     }
     return STATUS_OK;
+}
+
+// Finalize a mechanism's result: propagate any error unchanged, otherwise finalize
+// the compute stream once (async no-op by default; drains only on the legacy gate /
+// null stream).  A free function so no closure is constructed per Compute call.
+Ort::Status FinalizeCompute(Ort::Status status, hipStream_t hip_stream) {
+    RETURN_IF_ERROR(std::move(status));
+    return FinishComputeStream(hip_stream);
+}
+
+}  // namespace
+
+// Orchestrator: resolve the shape / program once, then walk the mechanism chain.
+// Each Try* returns nullopt to fall through to the next mechanism; the first to
+// return a value (OK or error) is this call's terminal result.  The function-try
+// -block converts any exception thrown by a stage into a Status.
+Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state,
+    const Ort::KernelContext& kernel_context) noexcept
+try {
+    // Pin this (possibly pool-owned) thread to the EP's GPU for the whole call:
+    // (re)compilation loads code objects and every run branch launches kernels,
+    // all of which must target compute_state.device_id.  Set once here (only if
+    // the thread isn't already on it) rather than before each branch.
+    const HipDeviceGuard dev_guard{compute_state.device_id};
+
+    ComputeIOInfo io;
+    io.hip_stream = static_cast<hipStream_t>(kernel_context.GetGPUComputeStream());
+    RETURN_IF_ERROR(ResolveComputeIO(compute_state, kernel_context, io));
+
+    // Every mechanism issues stream-ordered work and hands back a Status; the stream
+    // is finalized once via FinalizeCompute (async no-op by default; drains only on the
+    // legacy gate or a null stream).  An early error short-circuits before the sync,
+    // matching the pre-refactor per-path behavior.
+    if (auto status{TryDirectBind(compute_state, kernel_context, io)}) {
+        return FinalizeCompute(std::move(*status), io.hip_stream);
+    }
+    if (auto status{TryStaging(compute_state, kernel_context, io)}) {
+        return FinalizeCompute(std::move(*status), io.hip_stream);
+    }
+    return FinalizeCompute(RunEager(compute_state, kernel_context, io), io.hip_stream);
 } catch (const Ort::Exception& e) {
     return Ort::Status{e};
 } catch (const std::exception& e) {

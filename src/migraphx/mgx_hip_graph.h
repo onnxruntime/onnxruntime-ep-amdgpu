@@ -166,4 +166,12 @@ void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
     bool& enable_flag,
     int& recapture_count);
 
+// Copy every program output whose index is NOT in `prog_output_indices` (i.e. the
+// non-pre-bound "extra" outputs, such as a KV cache) to its matching ORT output
+// tensor, device-to-device on `stream`.  These are the outputs the hipGraph replay
+// path would otherwise materialize; the eager run paths (staging / direct / no-graph)
+// share this to avoid three copies of the same gather-and-copy loop.
+void CopyUnboundOutputsToOrt(const Ort::KernelContext& ctx, hipStream_t stream,
+    migraphx::arguments& outputs, const std::vector<std::size_t>& prog_output_indices);
+
 }  // namespace mgx_ep
