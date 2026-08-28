@@ -241,18 +241,8 @@ struct StagingBindResult {
     DirectBindCache hybrid{};
 };
 
-// Integer key for the per-shape hot caches (direct_bind_cache, hip_graph_cache,
-// scratch_bufs, staging_bind_cache, cached_param_shapes).  Uses the same low 64
-// bits that hash::ToHex(input_shapes_hash) encodes, so the collision domain is
-// identical to the former hex-string key -- but keying the maps by the integer
-// avoids the per-call hex-string heap allocation and the string hashing that
-// each std::string-keyed lookup incurred.
-using ShapeKey = std::uint64_t;
-inline ShapeKey ShapeKeyOf(const hash::Value& v) {
-    // Cast before the shift: shifting a 32-bit value by 32 would be UB.  v.at(0)
-    // widens to uint64_t via operator| on its own.  Matches hash::ToHex(Value).
-    return v.at(0) | static_cast<std::uint64_t>(v.at(1)) << 32;
-}
+// Integer key for the per-shape hot caches: the low 64 bits of the shapes hash.
+using ShapeKey = hash::ShapeKey;
 
 struct ComputeState {
     std::mutex& mutex;
@@ -334,8 +324,9 @@ struct ComputeState {
     bool has_dynamic_batch{};
     bool defer_compilation{};
     std::vector<std::size_t> compiled_batch_sizes{};
-    // Compiled program variants keyed by shape/batch hash.
-    Map<migraphx::program> cached_programs{};
+    // Compiled program variants keyed by shape/batch hash (ShapeKey, so Compute
+    // looks one up by the integer key it already computed -- no hex string / find).
+    std::unordered_map<ShapeKey, migraphx::program> cached_programs{};
 
     // ── Coalesced input arena (ORT_MIGRAPHX_COALESCE_IO) ─────────────────────
     // When coalesce_io is set, every input staging buffer's data points into a
@@ -376,23 +367,15 @@ struct ComputeState {
     std::vector<std::int64_t> last_input_shapes{};
     hash::Value last_input_shapes_hash{};
     bool has_last_input_shapes{};
-    // Shape key the currently-active `program` was compiled/loaded for.  The
-    // shape-changed path decides "does the active program already match?" with one
-    // integer compare against this, instead of re-deriving and comparing every
-    // parameter shape (which called get_parameter_shapes() and re-fetched each
-    // input's shape via GetShape() on every alternating request).  Set whenever
-    // `program` is (re)compiled or swapped in from the cache.
+    // Shape key the active `program` was compiled/loaded for, so the shape-changed
+    // path matches with one integer compare.  Set on (re)compile or cache swap.
     ShapeKey active_program_shape_key{};
     bool has_active_program_shape_key{};
-    // Raw input data pointers gathered during the per-call input-shape scan (indexed
-    // by ORT input index), reused so the coalesced input copy does not have to call
-    // GetInput a second time for every input.  Rewritten on every Compute call.
+    // Raw input data pointers gathered during the per-call input-shape scan (by ORT
+    // input index), reused by the coalesced input copy.  Rewritten every call.
     std::vector<const void*> cur_input_data{};
-    // Per-input dim counts recorded during the same scan, in input_name_indices
-    // iteration order (parallel to how current_input_shapes is concatenated).  Lets
-    // the shape-changed rehash walk current_input_shapes by a running offset instead
-    // of re-fetching every input's shape through the allocating GetShape() path.
-    // Rewritten on every Compute call.
+    // Per-input dim counts from the same scan (input_name_indices order), letting the
+    // shape-changed rehash slice current_input_shapes by offset.  Rewritten every call.
     std::vector<std::uint32_t> cur_input_ranks{};
 
     // Program parameter shapes keyed by shape hash, so each bucket keeps its shapes

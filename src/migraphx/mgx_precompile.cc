@@ -82,21 +82,32 @@ PrecompilePlan ineligible_plan()
     return {false, false, {}, {}};
 }
 
-std::vector<std::pair<std::string, std::size_t>> build_plan_targets(bool bucketed,
+// key feeds cached_programs; hex names the .mxr file on disk.
+struct PlanTarget {
+    hash::ShapeKey key;
+    std::string hex;
+    std::size_t batch_size;
+};
+
+PlanTarget make_plan_target(const hash::Value& v, std::size_t batch_size)
+{
+    return {hash::ShapeKeyOf(v), hash::ToHex(v), batch_size};
+}
+
+std::vector<PlanTarget> build_plan_targets(bool bucketed,
     const std::vector<std::size_t>& batch_sizes, const Map<std::vector<std::int64_t>>& shapes_by_name,
     const Map<std::size_t>& input_name_indices)
 {
     if (bucketed) {
-        std::vector<std::pair<std::string, std::size_t>> targets;
+        std::vector<PlanTarget> targets;
         targets.reserve(batch_sizes.size());
         for (const auto batch_size : batch_sizes) {
-            targets.emplace_back(
-                ShapeHashHexForBucketBatch(input_name_indices, shapes_by_name, batch_size),
-                batch_size);
+            targets.push_back(make_plan_target(
+                ShapeHashForBucketBatch(input_name_indices, shapes_by_name, batch_size), batch_size));
         }
         return targets;
     }
-    return {{ShapeHashHexForStaticShapes(input_name_indices, shapes_by_name), 0}};
+    return {make_plan_target(ShapeHashForStaticShapes(input_name_indices, shapes_by_name), 0)};
 }
 
 }  // namespace
@@ -145,7 +156,7 @@ PrecompilePlan BuildPrecompilePlan(const Ort::ConstGraph& graph, const Ort::Cons
     return {true, false, std::move(batch_sizes), std::move(shapes_by_name)};
 }
 
-std::string ShapeHashHexForBucketBatch(const Map<std::size_t>& input_name_indices,
+hash::Value ShapeHashForBucketBatch(const Map<std::size_t>& input_name_indices,
     const Map<std::vector<std::int64_t>>& base_shapes_by_name, std::size_t bucket_batch)
 {
     hash::Value input_shapes_hash{};
@@ -153,28 +164,28 @@ std::string ShapeHashHexForBucketBatch(const Map<std::size_t>& input_name_indice
         const auto shape{effective_shape_for_bucket_batch(base_shapes_by_name.at(name), bucket_batch)};
         hash::Hash(input_shapes_hash, shape);
     }
-    return hash::ToHex(input_shapes_hash);
+    return input_shapes_hash;
 }
 
-std::string ShapeHashHexForStaticShapes(const Map<std::size_t>& input_name_indices,
+hash::Value ShapeHashForStaticShapes(const Map<std::size_t>& input_name_indices,
     const Map<std::vector<std::int64_t>>& shapes_by_name)
 {
     hash::Value input_shapes_hash{};
     for (const auto& [name, _] : input_name_indices) {
         hash::Hash(input_shapes_hash, shapes_by_name.at(name));
     }
-    return hash::ToHex(input_shapes_hash);
+    return input_shapes_hash;
 }
 
 bool AnyPlannedTargetMissing(const PrecompilePlan& plan, const Map<std::size_t>& input_name_indices,
-    const Map<migraphx::program>& cached_programs)
+    const CachedPrograms& cached_programs)
 {
     const auto& [eligible, bucketed, batch_sizes, shapes_by_name]{plan};
     if (!eligible) {
         return true;
     }
-    for (const auto& [hash, _] : build_plan_targets(bucketed, batch_sizes, shapes_by_name, input_name_indices)) {
-        if (cached_programs.count(hash) == 0) {
+    for (const auto& target : build_plan_targets(bucketed, batch_sizes, shapes_by_name, input_name_indices)) {
+        if (cached_programs.count(target.key) == 0) {
             return true;
         }
     }
@@ -182,7 +193,7 @@ bool AnyPlannedTargetMissing(const PrecompilePlan& plan, const Map<std::size_t>&
 }
 
 Ort::Status PreloadMxrPrograms(const PrecompilePlan& plan, const Map<std::size_t>& input_name_indices,
-    Map<migraphx::program>& cached_programs, bool force_recompile, const fs::path& cache_dir,
+    CachedPrograms& cached_programs, bool force_recompile, const fs::path& cache_dir,
     const std::string& mxr_prefix)
 {
     const auto& [eligible, bucketed, batch_sizes, shapes_by_name]{plan};
@@ -190,18 +201,15 @@ Ort::Status PreloadMxrPrograms(const PrecompilePlan& plan, const Map<std::size_t
         return STATUS_OK;
     }
 
-    for (const auto& [hash, _] : build_plan_targets(bucketed, batch_sizes, shapes_by_name, input_name_indices)) {
-        if (cached_programs.count(hash) != 0) {
-            continue;
-        }
-        if (force_recompile) {
+    for (const auto& target : build_plan_targets(bucketed, batch_sizes, shapes_by_name, input_name_indices)) {
+        if (cached_programs.count(target.key) != 0 || force_recompile) {
             continue;
         }
 
-        const fs::path mxr_path{cache_dir / (mxr_prefix + hash + ".mxr")};
+        const fs::path mxr_path{cache_dir / (mxr_prefix + target.hex + ".mxr")};
         migraphx::program program;
         if (load_compiled_program(program, mxr_path)) {
-            cached_programs.emplace(hash, std::move(program));
+            cached_programs.emplace(target.key, std::move(program));
         }
     }
 
@@ -209,7 +217,7 @@ Ort::Status PreloadMxrPrograms(const PrecompilePlan& plan, const Map<std::size_t
 }
 
 Ort::Status CompileMissingPrograms(const PrecompilePlan& plan, const Map<std::size_t>& input_name_indices,
-    std::string_view onnx_string, Map<migraphx::program>& cached_programs, const migraphx::target& target,
+    std::string_view onnx_string, CachedPrograms& cached_programs, const migraphx::target& target,
     bool fp16_enable, bool bf16_enable, bool int8_enable, bool fp8_enable,
     bool int8_calibration_cache_available, const Map<float>& dynamic_ranges, bool exhaustive_tune,
     const std::string& mlss_use_specific_ops, bool disable_compiled_model_caching,
@@ -224,21 +232,21 @@ Ort::Status CompileMissingPrograms(const PrecompilePlan& plan, const Map<std::si
     const auto external_data_dir_resolved{external_data_dir.empty() ?
         model_path.parent_path() : external_data_dir};
 
-    for (const auto& [hash, batch_size] : build_plan_targets(bucketed, batch_sizes, shapes_by_name, input_name_indices)) {
-        if (cached_programs.count(hash) != 0) {
+    for (const auto& plan_target : build_plan_targets(bucketed, batch_sizes, shapes_by_name, input_name_indices)) {
+        if (cached_programs.count(plan_target.key) != 0) {
             continue;
         }
 
         fs::path mxr_path;
         if (!cache_dir.empty()) {
-            mxr_path = cache_dir / (mxr_prefix + hash + ".mxr");
+            mxr_path = cache_dir / (mxr_prefix + plan_target.hex + ".mxr");
         }
 
         migraphx::onnx_options onnx_options;
         onnx_options.set_external_data_path(external_data_dir_resolved.string());
         for (const auto& [name, _] : input_name_indices) {
             const auto shape{bucketed ?
-                effective_shape_for_bucket_batch(shapes_by_name.at(name), batch_size) :
+                effective_shape_for_bucket_batch(shapes_by_name.at(name), plan_target.batch_size) :
                 shapes_by_name.at(name)};
             onnx_options.set_input_parameter_shape(name, {shape.begin(), shape.end()});
         }
@@ -250,13 +258,13 @@ Ort::Status CompileMissingPrograms(const PrecompilePlan& plan, const Map<std::si
         if (!disable_compiled_model_caching) {
             save_compiled_program(program, mxr_path);
         }
-        cached_programs.emplace(hash, std::move(program));
+        cached_programs.emplace(plan_target.key, std::move(program));
     }
 
     return STATUS_OK;
 }
 
-migraphx::program SelectDefaultProgram(const Map<migraphx::program>& cached_programs, bool bucketed,
+migraphx::program SelectDefaultProgram(const CachedPrograms& cached_programs, bool bucketed,
     const std::vector<std::size_t>& batch_sizes, const Map<std::vector<std::int64_t>>& shapes_by_name,
     const Map<std::size_t>& input_name_indices)
 {
@@ -264,10 +272,10 @@ migraphx::program SelectDefaultProgram(const Map<migraphx::program>& cached_prog
         return {};
     }
 
-    const std::string hash{bucketed ?
-        ShapeHashHexForBucketBatch(input_name_indices, shapes_by_name, batch_sizes.back()) :
-        ShapeHashHexForStaticShapes(input_name_indices, shapes_by_name)};
-    if (const auto it{cached_programs.find(hash)}; it != cached_programs.end()) {
+    const auto value{bucketed ?
+        ShapeHashForBucketBatch(input_name_indices, shapes_by_name, batch_sizes.back()) :
+        ShapeHashForStaticShapes(input_name_indices, shapes_by_name)};
+    if (const auto it{cached_programs.find(hash::ShapeKeyOf(value))}; it != cached_programs.end()) {
         return it->second;
     }
 

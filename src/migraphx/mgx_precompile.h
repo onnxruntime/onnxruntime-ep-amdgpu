@@ -28,26 +28,29 @@ PrecompilePlan BuildPrecompilePlan(const Ort::ConstGraph& graph, const Ort::Cons
     const Map<std::size_t>& input_name_indices, std::size_t max_dynamic_batch,
     std::string_view compile_batches);
 
-// Build the same shape hash Compute() uses for a bucket batch size.
-std::string ShapeHashHexForBucketBatch(const Map<std::size_t>& input_name_indices,
+// The shape hash Compute() uses for a bucket batch size / fixed static shapes.  The
+// caller derives the integer key (hash::ShapeKeyOf) and the MXR filename (ToHex).
+hash::Value ShapeHashForBucketBatch(const Map<std::size_t>& input_name_indices,
     const Map<std::vector<std::int64_t>>& base_shapes_by_name, std::size_t bucket_batch);
 
-// Build the same shape hash Compute() uses for fixed static input shapes.
-std::string ShapeHashHexForStaticShapes(const Map<std::size_t>& input_name_indices,
+hash::Value ShapeHashForStaticShapes(const Map<std::size_t>& input_name_indices,
     const Map<std::vector<std::int64_t>>& shapes_by_name);
+
+// cached_programs is keyed by ShapeKey (the low 64 bits of the shape hash).
+using CachedPrograms = std::unordered_map<hash::ShapeKey, migraphx::program>;
 
 // True when any planned target hash is absent from cached_programs.
 bool AnyPlannedTargetMissing(const PrecompilePlan& plan, const Map<std::size_t>& input_name_indices,
-    const Map<migraphx::program>& cached_programs);
+    const CachedPrograms& cached_programs);
 
 // Load every planned MXR from disk into cached_programs (no compile).
 Ort::Status PreloadMxrPrograms(const PrecompilePlan& plan, const Map<std::size_t>& input_name_indices,
-    Map<migraphx::program>& cached_programs, bool force_recompile, const fs::path& cache_dir,
+    CachedPrograms& cached_programs, bool force_recompile, const fs::path& cache_dir,
     const std::string& mxr_prefix);
 
 // Compile and save any planned targets still missing from cached_programs.
 Ort::Status CompileMissingPrograms(const PrecompilePlan& plan, const Map<std::size_t>& input_name_indices,
-    std::string_view onnx_string, Map<migraphx::program>& cached_programs, const migraphx::target& target,
+    std::string_view onnx_string, CachedPrograms& cached_programs, const migraphx::target& target,
     bool fp16_enable, bool bf16_enable, bool int8_enable, bool fp8_enable,
     bool int8_calibration_cache_available, const Map<float>& dynamic_ranges, bool exhaustive_tune,
     const std::string& mlss_use_specific_ops, bool disable_compiled_model_caching,
@@ -55,7 +58,7 @@ Ort::Status CompileMissingPrograms(const PrecompilePlan& plan, const Map<std::si
     const std::string& mxr_prefix);
 
 // Pick the default program to install on ComputeState after load/compile.
-migraphx::program SelectDefaultProgram(const Map<migraphx::program>& cached_programs, bool bucketed,
+migraphx::program SelectDefaultProgram(const CachedPrograms& cached_programs, bool bucketed,
     const std::vector<std::size_t>& batch_sizes, const Map<std::vector<std::int64_t>>& shapes_by_name,
     const Map<std::size_t>& input_name_indices);
 

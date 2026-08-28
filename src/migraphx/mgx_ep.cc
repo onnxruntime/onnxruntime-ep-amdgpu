@@ -1406,25 +1406,19 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         return shape;
     }};
 
-    // Item 4: gather the actual input shapes once.  If they are identical to the
-    // previous call we can skip both the shape-compare loop and the rehash loop:
-    // identical actual shapes imply an identical effective shape, dyn bucket, and
-    // hash, and (since the program was already compiled for them last time) a match.
-    // The same pass captures the dynamic-batch request (front extent of the
-    // lowest-index input), so the batch is resolved without a second traversal.
+    // Gather the actual input shapes once.  If identical to the previous call we skip
+    // the rehash and match work below.  The same pass captures the dynamic-batch
+    // request (front extent of the lowest-index input) and each input's raw data ptr.
     std::vector<std::int64_t> current_input_shapes;
     current_input_shapes.reserve(input_name_indices.size() * 4);
-    // Item 6: raw input data pointers for this call (indexed by ORT input index),
-    // reused by the coalesced input copy so it does not call GetInput a second time
-    // for every input.  Cleared to nullptr so any index the scan skips stays unset.
+    // Raw input data ptrs (by ORT index), reused by the coalesced copy; nullptr for
+    // any index the scan skips.
     compute_state.cur_input_data.assign(input_name_indices.size(), nullptr);
-    // Per-input dim counts in iteration order, so the shape-changed rehash below can
-    // slice current_input_shapes by a running offset instead of re-fetching shapes.
+    // Per-input dim counts, so the shape-changed rehash slices current_input_shapes by
+    // offset instead of re-fetching shapes.
     compute_state.cur_input_ranks.clear();
     compute_state.cur_input_ranks.reserve(input_name_indices.size());
-    // Item 5: reused across inputs -- each input's dims are read into this buffer via
-    // the (non-deprecated) C API instead of allocating a fresh vector per input as
-    // TensorTypeAndShapeInfo::GetShape() would on every one of the 200+ inputs.
+    // Reused per input: dims read via the C API to avoid a GetShape() vector alloc each.
     std::vector<std::int64_t> dims;
     const bool track_batch{compute_state.max_dynamic_batch > 0};
     bool have_batch_min{false};
@@ -1467,9 +1461,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         input_shapes_hash = compute_state.last_input_shapes_hash;
         input_shapes_match = true;
     } else if (!compute_state.has_input_shapes) {
-        // First call: seed the shapes hash.  onnx_options input parameter shapes are
-        // set on the (rare) parse path below -- its only consumer -- so the common
-        // cache-hit paths never pay for it.
+        // First call: seed the shapes hash (onnx_options are set on the parse path).
         for (auto& [name, index] : input_name_indices) {
             auto value{kernel_context.GetInput(index)};
             auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape(), name)};
@@ -1477,25 +1469,11 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         }
         compute_state.has_input_shapes = true;
     } else {
-        // Shapes changed from the previous call.  Whether the currently-active program
-        // still matches is decided by a single shape-key compare after the hash (see
-        // active_program_shape_key below) rather than by re-deriving and comparing
-        // every parameter shape -- the old path called program.get_parameter_shapes()
-        // and re-fetched each input's shape via the allocating GetShape() on every
-        // alternating request.  A real mismatch is resolved by the recompile block,
-        // which locates the program by hash (or builds it, setting onnx_options).
-        //
-        // Compute the hash over all model inputs, consistent with the first-call path.
-        //
-        // Reuse the raw dims already gathered in current_input_shapes (via the
-        // alloc-free C-API scan) instead of re-fetching each input's shape through
-        // the allocating GetShape()/effective_shape()/Hash-copy path.  The effective
-        // transform (batch bucket-up, seq pad-up) is applied in place into the reused
-        // `dims` buffer and hashed over a span, so this shape-changed rehash does no
-        // per-input heap allocation.  Walks input_name_indices in the same order the
-        // scan filled current_input_shapes (aligned by cur_input_ranks + a running
-        // offset), and stays byte-identical to the first-call hash above -- same int64
-        // values, same per-input murmur chaining -- so both paths agree on the key.
+        // Shapes changed: rehash over all inputs (a shape-key compare below decides
+        // whether the active program still matches).  Reuse the dims already gathered
+        // in current_input_shapes (alloc-free scan), applying the effective batch/seq
+        // transform in place so this stays byte-identical to the first-call hash --
+        // no per-input allocation or GetShape() calls.
         std::size_t shape_off{0};
         std::size_t rank_idx{0};
         for (const auto& [name, index] : input_name_indices) {
@@ -1521,18 +1499,11 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         }
     }
 
-    // Integer cache key for the per-shape hot caches, derived once from the input
-    // shapes hash (the same low 64 bits the former hex-string key encoded).  Reused
-    // by the recompile invalidation, the param-shapes lookup, and the direct/staging
-    // paths, so none of them build a hex string or hash a string key per call.
-    const ShapeKey shape_key{ShapeKeyOf(input_shapes_hash)};
+    // Integer key for the per-shape hot caches and the cached_programs lookup.
+    const ShapeKey shape_key{hash::ShapeKeyOf(input_shapes_hash)};
 
-    // Decide whether the active program already matches this call's shapes with a
-    // single integer compare against the key it was compiled for.  shapes_unchanged
-    // already set the flag true; the first call leaves it false (has_input_shapes was
-    // false) so the program is compiled below and its key recorded.  A shape change
-    // that no longer matches drops into the recompile block, which swaps in (or
-    // builds) the right program and updates the key.
+    // The active program matches iff its compiled key equals this call's.  (shapes_
+    // unchanged already set true; the first call leaves it false so it compiles below.)
     if (!shapes_unchanged && input_shapes_match) {
         input_shapes_match = compute_state.has_active_program_shape_key &&
                              shape_key == compute_state.active_program_shape_key;
@@ -1544,12 +1515,12 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
     // if the thread isn't already on it) rather than before each branch.
     const HipDeviceGuard dev_guard{compute_state.device_id};
 
-    // If the input shapes are different (e.g., LLMs), the EP needs to reparse and recompile the program
+    // Shapes differ from the active program (e.g. LLMs / bucket switch): look up the
+    // program for this shape by its integer key, or (re)compile it.
     if (!input_shapes_match) {
-        const std::string current_hash{hash::ToHex(input_shapes_hash)};
         bool loaded_from_cache{false};
 
-        if (const auto cit{compute_state.cached_programs.find(current_hash)};
+        if (const auto cit{compute_state.cached_programs.find(shape_key)};
             cit != compute_state.cached_programs.end()) {
             program = cit->second;
             loaded_from_cache = true;
@@ -1570,17 +1541,14 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
         migraphx::program_parameters compile_params{};
         fs::path mxr_path;
         if (!compute_state.cache_dir.empty()) {
-            mxr_path = compute_state.cache_dir / (compute_state.mxr_prefix + current_hash + ".mxr");
+            mxr_path = compute_state.cache_dir /
+                (compute_state.mxr_prefix + hash::ToHex(input_shapes_hash) + ".mxr");
         }
         if (compute_state.force_recompile || !load_compiled_program(program, mxr_path)) {
             const auto external_data_dir{compute_state.external_data_dir.empty() ?
                 compute_state.model_path.parent_path() : compute_state.external_data_dir};
             onnx_options.set_external_data_path(external_data_dir.string());
-            // Populate onnx_options with this call's (effective) input parameter
-            // shapes before parsing.  This was formerly done incrementally by the
-            // per-parameter compare loop; with the match check now a single key
-            // compare, set them here on the rare parse path only (parse_onnx_buffer
-            // is the sole consumer of onnx_options).
+            // Set input parameter shapes for the parse (onnx_options' only consumer).
             for (const auto& [pname, pindex] : input_name_indices) {
                 const auto pvalue{kernel_context.GetInput(pindex)};
                 const auto pshape{effective_shape(
@@ -1621,19 +1589,17 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 save_compiled_program(program, mxr_path);
             }
         }
-            // Keep a copy of the freshly compiled program so it (and any graph
-            // captured against it) survives later shape/bucket switches.
+            // Keep the freshly compiled program so it (and its captured graph) survive
+            // later shape/bucket switches.
             if (dyn.active || !compute_state.defer_compilation) {
-                compute_state.cached_programs.emplace(current_hash, program);
+                compute_state.cached_programs.emplace(shape_key, program);
             }
-            // Program for this hash was (re)built -> anything cached against the old
-            // one for the same hash is stale.
+            // Freshly built -> drop anything cached against the old program.
             compute_state.staging_bind_cache.erase(shape_key);
             compute_state.direct_bind_cache.erase(shape_key);
             compute_state.cached_param_shapes.erase(shape_key);
         }
-        // The active program now matches this call's shapes (loaded from cache or
-        // freshly compiled); record its key for the next call's single-compare check.
+        // Program now matches this call's shapes; record its key for the next compare.
         compute_state.active_program_shape_key = shape_key;
         compute_state.has_active_program_shape_key = true;
     }
