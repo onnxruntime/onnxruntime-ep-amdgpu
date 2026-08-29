@@ -880,7 +880,7 @@ StagingBindResult BindStagingParams(ComputeState& cs,
                 result.hybrid.has_scratch = true;
                 result.hybrid.scratch_shape = scratch->shape;
             }
-        } else {
+        } else if (const auto oi{ComputeOutputIndex(name)}; oi != -1) {
             const auto stage_it{cs.staging_outputs.find(param_name)};
             if (stage_it == cs.staging_outputs.end()) {
                 continue;
@@ -903,7 +903,9 @@ StagingBindResult BindStagingParams(ComputeState& cs,
                 param_name, static_cast<std::size_t>(oi), out_shape,
                 std::vector<std::int64_t>{out_lens.begin(), out_lens.end()}});
             result.hybrid.prog_output_indices.push_back(static_cast<std::size_t>(oi));
-        }     
+        } else {
+            result.hybrid.eligible = false;  // unbound/literal param -> no direct bind
+        }
     }
     return result;
 }
@@ -1017,6 +1019,7 @@ void FreeStaging(ComputeState& cs, hipStream_t stream) {
     cs.in_arena_bytes = 0;
     cs.staging_inputs_coalesced = false;
     // Re-verify coalesce eligibility against the next allocation's inputs.
+    cs.coalesce_residency = ComputeState::CoalesceResidency::kUnknown;
     for (auto& [name, buf] : cs.staging_outputs) {
         if (buf.data != nullptr) {
             (void)hipFreeAsync(buf.data, stream);

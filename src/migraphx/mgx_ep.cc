@@ -1332,103 +1332,93 @@ struct ComputeIOInfo {
     ShapeKey shape_key{};
     bool needs_padding{false};
     const migraphx::program_parameter_shapes* param_shapes{nullptr};
-    hipStream_t hip_stream{nullptr};  // ORT compute stream, resolved once per call
+    hipStream_t     hip_stream{nullptr};  // ORT compute stream, resolved once per call
 };
 
-// Cache-tier stage: gather the input shapes once, resolve dynamic-batch / seq
-// padding, then hash and look up (or compile) the program for this shape,
-// recording everything the mechanism paths need into `io`.  This collapses the
-// built-in EP's ultra-fast / fast / standard tiers into a single deterministic
-// pass so no mechanism path re-reads shapes.  Throws on failure (the Compute
-// function-try-block converts it to a Status).
-Ort::Status ResolveComputeIO(ComputeState& compute_state,
-    const Ort::KernelContext& kernel_context, ComputeIOInfo& io) {
-    const auto& input_name_indices{compute_state.input_name_indices};
-    auto& program{compute_state.program};
-    auto& onnx_options{compute_state.onnx_options};
-
-    bool input_shapes_match{compute_state.has_input_shapes};
-    auto& cached_param_shapes{compute_state.cached_param_shapes};
-    hash::Value input_shapes_hash{};
-
-    // Dynamic-batch bucketing is resolved below, folded into the single input-shape
-    // gather so all inputs are traversed once instead of being scanned here too.
-    // The batch is assumed to live on axis 0 of the model inputs.
-    DynamicBatchContext dyn{};
-
-    // Resolve static seq-padding for this call (no-op when disabled).  A named input
-    // is padded on its token axis to the fixed target length, only for prefill: the
-    // axis extent must be in (1, target).  decode (extent == 1) and already-max
-    // prompts are left alone.  Inert when static_pad_seq_len == 0.
-    StaticSeqContext seq{};
-    if (compute_state.static_pad_seq) {
-        // Take the target from the attention mask (axis 1; axis 0 is batch, scaled by num_beams).
-        // It carries the length the caller is really generating with, and is the same length it
-        // sized its KV cache to.  The configured value cannot be trusted here: for OGA it is
-        // config.search.max_length, read while the session is created, so a caller that sets
-        // max_length on GeneratorParams sets it too late for us and we would pad to the model's
-        // full context.  An explicit env value still wins; models with no mask keep the
-        // configured length.
-        static const std::string kAttentionMaskInput{"attention_mask"};
-        std::size_t target{compute_state.static_pad_seq_len};
-        if (not compute_state.static_pad_seq_len_from_env) {
-            if (const auto mask_it{input_name_indices.find(kAttentionMaskInput)};
-                mask_it != input_name_indices.end()) {
-                const auto mask_shape{
-                    kernel_context.GetInput(mask_it->second).GetTensorTypeAndShapeInfo().GetShape()};
-                if (mask_shape.size() > 1 && mask_shape[1] > 0) {
-                    target = static_cast<std::size_t>(mask_shape[1]);
-                }
-            }
-        }
-        for (const auto& [name, axis] : compute_state.static_pad_input_axes) {
-            if (target == 0) {
-                break;  // nothing usable to pad to -> leave shapes untouched (inert, as before)
-            }
-            const auto it{input_name_indices.find(name)};
-            if (it == input_name_indices.end()) {
-                continue;
-            }
-            const auto shape{kernel_context.GetInput(it->second).GetTensorTypeAndShapeInfo().GetShape()};
-            if (axis < 0 || static_cast<size_t>(axis) >= shape.size()) {
-                continue;
-            }
-            const auto extent{static_cast<size_t>(shape[axis])};
-            if (extent > 1 && extent < target) {
-                seq.active = true;
-                seq.real_len = extent;
-                seq.target_len = target;
-                seq.input_axes = &compute_state.static_pad_input_axes;
-                seq.output_axes_by_index = &compute_state.static_pad_output_axes_by_index;
-                break;  // all named inputs share the same token length this call
+// Map an actual input shape to the shape the program is compiled for, in place: a
+// batched input (axis-0 extent == requested batch) is bucketed up to the target
+// batch, and a named seq input has its token axis padded up to the static target
+// length.  Single source of truth for the transform applied by both the shape hash
+// and the parse-time parameter shapes, so the two can never drift.
+void ApplyEffectiveShape(std::vector<std::int64_t>& shape, const std::string& name,
+    const DynamicBatchContext& dyn, const StaticSeqContext& seq) {
+    if (dyn.active && !shape.empty() &&
+        static_cast<std::size_t>(shape.front()) == dyn.requested_batch) {
+        shape.front() = static_cast<std::int64_t>(dyn.target_batch);
+    }
+    if (seq.active && seq.input_axes != nullptr) {
+        if (const auto it{seq.input_axes->find(name)}; it != seq.input_axes->end()) {
+            const int axis{it->second};
+            if (axis >= 0 && static_cast<std::size_t>(axis) < shape.size() &&
+                static_cast<std::size_t>(shape[axis]) == seq.real_len) {
+                shape[axis] = static_cast<std::int64_t>(seq.target_len);
             }
         }
     }
+}
 
-    // Map an actual input shape to the shape the program is compiled for: a batched
-    // input (axis-0 extent == requested batch) is bucketed up to the target batch,
-    // and a named seq input has its token axis padded up to the static target length.
-    const auto effective_shape{[&dyn, &seq](std::vector<int64_t> shape,
-                                            const std::string& name) {
-        if (dyn.active && !shape.empty() &&
-            static_cast<size_t>(shape.front()) == dyn.requested_batch) {
-            shape.front() = static_cast<int64_t>(dyn.target_batch);
-        }
-        if (seq.active && seq.input_axes != nullptr) {
-            if (const auto it{seq.input_axes->find(name)}; it != seq.input_axes->end()) {
-                const int axis{it->second};
-                if (axis >= 0 && static_cast<size_t>(axis) < shape.size() &&
-                    static_cast<size_t>(shape[axis]) == seq.real_len) {
-                    shape[axis] = static_cast<int64_t>(seq.target_len);
-                }
+// Resolve static seq-padding for this call (inert when disabled).  A named input is
+// padded on its token axis to the fixed target length, only for prefill: the axis
+// extent must be in (1, target).  decode (extent == 1) and already-max prompts are
+// left alone.  Returns an inactive context when static_pad_seq_len == 0.
+StaticSeqContext ResolveSeqPadding(ComputeState& compute_state,
+    const Ort::KernelContext& kernel_context) {
+    StaticSeqContext seq{};
+    if (!compute_state.static_pad_seq) {
+        return seq;
+    }
+    const auto& input_name_indices{compute_state.input_name_indices};
+    // Take the target from the attention mask (axis 1; axis 0 is batch, scaled by num_beams).
+    // It carries the length the caller is really generating with, and is the same length it
+    // sized its KV cache to.  The configured value cannot be trusted here: for OGA it is
+    // config.search.max_length, read while the session is created, so a caller that sets
+    // max_length on GeneratorParams sets it too late for us and we would pad to the model's
+    // full context.  An explicit env value still wins; models with no mask keep the
+    // configured length.
+    static const std::string kAttentionMaskInput{"attention_mask"};
+    std::size_t target{compute_state.static_pad_seq_len};
+    if (not compute_state.static_pad_seq_len_from_env) {
+        if (const auto mask_it{input_name_indices.find(kAttentionMaskInput)};
+            mask_it != input_name_indices.end()) {
+            const auto mask_shape{
+                kernel_context.GetInput(mask_it->second).GetTensorTypeAndShapeInfo().GetShape()};
+            if (mask_shape.size() > 1 && mask_shape[1] > 0) {
+                target = static_cast<std::size_t>(mask_shape[1]);
             }
         }
-        return shape;
-    }};
+    }
+    for (const auto& [name, axis] : compute_state.static_pad_input_axes) {
+        if (target == 0) {
+            break;  // nothing usable to pad to -> leave shapes untouched (inert, as before)
+        }
+        const auto it{input_name_indices.find(name)};
+        if (it == input_name_indices.end()) {
+            continue;
+        }
+        const auto shape{kernel_context.GetInput(it->second).GetTensorTypeAndShapeInfo().GetShape()};
+        if (axis < 0 || static_cast<size_t>(axis) >= shape.size()) {
+            continue;
+        }
+        const auto extent{static_cast<size_t>(shape[axis])};
+        if (extent > 1 && extent < target) {
+            seq.active = true;
+            seq.real_len = extent;
+            seq.target_len = target;
+            seq.input_axes = &compute_state.static_pad_input_axes;
+            seq.output_axes_by_index = &compute_state.static_pad_output_axes_by_index;
+            break;  // all named inputs share the same token length this call
+        }
+    }
+    return seq;
+}
 
-    // Gather the actual input shapes once.  If identical to the previous call we skip
-    // the rehash and match work below.  The same pass captures the dynamic-batch
-    // request (front extent of the lowest-index input) and each input's raw data ptr.
+// Single pass over the model inputs: gather the raw dims (flattened), record each
+// input's rank and raw data ptr on the compute state, and resolve the dynamic-batch
+// bucket from the lowest-index input's axis-0 extent.  Returns the flattened raw
+// shapes so the caller can compare against the previous call and hash them.
+std::vector<std::int64_t> GatherInputShapesAndBatch(ComputeState& compute_state,
+    const Ort::KernelContext& kernel_context, DynamicBatchContext& dyn) {
+    const auto& input_name_indices{compute_state.input_name_indices};
     std::vector<std::int64_t> current_input_shapes;
     current_input_shapes.reserve(input_name_indices.size() * 4);
     // Raw input data ptrs (by ORT index), reused by the coalesced copy; nullptr for
@@ -1474,84 +1464,64 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
         dyn.target_batch = bucket > 0 ? bucket : requested_batch;
         dyn.active = true;
     }
-    const bool shapes_unchanged{compute_state.has_last_input_shapes &&
-                                current_input_shapes == compute_state.last_input_shapes};
+    return current_input_shapes;
+}
 
-    if (shapes_unchanged) {
-        input_shapes_hash = compute_state.last_input_shapes_hash;
-        input_shapes_match = true;
-    } else if (!compute_state.has_input_shapes) {
-        // First call: seed the shapes hash (onnx_options are set on the parse path).
-        for (auto& [name, index] : input_name_indices) {
-            auto value{kernel_context.GetInput(index)};
-            auto shape{effective_shape(value.GetTensorTypeAndShapeInfo().GetShape(), name)};
-            hash::Hash(input_shapes_hash, shape);
-        }
-        compute_state.has_input_shapes = true;
-    } else {
-        // Shapes changed: rehash over all inputs (a shape-key compare below decides
-        // whether the active program still matches).  Reuse the dims already gathered
-        // in current_input_shapes (alloc-free scan), applying the effective batch/seq
-        // transform in place so this stays byte-identical to the first-call hash --
-        // no per-input allocation or GetShape() calls.
-        std::size_t shape_off{0};
-        std::size_t rank_idx{0};
-        for (const auto& [name, index] : input_name_indices) {
-            const std::size_t rank{compute_state.cur_input_ranks[rank_idx++]};
-            dims.assign(current_input_shapes.begin() + shape_off,
-                        current_input_shapes.begin() + shape_off + rank);
-            shape_off += rank;
-            if (dyn.active && rank > 0 &&
-                static_cast<std::size_t>(dims.front()) == dyn.requested_batch) {
-                dims.front() = static_cast<std::int64_t>(dyn.target_batch);
-            }
-            if (seq.active && seq.input_axes != nullptr) {
-                if (const auto it{seq.input_axes->find(name)}; it != seq.input_axes->end()) {
-                    const int axis{it->second};
-                    if (axis >= 0 && static_cast<std::size_t>(axis) < rank &&
-                        static_cast<std::size_t>(dims[axis]) == seq.real_len) {
-                        dims[axis] = static_cast<std::int64_t>(seq.target_len);
-                    }
-                }
-            }
-            hash::Hash(input_shapes_hash,
-                gsl::span<const std::int64_t>{dims.data(), dims.size()});
-        }
+// Hash every input's effective (batch/seq-transformed) shape, reusing the dims already
+// gathered in current_input_shapes + cur_input_ranks (no GetShape() re-fetch).  Used
+// for both the first-call seed and the shape-changed rehash so there is a single
+// hashing code path -- the two can never produce divergent keys for identical inputs.
+hash::Value HashEffectiveInputShapes(const ComputeState& compute_state,
+    const std::vector<std::int64_t>& current_input_shapes,
+    const DynamicBatchContext& dyn, const StaticSeqContext& seq) {
+    hash::Value input_shapes_hash{};
+    std::vector<std::int64_t> dims;
+    std::size_t shape_off{0};
+    std::size_t rank_idx{0};
+    for (const auto& [name, index] : compute_state.input_name_indices) {
+        const std::size_t rank{compute_state.cur_input_ranks[rank_idx++]};
+        dims.assign(current_input_shapes.begin() + shape_off,
+                    current_input_shapes.begin() + shape_off + rank);
+        shape_off += rank;
+        ApplyEffectiveShape(dims, name, dyn, seq);
+        hash::Hash(input_shapes_hash,
+            gsl::span<const std::int64_t>{dims.data(), dims.size()});
+    }
+    return input_shapes_hash;
+}
+
+// Resolve the program for shape_key: reuse the in-memory cached program if present,
+// otherwise load the .mxr or (re)parse + calibrate + compile + save, then drop any
+// per-shape caches bound to the previous program and record the active key.  Mirrors
+// the built-in EP's handle_input_shape_mismatch + load_or_compile_model split.  Only
+// called on a shape miss (the hot path skips it).  Throws on parse/compile failure.
+void ResolveProgram(ComputeState& compute_state, const Ort::KernelContext& kernel_context,
+    ShapeKey shape_key, const hash::Value& input_shapes_hash,
+    const DynamicBatchContext& dyn, const StaticSeqContext& seq) {
+    const auto& input_name_indices{compute_state.input_name_indices};
+    auto& program{compute_state.program};
+    auto& onnx_options{compute_state.onnx_options};
+
+    bool loaded_from_cache{false};
+
+    if (const auto cit{compute_state.cached_programs.find(shape_key)};
+        cit != compute_state.cached_programs.end()) {
+        program = cit->second;
+        loaded_from_cache = true;
+    } else if (compute_state.hip_graph_enable && !dyn.active) {
+        // Unbounded dynamic-shape (e.g. LLM) path: keep only the current shape's
+        // graph/staging, so invalidate before the program changes.
+        DestroyHipGraphs(compute_state);
+        FreeStaging(compute_state,
+            static_cast<hipStream_t>(kernel_context.GetGPUComputeStream()));
+        // Direct-bind bindings reference the graphs just destroyed; drop them
+        // so they are repopulated (and re-captured) against the new program.
+        // Clear param shapes too so the map does not grow per token length.
+        compute_state.direct_bind_cache.clear();
+        compute_state.cached_param_shapes.clear();
     }
 
-    // Integer key for the per-shape hot caches and the cached_programs lookup.
-    const ShapeKey shape_key{hash::ShapeKeyOf(input_shapes_hash)};
-
-    // The active program matches iff its compiled key equals this call's.  (shapes_
-    // unchanged already set true; the first call leaves it false so it compiles below.)
-    if (!shapes_unchanged && input_shapes_match) {
-        input_shapes_match = compute_state.has_active_program_shape_key &&
-                             shape_key == compute_state.active_program_shape_key;
-    }
-
-    // Shapes differ from the active program (e.g. LLMs / bucket switch): look up the
-    // program for this shape by its integer key, or (re)compile it.
-    if (!input_shapes_match) {
-        bool loaded_from_cache{false};
-
-        if (const auto cit{compute_state.cached_programs.find(shape_key)};
-            cit != compute_state.cached_programs.end()) {
-            program = cit->second;
-            loaded_from_cache = true;
-        } else if (compute_state.hip_graph_enable && !dyn.active) {
-            // Unbounded dynamic-shape (e.g. LLM) path: keep only the current shape's
-            // graph/staging, so invalidate before the program changes.
-            DestroyHipGraphs(compute_state);
-            FreeStaging(compute_state,
-                static_cast<hipStream_t>(kernel_context.GetGPUComputeStream()));
-            // Direct-bind bindings reference the graphs just destroyed; drop them
-            // so they are repopulated (and re-captured) against the new program.
-            // Clear param shapes too so the map does not grow per token length.
-            compute_state.direct_bind_cache.clear();
-            compute_state.cached_param_shapes.clear();
-        }
-
-        if (!loaded_from_cache) {
+    if (!loaded_from_cache) {
         migraphx::program_parameters compile_params{};
         fs::path mxr_path;
         if (!compute_state.cache_dir.empty()) {
@@ -1562,11 +1532,12 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
             const auto external_data_dir{compute_state.external_data_dir.empty() ?
                 compute_state.model_path.parent_path() : compute_state.external_data_dir};
             onnx_options.set_external_data_path(external_data_dir.string());
-            // Set input parameter shapes for the parse (onnx_options' only consumer).
+            // Set input parameter shapes for the parse (onnx_options' only consumer),
+            // applying the same effective-shape transform used to hash so the compiled
+            // program matches the key it is cached under.
             for (const auto& [pname, pindex] : input_name_indices) {
-                const auto pvalue{kernel_context.GetInput(pindex)};
-                const auto pshape{effective_shape(
-                    pvalue.GetTensorTypeAndShapeInfo().GetShape(), pname)};
+                auto pshape{kernel_context.GetInput(pindex).GetTensorTypeAndShapeInfo().GetShape()};
+                ApplyEffectiveShape(pshape, pname, dyn, seq);
                 onnx_options.set_input_parameter_shape(pname, {pshape.begin(), pshape.end()});
             }
             program = migraphx::parse_onnx_buffer(compute_state.onnx_string, onnx_options);
@@ -1603,33 +1574,88 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
                 save_compiled_program(program, mxr_path);
             }
         }
-            // Keep the freshly compiled program so it (and its captured graph) survive
-            // later shape/bucket switches.
-            if (dyn.active || !compute_state.defer_compilation) {
-                compute_state.cached_programs.emplace(shape_key, program);
-            }
-            // Freshly built -> drop anything cached against the old program.
-            compute_state.staging_bind_cache.erase(shape_key);
-            compute_state.direct_bind_cache.erase(shape_key);
-            compute_state.cached_param_shapes.erase(shape_key);
+        // Keep the freshly compiled program so it (and its captured graph) survive
+        // later shape/bucket switches.
+        if (dyn.active || !compute_state.defer_compilation) {
+            compute_state.cached_programs.emplace(shape_key, program);
         }
-        // Program now matches this call's shapes; record its key for the next compare.
-        compute_state.active_program_shape_key = shape_key;
-        compute_state.has_active_program_shape_key = true;
+        // Freshly built -> drop anything cached against the old program.
+        compute_state.staging_bind_cache.erase(shape_key);
+        compute_state.direct_bind_cache.erase(shape_key);
+        compute_state.cached_param_shapes.erase(shape_key);
+    }
+    // Program now matches this call's shapes; record its key for the next compare.
+    compute_state.active_program_shape_key = shape_key;
+    compute_state.has_active_program_shape_key = true;
+}
+
+// Cache-tier stage (orchestrator): resolve padding, gather input shapes once, hash +
+// match against the active program (compiling on a miss), then bind param_shapes and
+// record everything the mechanism paths need into `io`.  This collapses the built-in
+// EP's ultra-fast / fast / standard tiers into a single deterministic pass so no
+// mechanism path re-reads shapes.  Throws on failure (the Compute function-try-block
+// converts it to a Status).
+Ort::Status ResolveComputeIO(ComputeState& compute_state,
+    const Ort::KernelContext& kernel_context, ComputeIOInfo& io) {
+    // 1. Resolve the padding contexts for this call (both inert when disabled).
+    const StaticSeqContext seq{ResolveSeqPadding(compute_state, kernel_context)};
+    DynamicBatchContext dyn{};
+
+    // 2. Single pass: gather input shapes + data ptrs and resolve the dynamic-batch
+    //    bucket.  If the raw shapes are identical to the previous call we reuse the
+    //    cached hash and skip the rehash/match work below.
+    std::vector<std::int64_t> current_input_shapes{
+        GatherInputShapesAndBatch(compute_state, kernel_context, dyn)};
+    const bool shapes_unchanged{compute_state.has_last_input_shapes &&
+                                current_input_shapes == compute_state.last_input_shapes};
+
+    // 3. Hash the effective input shapes (unless unchanged) and decide whether the
+    //    active program still matches this call.  A single hashing path serves both
+    //    the first-call seed and the shape-changed rehash.
+    hash::Value input_shapes_hash{};
+    bool input_shapes_match{compute_state.has_input_shapes};
+    if (shapes_unchanged) {
+        input_shapes_hash = compute_state.last_input_shapes_hash;
+        input_shapes_match = true;
+    } else {
+        input_shapes_hash =
+            HashEffectiveInputShapes(compute_state, current_input_shapes, dyn, seq);
+        if (!compute_state.has_input_shapes) {
+            // First call: seed the shapes hash and leave match false so we compile below.
+            compute_state.has_input_shapes = true;
+            input_shapes_match = false;
+        }
     }
 
-    // Bind param_shapes for the program that will run this call (cached per hash;
-    // built once on a miss).
+    // Integer key for the per-shape hot caches and the cached_programs lookup.
+    const ShapeKey shape_key{hash::ShapeKeyOf(input_shapes_hash)};
+
+    // The active program matches iff its compiled key equals this call's.  (shapes_
+    // unchanged already set true; the first call left it false so it compiles below.)
+    if (!shapes_unchanged && input_shapes_match) {
+        input_shapes_match = compute_state.has_active_program_shape_key &&
+                             shape_key == compute_state.active_program_shape_key;
+    }
+
+    // 4. Shapes differ from the active program (e.g. LLMs / bucket switch): look up
+    //    the program for this shape by its integer key, or (re)compile it.
+    if (!input_shapes_match) {
+        ResolveProgram(compute_state, kernel_context, shape_key, input_shapes_hash, dyn, seq);
+    }
+
+    // 5. Bind param_shapes for the program that will run this call (cached per hash;
+    //    built once on a miss).
+    auto& cached_param_shapes{compute_state.cached_param_shapes};
     auto param_shapes_it{cached_param_shapes.find(shape_key)};
     if (param_shapes_it == cached_param_shapes.end()) {
         param_shapes_it = cached_param_shapes.emplace(
-            shape_key, program.get_parameter_shapes()).first;
+            shape_key, compute_state.program.get_parameter_shapes()).first;
     }
     const auto& param_shapes{param_shapes_it->second};
 
-    // Item 4: remember these shapes so the next identical call takes the fast path.
-    // Set only after the (possible) recompile above, so the recorded hash always
-    // corresponds to a program that is compiled and ready for these shapes.
+    // 6. Item 4: remember these shapes so the next identical call takes the fast path.
+    //    Set only after the (possible) recompile above, so the recorded hash always
+    //    corresponds to a program that is compiled and ready for these shapes.
     if (!shapes_unchanged) {
         compute_state.last_input_shapes = std::move(current_input_shapes);
         compute_state.last_input_shapes_hash = input_shapes_hash;
@@ -1641,12 +1667,11 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
     // (input pad / output slice); the direct-bind path cannot be used.
     const bool needs_batch_pad{dyn.active && dyn.target_batch > dyn.requested_batch};
     const bool needs_seq_pad{seq.active && seq.target_len > seq.real_len};
-    const bool needs_padding{needs_batch_pad || needs_seq_pad};
 
     io.dyn = dyn;
     io.seq = seq;
     io.shape_key = shape_key;
-    io.needs_padding = needs_padding;
+    io.needs_padding = needs_batch_pad || needs_seq_pad;
     io.param_shapes = &param_shapes;
     return STATUS_OK;
 }
