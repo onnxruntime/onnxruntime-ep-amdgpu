@@ -724,9 +724,9 @@ void CopyInputsToStaging(ComputeState& cs,
     // into the arena.  Driven entirely by the precomputed bind.input_copies plan:
     // no parameter names, std::strings, or map lookups on this hot path.
     // Batch padding is compatible with the coalesced gather (item 1): only the real
-    // rows are copied host-side and the pad tail is zeroed, so it still resolves to
-    // one H2D.  Only seq padding -- which places real tokens at a per-slice interior
-    // offset -- must fall through to the per-input path below.
+    // rows are copied host-side (the pad tail is left as-is -- see below), so it still
+    // resolves to one H2D.  Only seq padding -- which places real tokens at a per-slice
+    // interior offset -- must fall through to the per-input path below.
     const bool seq_no_pad{!seq.active || seq.target_len == seq.real_len};
     if (cs.staging_inputs_coalesced && cs.in_staging_host != nullptr && seq_no_pad) {
         // Coalesce eligibility (all inputs host-resident) is determined once and
@@ -756,12 +756,10 @@ void CopyInputsToStaging(ComputeState& cs,
                 if (src == nullptr) {
                     src = ctx.GetInput(ib.ort_index).GetTensorRawData();
                 }
-                // A batched input arrives with requested_batch rows: gather only those
-                // and leave the pad tail zeroed.  Non-batched inputs copy in full.
-                // Batched == program axis-0 was bucketed up to target_batch AND the
-                // actual axis-0 (cached during the input scan, item 4 -- no GetShape
-                // here) equals requested_batch; the second half rejects a fixed dim that
-                // merely coincides with target_batch.
+                // A batched input (program axis-0 bucketed to target_batch and actual
+                // axis-0 == requested_batch, cached from the input scan) gathers only the
+                // real rows; others copy in full.  The pad tail is left as-is (no per-call
+                // zeroing): pad output rows are sliced off downstream.
                 const bool batched{batch_pad && !ib.prog_lens.empty() &&
                     ib.prog_lens.front() == dyn.target_batch &&
                     ib.ort_index < cs.cur_input_axis0.size() &&
@@ -773,12 +771,6 @@ void CopyInputsToStaging(ComputeState& cs,
                 }
                 if (copy_bytes > 0) {
                     std::memcpy(host_base + ib.arena_offset, src, copy_bytes);
-                }
-                // Zero the pad tail so a smaller batch never inherits a prior (larger)
-                // call's rows.  A host memset keeps this a single contiguous H2D.
-                if (ib.prog_bytes > copy_bytes) {
-                    std::memset(host_base + ib.arena_offset + copy_bytes, 0,
-                        ib.prog_bytes - copy_bytes);
                 }
             }
             // One transfer for every input.  Copying the whole arena (including the
@@ -838,13 +830,9 @@ void CopyInputsToStaging(ComputeState& cs,
             PadSeqTensor(src, ib.staging_data, outer, seq.real_len, seq.target_len,
                 inner, ib.element_size, stream);
         } else {
-            // Batched: copy the real requested_batch rows (row_bytes precomputed at
-            // bind) and zero the pad tail.  Unbatched: copy in full.  Zeroing the pad
-            // rows (vs the old last-row replicate) is one memset instead of O(log N)
-            // replicate copies and is correct for the batch-independent models dynamic
-            // batching targets -- the pad output rows are sliced off and never feed a
-            // real row.  The zero also stops a smaller batch inheriting a prior call's
-            // rows.
+            // Batched: copy the real requested_batch rows; unbatched: copy in full.  The
+            // pad tail is left as-is (no per-call zeroing) -- pad output rows are sliced
+            // off downstream.
             std::size_t copy_bytes{batched ? ib.row_bytes * dyn.requested_batch
                                            : ib.prog_bytes};
             if (copy_bytes > ib.stage_capacity) {
@@ -853,10 +841,6 @@ void CopyInputsToStaging(ComputeState& cs,
             if (copy_bytes > 0) {
                 HIP_CALL_THROW(hipMemcpyAsync(ib.staging_data, src, copy_bytes,
                     hipMemcpyDefault, stream));
-            }
-            if (ib.prog_bytes > copy_bytes) {
-                HIP_CALL_THROW(hipMemsetAsync(static_cast<char*>(ib.staging_data) + copy_bytes,
-                    0, ib.prog_bytes - copy_bytes, stream));
             }
         }
     }
