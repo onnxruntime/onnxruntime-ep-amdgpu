@@ -144,6 +144,7 @@ struct StagingInputBind {
     std::size_t arena_offset{};              // byte offset into the pinned host arena (coalesced)
     std::size_t stage_capacity{};            // staging buffer size in bytes (copy clamp)
     std::size_t prog_bytes{};                // full program-shape byte size for this input
+    std::size_t row_bytes{};                 // bytes per axis-0 row (prog_bytes / prog_lens[0]); batch-pad math
     std::vector<std::size_t> prog_lens{};    // program-shape lengths (padding math)
     std::size_t element_size{};              // prog_bytes / product(prog_lens) (padding math)
     std::string name{};                      // parameter name (seq-axis lookup, padding path only)
@@ -219,6 +220,7 @@ struct StagingBindResult {
     std::vector<std::string> bound_output_names{};        // staging key per bound output
     std::vector<migraphx::shape> bound_output_shapes{};   // current bucket shape per bound output
     std::vector<std::vector<std::int64_t>> bound_output_ort_shapes{};  // bucket ORT shape (int64) per bound output
+    std::vector<std::size_t> bound_output_row_bytes{};    // bytes per axis-0 row per bound output (batch-slice math)
     std::vector<void*> bound_output_data{};               // staging src ptr per bound output (resolved once)
     std::vector<StagingInputBind> input_copies{};         // flat per-input copy plan (built once)
 
@@ -377,6 +379,12 @@ struct ComputeState {
     // Per-input dim counts from the same scan (input_name_indices order), letting the
     // shape-changed rehash slice current_input_shapes by offset.  Rewritten every call.
     std::vector<std::uint32_t> cur_input_ranks{};
+    // Per-input axis-0 extent (by ORT input index) from the same scan; -1 for a rank-0
+    // input or an index the scan skipped.  Lets the batch-pad copy confirm an input is
+    // actually batched (actual axis-0 == requested_batch) without a per-call GetShape:
+    // the program shape alone is ambiguous when a fixed dim coincidentally equals the
+    // target bucket.  Rewritten every call.
+    std::vector<std::int64_t> cur_input_axis0{};
 
     // Program parameter shapes keyed by shape hash, so each bucket keeps its shapes
     // and the hot path skips the get_parameter_shapes() rebuild. Dropped per-hash on

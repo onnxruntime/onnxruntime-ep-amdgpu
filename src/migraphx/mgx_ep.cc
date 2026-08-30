@@ -1424,6 +1424,9 @@ std::vector<std::int64_t> GatherInputShapesAndBatch(ComputeState& compute_state,
     // Raw input data ptrs (by ORT index), reused by the coalesced copy; nullptr for
     // any index the scan skips.
     compute_state.cur_input_data.assign(input_name_indices.size(), nullptr);
+    // Per-input axis-0 extent (by ORT index), reused by the batch-pad copy to confirm
+    // an input is actually batched without a second per-call shape read.
+    compute_state.cur_input_axis0.assign(input_name_indices.size(), -1);
     // Per-input dim counts, so the shape-changed rehash slices current_input_shapes by
     // offset instead of re-fetching shapes.
     compute_state.cur_input_ranks.clear();
@@ -1447,6 +1450,9 @@ std::vector<std::int64_t> GatherInputShapesAndBatch(ComputeState& compute_state,
         compute_state.cur_input_ranks.push_back(static_cast<std::uint32_t>(rank));
         if (index < compute_state.cur_input_data.size()) {
             compute_state.cur_input_data[index] = input_value.GetTensorRawData();
+        }
+        if (index < compute_state.cur_input_axis0.size() && rank > 0) {
+            compute_state.cur_input_axis0[index] = dims.front();
         }
         if (track_batch && rank > 0 && (!have_batch_min || index < batch_min_index)) {
             have_batch_min = true;

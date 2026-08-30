@@ -716,20 +716,19 @@ void CopyInputsToStaging(ComputeState& cs,
     const StaticSeqContext& seq)
 {
     // ── Coalesced fast path ───────────────────────────────────────────────────
-    // When the input arena is active, there is no padding, and every input is
-    // host-resident, gather all inputs into the pinned staging buffer and issue a
-    // single H2D for the whole arena -- collapsing the per-input launch overhead
-    // that dominates batch-1 many-input models.  Any other case (padding or a
-    // device-resident input) falls through to the per-input loop below, which is
-    // still correct because each staging buffer's data points into the arena.
-    // Both batch padding AND seq padding disqualify the fast path: the memcpy below
-    // copies only the real bytes and would skip the pad tail-zero / prefix stride.
-    // Driven entirely by the precomputed bind.input_copies plan: no parameter
-    // names, std::strings, or map lookups on this hot path.
-    const bool batch_no_pad{!dyn.active || dyn.target_batch == dyn.requested_batch};
+    // When the input arena is active and every input is host-resident, gather all
+    // inputs into the pinned staging buffer and issue a single H2D for the whole
+    // arena -- collapsing the per-input launch overhead that dominates batch-1
+    // many-input models.  A device-resident input falls through to the per-input
+    // loop below, which is still correct because each staging buffer's data points
+    // into the arena.  Driven entirely by the precomputed bind.input_copies plan:
+    // no parameter names, std::strings, or map lookups on this hot path.
+    // Batch padding is compatible with the coalesced gather (item 1): only the real
+    // rows are copied host-side and the pad tail is zeroed, so it still resolves to
+    // one H2D.  Only seq padding -- which places real tokens at a per-slice interior
+    // offset -- must fall through to the per-input path below.
     const bool seq_no_pad{!seq.active || seq.target_len == seq.real_len};
-    const bool no_padding{batch_no_pad && seq_no_pad};
-    if (cs.staging_inputs_coalesced && cs.in_staging_host != nullptr && no_padding) {
+    if (cs.staging_inputs_coalesced && cs.in_staging_host != nullptr && seq_no_pad) {
         // Coalesce eligibility (all inputs host-resident) is determined once and
         // cached on the ComputeState: the caller binds each input to the same memory
         // type on every call, so rescanning N inputs with GetTensorMemoryInfo per
@@ -747,6 +746,7 @@ void CopyInputsToStaging(ComputeState& cs,
         }
 
         if (cs.coalesce_residency == ComputeState::CoalesceResidency::kAllHost) {
+            const bool batch_pad{dyn.active && dyn.target_batch > dyn.requested_batch};
             char* host_base{static_cast<char*>(cs.in_staging_host)};
             for (const auto& ib : bind.input_copies) {
                 // Item 6: reuse the raw pointer captured during the per-call input
@@ -756,12 +756,29 @@ void CopyInputsToStaging(ComputeState& cs,
                 if (src == nullptr) {
                     src = ctx.GetInput(ib.ort_index).GetTensorRawData();
                 }
-                std::size_t copy_bytes{ib.prog_bytes};
+                // A batched input arrives with requested_batch rows: gather only those
+                // and leave the pad tail zeroed.  Non-batched inputs copy in full.
+                // Batched == program axis-0 was bucketed up to target_batch AND the
+                // actual axis-0 (cached during the input scan, item 4 -- no GetShape
+                // here) equals requested_batch; the second half rejects a fixed dim that
+                // merely coincides with target_batch.
+                const bool batched{batch_pad && !ib.prog_lens.empty() &&
+                    ib.prog_lens.front() == dyn.target_batch &&
+                    ib.ort_index < cs.cur_input_axis0.size() &&
+                    cs.cur_input_axis0[ib.ort_index] == static_cast<std::int64_t>(dyn.requested_batch)};
+                std::size_t copy_bytes{batched ? ib.row_bytes * dyn.requested_batch
+                                               : ib.prog_bytes};
                 if (copy_bytes > ib.stage_capacity) {
                     copy_bytes = ib.stage_capacity;
                 }
                 if (copy_bytes > 0) {
                     std::memcpy(host_base + ib.arena_offset, src, copy_bytes);
+                }
+                // Zero the pad tail so a smaller batch never inherits a prior (larger)
+                // call's rows.  A host memset keeps this a single contiguous H2D.
+                if (ib.prog_bytes > copy_bytes) {
+                    std::memset(host_base + ib.arena_offset + copy_bytes, 0,
+                        ib.prog_bytes - copy_bytes);
                 }
             }
             // One transfer for every input.  Copying the whole arena (including the
@@ -773,26 +790,30 @@ void CopyInputsToStaging(ComputeState& cs,
         }
     }
 
-    // Per-input fallback (a device-resident input, or padding is active).  Only the
-    // padding branches need the actual ORT shape, so fetch it lazily.
-    const bool maybe_pad{(dyn.active && dyn.target_batch > dyn.requested_batch) ||
-                         (seq.active && seq.input_axes != nullptr)};
+    // Per-input fallback (a device-resident input, or seq padding is active).  Only
+    // the seq-padding branch needs the actual ORT shape (to place the real token
+    // span); batch padding is driven entirely by the bind-time program lengths + the
+    // resolved dynamic-batch context, so it needs no per-call GetShape (item 4).
+    const bool need_actual_shape{seq.active && seq.input_axes != nullptr};
     for (const auto& ib : bind.input_copies) {
         const auto input_tensor{ctx.GetInput(ib.ort_index)};
         const void* src{input_tensor.GetTensorRawData()};
         const auto& prog_lens{ib.prog_lens};
 
         std::vector<std::int64_t> actual_shape;
-        if (maybe_pad) {
+        if (need_actual_shape) {
             actual_shape = input_tensor.GetTensorTypeAndShapeInfo().GetShape();
         }
 
         // A batched input arrives with requested_batch rows but the program (and
-        // staging) expect target_batch rows; replicate the last row to pad.
+        // staging) expect target_batch rows.  Batched == program axis-0 was bucketed up
+        // to target_batch AND the actual axis-0 (cached during the input scan, item 4 --
+        // no GetShape here) equals requested_batch; the second half rejects a fixed dim
+        // that merely coincides with target_batch.
         const bool batched{dyn.active && dyn.target_batch > dyn.requested_batch &&
             !prog_lens.empty() && prog_lens.front() == dyn.target_batch &&
-            !actual_shape.empty() &&
-            static_cast<std::size_t>(actual_shape.front()) == dyn.requested_batch};
+            ib.ort_index < cs.cur_input_axis0.size() &&
+            cs.cur_input_axis0[ib.ort_index] == static_cast<std::int64_t>(dyn.requested_batch)};
 
         // A named seq input arrives with real_len tokens but the program expects
         // target_len; copy the real tokens per slice and zero-fill the pad tail.
@@ -816,17 +837,26 @@ void CopyInputsToStaging(ComputeState& cs,
                 inner *= prog_lens[a];
             PadSeqTensor(src, ib.staging_data, outer, seq.real_len, seq.target_len,
                 inner, ib.element_size, stream);
-        } else if (batched) {
-            const std::size_t elements_per_row{ProductOf(prog_lens) / dyn.target_batch};
-            PadInputTensor(src, ib.staging_data, dyn.requested_batch, dyn.target_batch,
-                ib.element_size, elements_per_row, stream);
         } else {
-            std::size_t bytes{ib.prog_bytes};
-            if (bytes > ib.stage_capacity) {
-                bytes = ib.stage_capacity;
+            // Batched: copy the real requested_batch rows (row_bytes precomputed at
+            // bind) and zero the pad tail.  Unbatched: copy in full.  Zeroing the pad
+            // rows (vs the old last-row replicate) is one memset instead of O(log N)
+            // replicate copies and is correct for the batch-independent models dynamic
+            // batching targets -- the pad output rows are sliced off and never feed a
+            // real row.  The zero also stops a smaller batch inheriting a prior call's
+            // rows.
+            std::size_t copy_bytes{batched ? ib.row_bytes * dyn.requested_batch
+                                           : ib.prog_bytes};
+            if (copy_bytes > ib.stage_capacity) {
+                copy_bytes = ib.stage_capacity;
             }
-            if (bytes > 0) {
-                HIP_CALL_THROW(hipMemcpyAsync(ib.staging_data, src, bytes, hipMemcpyDefault, stream));
+            if (copy_bytes > 0) {
+                HIP_CALL_THROW(hipMemcpyAsync(ib.staging_data, src, copy_bytes,
+                    hipMemcpyDefault, stream));
+            }
+            if (ib.prog_bytes > copy_bytes) {
+                HIP_CALL_THROW(hipMemsetAsync(static_cast<char*>(ib.staging_data) + copy_bytes,
+                    0, ib.prog_bytes - copy_bytes, stream));
             }
         }
     }
@@ -863,6 +893,10 @@ StagingBindResult BindStagingParams(ComputeState& cs,
             ib.prog_lens.assign(in_lens.begin(), in_lens.end());
             const std::size_t total_elems{ProductOf(ib.prog_lens)};
             ib.element_size = total_elems > 0 ? ib.prog_bytes / total_elems : 0;
+            // Precompute bytes-per-row (axis 0) so the batch-pad copy computes the real
+            // byte count as row_bytes * requested_batch with no per-call shape read.
+            ib.row_bytes = (!ib.prog_lens.empty() && ib.prog_lens.front() > 0)
+                ? ib.prog_bytes / ib.prog_lens.front() : ib.prog_bytes;
             ib.name = param_name;
             result.input_copies.push_back(std::move(ib));
             // Hybrid: bind this input to its (pointer-stable) arena sub-view.  The
@@ -897,6 +931,11 @@ StagingBindResult BindStagingParams(ComputeState& cs,
             // does not rebuild it every inference (it only slices it when padding).
             const auto out_lens{out_shape.lengths()};
             result.bound_output_ort_shapes.emplace_back(out_lens.begin(), out_lens.end());
+            // Precompute bytes-per-row (axis 0) so the batch slice avoids a per-call
+            // division when shrinking a padded output to the requested batch.
+            result.bound_output_row_bytes.push_back(
+                !out_lens.empty() && out_lens.front() > 0 ? out_shape.bytes() / out_lens.front()
+                                                          : out_shape.bytes());
             // Hybrid: this output can be bound directly to its ORT tensor.  ort_shape
             // == program shape here (the hybrid runs only when no padding is needed).
             result.hybrid.outputs.push_back(CachedDirectOutput{
@@ -951,18 +990,21 @@ void CopyStagingOutputsToOrt(const StagingBindResult& bind,
         }
 
         // Report the cached bucket shape as-is unless a slice is needed (batch or
-        // seq), in which case work on a local copy.  The batch-1 steady state needs
-        // neither, so no per-output allocation happens there.
+        // seq), in which case work on a per-thread reusable buffer.  The batch-1 steady
+        // state needs no slice and never touches it; the padded-prefill slice reuses the
+        // buffer's capacity (item 5), so it allocates nothing after warmup.
         const std::vector<std::int64_t>* report_shape{&cached_ort_shape};
-        std::vector<std::int64_t> sliced_shape;
+        thread_local std::vector<std::int64_t> sliced_shape;
         if (batch_sliced) {
-            const std::size_t row_bytes{bytes / dyn.target_batch};
-            sliced_shape = cached_ort_shape;
+            // row_bytes precomputed at bind (item 3): bytes / target_batch.
+            const std::size_t row_bytes{i < bind.bound_output_row_bytes.size()
+                ? bind.bound_output_row_bytes[i] : bytes / dyn.target_batch};
+            sliced_shape.assign(cached_ort_shape.begin(), cached_ort_shape.end());
             sliced_shape.front() = static_cast<std::int64_t>(dyn.requested_batch);
             bytes = row_bytes * dyn.requested_batch;
             report_shape = &sliced_shape;
         } else if (seq_axis >= 0) {
-            sliced_shape = cached_ort_shape;
+            sliced_shape.assign(cached_ort_shape.begin(), cached_ort_shape.end());
             sliced_shape[seq_axis] = static_cast<std::int64_t>(seq.real_len);
             report_shape = &sliced_shape;
         }
