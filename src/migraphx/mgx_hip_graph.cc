@@ -343,12 +343,11 @@ bool WarmupAndCaptureHipGraphCommon(ComputeState& cs, hipStream_t stream,
         HIP_CALL_THROW(hipGraphInstantiate(&entry.exec, entry.graph, nullptr, nullptr, 0));
         entry.captured = true;
         entry.direct_bind = direct_bind;
+        entry.zeroing_in_graph = false;  // reset; set only if the fold below succeeds
         if (direct_bind) {
             // Baked-in device addresses, compared positionally on every replay.
             entry.captured_input_ptrs = captured_input_ptrs;
             entry.captured_output_ptrs = captured_output_ptrs;
-        } else {
-            entry.zeroing_in_graph = false;  // reset; set only if the fold below succeeds
         }
 
         // Record the scratch pointer baked into the graph for drift detection.
@@ -364,18 +363,21 @@ bool WarmupAndCaptureHipGraphCommon(ComputeState& cs, hipStream_t stream,
         entry.captured_output_zeroes =
             DetectRmwOutputs(cs, shape_key, entry.exec, stream, output_bufs);
 
-        // Item 7 (staging only): fold the (scratch + RMW-output) zeroing into the
-        // graph so replay is a single launch.  Must run after DetectRmwOutputs; keeps
-        // the original exec on failure.  The direct path re-zeros out of graph instead.
-        if (!direct_bind) {
-            FoldZeroingIntoCapturedGraph(cs, stream, program, params, shape_key, entry);
-        }
+        // Item 7: fold the (scratch + RMW-output) zeroing into the graph so replay is a
+        // single launch.  Must run after DetectRmwOutputs; keeps the original exec on
+        // failure.  Applies to both paths: for direct-bind the folded memsets target the
+        // same ORT-output/scratch addresses already baked into the program graph, so any
+        // pointer drift is caught by CheckCapturedPtrsMatch and forces a recapture that
+        // re-folds against the new pointers.
+        FoldZeroingIntoCapturedGraph(cs, stream, program, params, shape_key, entry);
 
         // Post-capture warm-in replays to settle workspace before first real use.  The
         // direct path zeroes scratch + RMW outputs before each launch; the staging path
         // folded that into the graph (or accepts an unzeroed warm-in), so it just launches.
         for (int i{0}; i < post_warmin; ++i) {
-            if (direct_bind) {
+            // A folded graph zeroes scratch + RMW outputs inside the launch; only an
+            // unfolded direct-bind graph needs the out-of-band zeroing here.
+            if (direct_bind && !entry.zeroing_in_graph) {
                 ZeroScratchFor(cs, shape_key, stream);
                 ZeroOutputBufs(entry.captured_output_zeroes, stream);
             }
@@ -1230,16 +1232,20 @@ void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
         } else {
             // Pointers matched: reset the drift counter so only *consecutive*
             // mismatches can trip the permanent fallback above.  No param rebind and
-            // no map lookups -- zero scratch via the cached slot + the RMW outputs,
-            // then replay.
+            // no map lookups.  When the zeroing was folded into the captured graph
+            // (item 7) the single launch already zeroes scratch + RMW outputs, so skip
+            // the out-of-graph memsets; otherwise zero via the cached slot + the RMW
+            // outputs, then replay.
             recapture_count = 0;
-            if (dbc.scratch_slot != nullptr && dbc.scratch_slot->data != nullptr &&
-                dbc.scratch_slot->size_bytes > 0) {
-                HIP_CALL_THROW(hipMemsetAsync(dbc.scratch_slot->data, 0,
-                    dbc.scratch_slot->size_bytes, stream));
-            }
-            for (const auto& [ptr, bytes] : entry->captured_output_zeroes) {
-                HIP_CALL_THROW(hipMemsetAsync(ptr, 0, bytes, stream));
+            if (!entry->zeroing_in_graph) {
+                if (dbc.scratch_slot != nullptr && dbc.scratch_slot->data != nullptr &&
+                    dbc.scratch_slot->size_bytes > 0) {
+                    HIP_CALL_THROW(hipMemsetAsync(dbc.scratch_slot->data, 0,
+                        dbc.scratch_slot->size_bytes, stream));
+                }
+                for (const auto& [ptr, bytes] : entry->captured_output_zeroes) {
+                    HIP_CALL_THROW(hipMemsetAsync(ptr, 0, bytes, stream));
+                }
             }
             HIP_CALL_THROW(hipGraphLaunch(entry->exec, stream));
             MaterializeExtraOutputs(ctx, stream, entry->extra_outputs, dyn);

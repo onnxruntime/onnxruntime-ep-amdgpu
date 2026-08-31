@@ -1414,12 +1414,14 @@ StaticSeqContext ResolveSeqPadding(ComputeState& compute_state,
 
 // Single pass over the model inputs: gather the raw dims (flattened), record each
 // input's rank and raw data ptr on the compute state, and resolve the dynamic-batch
-// bucket from the lowest-index input's axis-0 extent.  Returns the flattened raw
-// shapes so the caller can compare against the previous call and hash them.
-std::vector<std::int64_t> GatherInputShapesAndBatch(ComputeState& compute_state,
-    const Ort::KernelContext& kernel_context, DynamicBatchContext& dyn) {
+// bucket from the lowest-index input's axis-0 extent.  Fills `current_input_shapes`
+// (a caller-owned reusable buffer -- item 3) with the flattened raw shapes so the
+// caller can compare against the previous call and hash them, without a per-call alloc.
+void GatherInputShapesAndBatch(ComputeState& compute_state,
+    const Ort::KernelContext& kernel_context, DynamicBatchContext& dyn,
+    std::vector<std::int64_t>& current_input_shapes) {
     const auto& input_name_indices{compute_state.input_name_indices};
-    std::vector<std::int64_t> current_input_shapes;
+    current_input_shapes.clear();
     current_input_shapes.reserve(input_name_indices.size() * 4);
     // Raw input data ptrs (by ORT index), reused by the coalesced copy; nullptr for
     // any index the scan skips.
@@ -1470,7 +1472,6 @@ std::vector<std::int64_t> GatherInputShapesAndBatch(ComputeState& compute_state,
         dyn.target_batch = bucket > 0 ? bucket : requested_batch;
         dyn.active = true;
     }
-    return current_input_shapes;
 }
 
 // Hash every input's effective (batch/seq-transformed) shape, reusing the dims already
@@ -1494,6 +1495,40 @@ hash::Value HashEffectiveInputShapes(const ComputeState& compute_state,
             gsl::span<const std::int64_t>{dims.data(), dims.size()});
     }
     return input_shapes_hash;
+}
+
+// True when this call's effective input shapes equal the previous call's given that only
+// the dynamic-batch value moved (item 2).  Walks both flattened raw-shape arrays in
+// lockstep using the shared per-input ranks: each input's axis-0 is mapped through its own
+// requested->target batch substitution (mirroring ApplyEffectiveShape's batch rule) and
+// compared, while every non-batch dim must match exactly.  The caller guarantees seq
+// padding is inactive on both calls and the two buckets match, so a true result means the
+// effective-shape hash is identical to the previous call's and can be reused unrecomputed.
+bool EffectiveShapesEqualModuloBatch(
+    const std::vector<std::int64_t>& current, const std::vector<std::int64_t>& last,
+    const std::vector<std::uint32_t>& ranks,
+    std::size_t req, std::size_t target, std::size_t last_req, std::size_t last_target) {
+    std::size_t off{0};
+    for (const std::uint32_t rank : ranks) {
+        if (rank > 0) {
+            const std::int64_t cf{current[off]};
+            const std::int64_t lf{last[off]};
+            const std::int64_t cf_eff{static_cast<std::size_t>(cf) == req
+                ? static_cast<std::int64_t>(target) : cf};
+            const std::int64_t lf_eff{static_cast<std::size_t>(lf) == last_req
+                ? static_cast<std::int64_t>(last_target) : lf};
+            if (cf_eff != lf_eff) {
+                return false;
+            }
+            for (std::uint32_t k{1}; k < rank; ++k) {
+                if (current[off + k] != last[off + k]) {
+                    return false;
+                }
+            }
+        }
+        off += rank;
+    }
+    return true;
 }
 
 // Resolve the program for shape_key: reuse the in-memory cached program if present,
@@ -1608,19 +1643,35 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
     DynamicBatchContext dyn{};
 
     // 2. Single pass: gather input shapes + data ptrs and resolve the dynamic-batch
-    //    bucket.  If the raw shapes are identical to the previous call we reuse the
-    //    cached hash and skip the rehash/match work below.
-    std::vector<std::int64_t> current_input_shapes{
-        GatherInputShapesAndBatch(compute_state, kernel_context, dyn)};
+    //    bucket.  Fills the reusable scratch (item 3, no per-call alloc).  If the raw
+    //    shapes are identical to the previous call we reuse the cached hash and skip the
+    //    rehash/match work below.
+    auto& current_input_shapes{compute_state.input_shapes_scratch};
+    GatherInputShapesAndBatch(compute_state, kernel_context, dyn, current_input_shapes);
     const bool shapes_unchanged{compute_state.has_last_input_shapes &&
                                 current_input_shapes == compute_state.last_input_shapes};
+
+    // Item 2: effective-hash reuse across same-bucket dynamic-batch calls.  When the raw
+    //    shapes differ only in the batch value (same target bucket, same non-batch dims,
+    //    seq inactive on both calls) the effective shape -- and thus its hash -- is
+    //    identical to the previous call, so the whole rehash is skipped.  Guarded so it
+    //    can never reuse a hash across buckets or seq-padding changes.
+    const bool effective_unchanged{!shapes_unchanged && compute_state.has_last_input_shapes &&
+        !seq.active && !compute_state.last_seq_active &&
+        dyn.active && compute_state.last_dyn_active &&
+        dyn.target_batch == compute_state.last_dyn_target_batch &&
+        current_input_shapes.size() == compute_state.last_input_shapes.size() &&
+        compute_state.cur_input_ranks == compute_state.last_input_ranks &&
+        EffectiveShapesEqualModuloBatch(current_input_shapes, compute_state.last_input_shapes,
+            compute_state.cur_input_ranks, dyn.requested_batch, dyn.target_batch,
+            compute_state.last_dyn_requested_batch, compute_state.last_dyn_target_batch)};
 
     // 3. Hash the effective input shapes (unless unchanged) and decide whether the
     //    active program still matches this call.  A single hashing path serves both
     //    the first-call seed and the shape-changed rehash.
     hash::Value input_shapes_hash{};
     bool input_shapes_match{compute_state.has_input_shapes};
-    if (shapes_unchanged) {
+    if (shapes_unchanged || effective_unchanged) {
         input_shapes_hash = compute_state.last_input_shapes_hash;
         input_shapes_match = true;
     } else {
@@ -1661,12 +1712,21 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
 
     // 6. Item 4: remember these shapes so the next identical call takes the fast path.
     //    Set only after the (possible) recompile above, so the recorded hash always
-    //    corresponds to a program that is compiled and ready for these shapes.
+    //    corresponds to a program that is compiled and ready for these shapes.  On a
+    //    raw-shape change, swap the freshly filled scratch into last_input_shapes so the
+    //    old buffer becomes next call's scratch (O(1), no alloc -- item 3).
     if (!shapes_unchanged) {
-        compute_state.last_input_shapes = std::move(current_input_shapes);
+        std::swap(compute_state.last_input_shapes, current_input_shapes);
         compute_state.last_input_shapes_hash = input_shapes_hash;
         compute_state.has_last_input_shapes = true;
+        compute_state.last_input_ranks = compute_state.cur_input_ranks;
     }
+    // Record this call's batch/seq context every call (even on the fast paths) so the
+    // item-2 reuse check always compares against the immediately previous call.
+    compute_state.last_dyn_active = dyn.active;
+    compute_state.last_dyn_requested_batch = dyn.requested_batch;
+    compute_state.last_dyn_target_batch = dyn.target_batch;
+    compute_state.last_seq_active = seq.active;
 
     // Whether this call needs the program run at a larger shape than the request
     // (batch bucketed up, or seq padded up).  Padding requires the staging path

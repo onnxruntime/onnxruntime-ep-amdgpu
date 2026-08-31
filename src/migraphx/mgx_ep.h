@@ -369,6 +369,21 @@ struct ComputeState {
     std::vector<std::int64_t> last_input_shapes{};
     hash::Value last_input_shapes_hash{};
     bool has_last_input_shapes{};
+    // Reusable scratch the per-call input-shape scan fills (item 3): on a raw-shape
+    // change it is swapped into last_input_shapes (O(1)) so the old buffer becomes next
+    // call's scratch -- no per-call heap allocation for the gathered shapes.
+    std::vector<std::int64_t> input_shapes_scratch{};
+    // Previous call's per-input ranks + batch/seq context, for the effective-hash reuse
+    // fast path (item 2): under dynamic batching the raw batch dim changes every call, so
+    // the raw-equality `shapes_unchanged` check misses even though the effective (bucketed)
+    // shape -- and thus the hash -- is unchanged.  When only the batch value moved (same
+    // target bucket, same non-batch dims, seq inactive on both calls) the previous hash is
+    // reused without rehashing.  Updated every call so it always tracks the prior call.
+    std::vector<std::uint32_t> last_input_ranks{};
+    bool last_dyn_active{};
+    std::size_t last_dyn_requested_batch{};
+    std::size_t last_dyn_target_batch{};
+    bool last_seq_active{};
     // Shape key the active `program` was compiled/loaded for, so the shape-changed
     // path matches with one integer compare.  Set on (re)compile or cache swap.
     ShapeKey active_program_shape_key{};
