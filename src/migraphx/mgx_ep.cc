@@ -1426,8 +1426,9 @@ StaticSeqContext ResolveSeqPadding(ComputeState& compute_state,
 void GatherInputShapesAndBatch(ComputeState& compute_state,
     const Ort::KernelContext& kernel_context, DynamicBatchContext& dyn,
     std::vector<std::int64_t>& current_input_shapes, bool seq_active,
-    bool& shapes_known_unchanged) {
+    hipStream_t hip_stream, bool& shapes_known_unchanged) {
     shapes_known_unchanged = false;
+    compute_state.inputs_coalesced_this_call = false;
     const auto& input_name_indices{compute_state.input_name_indices};
 
     // Build the flat scan order once, mirroring the map's iteration order so the flattened
@@ -1459,17 +1460,23 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
             Ort::ThrowOnError(Ort::GetApi().GetDimensions(repr_handle, repr_dims.data(), repr_rank));
             const auto requested_batch{static_cast<std::size_t>(repr_dims.front())};
             if (requested_batch == compute_state.last_dyn_requested_batch) {
-                // Batch unchanged -> every input shape is unchanged; refresh only the data
-                // pointers and reuse the cached ranks / axis0 / dims template.
-                for (const auto& entry : scan_order) {
-                    if (entry.ort_index < compute_state.cur_input_data.size()) {
-                        compute_state.cur_input_data[entry.ort_index] =
-                            kernel_context.GetInput(entry.ort_index).GetTensorRawData();
-                    }
-                }
+                // Batch unchanged -> every input shape is unchanged; reuse the cached
+                // ranks / axis0 / dims template.  Fuse the coalesced gather into this
+                // pass when the arena is active; otherwise just refresh the data pointers
+                // for the copy that follows.
                 dyn.requested_batch = requested_batch;
                 dyn.target_batch = compute_state.last_dyn_target_batch;
                 dyn.active = true;
+                const ShapeKey fast_key{hash::ShapeKeyOf(compute_state.last_input_shapes_hash)};
+                if (!TryFusedCoalesceGather(compute_state, kernel_context, dyn, fast_key,
+                        hip_stream)) {
+                    for (const auto& entry : scan_order) {
+                        if (entry.ort_index < compute_state.cur_input_data.size()) {
+                            compute_state.cur_input_data[entry.ort_index] =
+                                kernel_context.GetInput(entry.ort_index).GetTensorRawData();
+                        }
+                    }
+                }
                 shapes_known_unchanged = true;
                 return;
             }
@@ -1708,7 +1715,7 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
     auto& current_input_shapes{compute_state.input_shapes_scratch};
     bool shapes_known_unchanged{false};
     GatherInputShapesAndBatch(compute_state, kernel_context, dyn, current_input_shapes,
-        seq.active, shapes_known_unchanged);
+        seq.active, io.hip_stream, shapes_known_unchanged);
     // When the scan proved the shapes unchanged (batch identical to the previous call) it
     // left current_input_shapes stale, so trust the flag and skip the full-buffer compare.
     const bool shapes_unchanged{shapes_known_unchanged ||

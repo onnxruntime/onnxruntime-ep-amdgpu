@@ -474,17 +474,24 @@ void ReplayHipGraph(hipStream_t stream, CapturedHipGraph& entry,
 // means an ORT buffer moved (e.g. allocator recycling) and the graph -- which
 // hard-codes device addresses -- must be re-captured.  Pointers are compared
 // positionally (same DirectBindCache order used at capture), so this is a flat
-// vector walk with no per-call map build or string hashing.
+// vector walk with no per-call map build or string hashing.  check_inputs is false when
+// the inputs are pointer-stable (coalesced arena sub-views): they cannot drift, so only
+// the outputs (+ scratch) are compared.
 bool CheckCapturedPtrsMatch(const CapturedHipGraph& entry,
-    const std::vector<void*>& input_ptrs, const std::vector<void*>& output_ptrs, void* scratch_ptr)
+    const std::vector<void*>& input_ptrs, const std::vector<void*>& output_ptrs,
+    void* scratch_ptr, bool check_inputs)
 {
-    if (entry.captured_input_ptrs.size() != input_ptrs.size() ||
-        entry.captured_output_ptrs.size() != output_ptrs.size()) {
+    if (entry.captured_output_ptrs.size() != output_ptrs.size()) {
         return false;
     }
-    for (std::size_t i{0}; i < input_ptrs.size(); ++i) {
-        if (entry.captured_input_ptrs[i] != input_ptrs[i]) {
+    if (check_inputs) {
+        if (entry.captured_input_ptrs.size() != input_ptrs.size()) {
             return false;
+        }
+        for (std::size_t i{0}; i < input_ptrs.size(); ++i) {
+            if (entry.captured_input_ptrs[i] != input_ptrs[i]) {
+                return false;
+            }
         }
     }
     for (std::size_t i{0}; i < output_ptrs.size(); ++i) {
@@ -719,75 +726,116 @@ void AllocateStaging(ComputeState& cs,
     cs.staging_allocated = true;
 }
 
+// True when `ptr` is page-locked (pinned) host memory: pinned sources DMA straight into
+// the device arena, whereas pageable memory must first be gathered into a pinned host
+// buffer.  Unregistered/unknown pointers report false (and clear the sticky error).
+static bool IsPinnedHostPtr(const void* ptr) {
+    if (ptr == nullptr) {
+        return false;
+    }
+    hipPointerAttribute_t attr{};
+    if (hipPointerGetAttributes(&attr, ptr) != hipSuccess) {
+        (void)hipGetLastError();
+        return false;
+    }
+    return attr.type == hipMemoryTypeHost;
+}
+
+// Classify the coalesced inputs once: any device-resident input disqualifies the
+// coalesced path; otherwise all-host, split by whether every source is pinned (direct
+// DMA) or some are pageable (gather + single H2D).
+static ComputeState::CoalesceResidency ProbeCoalesceResidency(
+    const StagingBindResult& bind, const Ort::KernelContext& ctx) {
+    bool all_pinned{true};
+    for (const auto& ib : bind.input_copies) {
+        const auto in{ctx.GetInput(ib.ort_index)};
+        if (in.GetTensorMemoryInfo().GetDeviceType() != OrtMemoryInfoDeviceType_CPU) {
+            return ComputeState::CoalesceResidency::kHasDevice;
+        }
+        if (all_pinned && !IsPinnedHostPtr(in.GetTensorRawData())) {
+            all_pinned = false;
+        }
+    }
+    return all_pinned ? ComputeState::CoalesceResidency::kAllHostPinned
+                      : ComputeState::CoalesceResidency::kAllHostPageable;
+}
+
+// Copy every coalesced input into its arena sub-view in one pass.  Pinned sources DMA
+// straight into the device arena; pageable sources are gathered into the pinned host
+// buffer then flushed with one whole-arena H2D.  A batched input copies only its real
+// requested_batch rows (the pad tail is left as-is -- pad output rows are sliced off
+// downstream); others copy in full.  When refresh_ptrs is set the ORT data pointers are
+// (re)read and recorded here so the shape scan and this gather share one traversal;
+// otherwise the pointers already recorded by the scan are reused.  Requires residency to
+// be a resolved all-host state.
+static void CoalesceInputsCore(ComputeState& cs, const StagingBindResult& bind,
+    const Ort::KernelContext& ctx, const DynamicBatchContext& dyn,
+    hipStream_t stream, bool refresh_ptrs) {
+    const bool pinned{cs.coalesce_residency == ComputeState::CoalesceResidency::kAllHostPinned};
+    const bool batch_pad{dyn.active && dyn.target_batch > dyn.requested_batch};
+    char* const host_base{static_cast<char*>(cs.in_staging_host)};
+    char* const arena_base{static_cast<char*>(cs.in_arena_dev)};
+    for (const auto& ib : bind.input_copies) {
+        const void* src{nullptr};
+        if (refresh_ptrs) {
+            src = ctx.GetInput(ib.ort_index).GetTensorRawData();
+            if (ib.ort_index < cs.cur_input_data.size()) {
+                cs.cur_input_data[ib.ort_index] = src;
+            }
+        } else {
+            src = ib.ort_index < cs.cur_input_data.size() ? cs.cur_input_data[ib.ort_index] : nullptr;
+            if (src == nullptr) {
+                src = ctx.GetInput(ib.ort_index).GetTensorRawData();
+            }
+        }
+        const bool batched{batch_pad && !ib.prog_lens.empty() &&
+            ib.prog_lens.front() == dyn.target_batch &&
+            ib.ort_index < cs.cur_input_axis0.size() &&
+            cs.cur_input_axis0[ib.ort_index] == static_cast<std::int64_t>(dyn.requested_batch)};
+        std::size_t copy_bytes{batched ? ib.row_bytes * dyn.requested_batch : ib.prog_bytes};
+        if (copy_bytes > ib.stage_capacity) {
+            copy_bytes = ib.stage_capacity;
+        }
+        if (copy_bytes == 0) {
+            continue;
+        }
+        if (pinned) {
+            HIP_CALL_THROW(hipMemcpyAsync(arena_base + ib.arena_offset, src, copy_bytes,
+                hipMemcpyHostToDevice, stream));
+        } else {
+            std::memcpy(host_base + ib.arena_offset, src, copy_bytes);
+        }
+    }
+    if (!pinned) {
+        HIP_CALL_THROW(hipMemcpyAsync(cs.in_arena_dev, cs.in_staging_host,
+            cs.in_arena_bytes, hipMemcpyHostToDevice, stream));
+    }
+}
+
 void CopyInputsToStaging(ComputeState& cs,
     const StagingBindResult& bind,
     const Ort::KernelContext& ctx, hipStream_t stream,
     const DynamicBatchContext& dyn,
     const StaticSeqContext& seq)
 {
-    // ── Coalesced fast path ───────────────────────────────────────────────────
-    // When the input arena is active and every input is host-resident, gather all
-    // inputs into the pinned staging buffer and issue a single H2D for the whole
-    // arena -- collapsing the per-input launch overhead that dominates batch-1
-    // many-input models.  A device-resident input falls through to the per-input
-    // loop below, which is still correct because each staging buffer's data points
-    // into the arena.  Driven entirely by the precomputed bind.input_copies plan:
-    // no parameter names, std::strings, or map lookups on this hot path.
-    // Batch padding is compatible with the coalesced gather (item 1): only the real
-    // rows are copied host-side (the pad tail is left as-is -- see below), so it still
-    // resolves to one H2D.  Only seq padding -- which places real tokens at a per-slice
-    // interior offset -- must fall through to the per-input path below.
+    // The fused shape-scan already coalesced this call's inputs in one pass.
+    if (cs.inputs_coalesced_this_call) {
+        return;
+    }
+
+    // Coalesced fast path: gather every host-resident input into the arena (pinned
+    // sources DMA directly; pageable sources gather then one H2D), driven by the
+    // precomputed bind.input_copies plan (no names/strings/map lookups).  A device
+    // input or active seq padding (real tokens at a per-slice interior offset) falls
+    // through to the per-input path below.
     const bool seq_no_pad{!seq.active || seq.target_len == seq.real_len};
     if (cs.staging_inputs_coalesced && cs.in_staging_host != nullptr && seq_no_pad) {
-        // Coalesce eligibility (all inputs host-resident) is determined once and
-        // cached on the ComputeState: the caller binds each input to the same memory
-        // type on every call, so rescanning N inputs with GetTensorMemoryInfo per
-        // inference is wasted work.  FreeStaging resets it on any structural change.
         if (cs.coalesce_residency == ComputeState::CoalesceResidency::kUnknown) {
-            auto residency{ComputeState::CoalesceResidency::kAllHost};
-            for (const auto& ib : bind.input_copies) {
-                const auto mem{ctx.GetInput(ib.ort_index).GetTensorMemoryInfo()};
-                if (mem.GetDeviceType() != OrtMemoryInfoDeviceType_CPU) {
-                    residency = ComputeState::CoalesceResidency::kHasDevice;
-                    break;
-                }
-            }
-            cs.coalesce_residency = residency;
+            cs.coalesce_residency = ProbeCoalesceResidency(bind, ctx);
         }
-
-        if (cs.coalesce_residency == ComputeState::CoalesceResidency::kAllHost) {
-            const bool batch_pad{dyn.active && dyn.target_batch > dyn.requested_batch};
-            char* host_base{static_cast<char*>(cs.in_staging_host)};
-            for (const auto& ib : bind.input_copies) {
-                // Item 6: reuse the raw pointer captured during the per-call input
-                // shape scan; fall back to GetInput only if it was not recorded.
-                const void* src{ib.ort_index < cs.cur_input_data.size()
-                    ? cs.cur_input_data[ib.ort_index] : nullptr};
-                if (src == nullptr) {
-                    src = ctx.GetInput(ib.ort_index).GetTensorRawData();
-                }
-                // A batched input (program axis-0 bucketed to target_batch and actual
-                // axis-0 == requested_batch, cached from the input scan) gathers only the
-                // real rows; others copy in full.  The pad tail is left as-is (no per-call
-                // zeroing): pad output rows are sliced off downstream.
-                const bool batched{batch_pad && !ib.prog_lens.empty() &&
-                    ib.prog_lens.front() == dyn.target_batch &&
-                    ib.ort_index < cs.cur_input_axis0.size() &&
-                    cs.cur_input_axis0[ib.ort_index] == static_cast<std::int64_t>(dyn.requested_batch)};
-                std::size_t copy_bytes{batched ? ib.row_bytes * dyn.requested_batch
-                                               : ib.prog_bytes};
-                if (copy_bytes > ib.stage_capacity) {
-                    copy_bytes = ib.stage_capacity;
-                }
-                if (copy_bytes > 0) {
-                    std::memcpy(host_base + ib.arena_offset, src, copy_bytes);
-                }
-            }
-            // One transfer for every input.  Copying the whole arena (including the
-            // aligned gaps) keeps it a single contiguous DMA; the program only reads
-            // the bound rows of each sub-view.
-            HIP_CALL_THROW(hipMemcpyAsync(cs.in_arena_dev, cs.in_staging_host,
-                cs.in_arena_bytes, hipMemcpyHostToDevice, stream));
+        if (cs.coalesce_residency == ComputeState::CoalesceResidency::kAllHostPinned ||
+            cs.coalesce_residency == ComputeState::CoalesceResidency::kAllHostPageable) {
+            CoalesceInputsCore(cs, bind, ctx, dyn, stream, /*refresh_ptrs=*/false);
             return;
         }
     }
@@ -856,6 +904,26 @@ void CopyInputsToStaging(ComputeState& cs,
     }
 }
 
+bool TryFusedCoalesceGather(ComputeState& cs,
+    const Ort::KernelContext& ctx, const DynamicBatchContext& dyn,
+    ShapeKey shape_key, hipStream_t stream) {
+    if (!cs.coalesce_io || !cs.staging_inputs_coalesced ||
+        cs.in_staging_host == nullptr || cs.in_arena_dev == nullptr) {
+        return false;
+    }
+    if (cs.coalesce_residency != ComputeState::CoalesceResidency::kAllHostPinned &&
+        cs.coalesce_residency != ComputeState::CoalesceResidency::kAllHostPageable) {
+        return false;
+    }
+    const auto it{cs.staging_bind_cache.find(shape_key)};
+    if (it == cs.staging_bind_cache.end()) {
+        return false;
+    }
+    CoalesceInputsCore(cs, it->second, ctx, dyn, stream, /*refresh_ptrs=*/true);
+    cs.inputs_coalesced_this_call = true;
+    return true;
+}
+
 StagingBindResult BindStagingParams(ComputeState& cs,
     const migraphx::program_parameter_shapes& param_shapes,
     ShapeKey shape_key, hipStream_t stream)
@@ -865,6 +933,9 @@ StagingBindResult BindStagingParams(ComputeState& cs,
     // bind.  Eligible unless a program parameter is neither an input, an output, nor
     // scratch (an unbound/literal param the hybrid cannot direct-bind).
     result.hybrid.eligible = true;
+    // Hybrid inputs are pointer-stable staging/arena sub-views, so replay drift checks
+    // only the ORT output pointers.
+    result.hybrid.inputs_pointer_stable = true;
     for (const auto& name : param_shapes.names()) {
         const std::string param_name{name};
         if (const auto idx_it{cs.input_name_indices.find(param_name)};
@@ -1230,7 +1301,7 @@ void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
         entry != nullptr && entry->captured && entry->direct_bind)
     {
         if (!CheckCapturedPtrsMatch(*entry, dbc.cur_input_ptrs, dbc.cur_output_ptrs,
-                current_scratch)) {
+                current_scratch, /*check_inputs=*/!dbc.inputs_pointer_stable)) {
             // ORT recycled a buffer under us.  Re-capture, but if drift is
             // sustained give up on this path (permanent eager/staging fallback)
             // rather than re-capturing on every call.

@@ -184,6 +184,9 @@ struct DirectBindCache {
     std::vector<CachedDirectOutput> outputs{};
     migraphx::program_parameters params{};
     bool eligible{};
+    // When true the bound inputs are pointer-stable staging/arena sub-views, so the
+    // replay drift check compares only outputs (+ scratch) and skips the inputs.
+    bool inputs_pointer_stable{false};
     // Scratch presence + shape, resolved once when this entry is populated so the
     // hot path allocates/zeros scratch without re-scanning all 200+ program
     // parameter names for a "scratch" entry on every call.
@@ -345,13 +348,18 @@ struct ComputeState {
     void* in_arena_dev{nullptr};
     void* in_staging_host{nullptr};
     std::size_t in_arena_bytes{};
-    // Coalesce eligibility (every input host-resident) is stable for a given
-    // deployment: a caller such as Triton binds each input to the same memory type
-    // on every call, so the single-H2D fast path either always qualifies or never
-    // does.  Determine it once and reuse it instead of rescanning N inputs with
-    // GetTensorMemoryInfo each inference.  Reset by FreeStaging (structural change).
-    enum class CoalesceResidency : std::uint8_t { kUnknown, kAllHost, kHasDevice };
+    // Coalesce input residency, stable for a given deployment (a caller such as Triton
+    // binds each input to the same memory kind every call).  Determined once and reused
+    // instead of rescanning N inputs per inference; reset by FreeStaging.  Pinned host
+    // sources DMA straight into the arena (no CPU copy); pageable sources are gathered
+    // into the pinned host buffer then flushed with one H2D; a device input disqualifies
+    // the coalesced path.
+    enum class CoalesceResidency : std::uint8_t {
+        kUnknown, kAllHostPinned, kAllHostPageable, kHasDevice };
     CoalesceResidency coalesce_residency{CoalesceResidency::kUnknown};
+    // Set when the fused shape-scan already coalesced this call's inputs, so the staging
+    // copy is skipped.  Reset at the start of every input scan.
+    bool inputs_coalesced_this_call{false};
 
     // ── hipGraph / staging / scratch runtime state (owned device memory) ──────
     // Staging buffers keyed by MIGraphX program parameter name.
