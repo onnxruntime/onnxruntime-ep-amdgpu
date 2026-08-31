@@ -221,6 +221,7 @@ struct StagingBindResult {
     std::vector<migraphx::shape> bound_output_shapes{};   // current bucket shape per bound output
     std::vector<std::vector<std::int64_t>> bound_output_ort_shapes{};  // bucket ORT shape (int64) per bound output
     std::vector<std::size_t> bound_output_row_bytes{};    // bytes per axis-0 row per bound output (batch-slice math)
+    std::vector<std::size_t> bound_output_bytes{};        // total bucket byte count per bound output (precomputed)
     std::vector<void*> bound_output_data{};               // staging src ptr per bound output (resolved once)
     std::vector<StagingInputBind> input_copies{};         // flat per-input copy plan (built once)
 

@@ -1782,10 +1782,17 @@ std::optional<Ort::Status> TryDirectBind(ComputeState& compute_state,
         // per-call maps, string hashing, or program_parameters.add(): those are
         // deferred to the capture/eager path).  Order matches dbc.inputs/outputs
         // so RunProgramOrHipGraphDirect can compare them positionally for drift.
+        // Reuse the input ptrs captured during ResolveComputeIO's shape scan;
+        // fall back to GetInput only for an index the scan did not record.
         dbc.cur_input_ptrs.resize(dbc.inputs.size());
         for (std::size_t i{0}; i < dbc.inputs.size(); ++i) {
-            dbc.cur_input_ptrs[i] = const_cast<void*>(
-                kernel_context.GetInput(dbc.inputs[i].ort_index).GetTensorRawData());
+            const auto ort_index{dbc.inputs[i].ort_index};
+            const void* src{ort_index < compute_state.cur_input_data.size()
+                ? compute_state.cur_input_data[ort_index] : nullptr};
+            if (src == nullptr) {
+                src = kernel_context.GetInput(ort_index).GetTensorRawData();
+            }
+            dbc.cur_input_ptrs[i] = const_cast<void*>(src);
         }
         dbc.cur_output_ptrs.resize(dbc.outputs.size());
         for (std::size_t i{0}; i < dbc.outputs.size(); ++i) {

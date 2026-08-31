@@ -88,21 +88,27 @@ std::size_t InferCompiledBatchFromParams(const migraphx::program_parameter_shape
 void MaterializeExtraOutputs(const Ort::KernelContext& ctx, hipStream_t stream,
     const std::vector<CapturedHipGraph::ExtraOutput>& extras, const DynamicBatchContext& dyn)
 {
+    // Report the cached (bind-time) shape directly in the common no-slice case; only a
+    // batched extra output needs a shrunk shape, built on a per-thread reusable buffer so
+    // the steady state copies/allocates nothing per extra output.
+    thread_local std::vector<std::int64_t> sliced_shape;
     for (const auto& extra : extras) {
-        auto ort_shape{extra.ort_shape};
+        const std::vector<std::int64_t>* report_shape{&extra.ort_shape};
         std::size_t bytes{extra.bytes};
 
         // Slice a batched extra output (captured at target_batch) down to request.
         if (dyn.active && dyn.target_batch > dyn.requested_batch &&
-            !ort_shape.empty() &&
-            static_cast<std::size_t>(ort_shape.front()) == dyn.target_batch)
+            !extra.ort_shape.empty() &&
+            static_cast<std::size_t>(extra.ort_shape.front()) == dyn.target_batch)
         {
             const std::size_t row_bytes{bytes / dyn.target_batch};
-            ort_shape.front() = static_cast<std::int64_t>(dyn.requested_batch);
+            sliced_shape.assign(extra.ort_shape.begin(), extra.ort_shape.end());
+            sliced_shape.front() = static_cast<std::int64_t>(dyn.requested_batch);
             bytes = row_bytes * dyn.requested_batch;
+            report_shape = &sliced_shape;
         }
 
-        auto output_tensor{ctx.GetOutput(extra.output_index, ort_shape.data(), ort_shape.size())};
+        auto output_tensor{ctx.GetOutput(extra.output_index, report_shape->data(), report_shape->size())};
         void* dst{output_tensor.GetTensorMutableRawData()};
         if (bytes > 0) {
             HIP_CALL_THROW(hipMemcpyWithStream(dst, extra.gpu_data, bytes,
@@ -922,6 +928,8 @@ StagingBindResult BindStagingParams(ComputeState& cs,
             result.bound_output_row_bytes.push_back(
                 !out_lens.empty() && out_lens.front() > 0 ? out_shape.bytes() / out_lens.front()
                                                           : out_shape.bytes());
+            // Precompute the total byte count so the per-call copy skips shape.bytes().
+            result.bound_output_bytes.push_back(out_shape.bytes());
             // Hybrid: this output can be bound directly to its ORT tensor.  ort_shape
             // == program shape here (the hybrid runs only when no padding is needed).
             result.hybrid.outputs.push_back(CachedDirectOutput{
@@ -943,6 +951,7 @@ void CopyStagingOutputsToOrt(const StagingBindResult& bind,
     for (std::size_t i{}; i < bind.prog_output_indices.size() &&
         i < bind.bound_output_shapes.size() &&
         i < bind.bound_output_ort_shapes.size() &&
+        i < bind.bound_output_bytes.size() &&
         i < bind.bound_output_data.size(); ++i)
     {
         const auto oi{bind.prog_output_indices[i]};
@@ -954,7 +963,8 @@ void CopyStagingOutputsToOrt(const StagingBindResult& bind,
         // batch buckets report the correct dimensions.
         const auto& out_shape{bind.bound_output_shapes[i]};
         const auto& cached_ort_shape{bind.bound_output_ort_shapes[i]};
-        std::size_t bytes{out_shape.bytes()};
+        // Precomputed at bind (item 6); bounded by the loop like its sibling vectors.
+        std::size_t bytes{bind.bound_output_bytes[i]};
 
         // Slice a batched output down to the requested batch.
         const bool batch_sliced{dyn.active && dyn.target_batch > dyn.requested_batch &&
