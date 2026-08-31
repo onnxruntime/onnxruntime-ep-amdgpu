@@ -111,7 +111,9 @@ void MaterializeExtraOutputs(const Ort::KernelContext& ctx, hipStream_t stream,
         auto output_tensor{ctx.GetOutput(extra.output_index, report_shape->data(), report_shape->size())};
         void* dst{output_tensor.GetTensorMutableRawData()};
         if (bytes > 0) {
-            HIP_CALL_THROW(hipMemcpyWithStream(dst, extra.gpu_data, bytes,
+            // Stream-ordered async D2D, matching CopyStagingOutputsToOrt on this same
+            // graph-replay path (correctness comes from the per-Run stream drain).
+            HIP_CALL_THROW(hipMemcpyAsync(dst, extra.gpu_data, bytes,
                 hipMemcpyDeviceToDevice, stream));
         }
     }

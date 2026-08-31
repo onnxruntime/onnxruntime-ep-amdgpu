@@ -1856,9 +1856,10 @@ std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
         // to the staging copy path below.  Padding disqualifies the hybrid because the
         // program writes target-batch/target-len rows that the staging path must slice
         // down to the requested shape.
-        const bool no_padding{
-            (!dyn.active || dyn.target_batch == dyn.requested_batch) &&
-            (!seq.active || seq.target_len == seq.real_len)};
+        // Equivalent to !io.needs_padding, resolved once in ResolveComputeIO: target_batch
+        // is always >= requested_batch (bucket rounds up) and seq.active implies
+        // target_len > real_len, so "==" there and ">" in needs_padding coincide.
+        const bool no_padding{!io.needs_padding};
         if (compute_state.hybrid_output_enable && no_padding && bind.hybrid.eligible &&
             compute_state.staging_inputs_coalesced) {
             auto& hyb{bind.hybrid};
@@ -1915,25 +1916,22 @@ Ort::Status RunEager(ComputeState& compute_state,
                 }
                 void* input_data{GetGpuInputData(compute_state, kernel_context, name, index, prog_shape, hip_stream)};
                 compute_params.add(name.c_str(), migraphx::argument{prog_shape, input_data});
-            } else {
-                // it is an output argument
-                constexpr std::string_view name_prefix{"#output_"};
-                if (const auto pos{name.find(name_prefix)}; pos != std::string_view::npos) {
-                    const auto sub{name.substr(pos + name_prefix.length())};
-                    auto output_index{ToInteger<size_t>(Trim(sub, std::isdigit))};
-                    output_indices.emplace_back(output_index);
+            } else if (const auto oi{ComputeOutputIndex(name)}; oi != -1) {
+                // Output argument (#output_N): reuse the shared parser instead of an
+                // inline find/Trim/ToInteger of the index.
+                const auto output_index{static_cast<size_t>(oi)};
+                output_indices.emplace_back(output_index);
 
-                    auto output_shape{output_shapes[output_index]};
-                    const auto lengths{output_shape.lengths()};
-                    std::vector<int64_t> tensor_shape{lengths.begin(), lengths.end()};
-                    auto output_tensor{kernel_context.GetOutput(output_index, tensor_shape.data(), tensor_shape.size())};
-                    void* output_data{output_tensor.GetTensorMutableRawData()};
-                    auto argument_shape{param_shapes[name.c_str()]};
-                    compute_params.add(name.c_str(), migraphx::argument{argument_shape, output_data});
-                } else {
-                    return Ort::Status{MakeString("NodeComputeInfo::Compute(): unbound program parameter '",
-                        name, "'").c_str(), ORT_EP_FAIL};
-                }
+                auto output_shape{output_shapes[output_index]};
+                const auto lengths{output_shape.lengths()};
+                std::vector<int64_t> tensor_shape{lengths.begin(), lengths.end()};
+                auto output_tensor{kernel_context.GetOutput(output_index, tensor_shape.data(), tensor_shape.size())};
+                void* output_data{output_tensor.GetTensorMutableRawData()};
+                auto argument_shape{param_shapes[name.c_str()]};
+                compute_params.add(name.c_str(), migraphx::argument{argument_shape, output_data});
+            } else {
+                return Ort::Status{MakeString("NodeComputeInfo::Compute(): unbound program parameter '",
+                    name, "'").c_str(), ORT_EP_FAIL};
             }
         }
     }
