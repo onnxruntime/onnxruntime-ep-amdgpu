@@ -247,6 +247,11 @@ struct StagingBindResult {
 // Integer key for the per-shape hot caches: the low 64 bits of the shapes hash.
 using ShapeKey = hash::ShapeKey;
 
+struct InputScanEntry {
+    std::string name;
+    std::size_t ort_index{};
+};
+
 struct ComputeState {
     std::mutex& mutex;
     int device_id;
@@ -401,6 +406,13 @@ struct ComputeState {
     // the program shape alone is ambiguous when a fixed dim coincidentally equals the
     // target bucket.  Rewritten every call.
     std::vector<std::int64_t> cur_input_axis0{};
+
+    // Flat mirror of input_name_indices (same order), reused by the scan + effective hash.
+    std::vector<InputScanEntry> input_scan_order{};
+    // Representative input (lowest ORT index, rank > 0) carrying the batch, cached from the
+    // last full scan; the steady-state scan reads only its shape to confirm the batch.
+    std::size_t batch_repr_index{};
+    bool has_batch_repr{};
 
     // Program parameter shapes keyed by shape hash, so each bucket keeps its shapes
     // and the hot path skips the get_parameter_shapes() rebuild. Dropped per-hash on

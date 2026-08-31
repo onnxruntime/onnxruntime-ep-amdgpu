@@ -1412,17 +1412,73 @@ StaticSeqContext ResolveSeqPadding(ComputeState& compute_state,
     return seq;
 }
 
-// Single pass over the model inputs: gather the raw dims (flattened), record each
-// input's rank and raw data ptr on the compute state, and resolve the dynamic-batch
-// bucket from the lowest-index input's axis-0 extent.  Fills `current_input_shapes`
-// (a caller-owned reusable buffer -- item 3) with the flattened raw shapes so the
-// caller can compare against the previous call and hash them, without a per-call alloc.
+// Single pass over the model inputs: gather the raw dims (flattened), record each input's
+// rank and raw data ptr, and resolve the dynamic-batch bucket from the lowest-index input's
+// axis-0.  Fills `current_input_shapes` (a caller-owned reusable buffer -- item 3) so the
+// caller can compare/hash without a per-call alloc.
+//
+// Fast path: under dynamic batching with seq padding inactive, only the batch changes
+// call-to-call, so read just the representative (lowest-index) input's axis-0.  If it
+// matches the previous call every input shape is unchanged: refresh only the data pointers,
+// reuse the cached template, and set `shapes_known_unchanged` so the caller skips the
+// compare/rehash.  A batch change, seq activity, first call, or non-batching model falls
+// through to the full scan.
 void GatherInputShapesAndBatch(ComputeState& compute_state,
     const Ort::KernelContext& kernel_context, DynamicBatchContext& dyn,
-    std::vector<std::int64_t>& current_input_shapes) {
+    std::vector<std::int64_t>& current_input_shapes, bool seq_active,
+    bool& shapes_known_unchanged) {
+    shapes_known_unchanged = false;
     const auto& input_name_indices{compute_state.input_name_indices};
+
+    // Build the flat scan order once, mirroring the map's iteration order so the flattened
+    // shape layout (and the hashes derived from it) is unchanged while the hot loops read a
+    // contiguous vector.
+    if (compute_state.input_scan_order.size() != input_name_indices.size()) {
+        compute_state.input_scan_order.clear();
+        compute_state.input_scan_order.reserve(input_name_indices.size());
+        for (const auto& [name, index] : input_name_indices) {
+            compute_state.input_scan_order.push_back(InputScanEntry{name, index});
+        }
+    }
+    const auto& scan_order{compute_state.input_scan_order};
+    const bool track_batch{compute_state.max_dynamic_batch > 0};
+
+    // ── Steady-state fast path: read only the representative input's batch ──
+    if (track_batch && !seq_active && !compute_state.last_seq_active &&
+        compute_state.has_last_input_shapes && compute_state.last_dyn_active &&
+        compute_state.has_batch_repr &&
+        compute_state.cur_input_data.size() == input_name_indices.size() &&
+        compute_state.batch_repr_index < compute_state.cur_input_data.size()) {
+        const auto repr_value{kernel_context.GetInput(compute_state.batch_repr_index)};
+        const auto repr_info{repr_value.GetTensorTypeAndShapeInfo()};
+        const OrtTensorTypeAndShapeInfo* repr_handle{repr_info};
+        const std::size_t repr_rank{repr_info.GetDimensionsCount()};
+        if (repr_rank > 0) {
+            thread_local std::vector<std::int64_t> repr_dims;
+            repr_dims.resize(repr_rank);
+            Ort::ThrowOnError(Ort::GetApi().GetDimensions(repr_handle, repr_dims.data(), repr_rank));
+            const auto requested_batch{static_cast<std::size_t>(repr_dims.front())};
+            if (requested_batch == compute_state.last_dyn_requested_batch) {
+                // Batch unchanged -> every input shape is unchanged; refresh only the data
+                // pointers and reuse the cached ranks / axis0 / dims template.
+                for (const auto& entry : scan_order) {
+                    if (entry.ort_index < compute_state.cur_input_data.size()) {
+                        compute_state.cur_input_data[entry.ort_index] =
+                            kernel_context.GetInput(entry.ort_index).GetTensorRawData();
+                    }
+                }
+                dyn.requested_batch = requested_batch;
+                dyn.target_batch = compute_state.last_dyn_target_batch;
+                dyn.active = true;
+                shapes_known_unchanged = true;
+                return;
+            }
+        }
+    }
+
+    // ── Full scan (first call, batch changed, seq active, or non-batching) ─────
     current_input_shapes.clear();
-    current_input_shapes.reserve(input_name_indices.size() * 4);
+    current_input_shapes.reserve(scan_order.size() * 4);
     // Raw input data ptrs (by ORT index), reused by the coalesced copy; nullptr for
     // any index the scan skips.
     compute_state.cur_input_data.assign(input_name_indices.size(), nullptr);
@@ -1432,14 +1488,14 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
     // Per-input dim counts, so the shape-changed rehash slices current_input_shapes by
     // offset instead of re-fetching shapes.
     compute_state.cur_input_ranks.clear();
-    compute_state.cur_input_ranks.reserve(input_name_indices.size());
+    compute_state.cur_input_ranks.reserve(scan_order.size());
     // Reused per input: dims read via the C API to avoid a GetShape() vector alloc each.
     std::vector<std::int64_t> dims;
-    const bool track_batch{compute_state.max_dynamic_batch > 0};
     bool have_batch_min{false};
     std::size_t batch_min_index{0};
     std::size_t requested_batch{0};
-    for (const auto& [name, index] : input_name_indices) {
+    for (const auto& entry : scan_order) {
+        const auto index{entry.ort_index};
         const auto input_value{kernel_context.GetInput(index)};
         const auto info{input_value.GetTensorTypeAndShapeInfo()};
         const OrtTensorTypeAndShapeInfo* info_handle{info};
@@ -1462,6 +1518,9 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
             requested_batch = static_cast<std::size_t>(dims.front());
         }
     }
+    // Remember the representative input so the next call's fast path reads only it.
+    compute_state.has_batch_repr = have_batch_min;
+    compute_state.batch_repr_index = batch_min_index;
     if (track_batch && requested_batch > 0) {
         if (compute_state.compiled_batch_sizes.empty()) {
             compute_state.compiled_batch_sizes = GenerateCompiledBatchSizes(
@@ -1485,12 +1544,12 @@ hash::Value HashEffectiveInputShapes(const ComputeState& compute_state,
     std::vector<std::int64_t> dims;
     std::size_t shape_off{0};
     std::size_t rank_idx{0};
-    for (const auto& [name, index] : compute_state.input_name_indices) {
+    for (const auto& entry : compute_state.input_scan_order) {
         const std::size_t rank{compute_state.cur_input_ranks[rank_idx++]};
         dims.assign(current_input_shapes.begin() + shape_off,
                     current_input_shapes.begin() + shape_off + rank);
         shape_off += rank;
-        ApplyEffectiveShape(dims, name, dyn, seq);
+        ApplyEffectiveShape(dims, entry.name, dyn, seq);
         hash::Hash(input_shapes_hash,
             gsl::span<const std::int64_t>{dims.data(), dims.size()});
     }
@@ -1647,9 +1706,14 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
     //    shapes are identical to the previous call we reuse the cached hash and skip the
     //    rehash/match work below.
     auto& current_input_shapes{compute_state.input_shapes_scratch};
-    GatherInputShapesAndBatch(compute_state, kernel_context, dyn, current_input_shapes);
-    const bool shapes_unchanged{compute_state.has_last_input_shapes &&
-                                current_input_shapes == compute_state.last_input_shapes};
+    bool shapes_known_unchanged{false};
+    GatherInputShapesAndBatch(compute_state, kernel_context, dyn, current_input_shapes,
+        seq.active, shapes_known_unchanged);
+    // When the scan proved the shapes unchanged (batch identical to the previous call) it
+    // left current_input_shapes stale, so trust the flag and skip the full-buffer compare.
+    const bool shapes_unchanged{shapes_known_unchanged ||
+                                (compute_state.has_last_input_shapes &&
+                                 current_input_shapes == compute_state.last_input_shapes)};
 
     // Item 2: effective-hash reuse across same-bucket dynamic-batch calls.  When the raw
     //    shapes differ only in the batch value (same target bucket, same non-batch dims,
