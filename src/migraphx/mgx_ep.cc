@@ -692,15 +692,18 @@ static std::optional<fs::path> get_current_module_dir() {
     // path never fits cannot spin forever.
     constexpr int max_resizes{16};
     int current_resize{0};
-    bool path_fits{false};
+    HRESULT result{E_FAIL};
     std::vector<wchar_t> buffer;
-    while ((current_resize < max_resizes) && !path_fits) {
+    while ((current_resize < max_resizes) && (result != S_OK)) {
         buffer.resize(buffer.size() + MAX_PATH);
         const auto written{GetModuleFileNameW(module, buffer.data(), static_cast<DWORD>(buffer.size()))};
-        path_fits = (written != 0) && (written < buffer.size());
+        if (written == 0) {
+            return std::nullopt;  // genuine failure; a bigger buffer cannot help
+        }
+        result = (written < buffer.size()) ? S_OK : HRESULT_FROM_WIN32(GetLastError());
         ++current_resize;
     }
-    if (!path_fits) {
+    if (result != S_OK) {
         return std::nullopt;
     }
     return fs::path{buffer.data()}.parent_path();
