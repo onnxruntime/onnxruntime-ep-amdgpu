@@ -971,6 +971,123 @@ void ExecutionProvider::CollectTelemetry(telemetry::BackendData& out) const noex
     out = backend_telemetry_;
 }
 
+// Load-time hipGraph prewarm.  Runs once per fused node at Compile time (after the
+// bucket programs are in memory).  For every compiled bucket it binds the EP-owned
+// staging buffers + scratch and captures the staging-path hipGraph into
+// hip_graph_cache[shape_key] (and caches the bind in staging_bind_cache), so the first
+// inference of each bucket REPLAYS a ready graph instead of paying the one-time
+// warmup+capture (tens-to-100+ ms for large buckets) on a live request.
+//
+// Only the staging path is prewarmable: it binds pointer-stable, EP-owned buffers that
+// exist at load, whereas the direct-bind / hybrid paths bake in per-request ORT tensor
+// pointers that do not exist until Compute runs.  So prewarm also forces the staging
+// path (disables use_direct_hip_graph + hybrid_output_enable); otherwise an exact-bucket
+// call would skip the prewarmed graph and re-capture a direct-bind graph over it.  This
+// matches the built-in MIGraphX EP, which runs the staging path under coalesce_io
+// (use_direct_hip_graph = hip_graph && !coalesce, and it has no hybrid output path).
+//
+// Best-effort / no-throw: on any failure the affected buckets simply fall back to the
+// normal lazy capture path (a capture failure disables hipGraph on the state exactly as
+// the lazy path would on the same failure).
+void ExecutionProvider::PrewarmHipGraphs(ComputeState& cs) noexcept
+try {
+    if (cs.cached_programs.empty()) {
+        return;
+    }
+    const HipDeviceGuard dev_guard{cs.device_id};
+
+    // The prewarmed graphs are staging-bound; route every hipGraph call through the
+    // (prewarmed) staging path so nothing captures on the hot path.
+    cs.use_direct_hip_graph = false;
+    cs.hybrid_output_enable = false;
+
+    // Dedicated init stream: Compute has no ORT compute stream yet.  Capture runs here;
+    // the instantiated hipGraphExec replays later on the per-run stream (exec is not
+    // bound to the capture stream).  Staging buffers are hipMallocAsync'd on this stream
+    // but pool-owned, so they remain valid after it is destroyed (we synchronize first).
+    hipStream_t stream{nullptr};
+    if (hipStreamCreateWithFlags(&stream, hipStreamNonBlocking) != hipSuccess || stream == nullptr) {
+        ORT_CXX_LOG_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_WARNING,
+            "[mgx-prewarm] failed to create init stream; skipping hipGraph prewarm");
+        return;
+    }
+
+    // Representative input's axis-0 (batch) extent for a compiled program.
+    const auto prog_batch{[&](const migraphx::program& p) -> std::size_t {
+        const auto ps{p.get_parameter_shapes()};
+        for (const auto& name : ps.names()) {
+            if (cs.input_name_indices.count(std::string{name}) > 0) {
+                const auto lens{ps[name].lengths()};
+                if (!lens.empty() && lens.front() > 0) {
+                    return lens.front();
+                }
+            }
+        }
+        return 0;
+    }};
+
+    // Size the staging buffers once, for the largest bucket, so every smaller bucket
+    // binds a prefix (mirrors AllocateStaging's max_dynamic_batch sizing).
+    const migraphx::program* largest{nullptr};
+    std::size_t largest_batch{0};
+    for (auto& [key, prog] : cs.cached_programs) {
+        if (const auto b{prog_batch(prog)}; largest == nullptr || b > largest_batch) {
+            largest_batch = b;
+            largest = &prog;
+        }
+    }
+    if (largest != nullptr) {
+        DynamicBatchContext dyn_max{};
+        dyn_max.active = largest_batch > 0;
+        dyn_max.requested_batch = largest_batch;
+        dyn_max.target_batch = largest_batch;
+        AllocateStaging(cs, largest->get_parameter_shapes(), stream, dyn_max);
+    }
+
+    // Capture the staging graph for each compiled bucket, caching the per-shape param
+    // shapes and staging bind so the hot path reuses them (no per-call rebuild/rebind).
+    std::size_t prewarmed{0};
+    for (auto& [shape_key, prog] : cs.cached_programs) {
+        auto ps_it{cs.cached_param_shapes.find(shape_key)};
+        if (ps_it == cs.cached_param_shapes.end()) {
+            ps_it = cs.cached_param_shapes.emplace(shape_key, prog.get_parameter_shapes()).first;
+        }
+        const auto& param_shapes{ps_it->second};
+
+        auto bind_it{cs.staging_bind_cache.find(shape_key)};
+        if (bind_it == cs.staging_bind_cache.end()) {
+            bind_it = cs.staging_bind_cache.emplace(
+                shape_key, BindStagingParams(cs, param_shapes, shape_key, stream)).first;
+        }
+        auto& bind{bind_it->second};
+
+        // Populates cs.hip_graph_cache[shape_key]; on failure it disables hipGraph on
+        // the state (same as the lazy path), so stop and let Compute run eager.
+        if (!WarmupAndCaptureHipGraph(cs, stream, prog, bind.params,
+                bind.prog_output_indices, shape_key)) {
+            ORT_CXX_LOG_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_WARNING,
+                "[mgx-prewarm] hipGraph capture failed for a bucket; stopping prewarm "
+                "(remaining buckets fall back to eager)");
+            break;
+        }
+        ++prewarmed;
+    }
+
+    (void)hipStreamSynchronize(stream);
+    (void)hipStreamDestroy(stream);
+
+    ORT_CXX_LOGF_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_INFO,
+        "[mgx-prewarm] captured %zu/%zu compiled hipGraph bucket(s) at load "
+        "(staging path forced: direct/hybrid disabled)",
+        prewarmed, cs.cached_programs.size());
+} catch (const std::exception& e) {
+    ORT_CXX_LOGF_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_WARNING,
+        "[mgx-prewarm] exception during hipGraph prewarm: %s", e.what());
+} catch (...) {
+    ORT_CXX_LOG_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_WARNING,
+        "[mgx-prewarm] unknown exception during hipGraph prewarm");
+}
+
 Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGraph& graph,
     const Ort::ConstNode& fused_node, const Map<size_t>& input_name_indices, const Map<size_t>& output_name_indices,
     const std::string& mxr_prefix, OrtNodeComputeInfo*& node_compute_info, OrtNode*& ep_context_node)
@@ -1174,6 +1291,18 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             compute_state.cached_programs);
     } else if (has_input_shape && program.get_parameter_shapes().size() > 0) {
         compute_state.defer_compilation = false;
+    }
+
+    // Move the per-bucket hipGraph warmup+capture off the hot path: capture every compiled
+    // bucket now so the first inference of each bucket replays instead of paying the
+    // (tens-to-100+ ms) cold capture.  Always runs when hipGraph is on and the (prewarmable)
+    // staging path is primary -- i.e. under coalesce_io; with coalesce_io off the primary
+    // path is direct-bind, which bakes in per-request ORT pointers and cannot be prewarmed
+    // (forcing staging there would be a steady-state regression).  No-op unless the bucket
+    // programs are already in memory (preloaded from .mxr or precompiled at load).
+    if (compute_state.hip_graph_enable && compute_state.coalesce_io &&
+        !compute_state.cached_programs.empty()) {
+        PrewarmHipGraphs(compute_state);
     }
 
     node_compute_info = std::make_unique<NodeComputeInfo>(*this).release();

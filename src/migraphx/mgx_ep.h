@@ -497,6 +497,14 @@ private:
         const Map<size_t>& input_name_indices, const Map<size_t>& output_name_indices,
         OrtNodeComputeInfo*& node_compute_info);
 
+    // Load-time hipGraph prewarm.  Captures the staging-path hipGraph for every compiled
+    // bucket during Compile so the per-bucket warmup+capture cost never lands on a live
+    // inference.  Forces the staging path (the only prewarmable one; direct/hybrid bake in
+    // per-request ORT pointers), so the caller only invokes it under coalesce_io, where
+    // staging is already the primary path.  Best-effort and no-throw: any failure just
+    // leaves the affected buckets to the normal lazy capture path.
+    void PrewarmHipGraphs(ComputeState& compute_state) noexcept;
+
     const ProviderFactory& factory_;
 
     const Ort::Logger logger_;
