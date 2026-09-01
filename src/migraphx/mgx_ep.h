@@ -462,6 +462,11 @@ struct ExecutionProvider : OrtEp, ApiPtrs {
 
     void CollectTelemetry(telemetry::BackendData& out) const noexcept;
 
+    // Session-scoped logger (severity resolved once at init). Exposed so the
+    // NodeComputeInfo compute path can gate VERBOSE hot-path tracing without an
+    // extra per-call C-API logger lookup.
+    const Ort::Logger& GetLogger() const noexcept { return logger_; }
+
 private:
     [[nodiscard]] const char* GetName() const noexcept;
 

@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
+#include <chrono>
 #include <cstdio>
 #include <optional>
 #include <set>
@@ -1331,6 +1333,7 @@ struct ComputeIOInfo {
     StaticSeqContext seq{};
     ShapeKey shape_key{};
     bool needs_padding{false};
+    bool shapes_known_unchanged{false};  // trace: batch-unchanged steady-state fast path hit
     const migraphx::program_parameter_shapes* param_shapes{nullptr};
     hipStream_t     hip_stream{nullptr};  // ORT compute stream, resolved once per call
 };
@@ -1368,47 +1371,47 @@ StaticSeqContext ResolveSeqPadding(ComputeState& compute_state,
         return seq;
     }
     const auto& input_name_indices{compute_state.input_name_indices};
-    // Take the target from the attention mask (axis 1; axis 0 is batch, scaled by num_beams).
-    // It carries the length the caller is really generating with, and is the same length it
-    // sized its KV cache to.  The configured value cannot be trusted here: for OGA it is
-    // config.search.max_length, read while the session is created, so a caller that sets
-    // max_length on GeneratorParams sets it too late for us and we would pad to the model's
-    // full context.  An explicit env value still wins; models with no mask keep the
-    // configured length.
-    static const std::string kAttentionMaskInput{"attention_mask"};
-    std::size_t target{compute_state.static_pad_seq_len};
-    if (not compute_state.static_pad_seq_len_from_env) {
-        if (const auto mask_it{input_name_indices.find(kAttentionMaskInput)};
-            mask_it != input_name_indices.end()) {
-            const auto mask_shape{
-                kernel_context.GetInput(mask_it->second).GetTensorTypeAndShapeInfo().GetShape()};
-            if (mask_shape.size() > 1 && mask_shape[1] > 0) {
-                target = static_cast<std::size_t>(mask_shape[1]);
+        // Take the target from the attention mask (axis 1; axis 0 is batch, scaled by num_beams).
+        // It carries the length the caller is really generating with, and is the same length it
+        // sized its KV cache to.  The configured value cannot be trusted here: for OGA it is
+        // config.search.max_length, read while the session is created, so a caller that sets
+        // max_length on GeneratorParams sets it too late for us and we would pad to the model's
+        // full context.  An explicit env value still wins; models with no mask keep the
+        // configured length.
+        static const std::string kAttentionMaskInput{"attention_mask"};
+        std::size_t target{compute_state.static_pad_seq_len};
+        if (not compute_state.static_pad_seq_len_from_env) {
+            if (const auto mask_it{input_name_indices.find(kAttentionMaskInput)};
+                mask_it != input_name_indices.end()) {
+                const auto mask_shape{
+                    kernel_context.GetInput(mask_it->second).GetTensorTypeAndShapeInfo().GetShape()};
+                if (mask_shape.size() > 1 && mask_shape[1] > 0) {
+                    target = static_cast<std::size_t>(mask_shape[1]);
+                }
             }
         }
-    }
-    for (const auto& [name, axis] : compute_state.static_pad_input_axes) {
-        if (target == 0) {
-            break;  // nothing usable to pad to -> leave shapes untouched (inert, as before)
+        for (const auto& [name, axis] : compute_state.static_pad_input_axes) {
+            if (target == 0) {
+                break;  // nothing usable to pad to -> leave shapes untouched (inert, as before)
+            }
+            const auto it{input_name_indices.find(name)};
+            if (it == input_name_indices.end()) {
+                continue;
+            }
+            const auto shape{kernel_context.GetInput(it->second).GetTensorTypeAndShapeInfo().GetShape()};
+            if (axis < 0 || static_cast<size_t>(axis) >= shape.size()) {
+                continue;
+            }
+            const auto extent{static_cast<size_t>(shape[axis])};
+            if (extent > 1 && extent < target) {
+                seq.active = true;
+                seq.real_len = extent;
+                seq.target_len = target;
+                seq.input_axes = &compute_state.static_pad_input_axes;
+                seq.output_axes_by_index = &compute_state.static_pad_output_axes_by_index;
+                break;  // all named inputs share the same token length this call
+            }
         }
-        const auto it{input_name_indices.find(name)};
-        if (it == input_name_indices.end()) {
-            continue;
-        }
-        const auto shape{kernel_context.GetInput(it->second).GetTensorTypeAndShapeInfo().GetShape()};
-        if (axis < 0 || static_cast<size_t>(axis) >= shape.size()) {
-            continue;
-        }
-        const auto extent{static_cast<size_t>(shape[axis])};
-        if (extent > 1 && extent < target) {
-            seq.active = true;
-            seq.real_len = extent;
-            seq.target_len = target;
-            seq.input_axes = &compute_state.static_pad_input_axes;
-            seq.output_axes_by_index = &compute_state.static_pad_output_axes_by_index;
-            break;  // all named inputs share the same token length this call
-        }
-    }
     return seq;
 }
 
@@ -1609,16 +1612,16 @@ void ResolveProgram(ComputeState& compute_state, const Ort::KernelContext& kerne
     auto& program{compute_state.program};
     auto& onnx_options{compute_state.onnx_options};
 
-    bool loaded_from_cache{false};
+        bool loaded_from_cache{false};
 
     if (const auto cit{compute_state.cached_programs.find(shape_key)};
-        cit != compute_state.cached_programs.end()) {
-        program = cit->second;
-        loaded_from_cache = true;
-    } else if (compute_state.hip_graph_enable && !dyn.active) {
-        // Unbounded dynamic-shape (e.g. LLM) path: keep only the current shape's
-        // graph/staging, so invalidate before the program changes.
-        DestroyHipGraphs(compute_state);
+            cit != compute_state.cached_programs.end()) {
+            program = cit->second;
+            loaded_from_cache = true;
+        } else if (compute_state.hip_graph_enable && !dyn.active) {
+            // Unbounded dynamic-shape (e.g. LLM) path: keep only the current shape's
+            // graph/staging, so invalidate before the program changes.
+            DestroyHipGraphs(compute_state);
         FreeStaging(compute_state,
             static_cast<hipStream_t>(kernel_context.GetGPUComputeStream()));
         // Direct-bind bindings reference the graphs just destroyed; drop them
@@ -1626,9 +1629,9 @@ void ResolveProgram(ComputeState& compute_state, const Ort::KernelContext& kerne
         // Clear param shapes too so the map does not grow per token length.
         compute_state.direct_bind_cache.clear();
         compute_state.cached_param_shapes.clear();
-    }
+        }
 
-    if (!loaded_from_cache) {
+        if (!loaded_from_cache) {
         migraphx::program_parameters compile_params{};
         fs::path mxr_path;
         if (!compute_state.cache_dir.empty()) {
@@ -1683,7 +1686,7 @@ void ResolveProgram(ComputeState& compute_state, const Ort::KernelContext& kerne
         }
         // Keep the freshly compiled program so it (and its captured graph) survive
         // later shape/bucket switches.
-        if (dyn.active || !compute_state.defer_compilation) {
+            if (dyn.active || !compute_state.defer_compilation) {
             compute_state.cached_programs.emplace(shape_key, program);
         }
         // Freshly built -> drop anything cached against the old program.
@@ -1809,6 +1812,7 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
     io.seq = seq;
     io.shape_key = shape_key;
     io.needs_padding = needs_batch_pad || needs_seq_pad;
+    io.shapes_known_unchanged = shapes_known_unchanged;
     io.param_shapes = &param_shapes;
     return STATUS_OK;
 }
@@ -1947,7 +1951,7 @@ std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
                 hyb, shape_key, scratch, dyn,
                 compute_state.hybrid_output_enable, compute_state.hybrid_recapture_count);
         } else {
-            RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
+        RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
                 bind, shape_key, dyn);
             CopyStagingOutputsToOrt(bind, kernel_context, hip_stream, dyn, seq);
         }
@@ -1991,18 +1995,18 @@ Ort::Status RunEager(ComputeState& compute_state,
                 // Output argument (#output_N): reuse the shared parser instead of an
                 // inline find/Trim/ToInteger of the index.
                 const auto output_index{static_cast<size_t>(oi)};
-                output_indices.emplace_back(output_index);
+                    output_indices.emplace_back(output_index);
 
-                auto output_shape{output_shapes[output_index]};
-                const auto lengths{output_shape.lengths()};
-                std::vector<int64_t> tensor_shape{lengths.begin(), lengths.end()};
-                auto output_tensor{kernel_context.GetOutput(output_index, tensor_shape.data(), tensor_shape.size())};
-                void* output_data{output_tensor.GetTensorMutableRawData()};
-                auto argument_shape{param_shapes[name.c_str()]};
-                compute_params.add(name.c_str(), migraphx::argument{argument_shape, output_data});
-            } else {
-                return Ort::Status{MakeString("NodeComputeInfo::Compute(): unbound program parameter '",
-                    name, "'").c_str(), ORT_EP_FAIL};
+                    auto output_shape{output_shapes[output_index]};
+                    const auto lengths{output_shape.lengths()};
+                    std::vector<int64_t> tensor_shape{lengths.begin(), lengths.end()};
+                    auto output_tensor{kernel_context.GetOutput(output_index, tensor_shape.data(), tensor_shape.size())};
+                    void* output_data{output_tensor.GetTensorMutableRawData()};
+                    auto argument_shape{param_shapes[name.c_str()]};
+                    compute_params.add(name.c_str(), migraphx::argument{argument_shape, output_data});
+                } else {
+                    return Ort::Status{MakeString("NodeComputeInfo::Compute(): unbound program parameter '",
+                        name, "'").c_str(), ORT_EP_FAIL};
             }
         }
     }
@@ -2023,6 +2027,94 @@ Ort::Status FinalizeCompute(Ort::Status status, hipStream_t hip_stream) {
     return FinishComputeStream(hip_stream);
 }
 
+// ── Single-run hot-path trace (ORT VERBOSE only) ─────────────────────────────
+// Lets one low-concurrency inference be traced end to end so the plugin's per-call
+// CPU cost and the mechanism/state it resolved are visible without a profiler --
+// the built-in vs plugin low-concurrency gap is a fixed per-call overhead story, so
+// the split between input resolution and the run mechanism is the signal we want.
+// Fully inert unless the EP logger's severity is VERBOSE (session log severity level
+// 0): construction only reads the logger's cached level and every timing call is
+// gated on `enabled`, so the steady-state path is unaffected.
+enum class MechKind { kDirectBind, kStaging, kEager };
+
+struct HotPathTrace {
+    using clock = std::chrono::steady_clock;
+    bool enabled;
+    clock::time_point last{};
+    double resolve_us{};
+    double mechanism_us{};
+    double finalize_us{};
+    double gpu_tail_us{};
+
+    explicit HotPathTrace(const Ort::Logger& logger) noexcept
+        : enabled{logger.GetLoggingSeverityLevel() <= ORT_LOGGING_LEVEL_VERBOSE} {
+        if (enabled) {
+            last = clock::now();
+        }
+    }
+
+    // Microseconds since the previous mark; advances the mark.  Only called when enabled.
+    double lap() noexcept {
+        const auto now{clock::now()};
+        const double us{std::chrono::duration<double, std::micro>(now - last).count()};
+        last = now;
+        return us;
+    }
+};
+
+// Emit one line describing what this Compute call resolved and where its CPU time
+// went.  Only ever reached on the traced (VERBOSE) path.
+void EmitHotPathTrace(const Ort::Logger& logger, const ComputeState& cs,
+    const ComputeIOInfo& io, const HotPathTrace& tr, MechKind mech) noexcept {
+    const char* mechanism{"eager"};
+    if (mech == MechKind::kDirectBind) {
+        mechanism = "direct_bind";
+    } else if (mech == MechKind::kStaging) {
+        // Mirror TryStaging's hybrid-vs-copy decision so the trace names the branch
+        // actually taken (the cache lookup only runs on the traced path).
+        mechanism = "staging_copy";
+        if (cs.hybrid_output_enable && !io.needs_padding && cs.staging_inputs_coalesced) {
+            const auto it{cs.staging_bind_cache.find(io.shape_key)};
+            if (it != cs.staging_bind_cache.end() && it->second.hybrid.eligible) {
+                mechanism = "staging_hybrid";
+            }
+        }
+    }
+
+    const char* residency{"unknown"};
+    switch (cs.coalesce_residency) {
+        case ComputeState::CoalesceResidency::kAllHostPinned:   residency = "host_pinned";   break;
+        case ComputeState::CoalesceResidency::kAllHostPageable: residency = "host_pageable"; break;
+        case ComputeState::CoalesceResidency::kHasDevice:       residency = "device";        break;
+        case ComputeState::CoalesceResidency::kUnknown:         residency = "unknown";       break;
+    }
+
+    // Session-wide traced-call counter so warm-up/cold calls can be told from the
+    // steady state in the log; only advanced on the traced path.
+    static std::atomic<std::uint64_t> call_counter{0};
+    const auto call_index{call_counter.fetch_add(1, std::memory_order_relaxed)};
+
+    const double cpu_total_us{tr.resolve_us + tr.mechanism_us + tr.finalize_us};
+    ORT_CXX_LOGF_NOEXCEPT(logger, ORT_LOGGING_LEVEL_VERBOSE,
+        "[mgx-hotpath] call=%llu mech=%s inputs=%zu batch=%zu->%zu fast_path=%d coalesced=%d "
+        "residency=%s seq=%d pad=%d hipgraph{en=%d direct=%d hybrid=%d} recap{direct=%d hybrid=%d} "
+        "| resolve_io=%.1f mechanism=%.1f finalize=%.1f cpu_total=%.1f gpu_tail=%.1f (us)",
+        static_cast<unsigned long long>(call_index),
+        mechanism,
+        cs.input_name_indices.size(),
+        io.dyn.requested_batch, io.dyn.target_batch,
+        io.shapes_known_unchanged ? 1 : 0,
+        cs.inputs_coalesced_this_call ? 1 : 0,
+        residency,
+        io.seq.active ? 1 : 0,
+        io.needs_padding ? 1 : 0,
+        cs.hip_graph_enable ? 1 : 0,
+        cs.use_direct_hip_graph ? 1 : 0,
+        cs.hybrid_output_enable ? 1 : 0,
+        cs.direct_recapture_count, cs.hybrid_recapture_count,
+        tr.resolve_us, tr.mechanism_us, tr.finalize_us, cpu_total_us, tr.gpu_tail_us);
+}
+
 }  // namespace
 
 // Orchestrator: resolve the shape / program once, then walk the mechanism chain.
@@ -2038,21 +2130,51 @@ try {
     // the thread isn't already on it) rather than before each branch.
     const HipDeviceGuard dev_guard{compute_state.device_id};
 
+    // Single-run trace (ORT VERBOSE only): time the resolve / mechanism / finalize
+    // phases of this call and log the resolved mechanism + state.  Inert otherwise.
+    HotPathTrace trace{ep_.GetLogger()};
+
     ComputeIOInfo io;
     io.hip_stream = static_cast<hipStream_t>(kernel_context.GetGPUComputeStream());
     RETURN_IF_ERROR(ResolveComputeIO(compute_state, kernel_context, io));
+    if (trace.enabled) {
+        trace.resolve_us = trace.lap();
+    }
 
-    // Every mechanism issues stream-ordered work and hands back a Status; the stream
-    // is finalized once via FinalizeCompute (async no-op by default; drains only on the
-    // legacy gate or a null stream).  An early error short-circuits before the sync,
-    // matching the pre-refactor per-path behavior.
-    if (auto status{TryDirectBind(compute_state, kernel_context, io)}) {
-        return FinalizeCompute(std::move(*status), io.hip_stream);
+    // Walk the mechanism chain (direct-bind -> staging -> eager); each issues
+    // stream-ordered work and returns a Status.  Capture which path ran and its
+    // status, then finalize the stream once via FinalizeCompute (async no-op by
+    // default; drains only on the legacy gate or a null stream).  An error status
+    // short-circuits the sync in FinalizeCompute, matching the per-path behavior.
+    MechKind mech{MechKind::kEager};
+    Ort::Status status{};
+    if (auto s{TryDirectBind(compute_state, kernel_context, io)}) {
+        mech = MechKind::kDirectBind;
+        status = std::move(*s);
+    } else if (auto s{TryStaging(compute_state, kernel_context, io)}) {
+        mech = MechKind::kStaging;
+        status = std::move(*s);
+    } else {
+        status = RunEager(compute_state, kernel_context, io);
     }
-    if (auto status{TryStaging(compute_state, kernel_context, io)}) {
-        return FinalizeCompute(std::move(*status), io.hip_stream);
+    if (trace.enabled) {
+        trace.mechanism_us = trace.lap();
     }
-    return FinalizeCompute(RunEager(compute_state, kernel_context, io), io.hip_stream);
+
+    status = FinalizeCompute(std::move(status), io.hip_stream);
+    if (trace.enabled) {
+        trace.finalize_us = trace.lap();
+        // Trace-only: the production path finalizes the stream asynchronously, so drain
+        // it here purely to size this call's outstanding GPU work.  Never runs off the
+        // VERBOSE path, so it cannot perturb steady-state latency.
+        if (status.IsOK() && io.hip_stream != nullptr &&
+            hipStreamSynchronize(io.hip_stream) != hipSuccess) {
+            (void)hipGetLastError();
+        }
+        trace.gpu_tail_us = trace.lap();
+        EmitHotPathTrace(ep_.GetLogger(), compute_state, io, trace, mech);
+    }
+    return status;
 } catch (const Ort::Exception& e) {
     return Ort::Status{e};
 } catch (const std::exception& e) {
