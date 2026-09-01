@@ -7,6 +7,9 @@
 
 namespace dml_ep {
 
+std::mutex DmlBucketizedBufferAllocator::s_liveAllocationsMutex;
+std::unordered_set<const void*> DmlBucketizedBufferAllocator::s_liveAllocations;
+
 PluginDmlAllocationInfo::~PluginDmlAllocationInfo() {
     if (m_owner) {
         m_owner->FreeResource(this, m_pooledResourceId);
@@ -131,6 +134,11 @@ void* DmlBucketizedBufferAllocator::AllocImpl(size_t size, AllocatorRoundingMode
     m_outstandingAllocationsById[allocInfo->GetId()] = allocInfo.Get();
 #endif
 
+    {
+        std::lock_guard<std::mutex> lock(s_liveAllocationsMutex);
+        s_liveAllocations.insert(allocInfo.Get());
+    }
+
     return allocInfo.Detach();
 }
 
@@ -144,6 +152,11 @@ void DmlBucketizedBufferAllocator::FreeImpl(void* p) {
 
 void DmlBucketizedBufferAllocator::FreeResource(void* p, uint64_t pooledResourceId) {
     PluginDmlAllocationInfo* allocInfo = static_cast<PluginDmlAllocationInfo*>(p);
+
+    {
+        std::lock_guard<std::mutex> lock(s_liveAllocationsMutex);
+        s_liveAllocations.erase(allocInfo);
+    }
 
     if (allocInfo->GetOwner() != this) {
         // This allocation doesn't belong to this allocator!
@@ -180,6 +193,17 @@ const PluginDmlAllocationInfo* DmlBucketizedBufferAllocator::DecodeDataHandle(co
         // There is no memory allocated which needs to be decoded.
         ORT_THROW_HR(E_INVALIDARG);
     }
+
+    // A pointer from another allocator (e.g. the factory's CpuAllocator stub) is non-null, so the check
+    // above misses it and the cast below would yield an object whose every field read faults. Validating
+    // by lookup avoids dereferencing an untrusted pointer. (PLAT-207667)
+    {
+        std::lock_guard<std::mutex> lock(s_liveAllocationsMutex);
+        if (s_liveAllocations.count(opaqueHandle) == 0) {
+            ORT_THROW_HR(E_INVALIDARG);
+        }
+    }
+
     const auto* allocInfo = static_cast<const PluginDmlAllocationInfo*>(opaqueHandle);
     return allocInfo;
 }

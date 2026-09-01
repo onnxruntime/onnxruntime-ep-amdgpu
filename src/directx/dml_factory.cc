@@ -444,6 +444,16 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateAllocatorImpl(OrtEpFactory* this_
         }
     }
 
+    // Never substitute a CPU allocator for GPU memory: its malloc'd pointers reach DecodeDataHandle,
+    // which used to blind-cast and dereference them. Scoped to an existing EP because ORT also asks for
+    // a GPU allocator during factory registration, when m_ep_raw is still null and no real allocator can
+    // exist yet; failing there would break registration. (PLAT-207667)
+    if (factory.IsGpuAllocator(memory_info) && factory.m_ep_raw != nullptr) {
+        return factory.ort_api.CreateStatus(ORT_EP_FAIL,
+            "DirectML EP: the GPU allocator is unavailable for this device, so GPU memory cannot be "
+            "allocated. Refusing to substitute a CPU allocator for GPU memory.");
+    }
+
     // Return a passthrough allocator that wraps the memory_info. The real per-session
     // GPU allocator (DmlBucketizedBufferAllocator) is created by the EP-level
     // OrtEp::CreateAllocator in ExecutionProviderPlugin::CreateAllocatorImpl.
