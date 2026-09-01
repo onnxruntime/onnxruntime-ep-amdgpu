@@ -235,6 +235,12 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 get_name(mgx_ep::provider_option::kExhaustiveTune).c_str(),
                 std::to_string(info.exhaustive_tune.value()).c_str()));
         }
+        if (info.compute_mode.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kComputeMode).c_str(),
+                info.compute_mode.value().c_str()));
+        }
         if (info.mlss_use_specific_ops.has_value()) {
             THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
                 local_session_options,

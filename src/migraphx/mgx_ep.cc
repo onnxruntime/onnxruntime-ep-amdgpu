@@ -580,17 +580,17 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
         }
     }
 
-    auto compute_mode{platform::GetEnvironmentVar(env_var::kComputeMode)};
-    if (!compute_mode.empty()) {
-        std::transform(compute_mode.begin(), compute_mode.end(), compute_mode.begin(), ::tolower);
-        if (compute_mode == "eager" || compute_mode == "0") {
-            compute_mode_ = ComputeMode::Eager;
-        } else if (compute_mode == "balanced" || compute_mode == "50") {
-            compute_mode_ = ComputeMode::Balanced;
-        } else if (compute_mode == "maximum" || compute_mode == "100") {
-            compute_mode_ = ComputeMode::Maximum;
+    // Runs after compute_mode_ is taken from the provider options above, so the
+    // environment variable wins over the provider option.
+    if (const auto compute_mode_env{platform::GetEnvironmentVar(env_var::kComputeMode)};
+        !compute_mode_env.empty()) {
+        if (const auto parsed{ParseComputeMode(compute_mode_env)}; parsed.has_value()) {
+            compute_mode_ = *parsed;
         } else {
-            /* TODO: log invalid value for the compute mode - do not change it. */
+            ORT_CXX_LOG_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_WARNING,
+                MakeString("Ignoring ", env_var::kComputeMode, "='", compute_mode_env,
+                    "': unknown compute mode, expected eager|balanced|maximum. "
+                    "Leaving the compute mode unchanged.").c_str());
         }
     }
 
@@ -949,7 +949,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             migraphx::program_parameters params;
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
-            compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_);
+            compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_, compute_mode_);
             // context_enable needs this file on disk even if caching is otherwise disabled.
             if (!disable_compiled_model_caching_ || context_enable_) {
                 save_compiled_program(program, mxr_path);
@@ -1047,7 +1047,8 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             RETURN_IF_ERROR(CompileMissingPrograms(pre_plan, input_name_indices, onnx_string,
                 compute_state.cached_programs, t_, enable_fp16_, enable_bf16_, enable_int8_, enable_fp8_,
                 int8_calibration_cache_available_, dynamic_ranges_, exhaustive_tune_, mlss_use_specific_ops_,
-                disable_compiled_model_caching_, model_path, external_data_dir_, effective_cache_dir, mxr_prefix));
+                compute_mode_, disable_compiled_model_caching_, model_path, external_data_dir_,
+                effective_cache_dir, mxr_prefix));
         }
         if (!compute_state.cached_programs.empty()) {
             compute_state.program = SelectDefaultProgram(compute_state.cached_programs, pre_bucketed,
@@ -1146,8 +1147,12 @@ try {
             RETURN_IF_ERROR(CreateNodeComputeInfoFromCache(graph, fused_node, input_name_indices,
                 output_name_indices, node_compute_info));
         } else {
+            // The compute mode is part of the key: two modes produce different
+            // binaries from the same graph, and without this an A/B between
+            // modes silently replays the other mode's cached program.
             const auto mxr_prefix{hash::ToHex(MIGraphX_Version) + "-" + GenerateGraphId(graph) + "-" +
-                hash::ToHex(std::string_view{device_prop_.gcnArchName}) + "-"};
+                hash::ToHex(std::string_view{device_prop_.gcnArchName}) + "-" +
+                hash::ToHex(static_cast<std::uint64_t>(compute_mode_)) + "-"};
 
             RETURN_IF_ERROR(CreateNodeComputeInfoFromGraph(graph, fused_node, input_name_indices,
                 output_name_indices, mxr_prefix, node_compute_info, ep_context_node));
@@ -1437,7 +1442,7 @@ Ort::Status NodeComputeInfo::Compute(ComputeState& compute_state, const Ort::Ker
                 compute_state.enable_fp8, compute_state.int8_calibration_cache_available, compute_state.dynamic_ranges);
 
             compile_program(program, compute_state.t, compute_state.exhaustive_tune,
-                compute_state.mlss_use_specific_ops);
+                compute_state.mlss_use_specific_ops, compute_state.compute_mode);
             if (!compute_state.disable_compiled_model_caching) {
                 save_compiled_program(program, mxr_path);
             }
