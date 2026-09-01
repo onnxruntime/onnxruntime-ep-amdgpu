@@ -146,6 +146,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     // ORT would look up kernels under "amdgpu" but find them stamped as "directml".
     THROW_IF_ERROR(dml_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
         &dml_ep_factory_, 1, &factories_created));
+    custom_op_backends_.push_back(dml_ep_factory_);
 #endif
 
     THROW_IF_ERROR(LoadDynamicLibrary(migraphxBackend, &mgx_backend_));
@@ -177,6 +178,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
 
     THROW_IF_ERROR(hip_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
         &hip_ep_factory_, 1, &factories_created));
+    custom_op_backends_.push_back(hip_ep_factory_);
 #endif
 }
 
@@ -381,60 +383,42 @@ Ort::Status ProviderFactory::GetHardwareDeviceIncompatibilityDetails(const OrtHa
 
 Ort::Status ProviderFactory::GetNumCustomOpDomains(size_t* num_domains) const {
     // Forward to every backend factory that is loaded so ORT registers all custom
-    // op schemas any backend may claim during GetCapability -- e.g. com.microsoft
-    // schemas (GroupNorm, SkipLayerNormalization) from directml, and com.amd
-    // schemas (e.g. QMoE) from hip. Which backend a given model actually uses is
-    // only decided later in CreateEp (profile option), but schema registration
-    // happens during Model::Load, before any session/EP exists -- so the union of
-    // every built backend's domains must be reported here regardless of the
-    // eventual profile selection. MIGraphX does not contribute custom op domains.
+    // op schemas any backend may claim during GetCapability. Which backend a given
+    // model actually uses is only decided later in CreateEp (profile option), but
+    // schema registration happens during Model::Load, before any session/EP exists
+    // -- so the union of every built backend's domains must be reported here
+    // regardless of the eventual profile selection.
     *num_domains = 0;
-#ifdef USE_DML
-    if (dml_ep_factory_ != nullptr && dml_ep_factory_->GetNumCustomOpDomains != nullptr) {
-        size_t dml_num_domains{};
-        RETURN_IF_ERROR(dml_ep_factory_->GetNumCustomOpDomains(dml_ep_factory_, &dml_num_domains));
-        *num_domains += dml_num_domains;
+    for (OrtEpFactory* factory : custom_op_backends_) {
+        if (factory == nullptr || factory->GetNumCustomOpDomains == nullptr) {
+            continue;
+        }
+        size_t count{};
+        RETURN_IF_ERROR(factory->GetNumCustomOpDomains(factory, &count));
+        *num_domains += count;
     }
-#endif
-#ifdef USE_HIP
-    if (hip_ep_factory_ != nullptr && hip_ep_factory_->GetNumCustomOpDomains != nullptr) {
-        size_t hip_num_domains{};
-        RETURN_IF_ERROR(hip_ep_factory_->GetNumCustomOpDomains(hip_ep_factory_, &hip_num_domains));
-        *num_domains += hip_num_domains;
-    }
-#endif
     return STATUS_OK;
 }
 
 Ort::Status ProviderFactory::GetCustomOpDomains(OrtCustomOpDomain** domains, size_t num_domains) const {
+    // Each backend fills its own slice of the caller's buffer, whose size ORT took
+    // from GetNumCustomOpDomains. Clamp to the space left so a backend reporting
+    // more domains here than it did there cannot overrun the buffer.
     size_t offset = 0;
-#ifdef USE_DML
-    if (dml_ep_factory_ != nullptr && dml_ep_factory_->GetCustomOpDomains != nullptr) {
-        size_t dml_num_domains{};
-        RETURN_IF_ERROR(dml_ep_factory_->GetNumCustomOpDomains(dml_ep_factory_, &dml_num_domains));
-        dml_num_domains = std::min(dml_num_domains, num_domains - offset);
-        if (dml_num_domains > 0) {
-            RETURN_IF_ERROR(dml_ep_factory_->GetCustomOpDomains(dml_ep_factory_, domains + offset, dml_num_domains));
-            offset += dml_num_domains;
+    for (OrtEpFactory* factory : custom_op_backends_) {
+        if (factory == nullptr || factory->GetCustomOpDomains == nullptr ||
+                factory->GetNumCustomOpDomains == nullptr) {
+            continue;
         }
-    }
-#endif
-#ifdef USE_HIP
-    if (hip_ep_factory_ != nullptr && hip_ep_factory_->GetCustomOpDomains != nullptr) {
-        size_t hip_num_domains{};
-        RETURN_IF_ERROR(hip_ep_factory_->GetNumCustomOpDomains(hip_ep_factory_, &hip_num_domains));
-        hip_num_domains = std::min(hip_num_domains, num_domains - offset);
-        if (hip_num_domains > 0) {
-            RETURN_IF_ERROR(hip_ep_factory_->GetCustomOpDomains(hip_ep_factory_, domains + offset, hip_num_domains));
-            offset += hip_num_domains;
+        size_t count{};
+        RETURN_IF_ERROR(factory->GetNumCustomOpDomains(factory, &count));
+        count = std::min(count, num_domains - offset);
+        if (count == 0) {
+            continue;
         }
+        RETURN_IF_ERROR(factory->GetCustomOpDomains(factory, domains + offset, count));
+        offset += count;
     }
-#endif
-#if !defined(USE_DML) && !defined(USE_HIP)
-    (void)domains;
-    (void)num_domains;
-#endif
-    (void)offset;
     return STATUS_OK;
 }
 
