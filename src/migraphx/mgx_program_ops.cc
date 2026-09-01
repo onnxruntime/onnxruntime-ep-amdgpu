@@ -60,25 +60,47 @@ void calibrate_and_quantize(const migraphx::program& prog, const migraphx::targe
     }
 }
 
+// Render already-escaped cache paths as the {"read_only_problem_cache_files":[...]} object
+// that migraphx's relaxed-JSON backend-option parser expects.
+static std::string build_read_only_problem_cache_option(const std::vector<std::string>& problem_cache_paths) {
+    std::string json{R"({"read_only_problem_cache_files":[)"};
+    for (std::size_t i{0}; i < problem_cache_paths.size(); ++i) {
+        if (i != 0) {
+            json += ',';
+        }
+        json += '"' + problem_cache_paths[i] + '"';
+    }
+    json += "]}";
+    return json;
+}
+
 void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune,
-    const std::string& mlss_use_specific_ops, const std::vector<std::string>& problem_cache_paths) {
+    const std::string& mlss_use_specific_ops, ComputeMode compute_mode,
+    const std::vector<std::string>& problem_cache_paths) {
     migraphx::compile_options options;
     options.set_fast_math(false);
-    options.set_exhaustive_tune_flag(exhaustive_tune);
-    // Deliver the ordered read-only cache files as the "read_only_problem_cache_files" GPU
-    // backend option (system-level/shipped caches that must never be written back). The paths
-    // arrive already JSON-escaped from setup_problem_cache_paths, so we just quote and join
-    // them. Passed as a %s arg so any '%' in a path is not a format specifier. MIGraphX builds
-    // with the problem-cache feature consume the key; older ignore it.
+
+    // The EP calls this a compute mode; migraphx calls the same concept a compile
+    // mode. ComputeMode's enumerator values are migraphx's compile_modes values
+    // (see mgx_info.h), so this cast is a straight pass-through. migraphx snaps
+    // an unknown value to the nearest mode rather than reporting an error, so
+    // assert the correspondence at compile time instead.
+    static_assert(static_cast<std::int8_t>(ComputeMode::Eager) == migraphx_compile_mode_eager);
+    static_assert(static_cast<std::int8_t>(ComputeMode::Balanced) == migraphx_compile_mode_balanced);
+    static_assert(static_cast<std::int8_t>(ComputeMode::Maximum) == migraphx_compile_mode_max);
+    options.set_compile_mode(static_cast<std::int8_t>(compute_mode));
+
+    // migraphx's own max mode sets the exhaustive-tune flag on the context
+    // (target.cpp), but constructs compile_ops from the unmutated
+    // options.exhaustive_tune, so on this build max would be close to a no-op.
+    // Set the flag here so Maximum means something without patching migraphx.
+    options.set_exhaustive_tune_flag(exhaustive_tune || compute_mode == ComputeMode::Maximum);
+
+    // read_only_problem_cache_files are system-level/shipped caches migraphx must never write
+    // back. Passed as a %s argument so a '%' in a path is not read as a format specifier.
+    // migraphx builds with the problem-cache feature consume the key; older ones ignore it.
     if (!problem_cache_paths.empty()) {
-        std::string json = "{\"read_only_problem_cache_files\":[";
-        for (std::size_t i = 0; i < problem_cache_paths.size(); ++i) {
-            if (i != 0) {
-                json += ",";
-            }
-            json += "\"" + problem_cache_paths[i] + "\"";
-        }
-        json += "]}";
+        const auto json{build_read_only_problem_cache_option(problem_cache_paths)};
         options.set_advance_backend_options("%s", json.c_str());
     }
     if (!mlss_use_specific_ops.empty()) {

@@ -25,6 +25,8 @@ struct ProviderInfo {
     std::optional<bool> disable_caching{};
     std::optional<bool> force_recompile{};
     std::optional<bool> exhaustive_tune{};
+    // Relayed verbatim to the migraphx backend, which validates it.
+    std::optional<std::string> compute_mode{};
     std::optional<fs::path> cache_dir{};
     std::optional<std::string> mlss_use_specific_ops{};
     std::optional<bool> cpu_control_flow{};

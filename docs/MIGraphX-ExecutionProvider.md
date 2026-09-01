@@ -143,6 +143,7 @@ Items are added as a python dictionary when invoking the MIGraphX execution prov
 | migraphx_max_dynamic_batch | INT | 7.1 | Maximum dynamic batch size to compile for models with a dynamic batch dimension. |
 | migraphx_compile_batches | <string> | 7.2 | Comma-separated list of batch sizes to compile for (e.g. "1,4,8,16,32"). |
 | migraphx_hip_graph_enable | 1 or 0 | 7.2 | Enable HIP graph capture and replay for the compiled MIGraphX model. |
+| compute_mode | eager \| balanced \| maximum, or their numeric equivalents 0 \| 50 \| 100 (default balanced) | 7.14 | Trades compile time against optimization. Maps directly onto MIGraphX's *compile mode*: `eager` skips the optimization rewrite pipeline for the fastest compile, `balanced` is the normal pipeline, and `maximum` additionally enables exhaustive tuning. Note the vocabulary difference across the boundary: what this EP calls a compute mode is what MIGraphX calls a compile mode. Session equivalent of the ORT_MIGRAPHX_COMPUTE_MODE environment variable. An unrecognized value fails session creation. |
 
 |             |                 |             |
 | Depricated  | Release Removed | Description |
@@ -186,6 +187,7 @@ Users can invoke Environment and Session variables in the same run but Environme
 | ORT_MIGRAPHX_MAX_DYNAMIC_BATCH | INT | 7.1 | Maximum dynamic batch size to compile for models with a dynamic batch dimension. |
 | ORT_MIGRAPHX_COMPILE_BATCHES | <string> | 7.2 | Comma-separated list of batch sizes to compile for (e.g. "1,4,8,16,32"). |
 | ORT_MIGRAPHX_HIP_GRAPH_ENABLE | 1 or 0 | 7.2 | Enable HIP graph capture and replay for the compiled MIGraphX model. |
+| ORT_MIGRAPHX_COMPUTE_MODE | eager \| balanced \| maximum, or their numeric equivalents 0 \| 50 \| 100 | 7.14 | Environment equivalent of the `compute_mode` session option; see its description above. An unrecognized value logs a warning and leaves the mode unchanged. |
 | ORT_MIGRAPHX_COALESCE_IO | 1 or 0 | 7.14 | Coalesce all host-resident inputs into a single Host-to-Device (H2D) transfer via the pinned-copy path. Requires ORT_MIGRAPHX_HIP_GRAPH_ENABLE=1; ignored (with a warning) when hipGraph is disabled. |
 |             |                      |             |
 | Depricated  | ROCm Version removed | Description |

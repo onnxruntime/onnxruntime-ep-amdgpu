@@ -4,6 +4,9 @@
 #include "mgx_options.h"
 #include "mgx_info.h"
 
+#include <algorithm>
+#include <cctype>
+
 #include "onnxruntime_session_options_config_keys.h"
 
 #include "common/parse_string.h"
@@ -33,7 +36,27 @@ ProviderOptions ApplyLegacyOptionAliases(const ProviderOptions& options) {
     return normalized;
 }
 
+// Accepted spellings of the compute_mode option, matched against the
+// lowercased input so the option is case-insensitive.
+constexpr std::pair<std::string_view, ComputeMode> kComputeModeNames[] = {
+    {"eager", ComputeMode::Eager},
+    {"balanced", ComputeMode::Balanced},
+    {"maximum", ComputeMode::Maximum},
+};
+
 }  // namespace
+
+std::optional<ComputeMode> ParseComputeMode(const std::string_view value) {
+    std::string lower{value};
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+        [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    for (const auto& [name, mode] : kComputeModeNames) {
+        if (lower == name) {
+            return mode;
+        }
+    }
+    return std::nullopt;
+}
 
 ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
     THROW_IF_ERROR(
@@ -76,18 +99,14 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddValueParser(
                 provider_option::kComputeMode,
                 [this](const std::string_view value) -> Ort::Status {
-                    std::string lower{value};
-                    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-                    if (lower == "eager" || value == "0") {
-                        compute_mode = ComputeMode::Eager;
-                    } else if (lower == "balanced" || value == "50") {
-                        compute_mode = ComputeMode::Balanced;
-                    } else if (lower == "maximum" || value == "100") {
-                        compute_mode = ComputeMode::Maximum;
-                    } else {
+                    // This is the only layer that can reject a bad value: migraphx
+                    // clamps an out-of-range compile mode instead of failing.
+                    const auto parsed{ParseComputeMode(value)};
+                    if (!parsed.has_value()) {
                         return Ort::Status{("unknown compute mode: " +
                             std::string{value}).c_str(), ORT_FAIL};
                     }
+                    compute_mode = *parsed;
                     return STATUS_OK;
                 })
             .AddAssignmentToReference(kOrtSessionOptionEpContextFilePath, context_file_path)
