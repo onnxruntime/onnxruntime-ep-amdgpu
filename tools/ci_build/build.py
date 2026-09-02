@@ -271,6 +271,29 @@ def _inject_dependencies(pyproject_path: Path, dep_specs: list[str]):
     log.info(f"Injected dependencies {dep_specs} into {pyproject_path}")
 
 
+def _set_migraphx_wheel_runpath(library_path: Path):
+    # This is intentionally applied to the staged wheel library because these
+    # relative paths describe the site-packages layout, not the native build
+    # tree. A long-term CMake alternative is to set BUILD_WITH_INSTALL_RPATH
+    # and INSTALL_RPATH on migraphx-ep to this same value. INSTALL_RPATH alone
+    # is insufficient while wheel packaging copies the build-tree artifact.
+    runpath = ':'.join([
+        '$ORIGIN',
+        '$ORIGIN/../migraphx_libs',
+        '$ORIGIN/../_rocm_sdk_libraries/lib',
+        '$ORIGIN/../_rocm_sdk_devel/lib',
+        '$ORIGIN/../_rocm_sdk_core/lib',
+        '/opt/rocm/lib',
+        '/opt/rocm/extras-10/lib',
+    ])
+    patchelf = shutil.which('patchelf')
+    if patchelf is None:
+        raise BuildError(
+            "patchelf is required to make the MIGraphX EP wheel relocatable.")
+    _run([patchelf, '--set-rpath', runpath, str(library_path)])
+    log.info(f"Set RUNPATH on {library_path} to {runpath}")
+
+
 def _find_built_library(config_build_dir: Path, target_name: str) -> Path | None:
     if _is_windows():
         patterns = [f'{target_name}.dll']
@@ -431,6 +454,8 @@ def _build_python_wheel(source_dir: Path, build_dir: Path, configs: set[str], wh
                 continue
             dst_lib = pkg_dir / src_lib.name
             shutil.copy2(str(src_lib), str(dst_lib))
+            if _is_linux() and wheel_ep == 'migraphx':
+                _set_migraphx_wheel_runpath(dst_lib)
             copied_files.add(src_lib.name.lower())
             log.info(f"Copied library: {src_lib} -> {dst_lib}")
             found_libraries.append({
