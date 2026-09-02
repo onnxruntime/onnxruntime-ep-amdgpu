@@ -88,6 +88,10 @@ else()
             DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
+if(UNIX AND NOT APPLE)
+    target_link_options(migraphx-ep PRIVATE "LINKER:-z,nodelete")
+endif()
+
 if(USE_AMDGPU)
     set_target_properties(migraphx-ep PROPERTIES OUTPUT_NAME "migraphx-backend")
     target_include_directories(migraphx-ep INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
