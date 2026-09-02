@@ -354,8 +354,11 @@ struct ComputeState {
     // sources DMA straight into the arena (no CPU copy); pageable sources are gathered
     // into the pinned host buffer then flushed with one H2D; a device input disqualifies
     // the coalesced path.
+    // Host-vs-device only, matching the built-in EP: all-host inputs are gathered into
+    // the pinned staging buffer + one whole-arena H2D; any device input falls back to
+    // the per-input staging copy.  (No pinned-vs-pageable split.)
     enum class CoalesceResidency : std::uint8_t {
-        kUnknown, kAllHostPinned, kAllHostPageable, kHasDevice };
+        kUnknown, kAllHost, kHasDevice };
     CoalesceResidency coalesce_residency{CoalesceResidency::kUnknown};
     // Set when the fused shape-scan already coalesced this call's inputs, so the staging
     // copy is skipped.  Reset at the start of every input scan.

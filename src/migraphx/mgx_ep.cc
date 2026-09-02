@@ -2212,10 +2212,9 @@ void EmitHotPathTrace(const Ort::Logger& logger, const ComputeState& cs,
 
     const char* residency{"unknown"};
     switch (cs.coalesce_residency) {
-        case ComputeState::CoalesceResidency::kAllHostPinned:   residency = "host_pinned";   break;
-        case ComputeState::CoalesceResidency::kAllHostPageable: residency = "host_pageable"; break;
-        case ComputeState::CoalesceResidency::kHasDevice:       residency = "device";        break;
-        case ComputeState::CoalesceResidency::kUnknown:         residency = "unknown";       break;
+        case ComputeState::CoalesceResidency::kAllHost:   residency = "host";    break;
+        case ComputeState::CoalesceResidency::kHasDevice: residency = "device";  break;
+        case ComputeState::CoalesceResidency::kUnknown:   residency = "unknown"; break;
     }
 
     // Session-wide traced-call counter so warm-up/cold calls can be told from the

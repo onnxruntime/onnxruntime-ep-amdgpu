@@ -141,6 +141,15 @@ void FreeStaging(ComputeState& cs, hipStream_t stream);
 // cache when the underlying program is recompiled).
 void DestroyHipGraphs(ComputeState& cs);
 
+// Warm up and capture a staging-path hipGraph for the currently bound `params` (no ORT
+// KernelContext required).  Exposed so load-time prewarm (ExecutionProvider::PrewarmHipGraphs)
+// can capture every compiled bucket off the hot path; the staging dispatcher
+// (RunProgramOrHipGraph) also uses it for lazy first-use capture.  Returns false (and
+// disables hipGraph on the state) if capture fails, so callers fall back to eager.
+bool WarmupAndCaptureHipGraph(ComputeState& cs, hipStream_t stream,
+    migraphx::program& program, migraphx::program_parameters& params,
+    const std::vector<std::size_t>& prog_output_indices, ShapeKey shape_key);
+
 // Dispatch a program run: replay a cached hipGraph for shape_key, capture one
 // on first use, or fall back to an eager run if capture fails.  `bind.params` must
 // already be bound to staging buffers/scratch and inputs already staged.  The
