@@ -280,8 +280,9 @@ void ZeroOutputBufs(const std::vector<std::pair<void*, std::size_t>>& bufs,
 // Shared warmup + hipGraph capture used by both the staging and direct-bind paths.
 // The caller supplies the run params, the output buffers to zero / RMW-probe, and
 // (direct-bind only) the input/output device pointers to bake into the entry for
-// drift checks.  On success the captured entry lives in cs.hip_graph_cache[shape_key];
-// on failure the slot is cleared, `enable_flag` is set false, and false is returned
+// drift checks.  On success the captured entry lives at shape_key in the mode's map
+// (hip_graph_cache_direct if direct_bind, else hip_graph_cache); on failure the slot
+// is cleared, `enable_flag` is set false, and false is returned
 // so the caller falls back to eager execution.  `direct_bind` selects the few
 // path-specific steps: the staging path folds the pre-replay zeroing into the graph
 // (item 7) and warms in with a bare launch, while the direct path bakes the ORT
@@ -319,11 +320,11 @@ bool WarmupAndCaptureHipGraphCommon(ComputeState& cs, hipStream_t stream,
         InferCompiledBatchFromParams(program.get_parameter_shapes(), cs.input_name_indices)};
     const int post_warmin{PostCaptureWarminFor(compiled_batch)};
 
-    auto& entry{cs.hip_graph_cache[shape_key]};
+    // Select this mode's map so staging and direct/hybrid captures never evict each other.
+    auto& cache{direct_bind ? cs.hip_graph_cache_direct : cs.hip_graph_cache};
+    auto& entry{cache[shape_key]};
 
-    // Drop any stale capture for this hash (e.g. a prior staging<->direct entry for
-    // the same shape) before overwriting so its graph/exec are not leaked.  A no-op
-    // for a fresh slot -- the staging caller resets drifted entries before reaching here.
+    // Free any prior graph in this slot before overwriting (a drift re-capture reuses it).
     if (entry.exec != nullptr) {
         (void)hipGraphExecDestroy(entry.exec);
         entry.exec = nullptr;
@@ -506,10 +507,9 @@ bool WarmupAndCaptureHipGraphDirect(ComputeState& cs, hipStream_t stream,
         }
     }
 
-    // Cache the entry on the dbc so the steady-state replay path (and
-    // MaterializeExtraOutputs) reaches it directly, without re-searching
-    // hip_graph_cache by key every call.
-    dbc.graph = &cs.hip_graph_cache[shape_key];
+    // Cache the entry (in the direct/hybrid map) on the dbc so steady-state replay and
+    // MaterializeExtraOutputs reach it directly, without re-searching by key every call.
+    dbc.graph = &cs.hip_graph_cache_direct[shape_key];
 
     return WarmupAndCaptureHipGraphCommon(cs, stream, program, dbc.params, shape_key,
         dbc.prog_output_indices, output_bufs, /*direct_bind=*/true,
@@ -1113,6 +1113,10 @@ void DestroyHipGraphs(ComputeState& cs) {
         ResetCapturedGraph(entry);
     }
     cs.hip_graph_cache.clear();
+    for (auto& [hash, entry] : cs.hip_graph_cache_direct) {
+        ResetCapturedGraph(entry);
+    }
+    cs.hip_graph_cache_direct.clear();
 }
 
 // Copy every program output not pre-bound (its index absent from prog_output_indices)
@@ -1176,25 +1180,15 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
         return;
     }
 
-    // Resolve this shape's captured-graph slot once and cache it on the bind, so the
-    // steady-state replay does a single map lookup only on the first call and none
-    // thereafter (mirrors DirectBindCache.graph).  The two former lookups (stale
-    // direct-bind drop + capture-status check) are merged into this one resolve.
+    // Resolve this shape's captured-graph slot once (in the staging map) and cache it
+    // on the bind, so the steady-state replay does a single map lookup only on the
+    // first call and none thereafter (mirrors DirectBindCache.graph).
     if (bind.graph == nullptr) {
         if (const auto it{cs.hip_graph_cache.find(shape_key)}; it != cs.hip_graph_cache.end()) {
             bind.graph = &it->second;
         }
     }
     CapturedHipGraph* entry{bind.graph};
-
-    // A direct-bind capture (against ORT pointers) cannot be replayed through the
-    // staging path.  This happens when the direct path was disabled at runtime
-    // (pointer drift) and the same shape_key falls back here; drop the stale
-    // entry so a staging graph is captured fresh below.
-    if (entry != nullptr && entry->direct_bind) {
-        ResetCapturedGraph(*entry);
-        entry->direct_bind = false;
-    }
 
     if (entry != nullptr && entry->captured) {
         // Re-capture if the scratch buffer was reallocated since capture.  The slot

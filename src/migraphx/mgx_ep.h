@@ -201,14 +201,11 @@ struct DirectBindCache {
     // and only cur_output_ptrs are ORT pointers gathered + drift-checked per call.
     std::vector<void*> cur_input_ptrs{};
     std::vector<void*> cur_output_ptrs{};
-    // Resolved pointers into the ComputeState maps (this shape's captured graph and
-    // scratch slot), so the steady-state replay skips re-searching hip_graph_cache /
-    // scratch_bufs with the same key it already used to find this dbc.  std::unordered_map
-    // keeps element addresses stable across insert/rehash, so these stay valid until
-    // their entry is erased: scratch_bufs entries are never erased mid-session, and
-    // hip_graph_cache is only cleared by DestroyHipGraphs -- which runs together with
-    // direct_bind_cache.clear() (unbounded-shape path), dropping this dbc too.  `graph`
-    // is (re)set on each capture; a null `graph` forces the (cold) capture path.
+    // Resolved pointers into the ComputeState maps (captured graph in hip_graph_cache_direct,
+    // scratch slot) so steady-state replay does no re-search.  std::unordered_map addresses
+    // are stable until the entry is erased: scratch_bufs is never erased mid-session, and the
+    // graph map is cleared only by DestroyHipGraphs, which runs with direct_bind_cache.clear()
+    // (unbounded-shape path), dropping this dbc.  Null `graph` forces the cold capture path.
     CapturedHipGraph* graph{nullptr};
     ScratchBuffer* scratch_slot{nullptr};
 };
@@ -228,13 +225,11 @@ struct StagingBindResult {
     std::vector<void*> bound_output_data{};               // staging src ptr per bound output (resolved once)
     std::vector<StagingInputBind> input_copies{};         // flat per-input copy plan (built once)
 
-    // Resolved pointers into the ComputeState maps for this shape's captured graph
-    // and scratch slot, so the steady-state replay skips re-searching hip_graph_cache
-    // and scratch_bufs with the same key every call.  Same stability invariant as
-    // DirectBindCache: scratch_bufs entries are never erased mid-session, and
-    // hip_graph_cache is only cleared by DestroyHipGraphs -- which runs together with
-    // FreeStaging (staging_bind_cache.clear()), dropping this bind too.  `graph` is
-    // (re)set on capture; a null `graph` forces the (cold) capture path.
+    // Resolved pointers into the ComputeState maps (captured graph in hip_graph_cache,
+    // scratch slot) so steady-state replay does no re-search.  Same stability invariant as
+    // DirectBindCache; the graph map is cleared only by DestroyHipGraphs, which runs with
+    // FreeStaging (staging_bind_cache.clear()), dropping this bind.  Null `graph` forces
+    // the cold capture path.
     CapturedHipGraph* graph{nullptr};
     ScratchBuffer* scratch_slot{nullptr};
 
@@ -360,8 +355,11 @@ struct ComputeState {
     bool staging_allocated{};
     // Scratch buffers keyed by shape hash.
     std::unordered_map<ShapeKey, ScratchBuffer> scratch_bufs{};
-    // Captured graphs keyed by shape hash.
-    std::unordered_map<ShapeKey, CapturedHipGraph> hip_graph_cache{};
+    // Captured graphs keyed by shape hash, split by binding mode so a shape's staging
+    // and direct/hybrid captures never evict each other (else a padded and an exact-bucket
+    // call for the same bucket thrash the one slot, recapturing on each).
+    std::unordered_map<ShapeKey, CapturedHipGraph> hip_graph_cache{};         // staging
+    std::unordered_map<ShapeKey, CapturedHipGraph> hip_graph_cache_direct{};  // direct/hybrid
     // Host inputs (e.g. scalar alpha) staged to device before run_async.
     Map<StagingBuffer> cpu_input_upload_bufs{};
 

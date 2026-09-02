@@ -764,17 +764,21 @@ ExecutionProvider::~ExecutionProvider() {
     // are ignored because the HIP context may already be torn down at process exit.
     (void)hipSetDevice(device_id_);
     for (auto& [name, cs] : compute_states_) {
-        for (auto& [hash, entry] : cs.hip_graph_cache) {
-            if (entry.exec != nullptr) {
-                (void)hipGraphExecDestroy(entry.exec);
-                entry.exec = nullptr;
+        const auto destroy_captured{[](std::unordered_map<ShapeKey, CapturedHipGraph>& cache) {
+            for (auto& [hash, entry] : cache) {
+                if (entry.exec != nullptr) {
+                    (void)hipGraphExecDestroy(entry.exec);
+                    entry.exec = nullptr;
+                }
+                if (entry.graph != nullptr) {
+                    (void)hipGraphDestroy(entry.graph);
+                    entry.graph = nullptr;
+                }
+                entry.captured = false;
             }
-            if (entry.graph != nullptr) {
-                (void)hipGraphDestroy(entry.graph);
-                entry.graph = nullptr;
-            }
-            entry.captured = false;
-        }
+        }};
+        destroy_captured(cs.hip_graph_cache);
+        destroy_captured(cs.hip_graph_cache_direct);
         // Staging inputs/outputs and the coalesce arena come from hipMallocAsync, so
         // they are released with hipFreeAsync.  Best-effort teardown: the free is
         // queued on the default stream and reclaimed with the context at exit.
@@ -976,7 +980,7 @@ void ExecutionProvider::CollectTelemetry(telemetry::BackendData& out) const noex
 
 // Load-time hipGraph prewarm.  Runs once per fused node at Compile time (after the
 // bucket programs are in memory).  For every compiled bucket it binds the EP-owned
-// staging buffers + scratch and captures the staging-path hipGraph into
+// staging buffers + scratch and captures the staging-path hipGraph into the staging map
 // hip_graph_cache[shape_key] (and caches the bind in staging_bind_cache), so the first
 // inference of each bucket REPLAYS a ready graph instead of paying the one-time
 // warmup+capture (tens-to-100+ ms for large buckets) on a live request.
@@ -1064,8 +1068,8 @@ try {
         }
         auto& bind{bind_it->second};
 
-        // Populates cs.hip_graph_cache[shape_key]; on failure it disables hipGraph on
-        // the state (same as the lazy path), so stop and let Compute run eager.
+        // Populates the staging map hip_graph_cache[shape_key]; on failure it disables
+        // hipGraph on the state (same as the lazy path), so stop and let Compute run eager.
         if (!WarmupAndCaptureHipGraph(cs, stream, prog, bind.params,
                 bind.prog_output_indices, shape_key)) {
             ORT_CXX_LOG_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_WARNING,
