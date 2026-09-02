@@ -896,15 +896,26 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
     {
         assert(!m_closed);
 
+        *abiData = nullptr;
+
         if (isInternalOperator)
         {
             *abiData = data;
             data->AddRef();
+            return;
         }
-        else
+
+        // DecodeDataHandle rejects a handle this EP's allocators never produced. Nothing here can
+        // report a status, and callers already treat a null interface as "unavailable", so degrade
+        // to that instead of letting the exception escape a noexcept boundary. (PLAT-207667)
+        ORT_TRY
         {
             Microsoft::WRL::ComPtr<ID3D12Resource> resource = m_allocator->DecodeDataHandle(data)->GetResource();
             *abiData = resource.Detach();
+        }
+        ORT_CATCH_GENERIC
+        {
+            *abiData = nullptr;
         }
     }
 
@@ -913,7 +924,14 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
         bool isInternalOperator)
     {
         assert(!isInternalOperator);
-        return m_allocator->DecodeDataHandle(data)->GetPooledResourceId();
+        ORT_TRY
+        {
+            return m_allocator->DecodeDataHandle(data)->GetPooledResourceId();
+        }
+        ORT_CATCH_GENERIC
+        {
+            return 0;  // "no pooled id", the same answer this Try* API gives for an unpooled handle
+        }
     }
 
     void PluginDmlExecutionProviderImpl::GetABIExecutionInterfaceAndInvalidateState(
@@ -1035,7 +1053,15 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
 
         // Use the allocator's DecodeDataHandle to get the PluginDmlAllocationInfo
         // This is safe because we're using the same allocator instance, not crossing DLL boundaries
-        const PluginDmlAllocationInfo* alloc_info = m_allocator->DecodeDataHandle(data_ptr);
+        const PluginDmlAllocationInfo* alloc_info = nullptr;
+        ORT_TRY
+        {
+            alloc_info = m_allocator->DecodeDataHandle(data_ptr);
+        }
+        ORT_CATCH_GENERIC
+        {
+            alloc_info = nullptr;  // handle not ours; the null path below is already the contract
+        }
         if (!alloc_info) {
             return nullptr;
         }
