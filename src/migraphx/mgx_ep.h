@@ -175,7 +175,7 @@ struct CachedDirectOutput {
 // compares them positionally against the captured graph's pointers.  `params` is
 // (re)bound lazily -- only when a capture or eager run is actually needed -- since
 // the steady-state replay path uses the captured graph directly and never reads
-// `params`.  `eligible` is used only by the hybrid staging binding
+// `params`.  `eligible` is used only by the staging binding
 // (StagingBindResult::hybrid) to mark whether outputs can be bound directly to ORT
 // tensors; the standalone direct_bind_cache does not gate on it (the direct path is
 // taken whenever use_direct_hip_graph is set and there is no padding).
@@ -196,7 +196,7 @@ struct DirectBindCache {
     std::vector<std::size_t> prog_output_indices{};
     // Current device pointers gathered each call (inputs/outputs order).  Reused
     // across calls so the hot path does no per-call heap allocation.  For the pure
-    // direct path these are ORT tensor pointers; for the coalesced hybrid (item 1)
+    // direct path these are ORT tensor pointers; for the coalesced path
     // cur_input_ptrs are the pointer-stable arena sub-views (set once, never drift)
     // and only cur_output_ptrs are ORT pointers gathered + drift-checked per call.
     std::vector<void*> cur_input_ptrs{};
@@ -238,12 +238,6 @@ struct StagingBindResult {
     CapturedHipGraph* graph{nullptr};
     ScratchBuffer* scratch_slot{nullptr};
 
-    // Item 1 (hybrid): when this shape has no padding, outputs can be bound directly
-    // to the ORT tensors (drift-checked) while inputs stay coalesced in the arena,
-    // eliminating the per-output staging->ORT D2D copies.  Built once by
-    // BindStagingParams; hybrid.cur_input_ptrs are the (pointer-stable) arena
-    // sub-views, so only the ORT output pointers are gathered + drift-checked per
-    // call.  Ineligible (extra/unbound params) -> the staging copy path is used.
     DirectBindCache hybrid{};
 };
 
@@ -300,11 +294,6 @@ struct ComputeState {
     static constexpr int kMaxDirectRecaptures{3};
     int direct_recapture_count{};
 
-    // Hybrid direct-bound outputs (item 1): the dual of use_direct_hip_graph for the
-    // coalesce_io path -- inputs stay coalesced in the arena, but outputs are bound
-    // directly to the ORT tensors (drift-checked) so the per-output staging->ORT D2D
-    // copies are skipped.  Enabled when hipGraph is on and coalesce_io is on.  Uses
-    // its own recapture counter so drift here does not disturb the pure-direct path.
     bool hybrid_output_enable{};
     int hybrid_recapture_count{};
 
@@ -502,8 +491,8 @@ private:
 
     // Load-time hipGraph prewarm.  Captures the staging-path hipGraph for every compiled
     // bucket during Compile so the per-bucket warmup+capture cost never lands on a live
-    // inference.  Forces the staging path (the only prewarmable one; direct/hybrid bake in
-    // per-request ORT pointers), so the caller only invokes it under coalesce_io, where
+    // inference.  Forces the staging path (the only prewarmable one; the direct-bind path
+    // bakes in per-request ORT pointers), so the caller only invokes it under coalesce_io, where
     // staging is already the primary path.  Best-effort and no-throw: any failure just
     // leaves the affected buckets to the normal lazy capture path.
     void PrewarmHipGraphs(ComputeState& compute_state) noexcept;

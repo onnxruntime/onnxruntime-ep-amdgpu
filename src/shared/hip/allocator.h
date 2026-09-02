@@ -3,8 +3,10 @@
 
 #pragma once
 
+#include <cstddef>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "hip/utils.h"
@@ -75,5 +77,16 @@ private:
     int device_id_{};
     const OrtMemoryInfo* memory_info_{};
 };
+
+// Pin the next device Alloc() on this thread to a caller-owned buffer: the EP arms it
+// before GetOutput so the ORT output tensor reuses a pointer-stable staging buffer
+// (drift-free direct-bind, no copy-back).  Consumed once; oversize falls through to a
+// normal allocation.
+void ArmOutputAlloc(void* buffer, std::size_t capacity) noexcept;
+void DisarmOutputAlloc() noexcept;
+
+// Drop a borrowed buffer from the registry when the EP frees it, so a later reuse of the
+// address is freed normally.
+void ReleaseBorrowedOutput(void* buffer) noexcept;
 
 }  // namespace hip

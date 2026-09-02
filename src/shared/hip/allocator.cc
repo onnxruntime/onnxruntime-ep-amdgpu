@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_set>
 
 #include "hip/allocator.h"
 
@@ -31,7 +32,42 @@ bool EnvTruthy(const char* name) {
     const std::string_view s{v};
     return s == "1" || s == "true" || s == "True" || s == "TRUE" || s == "on" || s == "ON";
 }
+
+// Output-buffer allocation hint state (see hip::ArmOutputAlloc).
+struct OutputAllocHint {
+    void* buffer{nullptr};
+    std::size_t capacity{0};
+    bool armed{false};
+};
+thread_local OutputAllocHint t_output_hint{};
+
+// EP-owned buffers currently lent to ORT as output storage; process-wide, keyed by the
+// (globally unique) device pointer so it is correct across allocator instances.
+std::mutex& BorrowedOutputsMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+std::unordered_set<void*>& BorrowedOutputs() {
+    static std::unordered_set<void*> set;
+    return set;
+}
 }  // namespace
+
+void ArmOutputAlloc(void* buffer, const std::size_t capacity) noexcept {
+    t_output_hint = OutputAllocHint{buffer, capacity, buffer != nullptr};
+}
+
+void DisarmOutputAlloc() noexcept {
+    t_output_hint.armed = false;
+}
+
+void ReleaseBorrowedOutput(void* buffer) noexcept {
+    if (buffer == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock{BorrowedOutputsMutex()};
+    BorrowedOutputs().erase(buffer);
+}
 
 bool Allocator::PoolModeFromEnv() {
     // Explicit override wins in either direction (ORT_MIGRAPHX_ALLOCATOR_POOL=0 forces off).
@@ -58,6 +94,18 @@ void* Allocator::Alloc(const size_t size) const {
     if (size == 0) {
         return nullptr;
     }
+    // Consume an armed output hint: hand back the EP-owned buffer (drift-free) instead of
+    // allocating.  Consumed once; oversize falls through to a normal allocation.
+    if (t_output_hint.armed) {
+        void* const hinted{t_output_hint.buffer};
+        const std::size_t capacity{t_output_hint.capacity};
+        t_output_hint.armed = false;
+        if (hinted != nullptr && size <= capacity) {
+            std::lock_guard<std::mutex> lock{BorrowedOutputsMutex()};
+            BorrowedOutputs().insert(hinted);
+            return hinted;
+        }
+    }
     // Reuse an idle block of the exact size if one is available.
     if (pool_enabled_) {
         std::lock_guard<std::mutex> lock{pool_mutex_};
@@ -80,6 +128,14 @@ void* Allocator::Alloc(const size_t size) const {
 void Allocator::Free(void* p) const {
     if (p == nullptr) {
         return;
+    }
+    // Borrowed output buffers are EP-owned and reused across calls; never free them here
+    // (released via ReleaseBorrowedOutput in FreeStaging / ~ExecutionProvider).
+    {
+        std::lock_guard<std::mutex> lock{BorrowedOutputsMutex()};
+        if (BorrowedOutputs().count(p) != 0) {
+            return;
+        }
     }
     // Recycle instead of releasing to the driver so the next same-size request skips
     // hipMalloc entirely (and the device-wide lock/sync it takes).

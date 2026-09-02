@@ -172,9 +172,9 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
 // replay never touches it.  A drift mismatch re-captures, and repeated drift flips
 // `enable_flag` false (per-session disable) using `recapture_count`.  Requires that
 // no batch/seq padding is needed for this call (the caller guarantees this).
-// Two callers share this: the pure-direct path (ORT input+output pointers, no
-// staging copy) and the coalesced hybrid (item 1: arena input pointers + ORT output
-// pointers), each passing its own enable flag + recapture counter.
+// Two callers share this, each passing its own enable flag + recapture counter: the
+// pure-direct path (ORT input+output pointers, no staging copy) and the coalesced path
+// (arena input pointers + ORT output pointers).
 void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
     const Ort::KernelContext& ctx,
     migraphx::program& program,

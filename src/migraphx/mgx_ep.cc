@@ -25,6 +25,7 @@
 #include "common/ort_graph_to_proto.h"
 #include "common/telemetry.h"
 
+#include "hip/allocator.h"
 #include "hip/stream_support.h"
 
 #include "mgx_dynamic_batch.h"
@@ -794,6 +795,8 @@ ExecutionProvider::~ExecutionProvider() {
         }
         for (auto& [param_name, buf] : cs.staging_outputs) {
             if (buf.data != nullptr) {
+                // Drop from the allocator's borrowed registry before releasing.
+                hip::ReleaseBorrowedOutput(buf.data);
                 (void)hipFreeAsync(buf.data, nullptr);
                 buf.data = nullptr;
             }
@@ -979,12 +982,12 @@ void ExecutionProvider::CollectTelemetry(telemetry::BackendData& out) const noex
 // warmup+capture (tens-to-100+ ms for large buckets) on a live request.
 //
 // Only the staging path is prewarmable: it binds pointer-stable, EP-owned buffers that
-// exist at load, whereas the direct-bind / hybrid paths bake in per-request ORT tensor
-// pointers that do not exist until Compute runs.  So prewarm also forces the staging
-// path (disables use_direct_hip_graph + hybrid_output_enable); otherwise an exact-bucket
-// call would skip the prewarmed graph and re-capture a direct-bind graph over it.  This
-// matches the built-in MIGraphX EP, which runs the staging path under coalesce_io
-// (use_direct_hip_graph = hip_graph && !coalesce, and it has no hybrid output path).
+// exist at load, whereas the direct-bind path bakes in per-request ORT tensor pointers
+// that do not exist until Compute runs.  So prewarm also forces the staging path
+// (disables use_direct_hip_graph); otherwise an exact-bucket call would skip the
+// prewarmed graph and re-capture a direct-bind graph over it.  This matches the built-in
+// MIGraphX EP, which runs the staging path under coalesce_io (use_direct_hip_graph =
+// hip_graph && !coalesce).
 //
 // Best-effort / no-throw: on any failure the affected buckets simply fall back to the
 // normal lazy capture path (a capture failure disables hipGraph on the state exactly as
@@ -1225,10 +1228,6 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     // coalesce_io is off; coalesce_io routes inputs through the pinned staging
     // arena and is therefore mutually exclusive with the direct-bind path.
     compute_state.use_direct_hip_graph = hip_graph_enable_ && !coalesce_io_enable_;
-    // Item 1 hybrid: with coalesce_io on, inputs stay coalesced but outputs are
-    // bound directly to ORT tensors (drift-checked), skipping the staging->ORT D2D
-    // copies.  Re-set each call so a transient-drift disable can recover; a sustained
-    // drift keeps hybrid_recapture_count past the cap, holding it on the staging path.
     compute_state.hybrid_output_enable = hip_graph_enable_ && coalesce_io_enable_;
     compute_state.static_pad_seq = static_pad_seq_;
     compute_state.static_pad_seq_len = static_pad_seq_len_;
@@ -2050,16 +2049,6 @@ std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
         auto& bind{bind_it->second};
         CopyInputsToStaging(compute_state, bind, kernel_context, hip_stream, dyn, seq);
 
-        // Item 1 (hybrid direct-bound outputs): when this call needs no padding, bind
-        // the program outputs directly to the ORT tensors (drift-checked) and skip the
-        // per-output staging->ORT D2D copies entirely.  Inputs are already coalesced
-        // into the (pointer-stable) arena, so cur_input_ptrs never drift and only the
-        // ORT output pointers are gathered + drift-checked here.  Reuses the direct
-        // path's capture/replay/drift machinery with the hybrid's own enable flag +
-        // recapture counter; on ineligibility or sustained output drift it falls back
-        // to the staging copy path below.  Padding disqualifies the hybrid because the
-        // program writes target-batch/target-len rows that the staging path must slice
-        // down to the requested shape.
         // Equivalent to !io.needs_padding, resolved once in ResolveComputeIO: target_batch
         // is always >= requested_batch (bucket rounds up) and seq.active implies
         // target_len > real_len, so "==" there and ">" in needs_padding coincide.
@@ -2068,8 +2057,20 @@ std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
             compute_state.staging_inputs_coalesced) {
             auto& hyb{bind.hybrid};
             hyb.cur_output_ptrs.resize(hyb.outputs.size());
+            // Back each ORT output with its pointer-stable staging_outputs buffer (armed
+            // just before GetOutput) so captured output pointers never drift and the
+            // copy-back is skipped.  The guard disarms even if GetOutput throws.
+            struct OutputHintGuard {
+                ~OutputHintGuard() { hip::DisarmOutputAlloc(); }
+            };
             for (std::size_t i{0}; i < hyb.outputs.size(); ++i) {
                 const auto& out{hyb.outputs[i]};
+                if (const auto stage_it{compute_state.staging_outputs.find(out.name)};
+                    stage_it != compute_state.staging_outputs.end() &&
+                    stage_it->second.data != nullptr) {
+                    hip::ArmOutputAlloc(stage_it->second.data, stage_it->second.size_bytes);
+                }
+                OutputHintGuard hint_guard;
                 auto output_tensor{kernel_context.GetOutput(out.output_index,
                     out.ort_shape.data(), out.ort_shape.size())};
                 hyb.cur_output_ptrs[i] = output_tensor.GetTensorMutableRawData();
@@ -2199,7 +2200,7 @@ void EmitHotPathTrace(const Ort::Logger& logger, const ComputeState& cs,
     if (mech == MechKind::kDirectBind) {
         mechanism = "direct_bind";
     } else if (mech == MechKind::kStaging) {
-        // Mirror TryStaging's hybrid-vs-copy decision so the trace names the branch
+        // Mirror TryStaging's output-path decision so the trace names the branch
         // actually taken (the cache lookup only runs on the traced path).
         mechanism = "staging_copy";
         if (cs.hybrid_output_enable && !io.needs_padding && cs.staging_inputs_coalesced) {

@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "hip/allocator.h"
 #include "hip/utils.h"
 #include "mgx_dynamic_batch.h"
 #include "common/env_var.h"
@@ -899,12 +900,7 @@ StagingBindResult BindStagingParams(ComputeState& cs,
     ShapeKey shape_key, hipStream_t stream)
 {
     StagingBindResult result;
-    // Item 1: build the hybrid (direct-bound outputs) plan alongside the staging
-    // bind.  Eligible unless a program parameter is neither an input, an output, nor
-    // scratch (an unbound/literal param the hybrid cannot direct-bind).
     result.hybrid.eligible = true;
-    // Hybrid inputs are pointer-stable staging/arena sub-views, so replay drift checks
-    // only the ORT output pointers.
     result.hybrid.inputs_pointer_stable = true;
     for (const auto& name : param_shapes.names()) {
         const std::string param_name{name};
@@ -934,8 +930,6 @@ StagingBindResult BindStagingParams(ComputeState& cs,
                 ? ib.prog_bytes / ib.prog_lens.front() : ib.prog_bytes;
             ib.name = param_name;
             result.input_copies.push_back(std::move(ib));
-            // Hybrid: bind this input to its (pointer-stable) arena sub-view.  The
-            // ptr never drifts, so it is recorded once here and never re-gathered.
             result.hybrid.inputs.push_back(
                 CachedDirectInput{param_name, idx_it->second, in_shape});
             result.hybrid.cur_input_ptrs.push_back(stage_it->second.data);
@@ -945,7 +939,6 @@ StagingBindResult BindStagingParams(ComputeState& cs,
                 // Cache the scratch slot so replay zeroing + the drift check skip the
                 // per-call scratch_bufs lookup (entries are never erased mid-session).
                 result.scratch_slot = &cs.scratch_bufs[shape_key];
-                // Hybrid shares the same scratch (same shape_key / slot).
                 result.hybrid.has_scratch = true;
                 result.hybrid.scratch_shape = scratch->shape;
             }
@@ -973,8 +966,6 @@ StagingBindResult BindStagingParams(ComputeState& cs,
                                                           : out_shape.bytes());
             // Precompute the total byte count so the per-call copy skips shape.bytes().
             result.bound_output_bytes.push_back(out_shape.bytes());
-            // Hybrid: this output can be bound directly to its ORT tensor.  ort_shape
-            // == program shape here (the hybrid runs only when no padding is needed).
             result.hybrid.outputs.push_back(CachedDirectOutput{
                 param_name, static_cast<std::size_t>(oi), out_shape,
                 std::vector<std::int64_t>{out_lens.begin(), out_lens.end()}});
@@ -1103,6 +1094,8 @@ void FreeStaging(ComputeState& cs, hipStream_t stream) {
     cs.coalesce_residency = ComputeState::CoalesceResidency::kUnknown;
     for (auto& [name, buf] : cs.staging_outputs) {
         if (buf.data != nullptr) {
+            // Drop from the allocator's borrowed registry before releasing.
+            hip::ReleaseBorrowedOutput(buf.data);
             (void)hipFreeAsync(buf.data, stream);
             buf.data = nullptr;
         }
