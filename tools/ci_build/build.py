@@ -454,7 +454,7 @@ def _build_python_wheel(source_dir: Path, build_dir: Path, configs: set[str], wh
                 continue
             dst_lib = pkg_dir / src_lib.name
             shutil.copy2(str(src_lib), str(dst_lib))
-            if _is_linux() and wheel_ep == 'migraphx':
+            if _is_linux() and lib_target in {'migraphx-ep', 'migraphx-backend'}:
                 _set_migraphx_wheel_runpath(dst_lib)
             copied_files.add(src_lib.name.lower())
             log.info(f"Copied library: {src_lib} -> {dst_lib}")
@@ -489,7 +489,7 @@ def _build_python_wheel(source_dir: Path, build_dir: Path, configs: set[str], wh
         dependencies = []
         if ort_version:
             dependencies.append(ort_version)
-        if wheel_ep == 'migraphx' and include_migraphx_libs:
+        if wheel_ep in {'migraphx', 'amdgpu'} and include_migraphx_libs:
             dependencies.append('migraphx-libs')
         if dependencies:
             _inject_dependencies(staged_pyproject, dependencies)
@@ -676,7 +676,7 @@ def main():
         '--migraphx_libs_dependency',
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Declare migraphx-libs as a dependency of the MIGraphX wheel."
+        help="Declare migraphx-libs as a dependency of wheels containing MIGraphX."
     )
     parser.add_argument(
         '--deploy_wheel',

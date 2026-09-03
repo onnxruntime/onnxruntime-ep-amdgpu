@@ -88,7 +88,7 @@ else()
             DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
-if(UNIX AND NOT APPLE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(migraphx-ep PRIVATE "LINKER:-z,nodelete")
 endif()
 
