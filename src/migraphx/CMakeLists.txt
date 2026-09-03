@@ -88,6 +88,10 @@ else()
             DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(migraphx-ep PRIVATE "LINKER:-z,nodelete")
+endif()
+
 # Optionally ship a read-only problem cache next to the EP: deploy the file at
 # MIGRAPHX_EP_PROBLEM_CACHE as problem_cache.json (the name setup_problem_cache_paths
 # discovers beside the module at runtime).
