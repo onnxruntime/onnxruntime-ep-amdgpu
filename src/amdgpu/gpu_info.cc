@@ -49,6 +49,7 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kStaticPadSeqLen, static_pad_seq_len)
             .AddAssignmentToReference(provider_option::kStaticPadInputs, static_pad_inputs)
             .AddAssignmentToReference(provider_option::kStaticPadOutputs, static_pad_outputs)
+            .IgnoreUnknownKeys()
             .Parse(provider_options));
 }
 

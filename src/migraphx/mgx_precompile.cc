@@ -212,7 +212,8 @@ Ort::Status CompileMissingPrograms(const PrecompilePlan& plan, const Map<std::si
     std::string_view onnx_string, Map<migraphx::program>& cached_programs, const migraphx::target& target,
     bool fp16_enable, bool bf16_enable, bool int8_enable, bool fp8_enable,
     bool int8_calibration_cache_available, const Map<float>& dynamic_ranges, bool exhaustive_tune,
-    const std::string& mlss_use_specific_ops, ComputeMode compute_mode, bool disable_compiled_model_caching,
+    const std::string& mlss_use_specific_ops, ComputeMode compute_mode,
+    const std::vector<std::string>& problem_cache_paths, bool disable_compiled_model_caching,
     const fs::path& model_path, const fs::path& external_data_dir, const fs::path& cache_dir,
     const std::string& mxr_prefix)
 {
@@ -246,7 +247,8 @@ Ort::Status CompileMissingPrograms(const PrecompilePlan& plan, const Map<std::si
         migraphx::program_parameters params;
         calibrate_and_quantize(program, target, params, fp16_enable, bf16_enable, int8_enable, fp8_enable,
             int8_calibration_cache_available, dynamic_ranges);
-        compile_program(program, target, exhaustive_tune, mlss_use_specific_ops, compute_mode);
+        compile_program(program, target, exhaustive_tune, mlss_use_specific_ops, compute_mode,
+            problem_cache_paths);
         if (!disable_compiled_model_caching) {
             save_compiled_program(program, mxr_path);
         }
