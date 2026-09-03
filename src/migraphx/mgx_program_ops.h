@@ -5,6 +5,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <migraphx/migraphx.hpp>
 
@@ -26,6 +27,7 @@ void calibrate_and_quantize(const migraphx::program& prog, const migraphx::targe
 // compute_mode has no default argument on purpose: every call site must state
 // which mode it compiles under.
 void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune,
-    const std::string& mlss_use_specific_ops, ComputeMode compute_mode);
+    const std::string& mlss_use_specific_ops, ComputeMode compute_mode,
+    const std::vector<std::string>& problem_cache_paths);
 
 }  // namespace mgx_ep
