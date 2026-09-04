@@ -3,6 +3,8 @@
 
 #include "mgx_program_ops.h"
 
+#include <cstddef>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -58,8 +60,23 @@ void calibrate_and_quantize(const migraphx::program& prog, const migraphx::targe
     }
 }
 
+// Render already-escaped cache paths as the {"read_only_problem_cache_files":[...]} object
+// that migraphx's relaxed-JSON backend-option parser expects.
+static std::string build_read_only_problem_cache_option(const std::vector<std::string>& problem_cache_paths) {
+    std::string json{R"({"read_only_problem_cache_files":[)"};
+    for (std::size_t i{0}; i < problem_cache_paths.size(); ++i) {
+        if (i != 0) {
+            json += ',';
+        }
+        json += '"' + problem_cache_paths[i] + '"';
+    }
+    json += "]}";
+    return json;
+}
+
 void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune,
-    const std::string& mlss_use_specific_ops, ComputeMode compute_mode) {
+    const std::string& mlss_use_specific_ops, ComputeMode compute_mode,
+    const std::vector<std::string>& problem_cache_paths) {
     migraphx::compile_options options;
     options.set_fast_math(false);
 
@@ -78,6 +95,14 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
     // options.exhaustive_tune, so on this build max would be close to a no-op.
     // Set the flag here so Maximum means something without patching migraphx.
     options.set_exhaustive_tune_flag(exhaustive_tune || compute_mode == ComputeMode::Maximum);
+
+    // read_only_problem_cache_files are system-level/shipped caches migraphx must never write
+    // back. Passed as a %s argument so a '%' in a path is not read as a format specifier.
+    // migraphx builds with the problem-cache feature consume the key; older ones ignore it.
+    if (!problem_cache_paths.empty()) {
+        const auto json{build_read_only_problem_cache_option(problem_cache_paths)};
+        options.set_advance_backend_options("%s", json.c_str());
+    }
     if (!mlss_use_specific_ops.empty()) {
         // MIGraphX expects a list of op names; split the comma-separated value.
         std::vector<std::string> ops;
