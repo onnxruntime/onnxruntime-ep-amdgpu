@@ -108,9 +108,12 @@ std::unique_ptr<ONNX_NAMESPACE::AttributeProto> BuildPluginAttributeProto(
     }
     case ORT_OP_ATTR_INTS: {
         attr_proto->set_type(ONNX_NAMESPACE::AttributeProto_AttributeType_INTS);
-        // Query size first
+        // Query size first. The size-probe intentionally returns a non-null status reporting the
+        // required buffer size; it transfers ownership to us, so release it instead of leaking.
         size_t total_size{};
-        api.ReadOpAttr(ort_attr, ORT_OP_ATTR_INTS, nullptr, 0, &total_size);
+        if (OrtStatus* probe = api.ReadOpAttr(ort_attr, ORT_OP_ATTR_INTS, nullptr, 0, &total_size)) {
+            api.ReleaseStatus(probe);
+        }
         if (total_size > 0) {
             std::vector<int64_t> values(total_size / sizeof(int64_t));
             ThrowOnError(api, api.ReadOpAttr(ort_attr, ORT_OP_ATTR_INTS, values.data(), total_size, &total_size));
@@ -129,7 +132,9 @@ std::unique_ptr<ONNX_NAMESPACE::AttributeProto> BuildPluginAttributeProto(
     case ORT_OP_ATTR_FLOATS: {
         attr_proto->set_type(ONNX_NAMESPACE::AttributeProto_AttributeType_FLOATS);
         size_t total_size{};
-        api.ReadOpAttr(ort_attr, ORT_OP_ATTR_FLOATS, nullptr, 0, &total_size);
+        if (OrtStatus* probe = api.ReadOpAttr(ort_attr, ORT_OP_ATTR_FLOATS, nullptr, 0, &total_size)) {
+            api.ReleaseStatus(probe);
+        }
         if (total_size > 0) {
             std::vector<float> values(total_size / sizeof(float));
             ThrowOnError(api, api.ReadOpAttr(ort_attr, ORT_OP_ATTR_FLOATS, values.data(), total_size, &total_size));
@@ -140,7 +145,9 @@ std::unique_ptr<ONNX_NAMESPACE::AttributeProto> BuildPluginAttributeProto(
     case ORT_OP_ATTR_STRING: {
         attr_proto->set_type(ONNX_NAMESPACE::AttributeProto_AttributeType_STRING);
         size_t total_size{};
-        api.ReadOpAttr(ort_attr, ORT_OP_ATTR_STRING, nullptr, 0, &total_size);
+        if (OrtStatus* probe = api.ReadOpAttr(ort_attr, ORT_OP_ATTR_STRING, nullptr, 0, &total_size)) {
+            api.ReleaseStatus(probe);
+        }
         if (total_size > 0) {
             std::string value(total_size, '\0');
             ThrowOnError(api, api.ReadOpAttr(ort_attr, ORT_OP_ATTR_STRING, &value[0], total_size, &total_size));
@@ -155,7 +162,9 @@ std::unique_ptr<ONNX_NAMESPACE::AttributeProto> BuildPluginAttributeProto(
     case ORT_OP_ATTR_STRINGS: {
         attr_proto->set_type(ONNX_NAMESPACE::AttributeProto_AttributeType_STRINGS);
         size_t total_size{};
-        api.ReadOpAttr(ort_attr, ORT_OP_ATTR_STRINGS, nullptr, 0, &total_size);
+        if (OrtStatus* probe = api.ReadOpAttr(ort_attr, ORT_OP_ATTR_STRINGS, nullptr, 0, &total_size)) {
+            api.ReleaseStatus(probe);
+        }
         if (total_size > 0) {
             std::vector<char> buffer(total_size);
             ThrowOnError(api, api.ReadOpAttr(ort_attr, ORT_OP_ATTR_STRINGS, buffer.data(), total_size, &total_size));
