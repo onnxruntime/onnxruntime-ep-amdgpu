@@ -41,9 +41,11 @@ constexpr auto kCacheDir = "ORT_MIGRAPHX_CACHE_DIR"sv;
 constexpr auto kComputeMode = "ORT_MIGRAPHX_COMPUTE_MODE"sv;
 constexpr auto kINT8UseNativeCalibrationTable = "ORT_MIGRAPHX_INT8_USE_NATIVE_CALIBRATION_TABLE"sv;
 constexpr auto kExhaustiveTune = "ORT_MIGRAPHX_EXHAUSTIVE_TUNE"sv;
+constexpr auto kProblemCachePath = "ORT_MIGRAPHX_PROBLEM_CACHE"sv;
 constexpr auto kHipGraphEnable = "ORT_MIGRAPHX_HIP_GRAPH_ENABLE"sv;
 constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
 constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
+constexpr auto kPrecompileAtLoad = "ORT_MIGRAPHX_PRECOMPILE_AT_LOAD"sv;
 constexpr auto kCoalesceIO = "ORT_MIGRAPHX_COALESCE_IO"sv;
 constexpr auto kMlssUseSpecificOps = "ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS"sv;
 constexpr auto kCpuControlFlow = "ORT_MIGRAPHX_CPU_CONTROL_FLOW"sv;
@@ -139,6 +141,9 @@ struct ComputeState {
     bool force_recompile{};
     fs::path external_data_dir;
     std::string mxr_prefix;
+    // Ordered read-only problem-cache paths (app override, then DLL-adjacent shipped),
+    // JSON-escaped for backend-option delivery.
+    std::vector<std::string> problem_cache_paths{};
 
     // ── Configuration (set at Compile time) ──────────────────────────────────
     bool hip_graph_enable{};
@@ -265,6 +270,9 @@ private:
         const Map<size_t>& input_name_indices, const Map<size_t>& output_name_indices,
         OrtNodeComputeInfo*& node_compute_info);
 
+    // Populate problem_cache_paths_ from the app override env var and the DLL-adjacent cache.
+    void setup_problem_cache_paths();
+
     const ProviderFactory& factory_;
 
     const Ort::Logger logger_;
@@ -288,6 +296,9 @@ private:
     bool enable_int8_{};
     bool exhaustive_tune_{};
     std::string mlss_use_specific_ops_{};
+    // Ordered read-only problem-cache paths (app override, then DLL-adjacent shipped),
+    // JSON-escaped for backend-option delivery.
+    std::vector<std::string> problem_cache_paths_{};
     std::string model_arch_{};
     bool int8_calibration_cache_available_{};
     bool int8_use_native_calibration_table_{};
@@ -305,6 +316,7 @@ private:
     bool hip_graph_enable_{};
     std::size_t max_dynamic_batch_{};
     std::string compile_batches_{};
+    bool precompile_at_load_{};
     bool coalesce_io_enable_{};
     bool cpu_control_flow_enable_{};
     bool static_pad_seq_{};

@@ -19,6 +19,10 @@ add_library(migraphx-ep MODULE
         mgx_hip_graph.h
         mgx_info.cc
         mgx_info.h
+        mgx_precompile.cc
+        mgx_precompile.h
+        mgx_program_ops.cc
+        mgx_program_ops.h
         mgx_interop.cc
         mgx_interop.h
         mgx_kernel_reg.cc
@@ -82,6 +86,29 @@ else()
 
     install(TARGETS migraphx-ep
             DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+# Optionally ship a read-only problem cache next to the EP: deploy the file at
+# MIGRAPHX_EP_PROBLEM_CACHE as problem_cache.json (the name setup_problem_cache_paths
+# discovers beside the module at runtime).
+set(MIGRAPHX_EP_PROBLEM_CACHE "" CACHE FILEPATH
+        "Optional problem-cache JSON to deploy beside migraphx-ep as problem_cache.json")
+if(MIGRAPHX_EP_PROBLEM_CACHE)
+    if(NOT EXISTS "${MIGRAPHX_EP_PROBLEM_CACHE}")
+        message(FATAL_ERROR "MIGRAPHX_EP_PROBLEM_CACHE not found: ${MIGRAPHX_EP_PROBLEM_CACHE}")
+    endif()
+    add_custom_command(TARGET migraphx-ep POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${MIGRAPHX_EP_PROBLEM_CACHE}"
+                "$<TARGET_FILE_DIR:migraphx-ep>/problem_cache.json"
+            COMMENT "Deploying problem_cache.json beside migraphx-ep")
+    if(WIN32)
+        install(FILES "${MIGRAPHX_EP_PROBLEM_CACHE}"
+                DESTINATION "." RENAME "problem_cache.json")
+    else()
+        install(FILES "${MIGRAPHX_EP_PROBLEM_CACHE}"
+                DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME "problem_cache.json")
+    endif()
 endif()
 
 if(USE_AMDGPU)
