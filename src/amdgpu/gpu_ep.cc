@@ -127,13 +127,14 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     THROW_IF_ERROR(ort_api.GetSessionOptionsConfigEntries(session_options, &ort_key_value_pairs));
 
     const Ort::KeyValuePairs key_value_pairs{ort_key_value_pairs};
+    const auto config_entries = key_value_pairs.GetKeyValuePairs();
     const std::string ep_prefix{"ep." + lowercase + "."};
 
     OrtSessionOptions* local_session_options{};
     THROW_IF_ERROR(ort_api.CreateSessionOptions(&local_session_options));
 
     ProviderOptions provider_options;
-    for (const auto& [key, value] : key_value_pairs.GetKeyValuePairs()) {
+    for (const auto& [key, value] : config_entries) {
         if (key.rfind(ep_prefix, 0) == 0) {
             provider_options.emplace(key.substr(ep_prefix.length()), value);
         } else {
@@ -198,6 +199,16 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
 #endif
 
     const auto create_hip_backend = [&] {
+        // Hip shares the AMDGPU EP name: forward ep.<amdgpu>.* except owned "profile".
+        for (const auto& [key, value] : config_entries) {
+            if (key.rfind(ep_prefix, 0) != 0) {
+                continue;
+            }
+            if (key.substr(ep_prefix.length()) == provider_option::kProfile) {
+                continue;
+            }
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(local_session_options, key.c_str(), value.c_str()));
+        }
         THROW_IF_ERROR(factory.CreateHipBackend(local_session_options, logger, backend_ep_));
     };
 
@@ -234,6 +245,12 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 local_session_options,
                 get_name(mgx_ep::provider_option::kExhaustiveTune).c_str(),
                 std::to_string(info.exhaustive_tune.value()).c_str()));
+        }
+        if (info.compute_mode.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kComputeMode).c_str(),
+                info.compute_mode.value().c_str()));
         }
         if (info.mlss_use_specific_ops.has_value()) {
             THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
