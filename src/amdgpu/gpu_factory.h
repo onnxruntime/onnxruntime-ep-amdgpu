@@ -130,6 +130,10 @@ private:
 
     OrtEpFactory* hip_ep_factory_{};
 
+    // Backends that can contribute custom op schemas. Filled as each backend
+    // factory is created, so it only holds backends that were built and loaded.
+    std::vector<OrtEpFactory*> custom_op_backends_;
+
     OrtHardwareDevice* virtual_device_{};
 
     // Owned memory infos for the GPU and pinned device slots, registered with OrtEpDevice.
