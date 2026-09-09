@@ -257,17 +257,41 @@ def _detect_ort_version(build_dir: Path, configs: set[str]) -> str | None:
     return None
 
 
-def _inject_ort_dependency(pyproject_path: Path, dep_spec: str):
+def _inject_dependencies(pyproject_path: Path, dep_specs: list[str]):
     content = pyproject_path.read_text(encoding='utf-8')
     rp_match = re.search(r'^(requires-python\s*=\s*"[^"]*")\s*$', content, re.MULTILINE)
     if rp_match:
         insert_pos = rp_match.end()
-        content = content[:insert_pos] + f'\ndependencies = [\n    "{dep_spec}",\n]' + content[insert_pos:]
+        dependencies = ''.join(f'    "{dep_spec}",\n' for dep_spec in dep_specs)
+        content = content[:insert_pos] + f'\ndependencies = [\n{dependencies}]' + content[insert_pos:]
     else:
         log.warning(f"Could not find requires-python in {pyproject_path}")
         return
     pyproject_path.write_text(content, encoding='utf-8')
-    log.info(f"Injected dependency '{dep_spec}' into {pyproject_path}")
+    log.info(f"Injected dependencies {dep_specs} into {pyproject_path}")
+
+
+def _set_migraphx_wheel_runpath(library_path: Path):
+    # This is intentionally applied to the staged wheel library because these
+    # relative paths describe the site-packages layout, not the native build
+    # tree. A long-term CMake alternative is to set BUILD_WITH_INSTALL_RPATH
+    # and INSTALL_RPATH on migraphx-ep to this same value. INSTALL_RPATH alone
+    # is insufficient while wheel packaging copies the build-tree artifact.
+    runpath = ':'.join([
+        '$ORIGIN',
+        '$ORIGIN/../migraphx_libs',
+        '$ORIGIN/../_rocm_sdk_libraries/lib',
+        '$ORIGIN/../_rocm_sdk_devel/lib',
+        '$ORIGIN/../_rocm_sdk_core/lib',
+        '/opt/rocm/lib',
+        '/opt/rocm/extras-10/lib',
+    ])
+    patchelf = shutil.which('patchelf')
+    if patchelf is None:
+        raise BuildError(
+            "patchelf is required to make the MIGraphX EP wheel relocatable.")
+    _run([patchelf, '--set-rpath', runpath, str(library_path)])
+    log.info(f"Set RUNPATH on {library_path} to {runpath}")
 
 
 def _find_built_library(config_build_dir: Path, target_name: str) -> Path | None:
@@ -382,7 +406,7 @@ def _generate_init_py(pkg_dir: Path, libraries: list[dict]):
 
 
 def _build_python_wheel(source_dir: Path, build_dir: Path, configs: set[str], wheel_ep: str,
-                        ort_version: str | None = None):
+                        ort_version: str | None = None, include_migraphx_libs: bool = True):
     ep_dir = source_dir / 'src' / wheel_ep
     pyproject_path = ep_dir / 'pyproject.toml'
 
@@ -430,6 +454,8 @@ def _build_python_wheel(source_dir: Path, build_dir: Path, configs: set[str], wh
                 continue
             dst_lib = pkg_dir / src_lib.name
             shutil.copy2(str(src_lib), str(dst_lib))
+            if _is_linux() and lib_target in {'migraphx-ep', 'migraphx-backend'}:
+                _set_migraphx_wheel_runpath(dst_lib)
             copied_files.add(src_lib.name.lower())
             log.info(f"Copied library: {src_lib} -> {dst_lib}")
             found_libraries.append({
@@ -460,8 +486,13 @@ def _build_python_wheel(source_dir: Path, build_dir: Path, configs: set[str], wh
         staged_pyproject = staging_dir / 'pyproject.toml'
         shutil.copy2(str(pyproject_path), str(staged_pyproject))
 
+        dependencies = []
         if ort_version:
-            _inject_ort_dependency(staged_pyproject, ort_version)
+            dependencies.append(ort_version)
+        if wheel_ep in {'migraphx', 'amdgpu'} and include_migraphx_libs:
+            dependencies.append('migraphx-libs')
+        if dependencies:
+            _inject_dependencies(staged_pyproject, dependencies)
 
         dist_dir = staging_dir / 'dist'
         log.info(f"Running 'python -m build --wheel' in {staging_dir}")
@@ -640,6 +671,12 @@ def main():
         '--build_wheel',
         action='store_true',
         help="Build Python wheel package for each enabled EP (--use_* flags)."
+    )
+    parser.add_argument(
+        '--migraphx_libs_dependency',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Declare migraphx-libs as a dependency of wheels containing MIGraphX."
     )
     parser.add_argument(
         '--deploy_wheel',
@@ -842,7 +879,8 @@ def main():
 
                 for ep_dir in wheel_ep_dirs:
                     _build_python_wheel(source_dir, build_dir, configs, ep_dir,
-                                        ort_version=ort_dep_spec)
+                                        ort_version=ort_dep_spec,
+                                        include_migraphx_libs=args.migraphx_libs_dependency)
 
             if args.deploy_wheel:
                 pypi_token = args.pypi_token or os.getenv('PYPI_TOKEN')
