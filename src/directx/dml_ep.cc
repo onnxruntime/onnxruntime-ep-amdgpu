@@ -68,12 +68,12 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     OrtEp::GetKernelRegistry = GetKernelRegistryImpl;
     IsConcurrentRunSupported = IsConcurrentRunSupportedImpl;
 
-    // OrtEp::OnSessionInitializationEnd is a v27 callback. Only advertise it when the
-    // runtime can drive it; on older runtimes it stays null (aggregate-initialized) and
-    // OnRunStartImpl performs the one-time post-init trim as a fallback instead.
-    if (NegotiatedOrtApiVersion() >= kSessionInitEndApiVersion) {
-        OrtEp::OnSessionInitializationEnd = OnSessionInitializationEndImpl;
-    }
+    //// OrtEp::OnSessionInitializationEnd is a v27 callback. Only advertise it when the
+    //// runtime can drive it; on older runtimes it stays null (aggregate-initialized) and
+    //// OnRunStartImpl performs the one-time post-init trim as a fallback instead.
+    //if (NegotiatedOrtApiVersion() >= kSessionInitEndApiVersion) {
+    //    OrtEp::OnSessionInitializationEnd = OnSessionInitializationEndImpl;
+    //}
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS4 featureOptions = {};
     if (SUCCEEDED(d3d12_device->CheckFeatureSupport(
@@ -1606,9 +1606,9 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::OnRunStartImpl(
     // On runtimes older than v27 ORT does not call OrtEp::OnSessionInitializationEnd,
     // so run the one-time post-init trim here (idempotent via m_sessionInitialized).
     // On v27+ the wired callback already handled it before the first run.
-    if (NegotiatedOrtApiVersion() < kSessionInitEndApiVersion) {
+    //if (NegotiatedOrtApiVersion() < kSessionInitEndApiVersion) {
         ep->m_executionProvider->OnSessionInitializationEnd();
-    }
+    //}
 
     ep->m_executionProvider.get()->OnRunStart(*run_options);
     return nullptr;

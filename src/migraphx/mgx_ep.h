@@ -42,6 +42,7 @@ constexpr auto kCacheDir = "ORT_MIGRAPHX_CACHE_DIR"sv;
 constexpr auto kComputeMode = "ORT_MIGRAPHX_COMPUTE_MODE"sv;
 constexpr auto kINT8UseNativeCalibrationTable = "ORT_MIGRAPHX_INT8_USE_NATIVE_CALIBRATION_TABLE"sv;
 constexpr auto kExhaustiveTune = "ORT_MIGRAPHX_EXHAUSTIVE_TUNE"sv;
+constexpr auto kProblemCachePath = "ORT_MIGRAPHX_PROBLEM_CACHE"sv;
 constexpr auto kHipGraphEnable = "ORT_MIGRAPHX_HIP_GRAPH_ENABLE"sv;
 constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
 constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
@@ -270,6 +271,9 @@ struct ComputeState {
     bool force_recompile{};
     fs::path external_data_dir;
     std::string mxr_prefix;
+    // Ordered read-only problem-cache paths (app override, then DLL-adjacent shipped),
+    // JSON-escaped for backend-option delivery.
+    std::vector<std::string> problem_cache_paths{};
 
     // ── Configuration (set at Compile time) ──────────────────────────────────
     bool hip_graph_enable{};
@@ -494,6 +498,8 @@ private:
     // staging is already the primary path.  Best-effort and no-throw: any failure just
     // leaves the affected buckets to the normal lazy capture path.
     void PrewarmHipGraphs(ComputeState& compute_state) noexcept;
+    // Populate problem_cache_paths_ from the app override env var and the DLL-adjacent cache.
+    void setup_problem_cache_paths();
 
     const ProviderFactory& factory_;
 
@@ -518,6 +524,9 @@ private:
     bool enable_int8_{};
     bool exhaustive_tune_{};
     std::string mlss_use_specific_ops_{};
+    // Ordered read-only problem-cache paths (app override, then DLL-adjacent shipped),
+    // JSON-escaped for backend-option delivery.
+    std::vector<std::string> problem_cache_paths_{};
     std::string model_arch_{};
     bool int8_calibration_cache_available_{};
     bool int8_use_native_calibration_table_{};
