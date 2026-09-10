@@ -102,9 +102,8 @@ cmake --install . --prefix "$AMDMIGRAPHX_INSTALL"
 # 2. Build + install ROCm/onnxruntime (v1.24.2 tag)
 # ---------------------------------------------------------------------------
 cd "$ONNXRUNTIME_SRC"
-git checkout v1.27.0
+git checkout v1.29.0
 #vendorID fix seen in OnnxRT core that breaks AMDGPUs needs to be upstreamed
-git cherry-pick 38fc6102a2ac126c3a94a01039635a4d40740e76
 
 ./build.sh --config Release \
     --cmake_generator Ninja \
@@ -123,6 +122,7 @@ git cherry-pick 38fc6102a2ac126c3a94a01039635a4d40740e76
     --cmake_extra_defines CMAKE_IGNORE_PREFIX_PATH=/usr/local
 
 cd build/Linux/Release
+pip3 install dist/*.whl
 cmake --install . --prefix "$ONNXRUNTIME_INSTALL"
 
 # ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ git checkout main
     --use_migraphx \
     --migraphx_home "$AMDMIGRAPHX_INSTALL" \
     --compile_no_warning_as_error \
-    --parallel 16 \
+    --parallel $(nproc) \
     --build_dir build.EP.MGX \
     --hip_path "$ROCM_PATH" \
     --build_wheel

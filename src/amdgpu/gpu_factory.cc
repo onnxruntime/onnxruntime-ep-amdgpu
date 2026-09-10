@@ -6,6 +6,8 @@
 #include <windows.h>
 #endif
 
+#include <algorithm>
+
 #include "common/enumerate.h"
 #include "common/dynamic_library.h"
 
@@ -144,6 +146,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     // ORT would look up kernels under "amdgpu" but find them stamped as "directml".
     THROW_IF_ERROR(dml_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
         &dml_ep_factory_, 1, &factories_created));
+    custom_op_backends_.push_back(dml_ep_factory_);
 #endif
 
     THROW_IF_ERROR(LoadDynamicLibrary(migraphxBackend, &mgx_backend_));
@@ -175,6 +178,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
 
     THROW_IF_ERROR(hip_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
         &hip_ep_factory_, 1, &factories_created));
+    custom_op_backends_.push_back(hip_ep_factory_);
 #endif
 }
 
@@ -378,29 +382,43 @@ Ort::Status ProviderFactory::GetHardwareDeviceIncompatibilityDetails(const OrtHa
 }
 
 Ort::Status ProviderFactory::GetNumCustomOpDomains(size_t* num_domains) const {
-    // Forward to the directml backend factory so ORT registers com.microsoft schemas
-    // (e.g. GroupNorm, SkipLayerNormalization) that the directml EP claims during GetCapability.
-    // The backend factory is available at factory init time, before any session is created.
-    // Only DirectML contributes custom op domains; MIGraphX does not.
-#ifdef USE_DML
-    if (dml_ep_factory_ != nullptr && dml_ep_factory_->GetNumCustomOpDomains != nullptr) {
-        RETURN_IF_ERROR(dml_ep_factory_->GetNumCustomOpDomains(dml_ep_factory_, num_domains));
-        return STATUS_OK;
-    }
-#endif
+    // Forward to every backend factory that is loaded so ORT registers all custom
+    // op schemas any backend may claim during GetCapability. Which backend a given
+    // model actually uses is only decided later in CreateEp (profile option), but
+    // schema registration happens during Model::Load, before any session/EP exists
+    // -- so the union of every built backend's domains must be reported here
+    // regardless of the eventual profile selection.
     *num_domains = 0;
+    for (OrtEpFactory* factory : custom_op_backends_) {
+        if (factory == nullptr || factory->GetNumCustomOpDomains == nullptr) {
+            continue;
+        }
+        size_t count{};
+        RETURN_IF_ERROR(factory->GetNumCustomOpDomains(factory, &count));
+        *num_domains += count;
+    }
     return STATUS_OK;
 }
 
 Ort::Status ProviderFactory::GetCustomOpDomains(OrtCustomOpDomain** domains, size_t num_domains) const {
-#ifdef USE_DML
-    if (dml_ep_factory_ != nullptr && dml_ep_factory_->GetCustomOpDomains != nullptr) {
-        RETURN_IF_ERROR(dml_ep_factory_->GetCustomOpDomains(dml_ep_factory_, domains, num_domains));
+    // Each backend fills its own slice of the caller's buffer, whose size ORT took
+    // from GetNumCustomOpDomains. Clamp to the space left so a backend reporting
+    // more domains here than it did there cannot overrun the buffer.
+    size_t offset = 0;
+    for (OrtEpFactory* factory : custom_op_backends_) {
+        if (factory == nullptr || factory->GetCustomOpDomains == nullptr ||
+                factory->GetNumCustomOpDomains == nullptr) {
+            continue;
+        }
+        size_t count{};
+        RETURN_IF_ERROR(factory->GetNumCustomOpDomains(factory, &count));
+        count = std::min(count, num_domains - offset);
+        if (count == 0) {
+            continue;
+        }
+        RETURN_IF_ERROR(factory->GetCustomOpDomains(factory, domains + offset, count));
+        offset += count;
     }
-#else
-    (void)domains;
-    (void)num_domains;
-#endif
     return STATUS_OK;
 }
 
