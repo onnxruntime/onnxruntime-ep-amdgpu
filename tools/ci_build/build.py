@@ -283,6 +283,7 @@ def _set_migraphx_wheel_runpath(library_path: Path):
         '$ORIGIN/../_rocm_sdk_libraries/lib',
         '$ORIGIN/../_rocm_sdk_devel/lib',
         '$ORIGIN/../_rocm_sdk_core/lib',
+        '$ORIGIN/../onnxruntime/capi',
         '/opt/rocm/lib',
         '/opt/rocm/extras-10/lib',
     ])
