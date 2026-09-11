@@ -102,6 +102,9 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     OrtEp::OnRunEnd = [](OrtEp* this_, const OrtRunOptions* run_options, bool sync_stream) noexcept {
         API_CALL_S(ExecutionProvider, this_, OnRunEnd, run_options, sync_stream);
     };
+    OrtEp::OnSessionInitializationEnd = [](OrtEp* this_) noexcept {
+        API_CALL_S(ExecutionProvider, this_, OnSessionInitializationEnd);
+    };
     // Wired for every profile so allocators resolve through this EP rather than factory_'s
     // process-global backend slot, which the next session's CreateEp overwrites.
     OrtEp::CreateAllocator = [](OrtEp* this_, const OrtMemoryInfo* memory_info,
@@ -180,8 +183,20 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
             }
             return Profile::MIGraphX;  // preserve the historical default on query failure
         }
-        const Profile chosen = select_backend(prop.gcnArchName, model_arch_hash(info.model_arch),
+
+        Profile chosen = select_backend(prop.gcnArchName, model_arch_hash(info.model_arch),
                                               is_webnn(info.model_fw), info.profile);
+
+        if (info.profile != Profile::Auto) {
+            if (info.profile == Profile::Hip && info.profile != chosen)
+            {
+                std::cout << "[warn] explicit profile: " << profile_name(info.profile)
+                          << ", does not match ideal profile: " << profile_name(chosen)
+                          << ", might encounter issues."
+                          << std::endl;
+            }
+            chosen = info.profile;
+        }
         if (trace) {
             std::cout << "[amdgpu-routing] arch=\"" << prop.gcnArchName << "\""
                       << " model_arch=" << (info.model_arch ? *info.model_arch : "(none)")
@@ -435,6 +450,16 @@ Ort::Status ExecutionProvider::CreateAllocator(const OrtMemoryInfo* memory_info,
 
 Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* run_options, bool sync_stream) const noexcept {
     EP_CALL_S(backend_ep_, OnRunEnd, run_options, sync_stream);
+}
+
+Ort::Status ExecutionProvider::OnSessionInitializationEnd() const noexcept {
+    if (backend_ep_ == nullptr) {
+        return MAKE_STATUS(ORT_EP_FAIL, "OnSessionInitializationEnd: invalid backend");
+    }
+    if (backend_ep_->OnSessionInitializationEnd != nullptr) {
+        RETURN_IF_ERROR(backend_ep_->OnSessionInitializationEnd(backend_ep_));
+    }
+    return STATUS_OK;
 }
 
 Ort::Status ExecutionProvider::CreateSyncStreamForDevice(const OrtMemoryDevice* memory_device,
