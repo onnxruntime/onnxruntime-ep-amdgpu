@@ -2952,32 +2952,41 @@ std::vector<std::unique_ptr<IFusionRule>> MakeAllOpActivationFusionRules(bool is
         rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
     }
 
+    // Gemm, Conv, and ConvTranspose op+activation fusion is disabled: these compile
+    // to DML metacommand operators (DML_OPERATOR_GEMM, DML_OPERATOR_CONVOLUTION), and
+    // setting FusedActivation makes DirectML request a separate fused-permutation
+    // metacommand from the driver. The AMD driver caches that variant (and a larger
+    // convolution workspace) in driver-resident memory that GetBindingProperties does
+    // not report, so it is invisible to CompileGraph/CompileOperator. The remaining
+    // fused ops (Add/Sum/BatchNorm/InstanceNorm/MVN) are plain compute shaders where
+    // the activation is a free shader epilogue and are unaffected.
+
     // Gemm: all activations on non-MCDM, Relu+LeakyRelu on MCDM.
-    {
-        OpActivationConfig cfg;
-        cfg.base_op_type        = "Gemm";
-        cfg.fused_op_type       = "DmlFusedGemm";
-        cfg.allowed_activations = isMcdmDevice ? mcdm_act : full_act;
-        rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
-    }
+    // {
+    //     OpActivationConfig cfg;
+    //     cfg.base_op_type        = "Gemm";
+    //     cfg.fused_op_type       = "DmlFusedGemm";
+    //     cfg.allowed_activations = isMcdmDevice ? mcdm_act : full_act;
+    //     rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
+    // }
 
     // Conv: all activations on non-MCDM, Relu+LeakyRelu on MCDM.
-    {
-        OpActivationConfig cfg;
-        cfg.base_op_type        = "Conv";
-        cfg.fused_op_type       = "DmlFusedConv";
-        cfg.allowed_activations = isMcdmDevice ? mcdm_act : full_act;
-        rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
-    }
+    // {
+    //     OpActivationConfig cfg;
+    //     cfg.base_op_type        = "Conv";
+    //     cfg.fused_op_type       = "DmlFusedConv";
+    //     cfg.allowed_activations = isMcdmDevice ? mcdm_act : full_act;
+    //     rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
+    // }
 
     // ConvTranspose: same policy as Conv.
-    {
-        OpActivationConfig cfg;
-        cfg.base_op_type        = "ConvTranspose";
-        cfg.fused_op_type       = "DmlFusedConvTranspose";
-        cfg.allowed_activations = isMcdmDevice ? mcdm_act : full_act;
-        rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
-    }
+    // {
+    //     OpActivationConfig cfg;
+    //     cfg.base_op_type        = "ConvTranspose";
+    //     cfg.fused_op_type       = "DmlFusedConvTranspose";
+    //     cfg.allowed_activations = isMcdmDevice ? mcdm_act : full_act;
+    //     rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
+    // }
 
     // BatchNormalization: all activations on non-MCDM; DISABLED on MCDM.
     if (!isMcdmDevice) {
