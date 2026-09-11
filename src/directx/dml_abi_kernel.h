@@ -129,6 +129,15 @@ public:
         const OrtKernelInfo* kernel_info = nullptr,
         const std::vector<ConstantGpuResource>* constant_gpu_resources = nullptr);
 
+    // Refresh only the per-call-varying state so this context object can be reused across Compute
+    // calls instead of being reconstructed each call. Sets the current OrtKernelContext*, drops the
+    // cached per-input/output tensor wrappers (their OrtValue* are valid for one Compute only), and
+    // re-runs GetABIExecutionInterfaceAndInvalidateState — a required per-call side effect that
+    // refreshes the current command list and invalidates descriptor-heap state. Caller must
+    // guarantee input/output counts are unchanged (i.e. shapes unchanged) since the tensor caches
+    // are only cleared, not resized.
+    void ResetForNewToken(OrtKernelContext* kernel_context) noexcept;
+
     // IMLOperatorKernelContext methods - implemented using only C API
     STDMETHOD(GetInputTensor)(uint32_t inputIndex, IMLOperatorTensor** tensor) const noexcept override;
     STDMETHOD(GetOutputTensor)(uint32_t outputIndex, IMLOperatorTensor** tensor) noexcept override;
@@ -555,6 +564,19 @@ struct DmlAbiKernel {
 
     // For shape-change detection between Compute calls (mirrors m_inputShapesOfKernelInference in unsafe path)
     EdgeShapes input_shapes_of_kernel_inference;
+
+    // Reused across Compute calls on the steady-state fast path. Built once on the first fast-path
+    // Compute and refreshed via ResetForNewToken() thereafter, avoiding a fresh AbiSafeKernelContext
+    // (and its cache-vector allocations + QueryInterface) on every Compute. Nulled whenever the
+    // shape-change branch fires so it is rebuilt with correct input/output counts. Assumes Compute is
+    // not called concurrently on one kernel (graph exec is sequential), same as needs_lazy_init /
+    // input_shapes_of_kernel_inference.
+    Microsoft::WRL::ComPtr<AbiSafeKernelContext> cached_context;
+
+    // Scratch reused by the shape-change guard to avoid allocating a fresh EdgeShapes (and per-input
+    // dim vectors) on every Compute. The full C-API shape re-read and comparison are unchanged; only
+    // the allocation is hoisted out of the per-call path.
+    EdgeShapes shape_scratch;
 
     // Snapshots of required constant CPU input values from the last kernel creation. Indexed by input
     // index (sparse — only indices in required_constant_cpu_inputs are populated). Used to detect value
