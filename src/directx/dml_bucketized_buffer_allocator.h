@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <mutex>
+#include <unordered_set>
+
 #include "dml_client.h"
 
 #include "dml_execution_context.h"
@@ -83,6 +86,11 @@ private:
     Microsoft::WRL::ComPtr<ExecutionContext> m_context;
     std::unique_ptr<DmlSubAllocator> m_subAllocator;
     const OrtMemoryInfo* m_memoryInfo{};
+
+    // Handles handed out by any allocator instance and not yet freed. Process-wide because a handle
+    // can legitimately be decoded by a different instance when sessions share tensors.
+    static std::mutex s_liveAllocationsMutex;
+    static std::unordered_set<const void*> s_liveAllocations;
 
 #ifndef NDEBUG
     // Useful for debugging; keeps track of all allocations that haven't been freed yet
