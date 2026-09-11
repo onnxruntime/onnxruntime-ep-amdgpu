@@ -183,8 +183,20 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
             }
             return Profile::MIGraphX;  // preserve the historical default on query failure
         }
-        const Profile chosen = select_backend(prop.gcnArchName, model_arch_hash(info.model_arch),
+
+        Profile chosen = select_backend(prop.gcnArchName, model_arch_hash(info.model_arch),
                                               is_webnn(info.model_fw), info.profile);
+
+        if (info.profile != Profile::Auto) {
+            if (info.profile == Profile::Hip && info.profile != chosen)
+            {
+                std::cout << "[warn] explicit profile: " << profile_name(info.profile)
+                          << ", does not match ideal profile: " << profile_name(chosen)
+                          << ", might encounter issues."
+                          << std::endl;
+            }
+            chosen = info.profile;
+        }
         if (trace) {
             std::cout << "[amdgpu-routing] arch=\"" << prop.gcnArchName << "\""
                       << " model_arch=" << (info.model_arch ? *info.model_arch : "(none)")
