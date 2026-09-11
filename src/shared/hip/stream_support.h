@@ -8,11 +8,22 @@
 namespace hip {
 
 struct SyncStream : OrtSyncStreamImpl, ApiPtrs {
-    SyncStream(const ApiPtrs& api_ptrs, int device_id, const OrtKeyValuePairs* /* stream_options */)
+    // When external_stream is non-null the stream is application-owned: we adopt it
+    // (compute + ORT's copies share it, so there is no cross-stream race and no need
+    // for a device-wide drain) and must NOT destroy it. This mirrors the classic
+    // built-in MIGraphXExecutionProvider's user_compute_stream / external_stream_
+    // path. When null we create and own a non-blocking stream as before.
+    SyncStream(const ApiPtrs& api_ptrs, int device_id, hipStream_t external_stream = nullptr)
         : OrtSyncStreamImpl{NegotiatedOrtApiVersion()}, ApiPtrs{api_ptrs}
     {
         HIP_CALL_THROW(hipSetDevice(device_id));
-        HIP_CALL_THROW(hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking));
+        if (external_stream != nullptr) {
+            stream_ = external_stream;
+            owns_stream_ = false;
+        } else {
+            HIP_CALL_THROW(hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking));
+            owns_stream_ = true;
+        }
 
         OrtSyncStreamImpl::Release = [](OrtSyncStreamImpl* this_) noexcept {
             delete reinterpret_cast<SyncStream*>(this_);
@@ -33,7 +44,10 @@ struct SyncStream : OrtSyncStreamImpl, ApiPtrs {
     }
 
     ~SyncStream() noexcept {
-        HIP_CALL_THROW(hipStreamDestroy(stream_));
+        // Never destroy an adopted application-owned stream.
+        if (owns_stream_) {
+            HIP_CALL_THROW(hipStreamDestroy(stream_));
+        }
     }
 
 private:
@@ -43,6 +57,7 @@ private:
     OrtStatus* OnSessionRunEnd() noexcept;
 
     hipStream_t stream_{};
+    bool owns_stream_{true};
 };
 
 struct SyncNotification : OrtSyncNotificationImpl, ApiPtrs {

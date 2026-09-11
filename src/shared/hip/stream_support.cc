@@ -24,6 +24,15 @@ OrtStatus* SyncStream::Flush() const noexcept {
 }
 
 OrtStatus* SyncStream::OnSessionRunEnd() noexcept {
+    // Single per-Run synchronization point, mirroring the classic built-in
+    // MIGraphXExecutionProvider's OnRunEnd(sync_stream): query first so a stream
+    // that already drained costs nothing, otherwise block until compute + copies
+    // enqueued on it this Run have completed. This is what lets the hot compute
+    // path stay async (no per-Compute device-wide drain) while still guaranteeing
+    // outputs are ready before results are returned to the caller.
+    if (hipStreamQuery(stream_) != hipSuccess) {
+        return HIP_CALL(hipStreamSynchronize(stream_));
+    }
     return nullptr;
 }
 

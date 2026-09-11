@@ -70,9 +70,20 @@ Ort::Status DataTransfer::CopyTensors(const std::vector<Ort::ConstValue>& src_te
                     }
                 }
             } else {
-                HIP_RETURN_IF_ERROR(hipMemcpy(dst_data, src_data, bytes, hipMemcpyHostToDevice));
-                if (src_memory_info.GetDeviceMemoryType() != OrtDeviceMemoryType_HOST_ACCESSIBLE) {
-                    HIP_RETURN_IF_ERROR(hipStreamSynchronize(nullptr));
+                if (stream_handle != nullptr) {
+                    // ORT gave us the compute stream: enqueue the H2D on it and let ORT's
+                    // run start/end stream synchronization order it against the compute that
+                    // consumes it. Blocking here (or on the null stream) would serialize the
+                    // hot path device-wide across all parallel instances for no benefit.
+                    HIP_RETURN_IF_ERROR(hipMemcpyAsync(dst_data, src_data, bytes,
+                        hipMemcpyHostToDevice, stream_handle));
+                } else {
+                    // No stream: a synchronous copy request, so the copy must be complete
+                    // when we return. Pinned (host-accessible) source is already synchronous.
+                    HIP_RETURN_IF_ERROR(hipMemcpy(dst_data, src_data, bytes, hipMemcpyHostToDevice));
+                    if (src_memory_info.GetDeviceMemoryType() != OrtDeviceMemoryType_HOST_ACCESSIBLE) {
+                        HIP_RETURN_IF_ERROR(hipStreamSynchronize(nullptr));
+                    }
                 }
             }
         } else if (src_device_type == OrtMemoryInfoDeviceType_GPU) {
