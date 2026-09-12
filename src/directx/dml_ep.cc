@@ -71,9 +71,11 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     // OrtEp::OnSessionInitializationEnd is a v27 callback. Only advertise it when the
     // runtime can drive it; on older runtimes it stays null (aggregate-initialized) and
     // OnRunStartImpl performs the one-time post-init trim as a fallback instead.
+#if ORT_API_VERSION >= 27
     if (NegotiatedOrtApiVersion() >= kSessionInitEndApiVersion) {
         OrtEp::OnSessionInitializationEnd = OnSessionInitializationEndImpl;
     }
+#endif
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS4 featureOptions = {};
     if (SUCCEEDED(d3d12_device->CheckFeatureSupport(
