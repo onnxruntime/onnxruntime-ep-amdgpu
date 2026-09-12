@@ -102,9 +102,11 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     OrtEp::OnRunEnd = [](OrtEp* this_, const OrtRunOptions* run_options, bool sync_stream) noexcept {
         API_CALL_S(ExecutionProvider, this_, OnRunEnd, run_options, sync_stream);
     };
+#if ORT_API_VERSION >= 27
     OrtEp::OnSessionInitializationEnd = [](OrtEp* this_) noexcept {
         API_CALL_S(ExecutionProvider, this_, OnSessionInitializationEnd);
     };
+#endif
     // Wired for every profile so allocators resolve through this EP rather than factory_'s
     // process-global backend slot, which the next session's CreateEp overwrites.
     OrtEp::CreateAllocator = [](OrtEp* this_, const OrtMemoryInfo* memory_info,
@@ -456,9 +458,12 @@ Ort::Status ExecutionProvider::OnSessionInitializationEnd() const noexcept {
     if (backend_ep_ == nullptr) {
         return MAKE_STATUS(ORT_EP_FAIL, "OnSessionInitializationEnd: invalid backend");
     }
-    if (backend_ep_->OnSessionInitializationEnd != nullptr) {
+#if ORT_API_VERSION >= 27
+    if (NegotiatedOrtApiVersion() >= kSessionInitEndApiVersion &&
+        backend_ep_->OnSessionInitializationEnd != nullptr) {
         RETURN_IF_ERROR(backend_ep_->OnSessionInitializationEnd(backend_ep_));
     }
+#endif
     return STATUS_OK;
 }
 
