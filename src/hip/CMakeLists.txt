@@ -6,8 +6,16 @@ add_library(hip-ep MODULE hip_factory.cc)
 target_link_libraries(hip-ep PRIVATE plugin-ep-utils)
 
 if(WIN32)
+    # /DEF: is an MSVC linker flag: pass it bare under the MSVC-style driver
+    # (cl.exe / clang-cl), but forward it through a GNU-style driver (e.g. ROCm
+    # clang++) via -Wl, or it is mistaken for an input file.
+    if(MSVC)
+        set(_ep_def_flag /DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
+    else()
+        set(_ep_def_flag -Wl,/DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
+    endif()
     set_property(TARGET hip-ep APPEND_STRING
-            PROPERTY LINK_FLAGS /DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
+            PROPERTY LINK_FLAGS ${_ep_def_flag})
 
     install(TARGETS hip-ep
             DESTINATION ".")

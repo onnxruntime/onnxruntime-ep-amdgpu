@@ -44,8 +44,16 @@ if(USE_DML)
 endif()
 
 if(WIN32)
+    # /DEF: is an MSVC linker flag: pass it bare under the MSVC-style driver
+    # (cl.exe / clang-cl), but forward it through a GNU-style driver (e.g. ROCm
+    # clang++) via -Wl, or it is mistaken for an input file.
+    if(MSVC)
+        set(_ep_def_flag /DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
+    else()
+        set(_ep_def_flag -Wl,/DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
+    endif()
     set_property(TARGET amdgpu-ep APPEND_STRING
-            PROPERTY LINK_FLAGS /DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
+            PROPERTY LINK_FLAGS ${_ep_def_flag})
     install(TARGETS amdgpu-ep
             DESTINATION ".")
     install(FILES $<TARGET_PDB_FILE:amdgpu-ep>
