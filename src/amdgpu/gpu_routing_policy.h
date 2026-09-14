@@ -65,9 +65,7 @@ inline bool is_webnn(const std::optional<std::string>& model_fw) {
 //   5. everything below gfx11 (gfx9/gfx10) -> DirectML
 inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_hash, bool is_webnn,
                               Profile profile) {
-    if (profile != Profile::Auto) {
-        return profile;  // explicit profile (and Optimized) honored/dispatched as-is
-    }
+
     // 1. WebNN compatibility carve-out: always DirectML, regardless of ASIC (browser path).
     if (is_webnn) return Profile::DirectX;
     // 2. Exact (arch prefix, model_arch) override.

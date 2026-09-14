@@ -6,6 +6,7 @@
 // AbiSafeKernelContext class (which has Microsoft::WRL::ComPtr<IWinmlExecutionProvider>)
 // is parsed by the compiler.
 
+#include <algorithm>
 #include <filesystem>
 #include "common/plugin_ep_utils.h"
 
@@ -526,6 +527,27 @@ AbiSafeKernelContext::AbiSafeKernelContext(
                 is_internal_operator_,
                 &abi_execution_object_);
         }
+    }
+}
+
+void AbiSafeKernelContext::ResetForNewToken(OrtKernelContext* kernel_context) noexcept {
+    // Point at this call's kernel context. GetInputTensor/GetOutputTensor use kernel_context_ to
+    // fetch the current OrtValue* buffers, which are only valid for the duration of one Compute call.
+    kernel_context_ = kernel_context;
+
+    // Drop the per-call tensor wrappers (they wrap now-invalid OrtValue*) without freeing the cache
+    // vectors. Counts are unchanged because this is only called when shapes are unchanged, so
+    // input_count_/output_count_ and the vector sizes stay valid.
+    std::fill(input_tensor_cache_.begin(), input_tensor_cache_.end(), nullptr);
+    std::fill(output_tensor_cache_.begin(), output_tensor_cache_.end(), nullptr);
+
+    // Re-run the required per-call side effect: for non-internal operators this refreshes the current
+    // command list (which changes after each submit) and invalidates descriptor-heap state. Skipping
+    // this would record into a stale/closed command list. Mirrors the constructor.
+    if (winml_provider_) {
+        winml_provider_->GetABIExecutionInterfaceAndInvalidateState(
+            is_internal_operator_,
+            abi_execution_object_.ReleaseAndGetAddressOf());
     }
 }
 
@@ -3698,20 +3720,26 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
 
             size_t shape_input_count = 0;
             kernel->ort_api->KernelContext_GetInputCount(context, &shape_input_count);
-            EdgeShapes current_shapes(shape_input_count);
+            // Reuse the kernel's scratch EdgeShapes to avoid allocating a fresh EdgeShapes (and its
+            // per-input dim vectors) on every Compute. The full C-API re-read and comparison below are
+            // unchanged — this only hoists the allocation out of the per-call path.
+            EdgeShapes& current_shapes = kernel->shape_scratch;
+            if (current_shapes.EdgeCount() != shape_input_count) {
+                current_shapes.Reset(shape_input_count);
+            }
             for (size_t i = 0; i < shape_input_count; ++i) {
                 const OrtValue* input_value = nullptr;
                 kernel->ort_api->KernelContext_GetInput(context, i, &input_value);
-                if (!input_value) continue;
+                auto& shape = current_shapes.GetMutableShape(i);
+                if (!input_value) { shape.clear(); continue; }
                 OrtTensorTypeAndShapeInfo* shape_info = nullptr;
                 kernel->ort_api->GetTensorTypeAndShape(input_value, &shape_info);
-                if (!shape_info) continue;
+                if (!shape_info) { shape.clear(); continue; }
                 size_t dim_count = 0;
                 kernel->ort_api->GetDimensionsCount(shape_info, &dim_count);
                 std::vector<int64_t> dims(dim_count);
                 kernel->ort_api->GetDimensions(shape_info, dims.data(), dim_count);
                 kernel->ort_api->ReleaseTensorTypeAndShapeInfo(shape_info);
-                auto& shape = current_shapes.GetMutableShape(i);
                 shape.resize(dim_count);
                 for (size_t d = 0; d < dim_count; ++d) {
                     shape[d] = dims[d] >= 0 ? static_cast<uint32_t>(dims[d]) : 0u;
@@ -3772,6 +3800,10 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             }
 
             if (shapes_changed || required_cpu_inputs_changed) {
+                // Drop the reused fast-path context: input/output counts may differ under new shapes,
+                // so it must be rebuilt (with correct cache sizing) on the next unchanged-shape token.
+                kernel->cached_context.Reset();
+
                 // Collect constants for the temporary kernel if not already done
                 if (shapes_changed && tmp_constant_tensors.empty() && !kernel->required_constant_cpu_inputs.empty()) {
                     collectConstantTensors();
@@ -3880,24 +3912,33 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             DMLPERF_ADD(ns_shape_change_check, shp);
         }
 
-        // Create ABI-safe kernel context
-        // Pass inferred output shapes so output tensors match DirectML's compiled expectations
-        // Also pass shape inferrer and related data for runtime shape inference (e.g., Reshape)
-        // Pass kernel_info so GetOutputTensor's shape inferrer path reads actual node attributes
+        // Create ABI-safe kernel context, reusing it across Compute calls on the steady-state fast path.
+        // Pass inferred output shapes so output tensors match DirectML's compiled expectations.
+        // Also pass shape inferrer and related data for runtime shape inference (e.g., Reshape).
+        // Pass kernel_info so GetOutputTensor's shape inferrer path reads actual node attributes.
+        // Built once, then ResetForNewToken() refreshes only the per-call OrtKernelContext*, drops
+        // the stale tensor wrappers, and re-runs the command-list/descriptor invalidate side effect —
+        // avoiding a fresh AbiSafeKernelContext (and its cache-vector allocs + QueryInterface) on
+        // every Compute. Invalidated (Reset) in the shape-change branch above.
         DMLPERF_T0(ctx);
-        auto kernel_context = Microsoft::WRL::Make<AbiSafeKernelContext>(
-            context,
-            kernel->ort_api,
-            kernel->dml_execution_provider,
-            kernel->is_internal_operator,
-            kernel->ep_name,
-            &kernel->inferred_output_shapes,
-            kernel->shape_inferrer.Get(),
-            &kernel->required_constant_cpu_inputs,
-            kernel->default_attributes,
-            kernel->kernel_info,
-            kernel->constant_gpu_resources.empty() ? nullptr : &kernel->constant_gpu_resources
-        );
+        if (!kernel->cached_context) {
+            kernel->cached_context = Microsoft::WRL::Make<AbiSafeKernelContext>(
+                context,
+                kernel->ort_api,
+                kernel->dml_execution_provider,
+                kernel->is_internal_operator,
+                kernel->ep_name,
+                &kernel->inferred_output_shapes,
+                kernel->shape_inferrer.Get(),
+                &kernel->required_constant_cpu_inputs,
+                kernel->default_attributes,
+                kernel->kernel_info,
+                kernel->constant_gpu_resources.empty() ? nullptr : &kernel->constant_gpu_resources
+            );
+        } else {
+            kernel->cached_context->ResetForNewToken(context);
+        }
+        AbiSafeKernelContext* kernel_context = kernel->cached_context.Get();
         DMLPERF_ADD(ns_context_construction, ctx);
 
 #ifdef DML_PERF_PROFILE
@@ -3964,7 +4005,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
 
         DMLPERF_T0(kc);
         try {
-            hr = kernel->ml_operator_kernel->Compute(kernel_context.Get());
+            hr = kernel->ml_operator_kernel->Compute(kernel_context);
         } catch (const std::exception& e) {
             DMLPERF_ADD(ns_kernel_compute, kc);
             DML_PERF_LOG("[ABI_SAFE] Compute EXCEPTION: op=", kernel->operator_name, "  what=", e.what(), "\n");
