@@ -647,6 +647,9 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
     PARSE_ENV_VAR(env_var::kPrecompileAtLoad, precompile_at_load_);
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
+    PARSE_ENV_VAR(env_var::kBorrowOutputs, borrow_outputs_enable_);
+    PARSE_ENV_VAR(env_var::kBatchShapeProfile, batch_shape_profile_enable_);
+    PARSE_ENV_VAR(env_var::kAllowCrossBatchOps, allow_cross_batch_ops_);
     PARSE_ENV_VAR(env_var::kStaticPadSeq, static_pad_seq_);
     // Not PARSE_ENV_VAR: we need to know whether the value was given, not just what it is.
     if (const auto pad_len_env{ParseEnvironmentVariable<std::size_t>(env_var::kStaticPadSeqLen)};
@@ -854,23 +857,33 @@ ExecutionProvider::~ExecutionProvider() {
         }};
         destroy_captured(cs.hip_graph_cache);
         destroy_captured(cs.hip_graph_cache_direct);
-        // Staging inputs/outputs and the coalesce arena come from hipMallocAsync, so
-        // they are released with hipFreeAsync.  Best-effort teardown: the free is
-        // queued on the default stream and reclaimed with the context at exit.
+        // Staging inputs/outputs come from hipMallocAsync, so they are released with
+        // hipFreeAsync.  Best-effort teardown: the free is queued on the default stream
+        // and reclaimed with the context at exit.
         for (auto& [param_name, buf] : cs.staging_inputs) {
-            // Arena sub-views are not independent allocations; the arena is freed below.
-            if (buf.data != nullptr && !buf.is_arena_view) {
+            if (buf.data != nullptr) {
                 (void)hipFreeAsync(buf.data, nullptr);
             }
             buf.data = nullptr;
         }
-        if (cs.in_arena_dev != nullptr) {
-            (void)hipFreeAsync(cs.in_arena_dev, nullptr);
-            cs.in_arena_dev = nullptr;
+        // Per-bucket coalesce arenas are plain hipMalloc'd (baked into captured graphs).
+        for (auto& [key, arena] : cs.coalesce_arenas) {
+            if (arena.dev != nullptr) {
+                (void)hipFree(arena.dev);
+                arena.dev = nullptr;
+            }
         }
-        if (cs.in_staging_host != nullptr) {
-            (void)hipHostFree(cs.in_staging_host);
-            cs.in_staging_host = nullptr;
+        for (auto*& host : cs.in_staging_host) {
+            if (host != nullptr) {
+                (void)hipHostFree(host);
+                host = nullptr;
+            }
+        }
+        for (auto& done : cs.in_staging_host_done) {
+            if (done != nullptr) {
+                (void)hipEventDestroy(done);
+                done = nullptr;
+            }
         }
         for (auto& [param_name, buf] : cs.staging_outputs) {
             if (buf.data != nullptr) {
@@ -1061,9 +1074,9 @@ void ExecutionProvider::CollectTelemetry(telemetry::BackendData& out) const noex
 // warmup+capture (tens-to-100+ ms for large buckets) on a live request.
 //
 // Only the staging path is prewarmable: it binds pointer-stable, EP-owned buffers that
-// exist at load, whereas the direct-bind path bakes in per-request ORT tensor pointers
-// that do not exist until Compute runs.  So prewarm also forces the staging path
-// (disables use_direct_hip_graph); otherwise an exact-bucket call would skip the
+// exist at load, whereas the pure direct-bind path bakes in per-request ORT tensor
+// pointers that do not exist until Compute runs.  So prewarm also forces the staging
+// path (disables use_direct_hip_graph); otherwise an exact-bucket call would skip the
 // prewarmed graph and re-capture a direct-bind graph over it.  This matches the built-in
 // MIGraphX EP, which runs the staging path under coalesce_io (use_direct_hip_graph =
 // hip_graph && !coalesce).
@@ -1079,9 +1092,10 @@ try {
     const HipDeviceGuard dev_guard{cs.device_id};
 
     // The prewarmed graphs are staging-bound; route every hipGraph call through the
-    // (prewarmed) staging path so nothing captures on the hot path.
+    // (prewarmed) staging path so nothing captures on the hot path.  Output borrowing is
+    // deliberately left alone: it lends the staging output buffers these graphs already
+    // write into, so it rides on the prewarmed graph rather than competing with it.
     cs.use_direct_hip_graph = false;
-    cs.hybrid_output_enable = false;
 
     // Dedicated init stream: Compute has no ORT compute stream yet.  Capture runs here;
     // the instantiated hipGraphExec replays later on the per-run stream (exec is not
@@ -1212,6 +1226,31 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         "dynamic batching instead, disable ep.context_enable and configure "
         "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH and, optionally, ORT_MIGRAPHX_COMPILE_BATCHES.");
 
+    // Bucketing rounds a request up to a compiled batch, pads the inputs on axis 0 and
+    // slices the pad rows back off the outputs.  That is only sound when rows are
+    // independent -- and the pad rows are not zeroed, they hold whatever the input arena
+    // held on an earlier call.  An op that reduces, sorts or contracts over axis 0 folds
+    // that stale data into the rows the caller does read, yielding wrong numbers that look
+    // entirely reasonable.  Refuse to serve the model rather than let that go unnoticed.
+    if (max_dynamic_batch_ > 0) {
+        if (const auto cross_batch{FindCrossBatchNodes(sorted_nodes)}; !cross_batch.empty()) {
+            const auto listed{fmt::format("{}", fmt::join(
+                cross_batch | ranges::views::take(8), "; "))};
+            RETURN_IF(!allow_cross_batch_ops_,
+                "dynamic batching (ORT_MIGRAPHX_MAX_DYNAMIC_BATCH=", max_dynamic_batch_,
+                ") cannot be used with '", subgraph_name, "': ", cross_batch.size(),
+                " node(s) combine data across the batch axis, so the padding added to reach a "
+                "compiled batch size would corrupt the real rows. Offenders: ", listed,
+                ". Either disable dynamic batching, or set ", env_var::kAllowCrossBatchOps,
+                "=1 to proceed anyway if you know the padded rows cannot reach them.");
+            ORT_CXX_LOGF_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_WARNING,
+                "[mgx-batch] '%s': %zu node(s) combine data across the batch axis and "
+                "%s=1 is set; padded rows may corrupt results. Offenders: %s",
+                subgraph_name.c_str(), cross_batch.size(),
+                std::string{env_var::kAllowCrossBatchOps}.c_str(), listed.c_str());
+        }
+    }
+
     migraphx::program program;
     migraphx::onnx_options onnx_options;
 
@@ -1309,7 +1348,11 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     // coalesce_io is off; coalesce_io routes inputs through the pinned staging
     // arena and is therefore mutually exclusive with the direct-bind path.
     compute_state.use_direct_hip_graph = hip_graph_enable_ && !coalesce_io_enable_;
-    compute_state.hybrid_output_enable = hip_graph_enable_ && coalesce_io_enable_;
+    // Whenever a call lands on the staging path, hand ORT the staging output buffers
+    // rather than copying into ORT-allocated ones.  Unlike the direct-bind path this
+    // needs no exact-bucket match: the loan is sized for the whole buffer, so a
+    // batch-padded call can report a shorter tensor over the same storage.
+    compute_state.borrow_outputs_enable = borrow_outputs_enable_;
     compute_state.static_pad_seq = static_pad_seq_;
     compute_state.static_pad_seq_len = static_pad_seq_len_;
     compute_state.static_pad_seq_len_from_env = static_pad_seq_len_from_env_;
@@ -1340,6 +1383,31 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         compute_state.has_dynamic_batch = max_dynamic_batch_ > 0;
         compute_state.compiled_batch_sizes = GenerateCompiledBatchSizes(
             max_dynamic_batch_, compile_batches_);
+    }
+
+    // Batch-determined shape profile: when the graph declares every input as
+    // [axis0, <concrete dims>], the whole input shape set follows from the batch, so
+    // Compute can read one representative input instead of rescanning all of them.  Only
+    // useful under dynamic batching, and incompatible with seq padding (which rewrites a
+    // second axis).  A model the graph cannot prove this for is left to the runtime
+    // learner in GatherInputShapesAndBatch.
+    // Which inputs are batched at all, straight from the graph's symbolic dims.  Weaker
+    // than the profile below -- it says nothing about the other axes -- but available to
+    // models the profile cannot cover, and it is what keeps the batch from being read off
+    // an input whose leading dim is a fixed size that happens to match.
+    if (max_dynamic_batch_ > 0) {
+        compute_state.input_batch_axis =
+            BuildBatchAxisMask(graph, fused_node, input_name_indices);
+    }
+
+    if (batch_shape_profile_enable_ && !static_pad_seq_ && max_dynamic_batch_ > 0) {
+        if (auto profile{BuildBatchShapeProfile(graph, fused_node, input_name_indices)}) {
+            compute_state.input_axis0_template = std::move(*profile);
+            compute_state.shapes_batch_determined = true;
+            compute_state.profile_revalidate_countdown = kProfileRevalidateCalls;
+        }
+    } else if (!batch_shape_profile_enable_) {
+        compute_state.batch_profile_disabled = true;
     }
 
     compute_state.defer_compilation = true;
@@ -1560,13 +1628,16 @@ struct ComputeIOInfo {
 };
 
 // Map an actual input shape to the shape the program is compiled for, in place: a
-// batched input (axis-0 extent == requested batch) is bucketed up to the target
-// batch, and a named seq input has its token axis padded up to the static target
-// length.  Single source of truth for the transform applied by both the shape hash
-// and the parse-time parameter shapes, so the two can never drift.
+// batched input (the graph declares axis 0 as the batch and its extent equals the
+// requested batch) is bucketed up to the target batch, and a named seq input has its
+// token axis padded up to the static target length.  Single source of truth for the
+// transform applied by both the shape hash and the parse-time parameter shapes, so the
+// two can never drift.  `batch_axis` must come from InputCarriesBatch: without it an
+// input whose leading dim is fixed at the requested batch would be silently rewritten to
+// the bucket, and the program would then be compiled for a shape it never receives.
 void ApplyEffectiveShape(std::vector<std::int64_t>& shape, const std::string& name,
-    const DynamicBatchContext& dyn, const StaticSeqContext& seq) {
-    if (dyn.active && !shape.empty() &&
+    const DynamicBatchContext& dyn, const StaticSeqContext& seq, bool batch_axis) {
+    if (dyn.active && batch_axis && !shape.empty() &&
         static_cast<std::size_t>(shape.front()) == dyn.requested_batch) {
         shape.front() = static_cast<std::int64_t>(dyn.target_batch);
     }
@@ -1636,22 +1707,113 @@ StaticSeqContext ResolveSeqPadding(ComputeState& compute_state,
     return seq;
 }
 
+// What the per-call input scan resolved.
+struct InputScanResult {
+    // current_input_shapes / cur_input_ranks were refilled.  The fast paths leave them
+    // stale, so the caller must not fold them into last_input_shapes.
+    bool full_scan{false};
+    // The target bucket is unchanged as well, so the previous call's hash AND the
+    // currently active program both still apply.
+    bool shapes_known_unchanged{false};
+    // `hash` holds this call's effective-shape hash, recovered without rescanning.  The
+    // bucket may have changed, so unless shapes_known_unchanged is also set the caller
+    // still has to check the key against the active program.
+    bool hash_resolved{false};
+    hash::Value hash{};
+};
+
+// Smallest compiled bucket >= requested_batch, generating the bucket list on first use.
+std::size_t ResolveTargetBatch(ComputeState& compute_state, std::size_t requested_batch) {
+    if (compute_state.compiled_batch_sizes.empty()) {
+        compute_state.compiled_batch_sizes = GenerateCompiledBatchSizes(
+            compute_state.max_dynamic_batch, compute_state.compile_batches);
+    }
+    const auto bucket{FindNearestCompiledBatchSize(requested_batch,
+        compute_state.compiled_batch_sizes)};
+    return bucket > 0 ? bucket : requested_batch;
+}
+
+// Derive a batch-determined shape profile by diffing this full scan against the previous
+// one (which must have run at a different batch).  Every input has to either keep its
+// dims verbatim across the two calls -- a constant -- or differ only in axis 0, with that
+// axis equal to each call's requested batch.  Anything else means the shapes are not a
+// function of the batch, and learning is abandoned for the session rather than retried
+// on every scan.  Only used for models the graph could not prove this for up front.
+void LearnBatchShapeProfile(ComputeState& cs,
+    const std::vector<std::int64_t>& current_input_shapes, std::size_t requested_batch) {
+    const auto& ranks{cs.cur_input_ranks};
+    if (!cs.learn_have_prev || cs.learn_prev_batch == requested_batch ||
+        cs.learn_prev_ranks != ranks ||
+        cs.learn_prev_shapes.size() != current_input_shapes.size()) {
+        cs.learn_prev_shapes = current_input_shapes;
+        cs.learn_prev_ranks = ranks;
+        cs.learn_prev_batch = requested_batch;
+        cs.learn_have_prev = true;
+        return;
+    }
+
+    std::vector<std::int64_t> tmpl(cs.input_scan_order.size(), -1);
+    std::size_t off{0};
+    for (std::size_t j{0}; j < ranks.size(); ++j) {
+        const std::size_t rank{ranks[j]};
+        if (rank == 0) {
+            cs.batch_profile_disabled = true;  // no axis 0 to derive from
+            return;
+        }
+        for (std::size_t k{1}; k < rank; ++k) {
+            if (current_input_shapes[off + k] != cs.learn_prev_shapes[off + k]) {
+                cs.batch_profile_disabled = true;  // a non-batch dim moved
+                return;
+            }
+        }
+        const std::int64_t cur0{current_input_shapes[off]};
+        const std::int64_t prev0{cs.learn_prev_shapes[off]};
+        const auto ort_index{cs.input_scan_order[j].ort_index};
+        if (ort_index >= tmpl.size()) {
+            cs.batch_profile_disabled = true;
+            return;
+        }
+        if (cur0 == prev0) {
+            tmpl[ort_index] = cur0;  // constant axis 0
+        } else if (cur0 == static_cast<std::int64_t>(requested_batch) &&
+                   prev0 == static_cast<std::int64_t>(cs.learn_prev_batch)) {
+            tmpl[ort_index] = -1;    // carries the batch
+        } else {
+            cs.batch_profile_disabled = true;
+            return;
+        }
+        off += rank;
+    }
+
+    if (ranges::none_of(tmpl, [](std::int64_t d) { return d < 0; })) {
+        cs.batch_profile_disabled = true;  // nothing tracks the batch
+        return;
+    }
+    cs.input_axis0_template = std::move(tmpl);
+    cs.shapes_batch_determined = true;
+    cs.profile_revalidate_countdown = kProfileRevalidateCalls;
+    cs.learn_prev_shapes.clear();
+    cs.learn_prev_ranks.clear();
+    cs.learn_have_prev = false;
+}
+
 // Single pass over the model inputs: gather the raw dims (flattened), record each input's
 // rank and raw data ptr, and resolve the dynamic-batch bucket from the lowest-index input's
-// axis-0.  Fills `current_input_shapes` (a caller-owned reusable buffer -- item 3) so the
-// caller can compare/hash without a per-call alloc.
+// axis-0.  Fills `current_input_shapes` (a caller-owned reusable buffer) so the caller can
+// compare/hash without a per-call alloc.
 //
-// Fast path: under dynamic batching with seq padding inactive, only the batch changes
-// call-to-call, so read just the representative (lowest-index) input's axis-0.  If it
-// matches the previous call every input shape is unchanged: refresh only the data pointers,
-// reuse the cached template, and set `shapes_known_unchanged` so the caller skips the
-// compare/rehash.  A batch change, seq activity, first call, or non-batching model falls
+// Fast path: read just the representative input's axis-0 and skip the other N-1 shape
+// reads (an OrtTensorTypeAndShapeInfo allocation each).  That is valid when the batch is
+// unchanged, and -- with a batch-determined shape profile -- also when the batch moved,
+// because then every other input's shape follows from it; in that case the bucket's
+// effective hash comes from the memo instead of being recomputed.  Seq activity, a first
+// call, a non-batching model, a bucket not yet memoized, or a due revalidation all fall
 // through to the full scan.
 void GatherInputShapesAndBatch(ComputeState& compute_state,
     const Ort::KernelContext& kernel_context, DynamicBatchContext& dyn,
     std::vector<std::int64_t>& current_input_shapes, bool seq_active,
-    hipStream_t hip_stream, bool& shapes_known_unchanged) {
-    shapes_known_unchanged = false;
+    hipStream_t hip_stream, InputScanResult& scan) {
+    scan = InputScanResult{};
     compute_state.inputs_coalesced_this_call = false;
     const auto& input_name_indices{compute_state.input_name_indices};
 
@@ -1667,9 +1829,12 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
     }
     const auto& scan_order{compute_state.input_scan_order};
     const bool track_batch{compute_state.max_dynamic_batch > 0};
+    // A due revalidation forces the full scan so its hash can be checked against the memo.
+    const bool revalidation_due{compute_state.shapes_batch_determined &&
+        compute_state.profile_revalidate_countdown == 0};
 
     // ── Steady-state fast path: read only the representative input's batch ──
-    if (track_batch && !seq_active && !compute_state.last_seq_active &&
+    if (track_batch && !seq_active && !compute_state.last_seq_active && !revalidation_due &&
         compute_state.has_last_input_shapes && compute_state.last_dyn_active &&
         compute_state.has_batch_repr &&
         compute_state.cur_input_data.size() == input_name_indices.size() &&
@@ -1683,15 +1848,46 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
             repr_dims.resize(repr_rank);
             Ort::ThrowOnError(Ort::GetApi().GetDimensions(repr_handle, repr_dims.data(), repr_rank));
             const auto requested_batch{static_cast<std::size_t>(repr_dims.front())};
-            if (requested_batch == compute_state.last_dyn_requested_batch) {
-                // Batch unchanged -> every input shape is unchanged; reuse the cached
-                // ranks / axis0 / dims template.  Fuse the coalesced gather into this
-                // pass when the arena is active; otherwise just refresh the data pointers
-                // for the copy that follows.
+            const bool same_batch{requested_batch == compute_state.last_dyn_requested_batch};
+
+            std::size_t target_batch{compute_state.last_dyn_target_batch};
+            bool usable{same_batch};
+            if (same_batch) {
+                // Every input shape is unchanged, so the previous call's hash still holds.
+                scan.hash = compute_state.last_input_shapes_hash;
+                scan.hash_resolved = true;
+                scan.shapes_known_unchanged = true;
+            } else if (compute_state.shapes_batch_determined && requested_batch > 0) {
+                // Only the batch can have moved, so the bucket alone identifies this
+                // call's effective shapes -- provided a full scan has already hashed it.
+                target_batch = ResolveTargetBatch(compute_state, requested_batch);
+                if (const auto it{compute_state.bucket_shape_hashes.find(target_batch)};
+                    it != compute_state.bucket_shape_hashes.end()) {
+                    scan.hash = it->second;
+                    scan.hash_resolved = true;
+                    scan.shapes_known_unchanged =
+                        target_batch == compute_state.last_dyn_target_batch;
+                    usable = true;
+                }
+            }
+
+            if (usable) {
                 dyn.requested_batch = requested_batch;
-                dyn.target_batch = compute_state.last_dyn_target_batch;
+                dyn.target_batch = target_batch;
                 dyn.active = true;
-                const ShapeKey fast_key{hash::ShapeKeyOf(compute_state.last_input_shapes_hash)};
+                if (!same_batch) {
+                    // Refresh the cached axis-0 extents the pad math reads, from the
+                    // profile rather than from N shape queries.
+                    for (std::size_t i{0}; i < compute_state.cur_input_axis0.size(); ++i) {
+                        const auto tmpl{i < compute_state.input_axis0_template.size()
+                            ? compute_state.input_axis0_template[i] : -1};
+                        compute_state.cur_input_axis0[i] = tmpl < 0
+                            ? static_cast<std::int64_t>(requested_batch) : tmpl;
+                    }
+                }
+                // Fuse the coalesced gather into this pass when the arena is active;
+                // otherwise just refresh the data pointers for the copy that follows.
+                const ShapeKey fast_key{hash::ShapeKeyOf(scan.hash)};
                 if (!TryFusedCoalesceGather(compute_state, kernel_context, dyn, fast_key,
                         hip_stream)) {
                     for (const auto& entry : scan_order) {
@@ -1701,13 +1897,16 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
                         }
                     }
                 }
-                shapes_known_unchanged = true;
+                if (compute_state.profile_revalidate_countdown > 0) {
+                    --compute_state.profile_revalidate_countdown;
+                }
                 return;
             }
         }
     }
 
     // ── Full scan (first call, batch changed, seq active, or non-batching) ─────
+    scan.full_scan = true;
     current_input_shapes.clear();
     current_input_shapes.reserve(scan_order.size() * 4);
     // Raw input data ptrs (by ORT index), reused by the coalesced copy; nullptr for
@@ -1743,7 +1942,16 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
         if (index < compute_state.cur_input_axis0.size() && rank > 0) {
             compute_state.cur_input_axis0[index] = dims.front();
         }
-        if (track_batch && rank > 0 && (!have_batch_min || index < batch_min_index)) {
+        // Representative input: the lowest-index one that carries the batch -- per the
+        // graph's symbolic dims when it declared them, else per a profile learned at
+        // runtime, else any input with a rank.  Reading the batch off an input whose
+        // axis 0 is a fixed dim would peg every request at that constant.
+        const bool carries_batch{InputCarriesBatch(compute_state, index) &&
+            (!compute_state.shapes_batch_determined ||
+             (index < compute_state.input_axis0_template.size() &&
+              compute_state.input_axis0_template[index] < 0))};
+        if (track_batch && rank > 0 && carries_batch &&
+            (!have_batch_min || index < batch_min_index)) {
             have_batch_min = true;
             batch_min_index = index;
             requested_batch = static_cast<std::size_t>(dims.front());
@@ -1753,14 +1961,37 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
     compute_state.has_batch_repr = have_batch_min;
     compute_state.batch_repr_index = batch_min_index;
     if (track_batch && requested_batch > 0) {
-        if (compute_state.compiled_batch_sizes.empty()) {
-            compute_state.compiled_batch_sizes = GenerateCompiledBatchSizes(
-                compute_state.max_dynamic_batch, compute_state.compile_batches);
-        }
-        const auto bucket{FindNearestCompiledBatchSize(requested_batch, compute_state.compiled_batch_sizes)};
         dyn.requested_batch = requested_batch;
-        dyn.target_batch = bucket > 0 ? bucket : requested_batch;
+        dyn.target_batch = ResolveTargetBatch(compute_state, requested_batch);
         dyn.active = true;
+
+        // Validate a profile that is due for it: the axis-0 extents must still match what
+        // the template predicts.  (The caller's hash-vs-memo check covers the other dims.)
+        if (compute_state.shapes_batch_determined &&
+            compute_state.profile_revalidate_countdown == 0) {
+            std::size_t off{0};
+            for (std::size_t j{0}; j < compute_state.cur_input_ranks.size(); ++j) {
+                const std::size_t rank{compute_state.cur_input_ranks[j]};
+                const auto ort_index{scan_order[j].ort_index};
+                const auto tmpl{ort_index < compute_state.input_axis0_template.size()
+                    ? compute_state.input_axis0_template[ort_index] : -1};
+                const auto expected{tmpl < 0 ? static_cast<std::int64_t>(requested_batch) : tmpl};
+                if (rank == 0 || current_input_shapes[off] != expected) {
+                    compute_state.shapes_batch_determined = false;
+                    compute_state.batch_profile_disabled = true;
+                    compute_state.bucket_shape_hashes.clear();
+                    break;
+                }
+                off += rank;
+            }
+            compute_state.profile_revalidate_countdown = kProfileRevalidateCalls;
+        }
+
+        // No profile yet: try to derive one from this scan and the previous one.
+        if (!compute_state.shapes_batch_determined && !compute_state.batch_profile_disabled &&
+            !seq_active) {
+            LearnBatchShapeProfile(compute_state, current_input_shapes, requested_batch);
+        }
     }
 }
 
@@ -1780,7 +2011,8 @@ hash::Value HashEffectiveInputShapes(const ComputeState& compute_state,
         dims.assign(current_input_shapes.begin() + shape_off,
                     current_input_shapes.begin() + shape_off + rank);
         shape_off += rank;
-        ApplyEffectiveShape(dims, entry.name, dyn, seq);
+        ApplyEffectiveShape(dims, entry.name, dyn, seq,
+            InputCarriesBatch(compute_state, entry.ort_index));
         hash::Hash(input_shapes_hash,
             gsl::span<const std::int64_t>{dims.data(), dims.size()});
     }
@@ -1788,24 +2020,28 @@ hash::Value HashEffectiveInputShapes(const ComputeState& compute_state,
 }
 
 // True when this call's effective input shapes equal the previous call's given that only
-// the dynamic-batch value moved (item 2).  Walks both flattened raw-shape arrays in
-// lockstep using the shared per-input ranks: each input's axis-0 is mapped through its own
-// requested->target batch substitution (mirroring ApplyEffectiveShape's batch rule) and
-// compared, while every non-batch dim must match exactly.  The caller guarantees seq
-// padding is inactive on both calls and the two buckets match, so a true result means the
-// effective-shape hash is identical to the previous call's and can be reused unrecomputed.
-bool EffectiveShapesEqualModuloBatch(
+// the dynamic-batch value moved.  Walks both flattened raw-shape arrays in lockstep using
+// the shared per-input ranks: each input's axis-0 is mapped through its own
+// requested->target batch substitution (mirroring ApplyEffectiveShape's batch rule, down
+// to the graph's verdict on which inputs are batched at all) and compared, while every
+// non-batch dim must match exactly.  The caller guarantees seq padding is inactive on both
+// calls and the two buckets match, so a true result means the effective-shape hash is
+// identical to the previous call's and can be reused unrecomputed.
+bool EffectiveShapesEqualModuloBatch(const ComputeState& compute_state,
     const std::vector<std::int64_t>& current, const std::vector<std::int64_t>& last,
     const std::vector<std::uint32_t>& ranks,
     std::size_t req, std::size_t target, std::size_t last_req, std::size_t last_target) {
     std::size_t off{0};
+    std::size_t rank_idx{0};
     for (const std::uint32_t rank : ranks) {
         if (rank > 0) {
+            const bool batch_axis{InputCarriesBatch(compute_state,
+                compute_state.input_scan_order[rank_idx].ort_index)};
             const std::int64_t cf{current[off]};
             const std::int64_t lf{last[off]};
-            const std::int64_t cf_eff{static_cast<std::size_t>(cf) == req
+            const std::int64_t cf_eff{batch_axis && static_cast<std::size_t>(cf) == req
                 ? static_cast<std::int64_t>(target) : cf};
-            const std::int64_t lf_eff{static_cast<std::size_t>(lf) == last_req
+            const std::int64_t lf_eff{batch_axis && static_cast<std::size_t>(lf) == last_req
                 ? static_cast<std::int64_t>(last_target) : lf};
             if (cf_eff != lf_eff) {
                 return false;
@@ -1817,6 +2053,7 @@ bool EffectiveShapesEqualModuloBatch(
             }
         }
         off += rank;
+        ++rank_idx;
     }
     return true;
 }
@@ -1868,7 +2105,7 @@ void ResolveProgram(ComputeState& compute_state, const Ort::KernelContext& kerne
             // program matches the key it is cached under.
             for (const auto& [pname, pindex] : input_name_indices) {
                 auto pshape{kernel_context.GetInput(pindex).GetTensorTypeAndShapeInfo().GetShape()};
-                ApplyEffectiveShape(pshape, pname, dyn, seq);
+                ApplyEffectiveShape(pshape, pname, dyn, seq, InputCarriesBatch(compute_state, pindex));
                 onnx_options.set_input_parameter_shape(pname, {pshape.begin(), pshape.end()});
             }
             program = migraphx::parse_onnx_buffer(compute_state.onnx_string, onnx_options);
@@ -1938,27 +2175,29 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
     //    shapes are identical to the previous call we reuse the cached hash and skip the
     //    rehash/match work below.
     auto& current_input_shapes{compute_state.input_shapes_scratch};
-    bool shapes_known_unchanged{false};
+    InputScanResult scan{};
     GatherInputShapesAndBatch(compute_state, kernel_context, dyn, current_input_shapes,
-        seq.active, io.hip_stream, shapes_known_unchanged);
-    // When the scan proved the shapes unchanged (batch identical to the previous call) it
-    // left current_input_shapes stale, so trust the flag and skip the full-buffer compare.
-    const bool shapes_unchanged{shapes_known_unchanged ||
-                                (compute_state.has_last_input_shapes &&
+        seq.active, io.hip_stream, scan);
+    // A fast-path scan leaves current_input_shapes stale, so trust its flags rather than
+    // comparing the buffer.
+    const bool shapes_unchanged{scan.shapes_known_unchanged ||
+                                (scan.full_scan && compute_state.has_last_input_shapes &&
                                  current_input_shapes == compute_state.last_input_shapes)};
 
-    // Item 2: effective-hash reuse across same-bucket dynamic-batch calls.  When the raw
-    //    shapes differ only in the batch value (same target bucket, same non-batch dims,
-    //    seq inactive on both calls) the effective shape -- and thus its hash -- is
-    //    identical to the previous call, so the whole rehash is skipped.  Guarded so it
-    //    can never reuse a hash across buckets or seq-padding changes.
-    const bool effective_unchanged{!shapes_unchanged && compute_state.has_last_input_shapes &&
+    // Effective-hash reuse across same-bucket dynamic-batch calls.  When the raw shapes
+    //    differ only in the batch value (same target bucket, same non-batch dims, seq
+    //    inactive on both calls) the effective shape -- and thus its hash -- is identical
+    //    to the previous call, so the whole rehash is skipped.  Guarded so it can never
+    //    reuse a hash across buckets or seq-padding changes.
+    const bool effective_unchanged{scan.full_scan && !shapes_unchanged &&
+        compute_state.has_last_input_shapes &&
         !seq.active && !compute_state.last_seq_active &&
         dyn.active && compute_state.last_dyn_active &&
         dyn.target_batch == compute_state.last_dyn_target_batch &&
         current_input_shapes.size() == compute_state.last_input_shapes.size() &&
         compute_state.cur_input_ranks == compute_state.last_input_ranks &&
-        EffectiveShapesEqualModuloBatch(current_input_shapes, compute_state.last_input_shapes,
+        EffectiveShapesEqualModuloBatch(compute_state,
+            current_input_shapes, compute_state.last_input_shapes,
             compute_state.cur_input_ranks, dyn.requested_batch, dyn.target_batch,
             compute_state.last_dyn_requested_batch, compute_state.last_dyn_target_batch)};
 
@@ -1970,6 +2209,10 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
     if (shapes_unchanged || effective_unchanged) {
         input_shapes_hash = compute_state.last_input_shapes_hash;
         input_shapes_match = true;
+    } else if (scan.hash_resolved) {
+        // The fast path recovered this bucket's hash from the memo without rescanning.
+        // The bucket may have moved, so leave the program check below to decide.
+        input_shapes_hash = scan.hash;
     } else {
         input_shapes_hash =
             HashEffectiveInputShapes(compute_state, current_input_shapes, dyn, seq);
@@ -1977,6 +2220,21 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
             // First call: seed the shapes hash and leave match false so we compile below.
             compute_state.has_input_shapes = true;
             input_shapes_match = false;
+        }
+        // Memoize the bucket's effective hash so a later switch to it resolves from the
+        // representative input alone.  This doubles as the shape profile's self-check: a
+        // stored hash that disagrees with the one just computed means the shapes are not
+        // a function of the batch after all, so the profile is retired for the session
+        // instead of continuing to key the caches off a wrong assumption.
+        if (compute_state.shapes_batch_determined && dyn.active && !seq.active) {
+            const auto [it, inserted]{
+                compute_state.bucket_shape_hashes.emplace(dyn.target_batch, input_shapes_hash)};
+            if (!inserted && it->second != input_shapes_hash) {
+                compute_state.shapes_batch_determined = false;
+                compute_state.batch_profile_disabled = true;
+                compute_state.profile_revalidate_countdown = -1;
+                compute_state.bucket_shape_hashes.clear();
+            }
         }
     }
 
@@ -2006,16 +2264,19 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
     }
     const auto& param_shapes{param_shapes_it->second};
 
-    // 6. Item 4: remember these shapes so the next identical call takes the fast path.
-    //    Set only after the (possible) recompile above, so the recorded hash always
-    //    corresponds to a program that is compiled and ready for these shapes.  On a
-    //    raw-shape change, swap the freshly filled scratch into last_input_shapes so the
-    //    old buffer becomes next call's scratch (O(1), no alloc -- item 3).
-    if (!shapes_unchanged) {
+    // 6. Remember these shapes so the next identical call takes the fast path.  Set only
+    //    after the (possible) recompile above, so the recorded hash always corresponds to
+    //    a program that is compiled and ready for these shapes.  On a raw-shape change,
+    //    swap the freshly filled scratch into last_input_shapes so the old buffer becomes
+    //    next call's scratch (O(1), no alloc).  Only a full scan filled that buffer; a
+    //    fast-path call still has to publish its hash, since the bucket may have moved.
+    if (scan.full_scan && !shapes_unchanged) {
         std::swap(compute_state.last_input_shapes, current_input_shapes);
         compute_state.last_input_shapes_hash = input_shapes_hash;
         compute_state.has_last_input_shapes = true;
         compute_state.last_input_ranks = compute_state.cur_input_ranks;
+    } else if (!scan.full_scan) {
+        compute_state.last_input_shapes_hash = input_shapes_hash;
     }
     // Record this call's batch/seq context every call (even on the fast paths) so the
     // item-2 reuse check always compares against the immediately previous call.
@@ -2034,7 +2295,7 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
     io.seq = seq;
     io.shape_key = shape_key;
     io.needs_padding = needs_batch_pad || needs_seq_pad;
-    io.shapes_known_unchanged = shapes_known_unchanged;
+    io.shapes_known_unchanged = !scan.full_scan;
     io.param_shapes = &param_shapes;
     return STATUS_OK;
 }
@@ -2143,40 +2404,24 @@ std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
         auto& bind{bind_it->second};
         CopyInputsToStaging(compute_state, bind, kernel_context, hip_stream, dyn, seq);
 
-        // Equivalent to !io.needs_padding, resolved once in ResolveComputeIO: target_batch
-        // is always >= requested_batch (bucket rounds up) and seq.active implies
-        // target_len > real_len, so "==" there and ">" in needs_padding coincide.
-        const bool no_padding{!io.needs_padding};
-        if (compute_state.hybrid_output_enable && no_padding && bind.hybrid.eligible &&
-            compute_state.staging_inputs_coalesced) {
-            auto& hyb{bind.hybrid};
-            hyb.cur_output_ptrs.resize(hyb.outputs.size());
-            // Back each ORT output with its pointer-stable staging_outputs buffer (armed
-            // just before GetOutput) so captured output pointers never drift and the
-            // copy-back is skipped.  The guard disarms even if GetOutput throws.
-            struct OutputHintGuard {
-                ~OutputHintGuard() { hip::DisarmOutputAlloc(); }
-            };
-            for (std::size_t i{0}; i < hyb.outputs.size(); ++i) {
-                const auto& out{hyb.outputs[i]};
-                if (const auto stage_it{compute_state.staging_outputs.find(out.name)};
-                    stage_it != compute_state.staging_outputs.end() &&
-                    stage_it->second.data != nullptr) {
-                    hip::ArmOutputAlloc(stage_it->second.data, stage_it->second.size_bytes);
-                }
-                OutputHintGuard hint_guard;
-                auto output_tensor{kernel_context.GetOutput(out.output_index,
-                    out.ort_shape.data(), out.ort_shape.size())};
-                hyb.cur_output_ptrs[i] = output_tensor.GetTensorMutableRawData();
-            }
-            // cur_input_ptrs are the arena sub-views resolved once in BindStagingParams.
-            const auto scratch{GetOrAllocScratchCached(compute_state, hyb, shape_key, hip_stream)};
-            RunProgramOrHipGraphDirect(compute_state, hip_stream, kernel_context, program,
-                hyb, shape_key, scratch, dyn,
-                compute_state.hybrid_output_enable, compute_state.hybrid_recapture_count);
+        // Lend each output's (pointer-stable) staging buffer to ORT as the output
+        // tensor's storage so the program writes straight into what the caller reads and
+        // the per-output copy-back disappears.  This works under batch padding too: the
+        // ORT tensor is reported at the requested batch while the loan covers the whole
+        // buffer, so the pad rows the program writes land past the tensor's end but
+        // inside the loan.  Seq padding is excluded -- that slice is strided per outer
+        // slice, not a prefix, so it genuinely needs the copy.
+        const bool seq_pad{seq.active && seq.target_len > seq.real_len};
+        bool all_borrowed{false};
+        if (compute_state.borrow_outputs_enable && !seq_pad) {
+            all_borrowed = BorrowStagingOutputs(bind, kernel_context, dyn);
         } else {
+            bind.output_borrowed.assign(bind.prog_output_indices.size(), 0);
+        }
+
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
-                bind, shape_key, dyn);
+            bind, shape_key, dyn);
+        if (!all_borrowed) {
             CopyStagingOutputsToOrt(bind, kernel_context, hip_stream, dyn, seq);
         }
         return STATUS_OK;
@@ -2297,11 +2542,10 @@ void EmitHotPathTrace(const Ort::Logger& logger, const ComputeState& cs,
         // Mirror TryStaging's output-path decision so the trace names the branch
         // actually taken (the cache lookup only runs on the traced path).
         mechanism = "staging_copy";
-        if (cs.hybrid_output_enable && !io.needs_padding && cs.staging_inputs_coalesced) {
-            const auto it{cs.staging_bind_cache.find(io.shape_key)};
-            if (it != cs.staging_bind_cache.end() && it->second.hybrid.eligible) {
-                mechanism = "staging_hybrid";
-            }
+        if (const auto it{cs.staging_bind_cache.find(io.shape_key)};
+            it != cs.staging_bind_cache.end() && !it->second.output_borrowed.empty() &&
+            ranges::all_of(it->second.output_borrowed, [](char b) { return b != 0; })) {
+            mechanism = "staging_borrow";
         }
     }
 
@@ -2320,8 +2564,9 @@ void EmitHotPathTrace(const Ort::Logger& logger, const ComputeState& cs,
     const double cpu_total_us{tr.resolve_us + tr.mechanism_us + tr.finalize_us};
     ORT_CXX_LOGF_NOEXCEPT(logger, ORT_LOGGING_LEVEL_VERBOSE,
         "[mgx-hotpath] call=%llu mech=%s inputs=%zu batch=%zu->%zu fast_path=%d coalesced=%d "
-        "residency=%s seq=%d pad=%d hipgraph{en=%d direct=%d hybrid=%d} recap{direct=%d hybrid=%d} "
-        "| resolve_io=%.1f mechanism=%.1f finalize=%.1f cpu_total=%.1f gpu_tail=%.1f (us)",
+        "residency=%s seq=%d pad=%d profile{on=%d learned=%d} hipgraph{en=%d direct=%d borrow=%d} "
+        "recap{direct=%d} | resolve_io=%.1f mechanism=%.1f finalize=%.1f cpu_total=%.1f "
+        "gpu_tail=%.1f (us)",
         static_cast<unsigned long long>(call_index),
         mechanism,
         cs.input_name_indices.size(),
@@ -2331,10 +2576,12 @@ void EmitHotPathTrace(const Ort::Logger& logger, const ComputeState& cs,
         residency,
         io.seq.active ? 1 : 0,
         io.needs_padding ? 1 : 0,
+        cs.shapes_batch_determined ? 1 : 0,
+        cs.profile_revalidate_countdown >= 0 ? 1 : 0,
         cs.hip_graph_enable ? 1 : 0,
         cs.use_direct_hip_graph ? 1 : 0,
-        cs.hybrid_output_enable ? 1 : 0,
-        cs.direct_recapture_count, cs.hybrid_recapture_count,
+        cs.borrow_outputs_enable ? 1 : 0,
+        cs.direct_recapture_count,
         tr.resolve_us, tr.mechanism_us, tr.finalize_us, cpu_total_us, tr.gpu_tail_us);
 }
 

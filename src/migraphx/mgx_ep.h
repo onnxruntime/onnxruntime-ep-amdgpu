@@ -66,6 +66,19 @@ constexpr auto kLegacyComputeSync = "ORT_MIGRAPHX_LEGACY_COMPUTE_SYNC"sv;
 // write outputs detected at capture. Lets the pre-replay memset fan-out reduction
 // be disabled if a model's outputs are misclassified. Default off (detect + skip).
 constexpr auto kForceZeroAllGraphOutputs = "ORT_MIGRAPHX_FORCE_ZERO_ALL_OUTPUTS"sv;
+// A/B gate: when set to 0/false, disable lending the EP-owned staging output buffers
+// to ORT as output-tensor storage and go back to copying each output into an
+// ORT-allocated tensor. Default on wherever the staging path runs.
+constexpr auto kBorrowOutputs = "ORT_MIGRAPHX_BORROW_OUTPUTS"sv;
+// A/B gate: when set to 0/false, disable the batch-determined shape profile, so every
+// Compute call rescans every input's shape instead of deriving them from the
+// representative input's batch. Default on.
+constexpr auto kBatchShapeProfile = "ORT_MIGRAPHX_BATCH_SHAPE_PROFILE"sv;
+// Escape hatch: when set to 1/true, downgrade the compile-time cross-batch op check from
+// a hard failure to a warning. Bucketing pads a request up to the compiled batch and the
+// pad rows hold stale arena data, so an op that folds axis 0 into its result corrupts the
+// rows the caller reads. Only set this if you know padding cannot reach those ops.
+constexpr auto kAllowCrossBatchOps = "ORT_MIGRAPHX_ALLOW_CROSS_BATCH_OPS"sv;
 }  // namespace env_vars
 
 // EP-owned device staging buffer (pointer-stable across runs so it can be
@@ -75,11 +88,18 @@ struct StagingBuffer {
     void* data{nullptr};
     std::size_t size_bytes{};
     migraphx::shape shape{};
-    // When the input arena is active (coalesce_io), `data` is a sub-view into the
-    // shared device arena rather than an independent allocation, so it must not be
-    // freed individually.  `arena_offset` is its byte offset within the arena.
-    std::size_t arena_offset{};
-    bool is_arena_view{};
+};
+
+// One compiled bucket's packed input arena (coalesce_io).  Every program input gets a
+// 256B-aligned slot sized for THIS bucket's shape, not for max_dynamic_batch, so the
+// single H2D that flushes the arena moves exactly the bytes the bucket reads: a batch-1
+// call no longer pays a max-batch-sized transfer.  One arena per compiled bucket, each
+// pointer-stable for the compute state's lifetime so it is safe to bake into a captured
+// hipGraph.  The host side is NOT here: all buckets share the double-buffered pinned
+// gather area on ComputeState, which keeps pinned memory bounded by the largest bucket.
+struct CoalesceArena {
+    void* dev{nullptr};
+    std::size_t bytes{};
 };
 
 // EP-owned scratch buffer bound to a MIGraphX program's "scratch" parameter.
@@ -148,6 +168,7 @@ struct StagingInputBind {
     std::size_t row_bytes{};                 // bytes per axis-0 row (prog_bytes / prog_lens[0]); batch-pad math
     std::vector<std::size_t> prog_lens{};    // program-shape lengths (padding math)
     std::size_t element_size{};              // prog_bytes / product(prog_lens) (padding math)
+    bool batch_axis{true};                   // graph says axis 0 is the batch (see InputCarriesBatch)
     std::string name{};                      // parameter name (seq-axis lookup, padding path only)
 };
 
@@ -176,18 +197,13 @@ struct CachedDirectOutput {
 // compares them positionally against the captured graph's pointers.  `params` is
 // (re)bound lazily -- only when a capture or eager run is actually needed -- since
 // the steady-state replay path uses the captured graph directly and never reads
-// `params`.  `eligible` is used only by the staging binding
-// (StagingBindResult::hybrid) to mark whether outputs can be bound directly to ORT
-// tensors; the standalone direct_bind_cache does not gate on it (the direct path is
-// taken whenever use_direct_hip_graph is set and there is no padding).
+// `params`.  Used only by the pure direct-bind path (use_direct_hip_graph, i.e.
+// hipGraph without coalesce_io); the staging path lends its own pointer-stable
+// buffers to ORT instead of binding ORT's pointers into the program.
 struct DirectBindCache {
     std::vector<CachedDirectInput> inputs{};
     std::vector<CachedDirectOutput> outputs{};
     migraphx::program_parameters params{};
-    bool eligible{};
-    // When true the bound inputs are pointer-stable staging/arena sub-views, so the
-    // replay drift check compares only outputs (+ scratch) and skips the inputs.
-    bool inputs_pointer_stable{false};
     // Scratch presence + shape, resolved once when this entry is populated so the
     // hot path allocates/zeros scratch without re-scanning all 200+ program
     // parameter names for a "scratch" entry on every call.
@@ -195,11 +211,8 @@ struct DirectBindCache {
     migraphx::shape scratch_shape{};
     // ORT output indices in `outputs` order; constant per shape, built once.
     std::vector<std::size_t> prog_output_indices{};
-    // Current device pointers gathered each call (inputs/outputs order).  Reused
-    // across calls so the hot path does no per-call heap allocation.  For the pure
-    // direct path these are ORT tensor pointers; for the coalesced path
-    // cur_input_ptrs are the pointer-stable arena sub-views (set once, never drift)
-    // and only cur_output_ptrs are ORT pointers gathered + drift-checked per call.
+    // Current ORT device pointers gathered each call (inputs/outputs order).  Reused
+    // across calls so the hot path does no per-call heap allocation.
     std::vector<void*> cur_input_ptrs{};
     std::vector<void*> cur_output_ptrs{};
     // Resolved pointers into the ComputeState maps (captured graph in hip_graph_cache_direct,
@@ -223,8 +236,31 @@ struct StagingBindResult {
     std::vector<std::vector<std::int64_t>> bound_output_ort_shapes{};  // bucket ORT shape (int64) per bound output
     std::vector<std::size_t> bound_output_row_bytes{};    // bytes per axis-0 row per bound output (batch-slice math)
     std::vector<std::size_t> bound_output_bytes{};        // total bucket byte count per bound output (precomputed)
+    std::vector<std::size_t> bound_output_capacity{};     // whole staging buffer size per bound output (loan bound)
     std::vector<void*> bound_output_data{};               // staging src ptr per bound output (resolved once)
     std::vector<StagingInputBind> input_copies{};         // flat per-input copy plan (built once)
+
+    // Per-bound-output: set when this call handed ORT the staging buffer itself as the
+    // output tensor's storage, so its copy-back is skipped.  Rewritten every call.
+    std::vector<char> output_borrowed{};
+
+    // This bucket's packed coalesce arena (null when coalesce_io is off), resolved once
+    // at bind so the gather needs no map lookup.  arena_bytes is the bucket's own packed
+    // size, which is what the H2D moves.
+    void* arena_dev{nullptr};
+    std::size_t arena_bytes{};
+
+    // Contiguous slices of the arena, each covering a run of input_copies.  The gather
+    // flushes a chunk as soon as it is filled, so the H2D of chunk k overlaps the CPU
+    // gather of chunk k+1.  A small arena gets a single chunk: the extra copy launches
+    // would cost more than the overlap saves.
+    struct GatherChunk {
+        std::size_t first_input{};
+        std::size_t input_count{};
+        std::size_t byte_offset{};
+        std::size_t byte_count{};
+    };
+    std::vector<GatherChunk> gather_chunks{};
 
     // Resolved pointers into the ComputeState maps (captured graph in hip_graph_cache,
     // scratch slot) so steady-state replay does no re-search.  Same stability invariant as
@@ -233,8 +269,6 @@ struct StagingBindResult {
     // the cold capture path.
     CapturedHipGraph* graph{nullptr};
     ScratchBuffer* scratch_slot{nullptr};
-
-    DirectBindCache hybrid{};
 };
 
 // Integer key for the per-shape hot caches: the low 64 bits of the shapes hash.
@@ -244,6 +278,13 @@ struct InputScanEntry {
     std::string name;
     std::size_t ort_index{};
 };
+
+// How many fast-path Compute calls may reuse a batch-determined shape profile before one
+// full (validating) input scan is forced.  The validation is free -- the full scan
+// re-derives the bucket's effective hash anyway and compares it against the memo -- so
+// this only trades one rescan per interval for the guarantee that a model whose shapes
+// stop tracking the batch is caught instead of silently mis-keyed.
+constexpr int kProfileRevalidateCalls = 512;
 
 struct ComputeState {
     std::mutex& mutex;
@@ -293,8 +334,12 @@ struct ComputeState {
     static constexpr int kMaxDirectRecaptures{3};
     int direct_recapture_count{};
 
-    bool hybrid_output_enable{};
-    int hybrid_recapture_count{};
+    // Lend the EP-owned staging output buffers to ORT as the output tensors' storage
+    // (see hip::ArmOutputAlloc) instead of copying each output into an ORT-allocated
+    // tensor.  Works for padded calls too: the staging buffer is sized for the whole
+    // compiled bucket while the ORT tensor is reported at the requested batch, so the
+    // program keeps writing target_batch rows into a buffer ORT believes is shorter.
+    bool borrow_outputs_enable{};
 
     // ── Direct-bind ultra-fast binding cache (keyed by shape hash) ────────────
     // Populated once per compiled shape; the hot path rebinds ORT pointers into
@@ -328,14 +373,23 @@ struct ComputeState {
     std::unordered_map<ShapeKey, migraphx::program> cached_programs{};
 
     // ── Coalesced input arena (ORT_MIGRAPHX_COALESCE_IO) ─────────────────────
-    // When coalesce_io is set, every input staging buffer's data points into a
-    // single device arena (in_arena_dev) fed by one pinned host staging buffer
-    // (in_staging_host); copying gathers all inputs host-side then issues one H2D.
+    // When coalesce_io is set, every input is a slot in its bucket's packed device
+    // arena; copying gathers all inputs into a pinned host buffer with the same layout
+    // then flushes it with one H2D (chunked, so the DMA overlaps the tail of the
+    // gather).  Arenas are per bucket so the transfer is sized to the bucket rather
+    // than to max_dynamic_batch.
     bool coalesce_io{};
     bool staging_inputs_coalesced{};
-    void* in_arena_dev{nullptr};
-    void* in_staging_host{nullptr};
-    std::size_t in_arena_bytes{};
+    std::unordered_map<ShapeKey, CoalesceArena> coalesce_arenas{};
+    // Shared double-buffered pinned host gather area, grown to the largest arena bound
+    // so far.  Calls alternate between the two buffers, and each buffer carries an event
+    // recorded after the H2D that drained it, so a gather can never overwrite bytes a
+    // previous call's transfer is still reading.  With one inference between reuses the
+    // event is already complete, so waiting on it costs nothing in steady state.
+    void* in_staging_host[2]{nullptr, nullptr};
+    hipEvent_t in_staging_host_done[2]{nullptr, nullptr};
+    std::size_t in_staging_host_bytes{};
+    unsigned in_staging_host_cur{};
     // Coalesce input residency, stable for a given deployment (a caller such as Triton
     // binds each input to the same memory kind every call).  Determined once and reused
     // instead of rescanning N inputs per inference; reset by FreeStaging.  Pinned host
@@ -416,11 +470,54 @@ struct ComputeState {
     std::size_t batch_repr_index{};
     bool has_batch_repr{};
 
+    // ── Batch-determined shape profile ───────────────────────────────────────
+    // When every model input's shape is [axis0, <compile-time-constant dims>], the whole
+    // input shape set is a function of the batch alone: reading the representative
+    // input's axis-0 determines every other input's shape, so the per-call rescan of all
+    // N inputs (an OrtTensorTypeAndShapeInfo allocation each) disappears -- which matters
+    // because a Triton-style dynamic batcher changes the batch on nearly every call, and
+    // the old fast path only short-circuited an *identical* batch.
+    //
+    // The profile comes from the graph when its declared shapes prove it, and is
+    // otherwise learned at runtime by diffing two full scans taken at different batches.
+    // Either way it is self-checking: every full scan re-derives the bucket's effective
+    // hash and compares it against the memo below, and a disagreement retires the profile
+    // for the session.  `input_axis0_template` is indexed by ORT input index and holds the
+    // input's constant axis-0 extent, or -1 when that axis carries the batch.
+    bool shapes_batch_determined{};
+    bool batch_profile_disabled{};
+    std::vector<std::int64_t> input_axis0_template{};
+    // Per ORT input index: 1 where the graph declares axis 0 symbolic, i.e. that input
+    // really is batched.  Empty when the graph could not tell us, in which case the code
+    // falls back to matching the runtime extent against the request -- which misfires on
+    // an input whose fixed leading dim happens to equal the batch or the bucket.
+    std::vector<char> input_batch_axis{};
+    // Calls left before the next forced (validating) full scan; -1 disables revalidation.
+    int profile_revalidate_countdown{-1};
+    // Effective-shape hash per target bucket, memoized by the full scan so a later switch
+    // to that bucket resolves the hash from the representative input alone.
+    std::unordered_map<std::size_t, hash::Value> bucket_shape_hashes{};
+    // Previous full scan's raw dims / ranks / batch, kept only while learning a profile.
+    std::vector<std::int64_t> learn_prev_shapes{};
+    std::vector<std::uint32_t> learn_prev_ranks{};
+    std::size_t learn_prev_batch{};
+    bool learn_have_prev{};
+
     // Program parameter shapes keyed by shape hash, so each bucket keeps its shapes
     // and the hot path skips the get_parameter_shapes() rebuild. Dropped per-hash on
     // recompile, alongside the binding caches.
     std::unordered_map<ShapeKey, migraphx::program_parameter_shapes> cached_param_shapes{};
 };
+
+// Whether input `ort_index`'s axis 0 is the batch axis, per the graph's symbolic dims.
+// Falls back to "assume any leading axis could be the batch" when the graph did not
+// declare shapes for every input, leaving the runtime extent match to disambiguate.
+// Fixed for the life of the session, so it is safe to bake into a cached binding --
+// unlike input_axis0_template, which a runtime profile can learn and later revoke.
+inline bool InputCarriesBatch(const ComputeState& cs, std::size_t ort_index) {
+    return cs.input_batch_axis.empty() ||
+        (ort_index < cs.input_batch_axis.size() && cs.input_batch_axis[ort_index] != 0);
+}
 
 struct EpContextComputeState {
     std::mutex& mutex;
@@ -546,6 +643,9 @@ private:
     std::string compile_batches_{};
     bool precompile_at_load_{};
     bool coalesce_io_enable_{};
+    bool borrow_outputs_enable_{true};
+    bool batch_shape_profile_enable_{true};
+    bool allow_cross_batch_ops_{};
     bool cpu_control_flow_enable_{};
     bool static_pad_seq_{};
     std::size_t static_pad_seq_len_{};
