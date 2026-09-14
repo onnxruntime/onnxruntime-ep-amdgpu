@@ -47,9 +47,9 @@ constexpr std::uint64_t kNoModelArch = 0;
 //     families this binary has never seen). kLlmModelArch is the documented P0 set only.
 //     Per-(arch, model) pinning goes in kArchModelBackend below, which IS live.
 //     TO ADD AN LLM FAMILY: add one `fnv1a("normalized_name")` entry (and bump the array size).
-constexpr std::array<std::uint64_t, 5> kLlmModelArch{{
+constexpr std::array<std::uint64_t, 6> kLlmModelArch{{
     fnv1a("llama"), fnv1a("qwen2"), fnv1a("phi3"), fnv1a("mistral"),
-    fnv1a("llm"),
+    fnv1a("llm"), fnv1a("muse_glimmer"),
 }};
 
 // (2) Per-(arch, model) backend override. Highest priority in Auto mode: a matching row wins over the
@@ -62,7 +62,14 @@ struct arch_model_backend {
     std::uint64_t model_arch_hash;  // fnv1a of normalized model_arch
     Profile backend;
 };
-constexpr std::array<arch_model_backend, 0> kArchModelBackend{};
+constexpr std::array<arch_model_backend, 1> kArchModelBackend{{
+    // Muse Glimmer (Llama-4-family) runs on the MIGraphX INT4 path on gfx1151 (Strix Halo).
+    // Its OGA genai_config model.type is the distinct "muse_glimmer", so pin it to MIGraphX
+    // instead of the default gfx1151 HIP route -- WITHOUT catching generic "llama" models.
+    // Overrides win over the gfx1151 HIP presence rule (this table is checked first in
+    // select_backend()).
+    {"gfx1151", fnv1a("muse_glimmer"), Profile::MIGraphX},
+}};
 
 static_assert([] {
     for (const auto h : kLlmModelArch) if (h == kNoModelArch) return false;
