@@ -151,6 +151,7 @@ std::string GenerateGraphId(const Ort::ConstGraph& graph)
     const auto inputs{GetValueInfos(graph.GetInputs())};
     for (const auto& node : inputs) {
         hash::Hash(value, node.GetName());
+        hash::Hash(value, static_cast<size_t>(node.TypeInfo().GetTensorTypeAndShapeInfo().GetElementType()));
     }
     hash::Hash(value, inputs.size());
 
@@ -165,6 +166,7 @@ std::string GenerateGraphId(const Ort::ConstGraph& graph)
         for (const auto& input : node_inputs) {
             hash::Hash(value, input.GetName());
             hash::Hash(value, input.TypeInfo().GetTensorTypeAndShapeInfo().GetShape());
+            hash::Hash(value, static_cast<size_t>(input.TypeInfo().GetTensorTypeAndShapeInfo().GetElementType()));
         }
     }
 

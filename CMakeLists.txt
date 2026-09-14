@@ -43,7 +43,7 @@ if(WIN32)
     endif()
 endif()
 
-option(USE_AMDGPU "Build the AMD GPU Execution Provider" OFF)
+option(USE_AMDGPU "Build the AMD GPU Execution Provider" ON)
 # DirectML is an optional backend and is Windows-only: default ON on Windows,
 # OFF elsewhere. Still overridable via -DUSE_DML.
 if(WIN32)
@@ -51,8 +51,8 @@ if(WIN32)
 else()
     option(USE_DML "Build the DirectML Execution Provider" OFF)
 endif()
-option(USE_MIGRAPHX "Build the MIGraphX Execution Provider" OFF)
-option(USE_HIP "Build the HIP (morphizen) backend shim" OFF)
+option(USE_MIGRAPHX "Build the MIGraphX Execution Provider" ON)
+option(USE_HIP "Build the HIP (morphizen) backend shim" ON)
 
 if(USE_AMDGPU)
     # The AMDGPU wrapper always needs the MIGraphX backend, so force it on.
