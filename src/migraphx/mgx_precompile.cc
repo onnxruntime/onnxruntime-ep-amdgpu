@@ -3,6 +3,11 @@
 
 #include "mgx_precompile.h"
 
+#include <algorithm>
+#include <cctype>
+#include <map>
+#include <optional>
+#include <set>
 #include <utility>
 
 #include "mgx_program_ops.h"
@@ -82,6 +87,150 @@ PrecompilePlan ineligible_plan()
     return {false, false, {}, {}};
 }
 
+// ── Cross-batch (axis-0) node detection ──────────────────────────────────────
+
+std::optional<std::int64_t> read_int_attr(const Ort::ConstNode& node, const char* name)
+{
+    Ort::ConstOpAttr attr;
+    if (const Ort::Status status{node.GetAttributeByName(name, attr)}; !status.IsOK() || !attr) {
+        return std::nullopt;
+    }
+    std::int64_t value{};
+    return attr.GetValue(value).IsOK() ? std::make_optional(value) : std::nullopt;
+}
+
+std::optional<std::string> read_string_attr(const Ort::ConstNode& node, const char* name)
+{
+    Ort::ConstOpAttr attr;
+    if (const Ort::Status status{node.GetAttributeByName(name, attr)}; !status.IsOK() || !attr) {
+        return std::nullopt;
+    }
+    std::string value;
+    return attr.GetValue(value).IsOK() ? std::make_optional(std::move(value)) : std::nullopt;
+}
+
+std::optional<std::vector<std::int64_t>> read_ints_attr(const Ort::ConstNode& node, const char* name)
+{
+    Ort::ConstOpAttr attr;
+    if (const Ort::Status status{node.GetAttributeByName(name, attr)}; !status.IsOK() || !attr) {
+        return std::nullopt;
+    }
+    std::vector<std::int64_t> values;
+    return attr.GetValueArray(values).IsOK() ? std::make_optional(std::move(values)) : std::nullopt;
+}
+
+// Integer initializer feeding input `index`, when that input is a compile-time constant.
+std::optional<std::vector<std::int64_t>> read_const_int_input(const Ort::ConstNode& node,
+    std::size_t index)
+{
+    const auto inputs{GetValueInfos(node.GetInputs())};
+    if (index >= inputs.size()) {
+        return std::nullopt;
+    }
+    Ort::ConstValue value{nullptr};
+    if (!inputs[index].GetInitializer(value).IsOK() || value == nullptr) {
+        return std::nullopt;
+    }
+    const auto info{value.GetTensorTypeAndShapeInfo()};
+    const auto count{info.GetElementCount()};
+    if (info.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+        const auto* data{value.GetTensorData<std::int64_t>()};
+        return std::vector<std::int64_t>{data, data + count};
+    }
+    if (info.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+        const auto* data{value.GetTensorData<std::int32_t>()};
+        return std::vector<std::int64_t>{data, data + count};
+    }
+    return std::nullopt;
+}
+
+// Declared rank of the node's first input; 0 when the graph does not say.
+std::size_t first_input_rank(const Ort::ConstNode& node)
+{
+    const auto inputs{GetValueInfos(node.GetInputs())};
+    if (inputs.empty()) {
+        return 0;
+    }
+    const auto type_info{inputs.front().TypeInfo()};
+    return type_info.GetONNXType() == ONNX_TYPE_TENSOR
+        ? type_info.GetTensorTypeAndShapeInfo().GetDimensionsCount() : 0;
+}
+
+// Whether `axis` names axis 0 of a tensor of `rank` dims.  Resolving a negative axis needs
+// the rank; when the graph did not declare one it is read as a tail axis, because that is
+// what a negative axis nearly always means and treating it as possibly-0 would flag every
+// default-axis Softmax in the model -- noise enough that the check would just get disabled.
+bool axis_is_zero(std::int64_t axis, std::size_t rank)
+{
+    if (axis >= 0) {
+        return axis == 0;
+    }
+    return rank > 0 && axis == -static_cast<std::int64_t>(rank);
+}
+
+// Whether an Einsum equation keeps axis 0 as a per-row label: every operand and the result
+// lead with the same label, so it is carried through rather than summed over.
+// "bij,bjk->bik" is safe; "ij,jk->ik" contracts across rows and is not.
+bool einsum_keeps_batch(std::string equation)
+{
+    equation.erase(std::remove_if(equation.begin(), equation.end(),
+        [](unsigned char c) { return std::isspace(c) != 0; }), equation.end());
+    const auto arrow{equation.find("->")};
+    if (arrow == std::string::npos) {
+        return false;  // implicit output form; do not guess at the result layout
+    }
+    const auto result{equation.substr(arrow + 2)};
+    if (result.empty()) {
+        return false;  // scalar result folds every row together
+    }
+    const char batch{result.front()};
+    const auto operands{equation.substr(0, arrow)};
+    for (std::size_t start{0}; start <= operands.size();) {
+        const auto comma{operands.find(',', start)};
+        const auto term{operands.substr(start,
+            comma == std::string::npos ? std::string::npos : comma - start)};
+        if (term.empty() || term.front() != batch) {
+            return false;
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    return true;
+}
+
+// Ops whose result depends on every row of axis 0 however they are configured.
+const std::set<std::string_view>& always_cross_batch_ops()
+{
+    static const std::set<std::string_view> ops{
+        "NonMaxSuppression", "NonZero", "Scan", "Unique",
+    };
+    return ops;
+}
+
+// Reduce family: an `axes` list picks the axes (an attribute before opset 13/18, input 1
+// after); no axes at all means "reduce everything", which includes axis 0.
+const std::set<std::string_view>& reduce_ops()
+{
+    static const std::set<std::string_view> ops{
+        "ReduceL1", "ReduceL2", "ReduceLogSum", "ReduceLogSumExp", "ReduceMax", "ReduceMean",
+        "ReduceMin", "ReduceProd", "ReduceSum", "ReduceSumSquare",
+    };
+    return ops;
+}
+
+// Ops carrying a single `axis`, with the ONNX default applied when it is absent.  ArgMax
+// and ArgMin really do default to axis 0, so an unannotated one is a genuine offender.
+const std::map<std::string_view, std::int64_t>& axis_ops()
+{
+    static const std::map<std::string_view, std::int64_t> ops{
+        {"ArgMax", 0}, {"ArgMin", 0}, {"Hardmax", -1}, {"LogSoftmax", -1},
+        {"LpNormalization", -1}, {"Softmax", -1}, {"TopK", -1},
+    };
+    return ops;
+}
+
 // key feeds cached_programs; hex names the .mxr file on disk.
 struct PlanTarget {
     hash::ShapeKey key;
@@ -154,6 +303,130 @@ PrecompilePlan BuildPrecompilePlan(const Ort::ConstGraph& graph, const Ort::Cons
 
     batch_sizes.push_back(1);
     return {true, false, std::move(batch_sizes), std::move(shapes_by_name)};
+}
+
+std::optional<std::vector<std::int64_t>> BuildBatchShapeProfile(const Ort::ConstGraph& graph,
+    const Ort::ConstNode& fused_node, const Map<std::size_t>& input_name_indices)
+{
+    if (input_name_indices.empty()) {
+        return std::nullopt;
+    }
+    const auto graph_shapes{collect_graph_input_shapes(graph, fused_node)};
+    std::vector<std::int64_t> axis0(input_name_indices.size(), -1);
+    for (const auto& [name, index] : input_name_indices) {
+        if (index >= axis0.size()) {
+            return std::nullopt;  // indices are expected to be dense over [0, N)
+        }
+        const auto shape_it{graph_shapes.find(name)};
+        // non_batch_dims_are_concrete also rejects a rank-0 input, which has no axis 0
+        // to read the batch from.
+        if (shape_it == graph_shapes.end() || !non_batch_dims_are_concrete(shape_it->second)) {
+            return std::nullopt;
+        }
+        axis0[index] = shape_it->second.front();
+    }
+    // No symbolic axis 0 anywhere means nothing carries the batch, so there is no
+    // representative input to read it from and the profile would be useless.
+    if (ranges::none_of(axis0, [](std::int64_t d) { return d < 0; })) {
+        return std::nullopt;
+    }
+    return axis0;
+}
+
+std::vector<char> BuildBatchAxisMask(const Ort::ConstGraph& graph,
+    const Ort::ConstNode& fused_node, const Map<std::size_t>& input_name_indices)
+{
+    if (input_name_indices.empty()) {
+        return {};
+    }
+    const auto graph_shapes{collect_graph_input_shapes(graph, fused_node)};
+    std::vector<char> mask(input_name_indices.size(), 0);
+    bool any_symbolic{false};
+    for (const auto& [name, index] : input_name_indices) {
+        if (index >= mask.size()) {
+            return {};  // indices are expected to be dense over [0, N)
+        }
+        const auto shape_it{graph_shapes.find(name)};
+        if (shape_it == graph_shapes.end()) {
+            return {};  // an input the graph does not declare; fall back to the heuristic
+        }
+        const auto& shape{shape_it->second};
+        const bool symbolic{!shape.empty() && shape.front() == -1};
+        mask[index] = symbolic ? 1 : 0;
+        any_symbolic = any_symbolic || symbolic;
+    }
+    return any_symbolic ? mask : std::vector<char>{};
+}
+
+std::vector<std::string> FindCrossBatchNodes(const std::vector<Ort::ConstNode>& nodes)
+{
+    std::vector<std::string> offenders;
+    const auto flag{[&offenders](const Ort::ConstNode& node, std::string_view op_type,
+        std::string_view reason) {
+        const auto name{node.GetName()};
+        offenders.push_back(MakeString(op_type, "(", name.empty() ? "<unnamed>" : name.c_str(),
+            "): ", reason));
+    }};
+
+    for (const auto& node : nodes) {
+        const auto op_type{node.GetOperatorType()};
+        const std::string_view op{op_type};
+        const auto rank{first_input_rank(node)};
+
+        if (always_cross_batch_ops().count(op) > 0) {
+            flag(node, op, "result depends on every row");
+        } else if (reduce_ops().count(op) > 0) {
+            auto axes{read_ints_attr(node, "axes")};
+            if (!axes) {
+                axes = read_const_int_input(node, 1);
+            }
+            if (!axes) {
+                // Either no axes were given at all (reduce everything) or they arrive as a
+                // tensor we cannot read here.  Both leave axis 0 unaccounted for.
+                if (GetValueInfos(node.GetInputs()).size() > 1) {
+                    flag(node, op, "axes are not a compile-time constant, so the batch axis "
+                        "cannot be ruled out");
+                } else if (read_int_attr(node, "noop_with_empty_axes").value_or(0) == 0) {
+                    flag(node, op, "reduces every axis, including the batch");
+                }
+            } else if (axes->empty()) {
+                if (read_int_attr(node, "noop_with_empty_axes").value_or(0) == 0) {
+                    flag(node, op, "empty axes reduces every axis, including the batch");
+                }
+            } else if (ranges::any_of(*axes,
+                [rank](std::int64_t a) { return axis_is_zero(a, rank); })) {
+                flag(node, op, "reduces the batch axis");
+            }
+        } else if (const auto axis_op{axis_ops().find(op)}; axis_op != axis_ops().end()) {
+            if (axis_is_zero(read_int_attr(node, "axis").value_or(axis_op->second), rank)) {
+                flag(node, op, "operates along the batch axis");
+            }
+        } else if (op == "CumSum") {
+            const auto axis{read_const_int_input(node, 1)};
+            if (!axis || axis->empty()) {
+                flag(node, op, "axis is not a compile-time constant");
+            } else if (axis_is_zero(axis->front(), rank)) {
+                flag(node, op, "accumulates along the batch axis");
+            }
+        } else if (op == "Compress") {
+            const auto axis{read_int_attr(node, "axis")};
+            if (!axis) {
+                flag(node, op, "flattens its input, folding all rows together");
+            } else if (axis_is_zero(*axis, rank)) {
+                flag(node, op, "selects along the batch axis");
+            }
+        } else if (op == "Gemm") {
+            if (read_int_attr(node, "transA").value_or(0) != 0) {
+                flag(node, op, "transA=1 contracts the batch axis");
+            }
+        } else if (op == "Einsum") {
+            const auto equation{read_string_attr(node, "equation")};
+            if (!equation || !einsum_keeps_batch(*equation)) {
+                flag(node, op, "equation does not carry axis 0 through as a per-row label");
+            }
+        }
+    }
+    return offenders;
 }
 
 hash::Value ShapeHashForBucketBatch(const Map<std::size_t>& input_name_indices,
