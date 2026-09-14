@@ -291,6 +291,9 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
 {
     auto* factory = static_cast<ProviderFactory*>(this_ptr);
 
+    // ORT ignores this from a plugin EP: InferenceSession copies the session options before CreateEp
+    // runs, so it mutates an object the session no longer reads. Kept to record the requirement; until
+    // ORT honours it, memory pattern stays on and inference fails from the second run. (PLAT-207667)
     factory->ort_api.DisableMemPattern(const_cast<OrtSessionOptions*>(session_options));
     factory->ort_api.SetSessionExecutionMode(const_cast<OrtSessionOptions*>(session_options), ExecutionMode::ORT_SEQUENTIAL);
 
