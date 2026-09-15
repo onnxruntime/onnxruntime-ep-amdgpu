@@ -1142,6 +1142,13 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
                 }
             }
             backend_telemetry_.loaded_from_cache = true;
+        } else {
+            // Nothing was loaded and nothing was precompiled, so compute_state.program is
+            // still the default-constructed (empty) program: the parse/compile above is
+            // skipped whenever use_plan_cache is set.  Clearing has_input_shapes routes the
+            // first Compute() call through its first-call path, which sets the parameter
+            // shapes from the actual input tensors and then compiles and saves the MXR.
+            compute_state.has_input_shapes = false;
         }
         compute_state.defer_compilation = AnyPlannedTargetMissing(pre_plan, input_name_indices,
             compute_state.cached_programs);
