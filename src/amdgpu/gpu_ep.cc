@@ -7,7 +7,9 @@
 #include "gpu_ep.h"
 
 #include "gpu_options.h"
+#ifdef USE_MIGRAPHX
 #include "mgx_options.h"
+#endif
 #include "gpu_routing_policy.h"  // select_backend, model_arch_hash, is_webnn
 #include "hip/utils.h"           // hipGetDeviceProperties for ASIC-based backend routing
 #include "common/env_var.h"      // ParseEnvironmentVariableWithDefault (routing trace)
@@ -229,6 +231,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         THROW_IF_ERROR(factory.CreateHipBackend(local_session_options, logger, backend_ep_));
     };
 
+#ifdef USE_MIGRAPHX
     const auto create_migraphx_backend = [&] {
         const auto get_name = [](const std::string_view sv) {
             return std::string{"ep."}.append(kMIGraphXBackend).append(".").append(sv);
@@ -320,31 +323,32 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         }
         THROW_IF_ERROR(factory.CreateMIGraphXBackend(local_session_options, logger, backend_ep_));
     };
+#endif
 
     // Explicit profile is honored; Auto/Optimized derives from (ASIC, model_arch). select_backend()
     // (inside route_by_heuristic) applies both, so the result covers every profile value.
     const Profile effective = route_by_heuristic();
     backend_ = BackendForProfile(effective);
 
-#ifdef USE_DML
-    if (effective == Profile::Eager) {
-        create_directx_backend();
-    } else if (effective == Profile::DirectX) {
-        create_directx_backend();
-    } else if (effective == Profile::MIGraphX) {
-        create_migraphx_backend();
-    } else if (effective == Profile::Hip) {
+    const auto create_selected_rocm_backend = [&] {
+#ifdef USE_MIGRAPHX
+      if (effective == Profile::Hip) {
         create_hip_backend();
-    } else {
+      } else {
         create_migraphx_backend();
+      }
+#else
+      create_hip_backend();
+#endif
+    };
+#ifdef USE_DML
+    if (effective == Profile::Eager || effective == Profile::DirectX) {
+      create_directx_backend();
+    } else {
+      create_selected_rocm_backend();
     }
 #else
-    // DirectML not built (e.g. Linux): DirectML/Eager profiles fall back to MIGraphX.
-    if (effective == Profile::Hip) {
-        create_hip_backend();
-    } else {
-        create_migraphx_backend();
-    }
+    create_selected_rocm_backend();
 #endif
     // Capture per-EP now: the shared factory_ backend field is overwritten by a later
     // umbrella EP (different backend). See PR for the cross-backend UAF details.
