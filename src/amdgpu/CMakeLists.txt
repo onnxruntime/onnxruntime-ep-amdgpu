@@ -30,12 +30,15 @@ if(MSVC)
     target_link_libraries(amdgpu-ep PRIVATE delayimp)
 endif()
 
-# Expose USE_HIP / USE_DML so the source can gate the optional backend loads.
+# Expose USE_HIP / USE_DML / USE_MIGRAPHX so the source can gate the optional backend loads.
 target_compile_definitions(amdgpu-ep PRIVATE $<$<BOOL:${USE_HIP}>:USE_HIP>)
 target_compile_definitions(amdgpu-ep PRIVATE $<$<BOOL:${USE_DML}>:USE_DML>)
+target_compile_definitions(amdgpu-ep PRIVATE $<$<BOOL:${USE_MIGRAPHX}>:USE_MIGRAPHX>)
 
-target_include_directories(amdgpu-ep PRIVATE
-        $<TARGET_PROPERTY:migraphx-ep,INTERFACE_INCLUDE_DIRECTORIES>)
+if(USE_MIGRAPHX)
+    target_include_directories(amdgpu-ep PRIVATE
+            $<TARGET_PROPERTY:migraphx-ep,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 
 # The directml-ep target only exists when USE_DML is on (Windows)
 if(USE_DML)

@@ -50,7 +50,9 @@ namespace {
 #ifdef USE_DML
 constexpr auto directmlBackend{LIBRARY_PREFIX ORT_TSTR("directx-backend") LIBRARY_SUFFIX};
 #endif
+#ifdef USE_MIGRAPHX
 constexpr auto migraphxBackend{LIBRARY_PREFIX ORT_TSTR("migraphx-backend") LIBRARY_SUFFIX};
+#endif
 constexpr auto hipBackend{LIBRARY_PREFIX ORT_TSTR("hip-backend") LIBRARY_SUFFIX};
 }
 
@@ -149,6 +151,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     custom_op_backends_.push_back(dml_ep_factory_);
 #endif
 
+#ifdef USE_MIGRAPHX
     THROW_IF_ERROR(LoadDynamicLibrary(migraphxBackend, &mgx_backend_));
     THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
         "ReleaseEpFactory", reinterpret_cast<void**>(&mgx_release_ep_factory_)));
@@ -165,6 +168,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
 
     THROW_IF_ERROR(mgx_create_ep_factories(kMIGraphXBackend, ort_api_base, default_logger,
         &mgx_ep_factory_, 1, &factories_created));
+#endif
 
     // hip (morphizen) backend: optional, only present when built with USE_HIP.
 #ifdef USE_HIP
@@ -211,6 +215,7 @@ ProviderFactory::~ProviderFactory() {
         /* TODO: log failure while unloading DirectML EP library */
     }
 #endif
+#ifdef USE_MIGRAPHX
     if (mgx_ep_factory_ != nullptr && mgx_release_ep_factory_ != nullptr) {
         if (OrtStatus* status = mgx_release_ep_factory_(mgx_ep_factory_)) {
             ort_api.ReleaseStatus(status);
@@ -220,6 +225,7 @@ ProviderFactory::~ProviderFactory() {
     if (!UnloadDynamicLibrary(mgx_backend_).IsOK()) {
         /* TODO: log failure while unloading MIGraphX EP library */
     }
+#endif
     if (hip_ep_factory_ != nullptr && hip_release_ep_factory_ != nullptr) {
         if (OrtStatus* status = hip_release_ep_factory_(hip_ep_factory_)) {
             ort_api.ReleaseStatus(status);
