@@ -38,21 +38,13 @@ constexpr bool IsMlssArchPrefix(std::string_view value, std::string_view prefix)
     return value.substr(0, prefix.size()) == prefix;
 }
 
-// Auto-enable MLSS conv from graph structure only.
-// gfx1200/gfx1201: any conv.
-// gfx1150 FP32: >=2 convs, known input shape, few non-depthwise grouped convs,
-// 1x1 kernels at most 80%.
-// gfx1150 FP16: conv-heavy (>=50 convs, convs >=28% of nodes, <=2% strided,
-// 1x1 at most 50%) or conv-sparse unstrided graphs (>=30 convs, no 1x1, convs
-// at most 8% of nodes). Both FP16 paths reject grouped/depthwise convs.
+// gfx1200/gfx1201: always on. gfx1150: graph heuristics. All other gfx
+// (gfx1100, gfx1151, ...) stay off until a policy is added.
 constexpr bool ShouldForceMlssConv(std::string_view gfx, const MlssGraphFeatures& features) {
-    if (features.convolution_count == 0) {
-        return false;
-    }
     if (IsMlssArchPrefix(gfx, "gfx1200") || IsMlssArchPrefix(gfx, "gfx1201")) {
         return true;
     }
-    if (!IsMlssArchPrefix(gfx, "gfx1150")) {
+    if (!IsMlssArchPrefix(gfx, "gfx1150") || features.convolution_count == 0) {
         return false;
     }
     if (features.input_elements_max <= 32) {
@@ -83,10 +75,16 @@ constexpr bool ShouldForceMlssConv(std::string_view gfx, const MlssGraphFeatures
         features.convolution_count * 25 >= features.node_count * 7) {
         return true;
     }
-    return features.convolution_count >= 30 &&
-           features.one_by_one_count == 0 &&
-           features.strided_count == 0 &&
-           features.convolution_count * 25 <= features.node_count * 2;
+    if (features.one_by_one_count != 0 || features.strided_count != 0) {
+        return false;
+    }
+    if (features.convolution_count >= 30 &&
+        features.convolution_count * 25 <= features.node_count * 2) {
+        return true;
+    }
+    return features.convolution_count >= 20 &&
+           features.convolution_count * 20 >= features.node_count * 3 &&
+           features.convolution_count * 4 <= features.node_count;
 }
 
 namespace detail {
@@ -123,7 +121,10 @@ static_assert(ShouldForceMlssConv("gfx1150", TestFeatures(299, 144, 299, 0, 0, 9
 static_assert(!ShouldForceMlssConv("gfx1150", TestFeatures(263, 108, 263, 0, 0, 1154, 1)));
 static_assert(ShouldForceMlssConv("gfx1150", TestFeatures(37, 0, 37, 0, 0, 698, 0)));
 static_assert(!ShouldForceMlssConv("gfx1150", TestFeatures(37, 0, 37, 0, 0, 250, 0)));
+static_assert(ShouldForceMlssConv("gfx1150", TestFeatures(26, 0, 26, 0, 0, 117, 0)));
+static_assert(!ShouldForceMlssConv("gfx1150", TestFeatures(33, 0, 33, 0, 0, 105, 0)));
 static_assert(!ShouldForceMlssConv("gfx1151", TestFeatures(10, 0, 0, 10)));
+static_assert(ShouldForceMlssConv("gfx1200", TestFeatures(0, 0, 0, 0)));
 static_assert(ShouldForceMlssConv("gfx1201", TestFeatures(1, 0, 0, 0)));
 static_assert(!ShouldForceMlssConv("gfx1100", TestFeatures(10, 0, 0, 0)));
 static_assert([] {
