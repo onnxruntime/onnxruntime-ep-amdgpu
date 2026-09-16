@@ -118,37 +118,6 @@ std::size_t FindNearestCompiledBatchSize(std::size_t requested_batch,
     return 0;
 }
 
-void PadInputTensor(const void* src_data, void* dst_data,
-    std::size_t original_batch, std::size_t padded_batch,
-    std::size_t element_size_bytes, std::size_t elements_per_batch,
-    hipStream_t stream)
-{
-    const std::size_t bytes_per_batch{element_size_bytes * elements_per_batch};
-
-    // Copy the original rows.
-    HIP_CALL_THROW(hipMemcpyAsync(dst_data, src_data, original_batch * bytes_per_batch,
-        hipMemcpyDeviceToDevice, stream));
-
-    // Replicate the last row to fill the padding using exponential doubling so
-    // the number of copies is O(log N) rather than O(N).
-    if (original_batch > 0 && padded_batch > original_batch) {
-        const char* last_batch{static_cast<const char*>(src_data) +
-            (original_batch - 1) * bytes_per_batch};
-        char* pad_start{static_cast<char*>(dst_data) + original_batch * bytes_per_batch};
-        const std::size_t slots_to_fill{padded_batch - original_batch};
-
-        HIP_CALL_THROW(hipMemcpyAsync(pad_start, last_batch, bytes_per_batch,
-            hipMemcpyDeviceToDevice, stream));
-        std::size_t filled{1};
-        while (filled < slots_to_fill) {
-            const std::size_t chunk{std::min(filled, slots_to_fill - filled)};
-            HIP_CALL_THROW(hipMemcpyAsync(pad_start + filled * bytes_per_batch, pad_start,
-                chunk * bytes_per_batch, hipMemcpyDeviceToDevice, stream));
-            filled += chunk;
-        }
-    }
-}
-
 void PadSeqTensor(const void* src_data, void* dst_data,
     std::size_t outer_count, std::size_t real_len, std::size_t target_len,
     std::size_t inner_count, std::size_t element_size_bytes,

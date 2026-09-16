@@ -74,6 +74,62 @@ std::vector<std::string> GetNodeOutputNames(const OrtApi& api, const OrtNode* no
     return names;
 }
 
+namespace {
+
+// Returns true if the ValueInfo has a statically-known extent-0 dimension.
+// Missing shape, rank 0 (scalar), or a dynamic dim (< 0) all return false.
+bool ValueInfoHasEmptyDim(const OrtApi& api, const OrtValueInfo* vi) {
+    if (!vi) return false;
+    const OrtTypeInfo* ti = nullptr;
+    OrtStatus* st = api.GetValueInfoTypeInfo(vi, &ti);
+    if (st || !ti) { if (st) api.ReleaseStatus(st); return false; }
+    const OrtTensorTypeAndShapeInfo* si = nullptr;
+    api.CastTypeInfoToTensorInfo(ti, &si);
+    if (!si) return false;
+    size_t rank = 0;
+    api.GetDimensionsCount(si, &rank);
+    if (rank == 0) return false;
+    std::vector<int64_t> dims(rank, -1);
+    api.GetDimensions(si, dims.data(), rank);
+    for (int64_t d : dims) if (d == 0) return true;
+    return false;
+}
+
+}  // namespace
+
+bool NodeHasEmptyEdge(
+    const OrtApi& api,
+    const OrtNode* node,
+    const std::unordered_map<std::string, const OrtValue*>& initializers) {
+    if (!node) return false;
+
+    // Any output with an extent-0 dim disqualifies the node — an empty output is
+    // always a real DML edge the graph would have to produce.
+    size_t n_out = 0;
+    api.Node_GetNumOutputs(node, &n_out);
+    if (n_out > 0) {
+        std::vector<const OrtValueInfo*> out_vis(n_out, nullptr);
+        api.Node_GetOutputs(node, out_vis.data(), n_out);
+        for (const OrtValueInfo* vi : out_vis)
+            if (ValueInfoHasEmptyDim(api, vi)) return true;
+    }
+
+    // An extent-0 input disqualifies the node only if it is NOT a constant
+    // initializer (a constant is baked in at compile time, never a runtime edge).
+    size_t n_in = 0;
+    api.Node_GetNumInputs(node, &n_in);
+    if (n_in > 0) {
+        std::vector<const OrtValueInfo*> in_vis(n_in, nullptr);
+        api.Node_GetInputs(node, in_vis.data(), n_in);
+        for (const OrtValueInfo* vi : in_vis) {
+            if (!ValueInfoHasEmptyDim(api, vi)) continue;
+            if (initializers.find(GetValueInfoName(api, vi)) == initializers.end())
+                return true;  // empty non-constant data edge
+        }
+    }
+    return false;
+}
+
 bool TryReadScalarFloat(const OrtApi& api, const OrtValue* val, float& out_value) {
     if (!val) return false;
 

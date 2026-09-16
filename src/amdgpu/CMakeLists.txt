@@ -21,6 +21,15 @@ add_library(amdgpu-ep MODULE
 
 target_link_libraries(amdgpu-ep PRIVATE plugin-ep-utils flatbuffers hip-shared)
 
+# ORT probes provider DLLs by loading them and looking for the legacy GetProvider
+# export. amdgpu-ep uses the plugin EP API instead, so the probe unloads it without
+# calling CreateEpFactories. Delay-load HIP so this discovery-only path does not
+# initialize the process-lifetime HIP runtime.
+if(MSVC)
+    target_link_options(amdgpu-ep PRIVATE "/DELAYLOAD:amdhip64_7.dll")
+    target_link_libraries(amdgpu-ep PRIVATE delayimp)
+endif()
+
 # Expose USE_HIP / USE_DML so the source can gate the optional backend loads.
 target_compile_definitions(amdgpu-ep PRIVATE $<$<BOOL:${USE_HIP}>:USE_HIP>)
 target_compile_definitions(amdgpu-ep PRIVATE $<$<BOOL:${USE_DML}>:USE_DML>)

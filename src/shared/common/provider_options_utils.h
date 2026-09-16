@@ -81,13 +81,23 @@ struct ProviderOptionsParser {
             });
     }
 
+    // When set, keys without a registered parser are skipped instead of failing.
+    // Useful for umbrella EPs that forward unknown options to a backend.
+    ProviderOptionsParser& IgnoreUnknownKeys() {
+        ignore_unknown_keys_ = true;
+        return *this;
+    }
+
     Ort::Status Parse(const ProviderOptions& options) const {
         for (const auto& option : options) {
             const auto& name = option.first;
             const auto& value_str = option.second;
             const auto value_parser_it = value_parsers_.find(name);
-            RETURN_IF(value_parser_it == value_parsers_.end(),
-                "Unknown provider option: \"", name, "\".");
+            if (value_parser_it == value_parsers_.end()) {
+                RETURN_IF(!ignore_unknown_keys_,
+                    "Unknown provider option: \"", name, "\".");
+                continue;
+            }
             const auto parse_status = value_parser_it->second(value_str);
             RETURN_IF_NOT(parse_status == nullptr,
                 "Failed to parse provider option \"", name, "\": ", parse_status.GetErrorMessage());
@@ -98,4 +108,5 @@ struct ProviderOptionsParser {
 private:
     using ValueParser = std::function<Ort::Status(const std::string&)>;
     std::unordered_map<std::string, ValueParser> value_parsers_;
+    bool ignore_unknown_keys_{false};
 };

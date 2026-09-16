@@ -185,11 +185,10 @@ D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* d3d12_device)
     feature_levels.pFeatureLevelsRequested = feature_levels_list;
     THROW_IF_FAILED(d3d12_device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &feature_levels, sizeof(feature_levels)));
 
-    // Use compute queue whenever possible to avoid TDR and maintain UI QoS.
-    // Core/generic devices only have compute queues, DX12 devices have both.
-    // Only DX11-level devices (11.0, 11.1) fall back to the direct/graphics queue.
-    auto use_compute_command_list = (feature_levels.MaxSupportedFeatureLevel <= D3D_FEATURE_LEVEL_1_0_CORE) ||
-                                    (feature_levels.MaxSupportedFeatureLevel >= D3D_FEATURE_LEVEL_12_0);
+    // Match ORT's DmlExecutionProvider queue selection (dml_provider_factory.cc
+    // CalculateCommandListType): use the COMPUTE queue only for core/NPU-class devices;
+    // every real DX12 GPU uses the DIRECT (3D/graphics) queue.
+    auto use_compute_command_list = (feature_levels.MaxSupportedFeatureLevel <= D3D_FEATURE_LEVEL_1_0_CORE);
 
     if (use_compute_command_list) {
         return D3D12_COMMAND_LIST_TYPE_COMPUTE;
@@ -201,7 +200,7 @@ D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* d3d12_device)
 }  // namespace
 
 ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, std::string_view ep_name, const Ort::Logger& default_logger)
-    : OrtEpFactory{ORT_API_VERSION},
+    : OrtEpFactory{NegotiatedOrtApiVersion()},
       ApiPtrs{api_ptrs},
       default_logger_{default_logger},
       ep_name_{ep_name},
@@ -680,7 +679,11 @@ OrtStatus* CreateEpFactories(const char* registration_name, const OrtApiBase* or
     const OrtLogger* default_logger, OrtEpFactory** factories, size_t max_factories, size_t* num_factories)
 {
     try {
-        const OrtApi* ort_api{ort_api_base->GetApi(ORT_API_VERSION)};
+        const OrtApi* ort_api{NegotiateOrtApi(*ort_api_base, kMinOrtApiVersion)};
+        if (ort_api == nullptr) {
+            RETURN_STATUS(ORT_EP_FAIL, "onnxruntime runtime too old: directx-ep requires ORT API >= ",
+                kMinOrtApiVersion);
+        }
         const OrtEpApi* ep_api{ort_api->GetEpApi()};
         const OrtModelEditorApi* model_editor_api{ort_api->GetModelEditorApi()};
 

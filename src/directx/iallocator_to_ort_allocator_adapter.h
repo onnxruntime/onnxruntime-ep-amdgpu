@@ -7,13 +7,14 @@
 
 #include "core/framework/allocator.h"     // onnxruntime::IAllocator, onnxruntime::AllocatorPtr
 #include <onnxruntime_c_api.h>            // OrtAllocator, ORT_API_VERSION
+#include "common/ort_api_version.h"       // NegotiatedOrtApiVersion
 
 namespace dml_ep {
 
 class IAllocatorToOrtAllocatorAdapter final : public OrtAllocator {
 public:
   explicit IAllocatorToOrtAllocatorAdapter(onnxruntime::AllocatorPtr allocator)
-      : OrtAllocator{ORT_API_VERSION},
+      : OrtAllocator{NegotiatedOrtApiVersion()},
         allocator_{std::move(allocator)} {
     // OrtAllocator function pointers (C ABI) forwarding to IAllocator (C++).
     Alloc = [](OrtAllocator* this_, size_t size) -> void* {

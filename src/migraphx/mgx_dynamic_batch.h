@@ -39,15 +39,6 @@ std::vector<std::size_t> GenerateCompiledBatchSizes(std::size_t max_batch_size,
 std::size_t FindNearestCompiledBatchSize(std::size_t requested_batch,
     const std::vector<std::size_t>& compiled_batch_sizes);
 
-// Pad a device input tensor up to a larger batch size by copying the original
-// rows and replicating the last row to fill the padding.  The replication uses
-// exponential doubling so the number of async copies is O(log N).  All copies
-// are device-to-device on the supplied stream.
-void PadInputTensor(const void* src_data, void* dst_data,
-    std::size_t original_batch, std::size_t padded_batch,
-    std::size_t element_size_bytes, std::size_t elements_per_batch,
-    hipStream_t stream);
-
 // Pad a tensor along an inner "sequence" axis: for each of outer_count slices, copy
 // real_len elements and zero-fill the remaining (target_len - real_len) elements of
 // that slice.  Layout is row-major with the seq axis at `axis`: outer_count =

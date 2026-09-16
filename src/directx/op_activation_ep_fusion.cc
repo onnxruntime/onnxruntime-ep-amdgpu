@@ -1473,7 +1473,7 @@ static OpActivationCompiledKernel CompileMVNActivation(
     const char* log_tag = "[OpActFusion/MVN]";
 
     if (x_sizes.empty()) {
-        DML_PERF_LOG(log_tag, " CompileMVNActivation: empty X");
+        DML_PERF_LOG(log_tag, " CompileMVNActivation: rank-0 X sizes");
         return result;
     }
 
@@ -1587,6 +1587,12 @@ static OrtStatus* ORT_API_CALL OpActivation_Compute(
         if (!slot_values[0] || !ReadRuntimeShape(api, slot_values[0], dml_dtype, x_sizes, x_bytes))
             return api.CreateStatus(ORT_FAIL, "OpActFusion: failed to read X shape");
 
+        // Empty input (e.g. a 0-sized batch from a data-dependent branch): DML
+        // descriptors can't represent a zero dim, so mirror ORT's DML EP
+        // (ExecuteOperator returns S_OK on any empty in/out) and no-op. The
+        // empty output is still allocated below; compile and execute are skipped.
+        bool x_empty = (x_bytes == 0);
+
         // Resolve per-slot shape/bytes for every input. A slot is either:
         //   dynamic  (dyn_input_indices[s] != SIZE_MAX) — shape from the runtime
         //            OrtValue in slot_values[s]; or
@@ -1690,7 +1696,9 @@ static OrtStatus* ORT_API_CALL OpActivation_Compute(
             return snap;
         };
 
-        if (!state->initialized) {
+        // Defer compilation while X is empty — a zero-dim shape can't build a
+        // valid DML kernel. A later non-empty call performs the lazy-init.
+        if (!state->initialized && !x_empty) {
             std::lock_guard<std::mutex> lock(state->init_mutex);
             if (!state->initialized) {
                 DML_PERF_LOG("[OpActFusion/", state->base_op_kind == BaseOpKind::Conv ? "Conv" :
@@ -1708,7 +1716,7 @@ static OrtStatus* ORT_API_CALL OpActivation_Compute(
 
         const OpActivationCompiledKernel* active = &state->kernel;
         OpActivationCompiledKernel temp_mi;
-        if (current_slot_sizes() != state->compiled_slot_sizes) {
+        if (!x_empty && current_slot_sizes() != state->compiled_slot_sizes) {
             // Shape changed on X or a dynamic weight — recompile temporary kernel.
             auto saved = state->kernel;
             if (!do_compile()) {
@@ -1827,6 +1835,12 @@ static OrtStatus* ORT_API_CALL OpActivation_Compute(
         size_t out_elem_count_mi = 1;
         for (auto d : out_dims) out_elem_count_mi *= static_cast<size_t>(d);
         uint64_t out_bytes_mi = static_cast<uint64_t>(out_elem_count_mi * elem_size_mi);
+
+        // Empty X → empty output: the output OrtValue is already allocated above
+        // (0 bytes) for downstream consumers. Nothing to bind or execute, so
+        // return success without touching DML — matching ORT's DML EP no-op.
+        if (x_empty)
+            return nullptr;
 
         ID3D12Resource* out_res = get_res(out_value);
         if (!out_res)
@@ -1998,8 +2012,13 @@ static OrtStatus* ORT_API_CALL OpActivation_Compute(
         ReadRuntimeShape(api, c_value, c_dtype, c_sizes, c_bytes);
     }
 
+    // Empty input (0-sized dim): DML can't build a descriptor for it, so no-op
+    // the way ORT's DML EP does. Compile/recompile/execute are skipped; the
+    // output OrtValue is still allocated below for downstream consumers.
+    bool inputs_empty = (a_bytes == 0 || b_bytes == 0);
+
     // Lazy-init: compile on first Compute with real shapes.
-    if (!state->initialized) {
+    if (!state->initialized && !inputs_empty) {
         std::lock_guard<std::mutex> lock(state->init_mutex);
         if (!state->initialized) {
             DML_PERF_LOG("[OpActFusion] Compute: lazy-init"
@@ -2036,7 +2055,7 @@ static OrtStatus* ORT_API_CALL OpActivation_Compute(
     // Shape-change: recompile a temporary kernel if sizes differ.
     const OpActivationCompiledKernel* active = &state->kernel;
     OpActivationCompiledKernel temp;
-    if (a_sizes != state->compiled_a_sizes || b_sizes != state->compiled_b_sizes) {
+    if (!inputs_empty && (a_sizes != state->compiled_a_sizes || b_sizes != state->compiled_b_sizes)) {
         DML_PERF_LOG("[OpActFusion] Compute: shape change"
                      " prev_A=", SizesStr(state->compiled_a_sizes),
                      " new_A=", SizesStr(a_sizes),
@@ -2103,6 +2122,11 @@ static OrtStatus* ORT_API_CALL OpActivation_Compute(
             return api.CreateStatus(ORT_FAIL, "OpActFusion: failed to get output");
         }
     }
+
+    // Empty input → empty output: output OrtValue is allocated above; skip the
+    // DML bind/execute entirely and return success (ORT DML EP no-op).
+    if (inputs_empty)
+        return nullptr;
 
     auto get_resource = [&](const OrtValue* v) -> ID3D12Resource* {
         void* raw = nullptr;
@@ -2188,7 +2212,7 @@ struct OpActivationNodeComputeInfo : OrtNodeComputeInfo {
     OpActivationKernelState* state = nullptr;
 
     OpActivationNodeComputeInfo() {
-        ort_version_supported = ORT_API_VERSION;
+        ort_version_supported = NegotiatedOrtApiVersion();
         CreateState = [](OrtNodeComputeInfo* self, OrtNodeComputeContext*, void** out) noexcept -> OrtStatus* {
             *out = static_cast<OpActivationNodeComputeInfo*>(self)->state;
             return nullptr;
@@ -2928,32 +2952,41 @@ std::vector<std::unique_ptr<IFusionRule>> MakeAllOpActivationFusionRules(bool is
         rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
     }
 
+    // Gemm, Conv, and ConvTranspose op+activation fusion is disabled: these compile
+    // to DML metacommand operators (DML_OPERATOR_GEMM, DML_OPERATOR_CONVOLUTION), and
+    // setting FusedActivation makes DirectML request a separate fused-permutation
+    // metacommand from the driver. The AMD driver caches that variant (and a larger
+    // convolution workspace) in driver-resident memory that GetBindingProperties does
+    // not report, so it is invisible to CompileGraph/CompileOperator. The remaining
+    // fused ops (Add/Sum/BatchNorm/InstanceNorm/MVN) are plain compute shaders where
+    // the activation is a free shader epilogue and are unaffected.
+
     // Gemm: all activations on non-MCDM, Relu+LeakyRelu on MCDM.
-    {
-        OpActivationConfig cfg;
-        cfg.base_op_type        = "Gemm";
-        cfg.fused_op_type       = "DmlFusedGemm";
-        cfg.allowed_activations = isMcdmDevice ? mcdm_act : full_act;
-        rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
-    }
+    // {
+    //     OpActivationConfig cfg;
+    //     cfg.base_op_type        = "Gemm";
+    //     cfg.fused_op_type       = "DmlFusedGemm";
+    //     cfg.allowed_activations = isMcdmDevice ? mcdm_act : full_act;
+    //     rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
+    // }
 
     // Conv: all activations on non-MCDM, Relu+LeakyRelu on MCDM.
-    {
-        OpActivationConfig cfg;
-        cfg.base_op_type        = "Conv";
-        cfg.fused_op_type       = "DmlFusedConv";
-        cfg.allowed_activations = isMcdmDevice ? mcdm_act : full_act;
-        rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
-    }
+    // {
+    //     OpActivationConfig cfg;
+    //     cfg.base_op_type        = "Conv";
+    //     cfg.fused_op_type       = "DmlFusedConv";
+    //     cfg.allowed_activations = isMcdmDevice ? mcdm_act : full_act;
+    //     rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
+    // }
 
     // ConvTranspose: same policy as Conv.
-    {
-        OpActivationConfig cfg;
-        cfg.base_op_type        = "ConvTranspose";
-        cfg.fused_op_type       = "DmlFusedConvTranspose";
-        cfg.allowed_activations = isMcdmDevice ? mcdm_act : full_act;
-        rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
-    }
+    // {
+    //     OpActivationConfig cfg;
+    //     cfg.base_op_type        = "ConvTranspose";
+    //     cfg.fused_op_type       = "DmlFusedConvTranspose";
+    //     cfg.allowed_activations = isMcdmDevice ? mcdm_act : full_act;
+    //     rules.push_back(std::make_unique<OpActivationFusionRule>(std::move(cfg)));
+    // }
 
     // BatchNormalization: all activations on non-MCDM; DISABLED on MCDM.
     if (!isMcdmDevice) {

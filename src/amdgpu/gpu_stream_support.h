@@ -11,7 +11,7 @@ struct ProviderFactory;
 
 struct SyncStream : OrtSyncStreamImpl {
     explicit SyncStream(const ProviderFactory& factory)
-        : OrtSyncStreamImpl{ORT_API_VERSION}, factory_{factory}
+        : OrtSyncStreamImpl{NegotiatedOrtApiVersion()}, factory_{factory}
     {
         OrtSyncStreamImpl::Release = [](OrtSyncStreamImpl* this_) noexcept {
             delete reinterpret_cast<SyncStream*>(this_);
@@ -42,7 +42,7 @@ private:
 
 struct SyncNotification : OrtSyncNotificationImpl {
     explicit SyncNotification(const ProviderFactory& factory)
-        : OrtSyncNotificationImpl{ORT_API_VERSION}, factory_{factory}
+        : OrtSyncNotificationImpl{NegotiatedOrtApiVersion()}, factory_{factory}
     {
         OrtSyncNotificationImpl::Release = [](OrtSyncNotificationImpl* this_) noexcept {
             delete reinterpret_cast<SyncNotification*>(this_);

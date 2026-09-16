@@ -41,9 +41,12 @@ constexpr bool starts_with(std::string_view s, std::string_view prefix) {
     return s.substr(0, prefix.size()) == prefix;
 }
 
-// fnv1a of the normalized model_arch, or kNoModelArch when the caller supplied none.
+// fnv1a of the normalized model_arch, or kNoModelArch when the caller supplied none (or whitespace
+// only). Empty-after-normalize is treated as absent so an empty provider option cannot trip HIP.
 inline std::uint64_t model_arch_hash(const std::optional<std::string>& model_arch) {
-    return model_arch.has_value() ? fnv1a(normalize_model_arch(model_arch.value())) : kNoModelArch;
+    if (!model_arch.has_value()) return kNoModelArch;
+    const std::string normalized = normalize_model_arch(model_arch.value());
+    return normalized.empty() ? kNoModelArch : fnv1a(normalized);
 }
 
 // True if the caller framework hint (model_fw provider option) names WebNN. Case-insensitive.
@@ -56,14 +59,14 @@ inline bool is_webnn(const std::optional<std::string>& model_fw) {
 // or Optimized) is honored/dispatched as-is. In Auto mode, in priority order:
 //   1. WebNN caller                   -> DirectML (browser/WebNN compatibility carve-out, all ASICs)
 //   2. kArchModelBackend (arch prefix + model_arch) override, if any row matches
-//   3. Medusa gfx117x                 -> DirectML
-//   4. gfx11 and newer                -> MIGraphX
+//   3. HIP-enabled gfx115x + present model_arch -> Hip
+//      (Strix gfx1150, Halo gfx1151, Krackan gfx1152, GPT3/Krackan2e gfx1153, and GPT SKUs
+//      that share 1150/1152. OGA gen/LLM hint; any non-empty value. Not a kLlmModelArch scan.)
+//   4. gfx11 and newer                -> MIGraphX (includes Medusa gfx117x)
 //   5. everything below gfx11 (gfx9/gfx10) -> DirectML
 inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_hash, bool is_webnn,
                               Profile profile) {
-    if (profile != Profile::Auto) {
-        return profile;  // explicit profile (and Optimized) honored/dispatched as-is
-    }
+
     // 1. WebNN compatibility carve-out: always DirectML, regardless of ASIC (browser path).
     if (is_webnn) return Profile::DirectX;
     // 2. Exact (arch prefix, model_arch) override.
@@ -73,12 +76,15 @@ inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_has
             return row.backend;
         }
     }
-    // 3-5. Prefix buckets (order matters: gfx117x before the general gfx11x).
-    if (starts_with(gfx, "gfx117")) return Profile::DirectX;  // Medusa MDS1/MDS2 (temporary)
-    // TODO(routing): Strix Halo LLMs (gfx1150/1151) target HipEP starting next release; they fold
-    // into MIGraphX today because HipEP is not built. Needs its own branch, keyed on kLlmModelArch,
-    // once it ships.
-    if (starts_with(gfx, "gfx11")) return Profile::MIGraphX;   // RDNA3 / RDNA3.5
+#ifdef USE_HIP
+    // 3. gfx115x (Strix / Halo / Krackan / Gorgon Point): a present model_arch is an OGA
+    //    gen/LLM session hint → HIP. Prefix gfx115 does not match Medusa gfx117.
+    if (starts_with(gfx, "gfx115") && arch_model_hash != kNoModelArch) {
+        return Profile::Hip;
+    }
+#endif
+    // 4-5. Prefix buckets. gfx117 (Medusa) is gfx11, so it uses MIGraphX with the rest of RDNA3.5.
+    if (starts_with(gfx, "gfx11")) return Profile::MIGraphX;   // RDNA3 / RDNA3.5 (incl. Medusa)
     if (starts_with(gfx, "gfx12")) return Profile::MIGraphX;   // RDNA4
     return Profile::DirectX;                                   // pre-gfx11 (gfx9/gfx10)
 }

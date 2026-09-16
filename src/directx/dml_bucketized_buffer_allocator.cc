@@ -3,6 +3,8 @@
 
 #include "dml_bucketized_buffer_allocator.h"
 
+#include "common/ort_api_version.h"
+
 namespace dml_ep {
 
 PluginDmlAllocationInfo::~PluginDmlAllocationInfo() {
@@ -33,7 +35,7 @@ DmlBucketizedBufferAllocator::DmlBucketizedBufferAllocator(
     D3D12_RESOURCE_STATES initialState,
     std::unique_ptr<DmlSubAllocator>&& subAllocator) 
     :
-    OrtAllocator{ORT_API_VERSION}
+    OrtAllocator{NegotiatedOrtApiVersion()}
     , m_device(device)
     , m_heapProperties(heapProps)
     , m_heapFlags(heapFlags)

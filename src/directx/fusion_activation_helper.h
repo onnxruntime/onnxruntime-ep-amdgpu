@@ -217,7 +217,11 @@ inline bool ReadRuntimeShape(
     size_t elem_size = (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) ? 2 : 4;
     out_sizes.resize(rank);
     for (size_t i = 0; i < rank; ++i)
-        out_sizes[i] = static_cast<uint32_t>(dims[i] > 0 ? dims[i] : 1);
+        // Preserve a genuine 0 dim (empty tensor) so callers can detect it and
+        // no-op the way ORT's DML EP does — DML descriptors can't represent a
+        // zero-sized dim, so an empty tensor must never reach compile/bind.
+        // Only a symbolic/dynamic dim (< 0) is clamped to a 1 placeholder.
+        out_sizes[i] = static_cast<uint32_t>(dims[i] >= 0 ? dims[i] : 1);
     // DML requires TotalTensorSizeInBytes to be DWORD-aligned (multiple of 4).
     uint64_t raw = static_cast<uint64_t>(elem_count * elem_size);
     out_bytes = (raw + 3u) & ~uint64_t(3u);

@@ -18,7 +18,7 @@ using AllocatorUniquePtr = std::unique_ptr<BaseAllocator>;
 
 struct CpuAllocator : BaseAllocator {
     explicit CpuAllocator(const OrtMemoryInfo* mem_info) : memory_info{mem_info} {
-        version = ORT_API_VERSION;
+        version = NegotiatedOrtApiVersion();
         Alloc = AllocImpl;
         Free = FreeImpl;
         Info = InfoImpl;

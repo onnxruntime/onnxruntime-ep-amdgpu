@@ -136,6 +136,13 @@ size_t DmlDataTypeSize(DML_TENSOR_DATA_TYPE dtype);
 // Build a DmlTensorInfo from sizes and data type, with 4D padding and alignment.
 DmlTensorInfo MakeTensorInfo(const std::vector<uint32_t>& sizes, DML_TENSOR_DATA_TYPE dtype);
 
+// Build a real (non-passthrough) DML_OPERATOR_ELEMENT_WISE_IDENTITY that copies
+// `tensor` to an identically-shaped output. Used to materialize a shape-only
+// passthrough op (Reshape/Squeeze/Unsqueeze/Flatten) when its output must exist
+// as a real DML node — e.g. when that output is a partition graph output and so
+// needs an outgoing DML output edge that an elided passthrough cannot provide.
+TranslatedOp BuildIdentityOp(const DmlTensorInfo& tensor);
+
 // Build a DmlTensorInfo placing source dims at a given axis within a target
 // dimension count.  Mirrors ORT's TensorDesc(placement=C, LeftAligned) pattern.
 // e.g. sizes=[384], placement=1, target_dim_count=4 → [1,384,1,1]

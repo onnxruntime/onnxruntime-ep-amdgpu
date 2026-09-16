@@ -70,7 +70,7 @@ telemetry::Backend BackendForProfile(Profile profile) noexcept {
 
 ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view ep_name,
         const Ort::ConstSessionOptions& session_options, const OrtLogger* logger)
-    : OrtEp{ORT_API_VERSION},
+    : OrtEp{NegotiatedOrtApiVersion()},
       ApiPtrs{factory.ort_api, factory.ep_api, factory.model_editor_api},
       factory_{factory}, ep_name_{ep_name}, logger_{logger}
 {
@@ -102,6 +102,17 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     OrtEp::OnRunEnd = [](OrtEp* this_, const OrtRunOptions* run_options, bool sync_stream) noexcept {
         API_CALL_S(ExecutionProvider, this_, OnRunEnd, run_options, sync_stream);
     };
+#if ORT_API_VERSION >= 27
+    OrtEp::OnSessionInitializationEnd = [](OrtEp* this_) noexcept {
+        API_CALL_S(ExecutionProvider, this_, OnSessionInitializationEnd);
+    };
+#endif
+    // Wired for every profile so allocators resolve through this EP rather than factory_'s
+    // process-global backend slot, which the next session's CreateEp overwrites.
+    OrtEp::CreateAllocator = [](OrtEp* this_, const OrtMemoryInfo* memory_info,
+                                OrtAllocator** allocator) noexcept {
+        API_CALL_S(ExecutionProvider, this_, CreateAllocator, memory_info, allocator);
+    };
     OrtEp::CreateSyncStreamForDevice = [](OrtEp* this_, const OrtMemoryDevice* memory_device,
                                           OrtSyncStreamImpl** stream) noexcept {
         API_CALL_S(ExecutionProvider, this_, CreateSyncStreamForDevice, memory_device, stream);
@@ -121,13 +132,14 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     THROW_IF_ERROR(ort_api.GetSessionOptionsConfigEntries(session_options, &ort_key_value_pairs));
 
     const Ort::KeyValuePairs key_value_pairs{ort_key_value_pairs};
+    const auto config_entries = key_value_pairs.GetKeyValuePairs();
     const std::string ep_prefix{"ep." + lowercase + "."};
 
     OrtSessionOptions* local_session_options{};
     THROW_IF_ERROR(ort_api.CreateSessionOptions(&local_session_options));
 
     ProviderOptions provider_options;
-    for (const auto& [key, value] : key_value_pairs.GetKeyValuePairs()) {
+    for (const auto& [key, value] : config_entries) {
         if (key.rfind(ep_prefix, 0) == 0) {
             provider_options.emplace(key.substr(ep_prefix.length()), value);
         } else {
@@ -136,7 +148,6 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     }
 
     const ProviderInfo info{provider_options};
-    backend_ = BackendForProfile(info.profile);
 
     // Telemetry is an internal EP facility. It is enabled by default and uses the
     // platform default directory (LocalLow on Windows).
@@ -174,8 +185,20 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
             }
             return Profile::MIGraphX;  // preserve the historical default on query failure
         }
-        const Profile chosen = select_backend(prop.gcnArchName, model_arch_hash(info.model_arch),
+
+        Profile chosen = select_backend(prop.gcnArchName, model_arch_hash(info.model_arch),
                                               is_webnn(info.model_fw), info.profile);
+
+        if (info.profile != Profile::Auto) {
+            if (info.profile == Profile::Hip && info.profile != chosen)
+            {
+                std::cout << "[warn] explicit profile: " << profile_name(info.profile)
+                          << ", does not match ideal profile: " << profile_name(chosen)
+                          << ", might encounter issues."
+                          << std::endl;
+            }
+            chosen = info.profile;
+        }
         if (trace) {
             std::cout << "[amdgpu-routing] arch=\"" << prop.gcnArchName << "\""
                       << " model_arch=" << (info.model_arch ? *info.model_arch : "(none)")
@@ -189,21 +212,20 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
 #ifdef USE_DML
     const auto create_directx_backend = [&] {
         THROW_IF_ERROR(factory.CreateDirectXBackend(local_session_options, logger, backend_ep_));
-        // DirectML manages its own per-session GPU allocator (DmlBucketizedBufferAllocator)
-        // via EP-level CreateAllocator. Wire it now that we know the backend is DirectML.
-        // MIGraphX allocators are handled at factory level — leave OrtEp::CreateAllocator null
-        // so ORT falls back to ep_factory_.CreateAllocator (the Allocator wrapper).
-        OrtEp::CreateAllocator = [](OrtEp* this_, const OrtMemoryInfo* memory_info,
-                                    OrtAllocator** allocator) noexcept {
-            API_CALL_S(ExecutionProvider, this_, CreateAllocator, memory_info, allocator);
-        };
     };
 #endif
 
     const auto create_hip_backend = [&] {
-        // hip backend manages allocator/data-transfer at the backend factory level,
-        // reached through the amdgpu Allocator/DataTransfer wrappers — leave
-        // OrtEp::CreateAllocator null so ORT falls back to ep_factory_.CreateAllocator.
+        // Hip shares the AMDGPU EP name: forward ep.<amdgpu>.* except owned "profile".
+        for (const auto& [key, value] : config_entries) {
+            if (key.rfind(ep_prefix, 0) != 0) {
+                continue;
+            }
+            if (key.substr(ep_prefix.length()) == provider_option::kProfile) {
+                continue;
+            }
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(local_session_options, key.c_str(), value.c_str()));
+        }
         THROW_IF_ERROR(factory.CreateHipBackend(local_session_options, logger, backend_ep_));
     };
 
@@ -240,6 +262,12 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 local_session_options,
                 get_name(mgx_ep::provider_option::kExhaustiveTune).c_str(),
                 std::to_string(info.exhaustive_tune.value()).c_str()));
+        }
+        if (info.compute_mode.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kComputeMode).c_str(),
+                info.compute_mode.value().c_str()));
         }
         if (info.mlss_use_specific_ops.has_value()) {
             THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
@@ -296,6 +324,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     // Explicit profile is honored; Auto/Optimized derives from (ASIC, model_arch). select_backend()
     // (inside route_by_heuristic) applies both, so the result covers every profile value.
     const Profile effective = route_by_heuristic();
+    backend_ = BackendForProfile(effective);
 
 #ifdef USE_DML
     if (effective == Profile::Eager) {
@@ -407,11 +436,35 @@ Ort::Status ExecutionProvider::OnRunStart(const OrtRunOptions* run_options) cons
 
 Ort::Status ExecutionProvider::CreateAllocator(const OrtMemoryInfo* memory_info,
     OrtAllocator** allocator) const noexcept {
-    EP_CALL_S(backend_ep_, CreateAllocator, memory_info, allocator);
+    // DirectML implements this on its OrtEp; migraphx and hip implement it on their factory.
+    // Prefer the former, as ORT itself does. The explicit null check is needed because
+    // EP_CALL_S reports a missing function pointer as success, leaving *allocator unset.
+    if (backend_ep_ != nullptr && backend_ep_->CreateAllocator != nullptr) {
+        EP_CALL_S(backend_ep_, CreateAllocator, memory_info, allocator);
+    }
+    if (backend_ep_factory_ == nullptr) {
+        return MAKE_STATUS(ORT_EP_FAIL, "CreateAllocator: invalid backend factory");
+    }
+    RETURN_IF_ERROR(backend_ep_factory_->CreateAllocator(backend_ep_factory_, memory_info,
+        nullptr /*allocator_options*/, allocator));
+    return STATUS_OK;
 }
 
 Ort::Status ExecutionProvider::OnRunEnd(const OrtRunOptions* run_options, bool sync_stream) const noexcept {
     EP_CALL_S(backend_ep_, OnRunEnd, run_options, sync_stream);
+}
+
+Ort::Status ExecutionProvider::OnSessionInitializationEnd() const noexcept {
+    if (backend_ep_ == nullptr) {
+        return MAKE_STATUS(ORT_EP_FAIL, "OnSessionInitializationEnd: invalid backend");
+    }
+#if ORT_API_VERSION >= 27
+    if (NegotiatedOrtApiVersion() >= kSessionInitEndApiVersion &&
+        backend_ep_->OnSessionInitializationEnd != nullptr) {
+        RETURN_IF_ERROR(backend_ep_->OnSessionInitializationEnd(backend_ep_));
+    }
+#endif
+    return STATUS_OK;
 }
 
 Ort::Status ExecutionProvider::CreateSyncStreamForDevice(const OrtMemoryDevice* memory_device,

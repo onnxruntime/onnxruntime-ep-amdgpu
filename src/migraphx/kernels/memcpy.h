@@ -10,7 +10,7 @@ namespace mgx_ep {
 struct MemcpyKernel : OrtKernelImpl {
 protected:
     MemcpyKernel(const Ort::KernelInfo& kernel_info, void* state)
-        : OrtKernelImpl{ORT_API_VERSION}, kernel_info_{kernel_info}, state_{state} {}
+        : OrtKernelImpl{NegotiatedOrtApiVersion()}, kernel_info_{kernel_info}, state_{state} {}
 
     template <typename T>
     static Ort::Status CreateImpl(const OrtKernelInfo* kernel_info, void* state, OrtKernelImpl*& kernel) noexcept;

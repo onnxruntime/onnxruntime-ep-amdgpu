@@ -10,6 +10,7 @@
 #include "core/graph/abi_graph_types.h"
 #include "core/framework/onnxruntime_typeinfo.h"
 #include "core/framework/abi_safe_attr_utils.h"
+#include "common/ort_api_version.h"
 using namespace ONNX_NAMESPACE;
 
 namespace onnxruntime {
@@ -250,7 +251,7 @@ const TypeProto* ProtoHelperNodeContext::getOutputType(size_t index) const {
 }
 
 AbiSafeProtoHelperNodeContext::AbiSafeProtoHelperNodeContext(const OrtNodePlugin* node)
-    : plugin_node_(node), api_(OrtGetApiBase()->GetApi(ORT_API_VERSION))
+    : plugin_node_(node), api_(OrtGetApiBase()->GetApi(NegotiatedOrtApiVersion()))
 {
     InitializeFromPlugin(node);
 }

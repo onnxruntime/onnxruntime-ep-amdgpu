@@ -22,7 +22,10 @@ else()
             DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
-set_target_properties(hip-ep PROPERTIES OUTPUT_NAME "hip-backend")
+
+if (USE_AMDGPU)
+    set_target_properties(hip-ep PROPERTIES OUTPUT_NAME "hip-backend")
+endif ()
 
 add_version_info(
         TARGET hip-ep

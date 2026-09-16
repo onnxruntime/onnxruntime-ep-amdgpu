@@ -75,7 +75,7 @@ ExternalMemoryHandle::ExternalMemoryHandle(const OrtExternalMemoryDescriptor& de
     hipExternalMemory_t hip_ext_memory, void* mapped_ptr) noexcept
     : OrtExternalMemoryHandle{}, hip_ext_memory_{hip_ext_memory}, mapped_ptr_{mapped_ptr}
 {
-    version = ORT_API_VERSION;
+    version = NegotiatedOrtApiVersion();
     descriptor = descriptor_in;
     Release = ReleaseImpl;
 }
@@ -94,7 +94,7 @@ void ORT_API_CALL ExternalMemoryHandle::ReleaseImpl(OrtExternalMemoryHandle* han
 ExternalSemaphoreHandle::ExternalSemaphoreHandle(hipExternalSemaphore_t hip_ext_semaphore) noexcept
     : OrtExternalSemaphoreHandle{}, hip_ext_semaphore_{hip_ext_semaphore}
 {
-    version = ORT_API_VERSION;
+    version = NegotiatedOrtApiVersion();
     Release = ReleaseImpl;
 }
 
@@ -112,7 +112,7 @@ void ORT_API_CALL ExternalSemaphoreHandle::ReleaseImpl(OrtExternalSemaphoreHandl
 ExternalResourceImporter::ExternalResourceImporter(const ApiPtrs& api_ptrs, int device_id)
     : OrtExternalResourceImporterImpl{}, ApiPtrs{api_ptrs}, device_id_{device_id}
 {
-    ort_version_supported = ORT_API_VERSION;
+    ort_version_supported = NegotiatedOrtApiVersion();
 
     CanImportMemory = CanImportMemoryImpl;
     ImportMemory = ImportMemoryImpl;

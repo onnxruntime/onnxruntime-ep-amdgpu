@@ -16,13 +16,14 @@
 #include "mgx_ep.h"
 #include "mgx_factory.h"
 #include "mgx_interop.h"
+#include "mgx_options.h"
 
 #include "mgx_kernel_reg.h"
 
 namespace mgx_ep {
 
 ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const char* ep_name, const Ort::Logger& default_logger)
-        : OrtEpFactory{ORT_API_VERSION}, ApiPtrs{api_ptrs}, default_logger_{default_logger}, ep_name_{ep_name}
+        : OrtEpFactory{NegotiatedOrtApiVersion()}, ApiPtrs{api_ptrs}, default_logger_{default_logger}, ep_name_{ep_name}
 {
     OrtEpFactory::GetName = [](const OrtEpFactory* this_) noexcept {
         API_CALL_T(const ProviderFactory, this_, GetName, "invalid object pointer");
@@ -259,7 +260,20 @@ try {
         return ORT_MAKE_STATUS(ORT_INVALID_ARGUMENT, "memory_device cannot be nullptr");
     }
     const int device_id{static_cast<int>(ep_api.MemoryDevice_GetDeviceId(memory_device))};
-    auto sync_stream{std::make_unique<hip::SyncStream>(*this, device_id, stream_options)};
+    // Adopt an application-owned stream if one was supplied via stream_options,
+    // mirroring the built-in EP's user_compute_stream path. Otherwise SyncStream
+    // creates and owns its own non-blocking stream.
+    hipStream_t external_stream{nullptr};
+    if (static_cast<const OrtKeyValuePairs*>(stream_options) != nullptr) {
+        if (const char* value{stream_options.GetValue(std::string{provider_option::kUserComputeStream}.c_str())};
+            value != nullptr) {
+            std::size_t address{};
+            if (TryParseStringWithClassicLocale(value, address) && address != 0) {
+                external_stream = reinterpret_cast<hipStream_t>(address);
+            }
+        }
+    }
+    auto sync_stream{std::make_unique<hip::SyncStream>(*this, device_id, external_stream)};
     stream = sync_stream.release();
     return STATUS_OK;
 } catch (const Ort::Exception& e) {
@@ -375,9 +389,10 @@ OrtStatus* CreateEpFactories(const char* registration_name, const OrtApiBase* or
             SetDllDirectoryW(path.parent_path().native().c_str());
         }
 #endif
-        const OrtApi* ort_api{ort_api_base->GetApi(ORT_API_VERSION)};
+        const OrtApi* ort_api{NegotiateOrtApi(*ort_api_base, kMinOrtApiVersion)};
         if (ort_api == nullptr) {
-            RETURN_STATUS(ORT_EP_FAIL, "Ort API not available: ", ORT_API_VERSION);
+            RETURN_STATUS(ORT_EP_FAIL, "onnxruntime runtime too old: migraphx-ep requires ORT API >= ",
+                kMinOrtApiVersion);
         }
         const OrtEpApi* ep_api{ort_api->GetEpApi()};
         const OrtModelEditorApi* model_editor_api{ort_api->GetModelEditorApi()};
