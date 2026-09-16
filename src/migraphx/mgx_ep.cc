@@ -38,6 +38,7 @@
 #include "mgx_ep_ctx.h"
 #include "mgx_hip_graph.h"
 #include "mgx_info.h"
+#include "mgx_mlss_heuristics.h"
 #include "mgx_precompile.h"
 #include "mgx_program_ops.h"
 #include "mgx_utils.h"
@@ -1179,6 +1180,13 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     Ort::Graph sorted_graph{graph.GetGraphView(sorted_nodes)};
     ONNX_NAMESPACE::ModelProto model_proto{};
     RETURN_IF_ERROR(GraphToProto(sorted_graph, model_proto));
+    const auto mlss_graph_features{AnalyzeMlssGraph(model_proto)};
+    const std::string effective_mlss_use_specific_ops{
+        !mlss_use_specific_ops_.empty()
+            ? mlss_use_specific_ops_
+            : (ShouldForceMlssConv(compute_capability_, mlss_graph_features) ? "conv" : "")};
+    const std::string effective_mxr_prefix{
+        mxr_prefix + hash::ToHex(std::string_view{effective_mlss_use_specific_ops}) + "-"};
     std::string onnx_string;
     if (!model_proto.SerializeToString(&onnx_string) || onnx_string.empty()) {
         return Ort::Status{"Serializing a model proto to string failed!", ORT_EP_FAIL};
@@ -1233,7 +1241,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         if (!use_plan_cache) {
         fs::path mxr_path;
         if (!effective_cache_dir.empty()) {
-            mxr_path = effective_cache_dir / (mxr_prefix + input_shapes_hash_hex + ".mxr");
+            mxr_path = effective_cache_dir / (effective_mxr_prefix + input_shapes_hash_hex + ".mxr");
         }
         loaded_from_cache = !force_recompile_ && load_compiled_program(program, mxr_path);
         backend_telemetry_.loaded_from_cache = loaded_from_cache;
@@ -1245,7 +1253,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             migraphx::program_parameters params;
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
-            compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_, compute_mode_,
+            compile_program(program, t_, exhaustive_tune_, effective_mlss_use_specific_ops, compute_mode_,
                 problem_cache_paths_);
             // context_enable needs this file on disk even if caching is otherwise disabled.
             if (!disable_compiled_model_caching_ || context_enable_) {
@@ -1261,7 +1269,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
 
     if (context_enable_) {
         // input_shapes_hash_hex is non-empty here: the RETURN_IF above requires has_input_shape.
-        const fs::path ep_context_mxr_path{mxr_prefix + input_shapes_hash_hex + ".mxr"};
+        const fs::path ep_context_mxr_path{effective_mxr_prefix + input_shapes_hash_hex + ".mxr"};
 
         EpContextNodeHelper ep_context_helper{*this, sorted_graph, fused_node};
         RETURN_IF_ERROR(ep_context_helper.CreateEpContextNode(ep_context_mxr_path, effective_cache_dir,
@@ -1284,7 +1292,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             has_input_shape,
             dump_subgraphs_,
             exhaustive_tune_,
-            mlss_use_specific_ops_,
+            effective_mlss_use_specific_ops,
             dynamic_ranges_,
             input_name_indices,
             output_name_indices,
@@ -1295,7 +1303,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             disable_compiled_model_caching_,
             force_recompile_,
             external_data_dir_,
-            mxr_prefix,
+            effective_mxr_prefix,
             problem_cache_paths_,
         });
 
@@ -1345,13 +1353,14 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     compute_state.defer_compilation = true;
     if (use_plan_cache) {
         RETURN_IF_ERROR(PreloadMxrPrograms(pre_plan, input_name_indices, compute_state.cached_programs,
-            force_recompile_, effective_cache_dir, mxr_prefix));
+            force_recompile_, effective_cache_dir, effective_mxr_prefix));
         if (precompile_at_load_) {
             RETURN_IF_ERROR(CompileMissingPrograms(pre_plan, input_name_indices, onnx_string,
                 compute_state.cached_programs, t_, enable_fp16_, enable_bf16_, enable_int8_, enable_fp8_,
-                int8_calibration_cache_available_, dynamic_ranges_, exhaustive_tune_, mlss_use_specific_ops_,
-                compute_mode_, problem_cache_paths_, disable_compiled_model_caching_, model_path,
-                external_data_dir_, effective_cache_dir, mxr_prefix));
+                int8_calibration_cache_available_, dynamic_ranges_, exhaustive_tune_,
+                effective_mlss_use_specific_ops, compute_mode_, problem_cache_paths_,
+                disable_compiled_model_caching_, model_path, external_data_dir_, effective_cache_dir,
+                effective_mxr_prefix));
         }
         if (!compute_state.cached_programs.empty()) {
             compute_state.program = SelectDefaultProgram(compute_state.cached_programs, pre_bucketed,
