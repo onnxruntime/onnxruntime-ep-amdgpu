@@ -7,6 +7,7 @@
 #include <limits>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace mgx_ep {
@@ -62,6 +63,7 @@ std::uint64_t AttributeProduct(
 MlssGraphFeatures AnalyzeMlssGraph(const ONNX_NAMESPACE::ModelProto& model) {
     MlssGraphFeatures features{};
     const auto& graph{model.graph()};
+    features.node_count = static_cast<std::uint64_t>(graph.node_size());
     std::unordered_map<std::string, const ONNX_NAMESPACE::TensorProto*> tensors;
     tensors.reserve(static_cast<std::size_t>(graph.initializer_size() + graph.node_size()));
     for (const auto& initializer : graph.initializer()) {
@@ -76,7 +78,17 @@ MlssGraphFeatures AnalyzeMlssGraph(const ONNX_NAMESPACE::ModelProto& model) {
         }
     }
 
+    std::unordered_set<std::string> initializer_names;
+    initializer_names.reserve(static_cast<std::size_t>(graph.initializer_size()));
+    for (const auto& initializer : graph.initializer()) {
+        initializer_names.insert(initializer.name());
+    }
+    // Skip initializer-as-input entries from old Caffe-converted graphs so
+    // channel/spatial stats describe activations, not weight tensors.
     for (const auto& input : graph.input()) {
+        if (initializer_names.count(input.name()) != 0) {
+            continue;
+        }
         if (!input.type().has_tensor_type() || !input.type().tensor_type().has_shape()) {
             continue;
         }

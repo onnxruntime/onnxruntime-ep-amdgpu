@@ -1253,7 +1253,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             migraphx::program_parameters params;
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
-            compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_, compute_mode_,
+            compile_program(program, t_, exhaustive_tune_, effective_mlss_use_specific_ops, compute_mode_,
                 problem_cache_paths_);
             // context_enable needs this file on disk even if caching is otherwise disabled.
             if (!disable_compiled_model_caching_ || context_enable_) {
@@ -1303,7 +1303,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             disable_compiled_model_caching_,
             force_recompile_,
             external_data_dir_,
-            mxr_prefix,
+            effective_mxr_prefix,
             problem_cache_paths_,
         });
 
@@ -1353,13 +1353,14 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     compute_state.defer_compilation = true;
     if (use_plan_cache) {
         RETURN_IF_ERROR(PreloadMxrPrograms(pre_plan, input_name_indices, compute_state.cached_programs,
-            force_recompile_, effective_cache_dir, mxr_prefix));
+            force_recompile_, effective_cache_dir, effective_mxr_prefix));
         if (precompile_at_load_) {
             RETURN_IF_ERROR(CompileMissingPrograms(pre_plan, input_name_indices, onnx_string,
                 compute_state.cached_programs, t_, enable_fp16_, enable_bf16_, enable_int8_, enable_fp8_,
-                int8_calibration_cache_available_, dynamic_ranges_, exhaustive_tune_, mlss_use_specific_ops_,
-                compute_mode_, problem_cache_paths_, disable_compiled_model_caching_, model_path,
-                external_data_dir_, effective_cache_dir, mxr_prefix));
+                int8_calibration_cache_available_, dynamic_ranges_, exhaustive_tune_,
+                effective_mlss_use_specific_ops, compute_mode_, problem_cache_paths_,
+                disable_compiled_model_caching_, model_path, external_data_dir_, effective_cache_dir,
+                effective_mxr_prefix));
         }
         if (!compute_state.cached_programs.empty()) {
             compute_state.program = SelectDefaultProgram(compute_state.cached_programs, pre_bucketed,
