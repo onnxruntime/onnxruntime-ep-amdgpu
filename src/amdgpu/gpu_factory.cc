@@ -149,8 +149,22 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     custom_op_backends_.push_back(dml_ep_factory_);
 #endif
 
-#ifdef _WIN32
-    // Share one VRAM copy of identical weight literals across programs.  Measured
+#ifdef _WIN32  
+    // MIGraphX keeps its INT4 M=1 GEMV fusion off by default; turn it on for this EP.
+    //
+    // This must be set HERE, before the backend is loaded, and not from inside
+    // migraphx-backend.dll. MIGraphX reads the variable with std::getenv from src/env.cpp, which
+    // builds into migraphx.dll -- and migraphx.dll is reached through a chain of static imports
+    // from migraphx-backend.dll, so its CRT has already seeded its own copy of the environment
+    // before any code in that dll runs. With a static CRT nothing written afterwards can reach
+    // it. amdgpu-ep.dll loads the backend dynamically, so code above this line runs before
+    // migraphx.dll exists in the process at all.
+    //
+    // Note this is process-global and unconditional: enabled() treats any present value as on,
+    // so MIGRAPHX_ENABLE_INT4_GEMV=0 in the environment will NOT switch it back off.
+    ::SetEnvironmentVariableA("MIGRAPHX_ENABLE_INT4_GEMV", "1");
+
+  // Share one VRAM copy of identical weight literals across programs.  Measured
     // ~45% less device memory (2499 -> 1292 MB on DeepSeek-1L, 2642 -> 1450 MB on
     // Llama-3.2-1B, gfx1201) with prefill and decode latency unchanged and generated
     // token IDs identical to baseline.
