@@ -43,9 +43,8 @@ constexpr std::uint64_t kNoModelArch = 0;
 
 // (1) Known LLM model_arch families (hashed). Currently the Windows ML P0 LLM set that is tested and
 //     supported. "llm" is a generic forward-compat marker. This list does not gate HIP: on gfx115x
-//     (Strix, Halo, Krackan, Gorgon Point) and gfx117x (Medusa), Auto routes to HIP whenever
-//     model_arch is present (any non-empty value OGA sends). kLlmModelArch is the documented P0 set
-//     only.
+//     and gfx117x, Auto routes to HIP whenever model_arch is present (any non-empty value OGA
+//     sends). kLlmModelArch is the documented P0 set only.
 //     Per-(arch, model) pinning goes in kArchModelBackend below, which IS live.
 //     TO ADD AN LLM FAMILY: add one `fnv1a("normalized_name")` entry (and bump the array size).
 constexpr std::array<std::uint64_t, 5> kLlmModelArch{{
