@@ -59,10 +59,10 @@ inline bool is_webnn(const std::optional<std::string>& model_fw) {
 // or Optimized) is honored/dispatched as-is. In Auto mode, in priority order:
 //   1. WebNN caller                   -> DirectML (browser/WebNN compatibility carve-out, all ASICs)
 //   2. kArchModelBackend (arch prefix + model_arch) override, if any row matches
-//   3. HIP-enabled gfx115x + present model_arch -> Hip
-//      (Strix gfx1150, Halo gfx1151, Krackan gfx1152, GPT3/Krackan2e gfx1153, and GPT SKUs
-//      that share 1150/1152. OGA gen/LLM hint; any non-empty value. Not a kLlmModelArch scan.)
-//   4. gfx11 and newer                -> MIGraphX (includes Medusa gfx117x)
+//   3. HIP-enabled gfx115x / gfx117x + present model_arch -> Hip
+//      (Strix/Halo/Krackan/GPT on gfx115*; Medusa on gfx117*. OGA gen/LLM hint; any non-empty
+//      value. Not a kLlmModelArch scan.)
+//   4. gfx11 and newer                -> MIGraphX
 //   5. everything below gfx11 (gfx9/gfx10) -> DirectML
 inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_hash, bool is_webnn,
                               Profile profile) {
@@ -77,14 +77,15 @@ inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_has
         }
     }
 #ifdef USE_HIP
-    // 3. gfx115x (Strix / Halo / Krackan / Gorgon Point): a present model_arch is an OGA
-    //    gen/LLM session hint → HIP. Prefix gfx115 does not match Medusa gfx117.
-    if (starts_with(gfx, "gfx115") && arch_model_hash != kNoModelArch) {
+    // 3. gfx115x (Strix / Halo / Krackan / Gorgon Point) and gfx117x (Medusa): a present
+    //    model_arch is an OGA gen/LLM session hint → HIP. Do not use prefix gfx11.
+    if ((starts_with(gfx, "gfx115") || starts_with(gfx, "gfx117")) &&
+        arch_model_hash != kNoModelArch) {
         return Profile::Hip;
     }
 #endif
-    // 4-5. Prefix buckets. gfx117 (Medusa) is gfx11, so it uses MIGraphX with the rest of RDNA3.5.
-    if (starts_with(gfx, "gfx11")) return Profile::MIGraphX;   // RDNA3 / RDNA3.5 (incl. Medusa)
+    // 4-5. Prefix buckets. Medusa without model_arch still matches gfx11 → MIGraphX.
+    if (starts_with(gfx, "gfx11")) return Profile::MIGraphX;   // RDNA3 / RDNA3.5
     if (starts_with(gfx, "gfx12")) return Profile::MIGraphX;   // RDNA4
     return Profile::DirectX;                                   // pre-gfx11 (gfx9/gfx10)
 }
