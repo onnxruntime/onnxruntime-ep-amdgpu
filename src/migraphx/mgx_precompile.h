@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -28,6 +29,35 @@ using PrecompilePlan = std::tuple<bool, bool, std::vector<std::size_t>, Map<std:
 PrecompilePlan BuildPrecompilePlan(const Ort::ConstGraph& graph, const Ort::ConstNode& fused_node,
     const Map<std::size_t>& input_name_indices, std::size_t max_dynamic_batch,
     std::string_view compile_batches);
+
+// Per-ORT-input axis-0 extent as the graph declares it, indexed by ORT input index, with
+// -1 where that dim is symbolic (i.e. it carries the batch).  Returned only when every
+// model input's shape is [axis0, <concrete dims>], which makes the whole input shape set
+// a function of the batch alone; std::nullopt otherwise.  Lets Compute() derive every
+// input's shape from one representative input instead of rescanning all of them.
+std::optional<std::vector<std::int64_t>> BuildBatchShapeProfile(const Ort::ConstGraph& graph,
+    const Ort::ConstNode& fused_node, const Map<std::size_t>& input_name_indices);
+
+// Per-ORT-input flag, indexed by ORT input index: 1 where the graph declares axis 0 as a
+// symbolic dim, i.e. that input's leading axis is the one dynamic batching varies.  Unlike
+// BuildBatchShapeProfile this says nothing about the remaining dims, so it is available
+// for models whose other axes are dynamic too.  Returns an empty vector when the graph
+// does not declare a shape for every model input, or when no input has a symbolic axis 0
+// (there would be nothing to read the batch from).
+std::vector<char> BuildBatchAxisMask(const Ort::ConstGraph& graph,
+    const Ort::ConstNode& fused_node, const Map<std::size_t>& input_name_indices);
+
+// Nodes that combine data across axis 0.  Dynamic batching rounds a request up to a
+// compiled bucket and slices the pad rows back off the outputs, which is sound only when
+// rows are computed independently -- and the pad rows carry whatever the input arena held
+// on an earlier call, not zeros.  An op that reduces, sorts, or contracts over axis 0
+// therefore folds that stale data into the rows the caller does read, producing wrong but
+// entirely plausible numbers.  Returns a human-readable entry per offending node
+// ("OpType(name): reason"); empty means the model is safe to bucket.  Errs toward
+// reporting where the cost is low -- an axes list it cannot constant-fold counts as
+// possibly axis 0 -- but reads a negative axis on an unranked tensor as a tail axis, and
+// does not descend into If/Loop/Scan subgraph bodies.
+std::vector<std::string> FindCrossBatchNodes(const std::vector<Ort::ConstNode>& nodes);
 
 // The shape hash Compute() uses for a bucket batch size / fixed static shapes.  The
 // caller derives the integer key (hash::ShapeKeyOf) and the MXR filename (ToHex).

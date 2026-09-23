@@ -80,18 +80,17 @@ void ZeroScratchFor(ComputeState& cs, ShapeKey shape_key, hipStream_t stream);
 // Allocated once (plain hipMalloc) and reused for the compute state's lifetime
 // to avoid the stream-ordered-pool growth that hipMallocAsync incurs.
 
-// Allocate staging buffers (one per program input/output parameter).  Batched
-// buffers (batch on axis 0) are sized to max_dynamic_batch so a single set of
-// buffers serves every compiled bucket; all others are sized exactly.  When static
-// seq-padding is active the buffers are already sized to the padded (target_len)
-// shape because that is the compiled program's shape, so no extra sizing is needed
-// here.
+// Allocate staging buffers (one per program output parameter, plus the input buffers
+// when coalesce_io is off).  Batched buffers (batch on axis 0) are sized to
+// max_dynamic_batch so a single set of buffers serves every compiled bucket; all others
+// are sized exactly.  No-op if already allocated.  When static seq-padding is active the
+// buffers are already sized to the padded (target_len) shape because that is the
+// compiled program's shape, so no extra sizing is needed here.
 //
-// When buffers already exist they are reused, EXCEPT when they are too small for
-// `param_shapes` -- then they are torn down (graphs first; see the body) and rebuilt.
-// That check only runs where it can fire, and only once per shape_key: the legacy
-// hipGraph path frees staging on every program change, so its buffers always match
-// the current program and the scan would be pure per-token overhead.
+// Under coalesce_io the inputs are NOT allocated here: each compiled bucket gets its own
+// packed arena, built lazily by BindStagingParams so it can be sized to that bucket's
+// batch.  This call only reserves the shared pinned host gather area, sized from the
+// param_shapes it is handed (the largest bucket during load-time prewarm).
 void AllocateStaging(ComputeState& cs,
     const migraphx::program_parameter_shapes& param_shapes, hipStream_t stream,
     const DynamicBatchContext& dyn, ShapeKey shape_key);
@@ -125,11 +124,25 @@ StagingBindResult BindStagingParams(ComputeState& cs,
     const migraphx::program_parameter_shapes& param_shapes,
     ShapeKey shape_key, hipStream_t stream);
 
+// Hand each pre-bound output's staging buffer to ORT as the output tensor's storage
+// instead of letting ORT allocate one (see hip::ArmOutputAlloc), so the copy-back below
+// can be skipped.  Works for a batch-padded call as well: the ORT tensor is reported at
+// the requested batch while the buffer we lend is sized for the whole compiled bucket,
+// so the program keeps writing target_batch rows into a buffer ORT believes is shorter
+// -- the pad rows live past the tensor's end but inside the loan.  ORT may decline the
+// loan for an output it has already bound (io-binding), so `bind.output_borrowed` records
+// the per-output outcome and the return value says whether every output was borrowed.
+// Must not be used while seq padding is active (that slice is strided, not a prefix).
+bool BorrowStagingOutputs(StagingBindResult& bind,
+    const Ort::KernelContext& ctx, const DynamicBatchContext& dyn);
+
 // Copy staging output buffers back into the ORT output tensors, slicing batched
 // outputs down to the requested batch when dynamic batching is active, and slicing
 // named outputs down to real_len on their token axis when static seq-padding is active.
 // The per-output staging source pointer is read from bind.bound_output_data (resolved
 // once by BindStagingParams), so no per-call staging_outputs map lookup is needed.
+// Outputs flagged in bind.output_borrowed are skipped: ORT is already pointing at the
+// staging buffer, so there is nothing to copy.
 void CopyStagingOutputsToOrt(const StagingBindResult& bind,
     const Ort::KernelContext& ctx, hipStream_t stream,
     const DynamicBatchContext& dyn,
@@ -189,9 +202,6 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
 // replay never touches it.  A drift mismatch re-captures, and repeated drift flips
 // `enable_flag` false (per-session disable) using `recapture_count`.  Requires that
 // no batch/seq padding is needed for this call (the caller guarantees this).
-// Two callers share this, each passing its own enable flag + recapture counter: the
-// pure-direct path (ORT input+output pointers, no staging copy) and the coalesced path
-// (arena input pointers + ORT output pointers).
 void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
     const Ort::KernelContext& ctx,
     migraphx::program& program,

@@ -39,6 +39,12 @@ bool ForceZeroAllOutputsEnabled() {
 // the device kernels that consume it stay aligned.
 constexpr std::size_t kArenaAlign = 256;
 
+// Gather chunking: split an arena into slices of roughly this size so the H2D for one
+// slice runs while the CPU gathers the next.  Below one slice's worth the extra copy
+// launches cost more than the overlap saves, so a small arena stays a single transfer.
+constexpr std::size_t kGatherChunkTargetBytes = 4u << 20;
+constexpr std::size_t kMaxGatherChunks = 8;
+
 // Product of a length vector (1 for an empty/scalar shape).
 std::size_t ProductOf(const std::vector<std::size_t>& lengths) {
     return std::accumulate(lengths.begin(), lengths.end(), std::size_t{1},
@@ -456,24 +462,18 @@ void ReplayHipGraph(hipStream_t stream, CapturedHipGraph& entry,
 // means an ORT buffer moved (e.g. allocator recycling) and the graph -- which
 // hard-codes device addresses -- must be re-captured.  Pointers are compared
 // positionally (same DirectBindCache order used at capture), so this is a flat
-// vector walk with no per-call map build or string hashing.  check_inputs is false when
-// the inputs are pointer-stable (coalesced arena sub-views): they cannot drift, so only
-// the outputs (+ scratch) are compared.
+// vector walk with no per-call map build or string hashing.
 bool CheckCapturedPtrsMatch(const CapturedHipGraph& entry,
     const std::vector<void*>& input_ptrs, const std::vector<void*>& output_ptrs,
-    void* scratch_ptr, bool check_inputs)
+    void* scratch_ptr)
 {
-    if (entry.captured_output_ptrs.size() != output_ptrs.size()) {
+    if (entry.captured_output_ptrs.size() != output_ptrs.size() ||
+        entry.captured_input_ptrs.size() != input_ptrs.size()) {
         return false;
     }
-    if (check_inputs) {
-        if (entry.captured_input_ptrs.size() != input_ptrs.size()) {
+    for (std::size_t i{0}; i < input_ptrs.size(); ++i) {
+        if (entry.captured_input_ptrs[i] != input_ptrs[i]) {
             return false;
-        }
-        for (std::size_t i{0}; i < input_ptrs.size(); ++i) {
-            if (entry.captured_input_ptrs[i] != input_ptrs[i]) {
-                return false;
-            }
         }
     }
     for (std::size_t i{0}; i < output_ptrs.size(); ++i) {
@@ -631,6 +631,55 @@ void ZeroScratchFor(ComputeState& cs, ShapeKey shape_key, hipStream_t stream) {
     HIP_CALL_THROW(hipMemsetAsync(it->second.data, 0, it->second.size_bytes, stream));
 }
 
+// Byte size of one bucket's packed input arena.  Every program input gets a
+// kArenaAlign-aligned slot sized exactly for this bucket's shape.  Offsets are assigned
+// in param_shapes order -- the same order BindStagingParams builds input_copies in -- so
+// the per-input arena offsets come out strictly increasing, which is what lets the
+// gather be chunked into contiguous byte ranges.
+static std::size_t PackedArenaBytes(const ComputeState& cs,
+    const migraphx::program_parameter_shapes& param_shapes)
+{
+    std::size_t offset{0};
+    for (const auto& name : param_shapes.names()) {
+        if (std::string_view{name} == kScratchParam ||
+            cs.input_name_indices.count(std::string{name}) == 0) {
+            continue;
+        }
+        offset += AlignUp(param_shapes[name].bytes(), kArenaAlign);
+    }
+    return offset;
+}
+
+// Grow the shared, double-buffered pinned host gather area to at least `bytes`.  Both
+// buffers are (re)allocated together so a call can always alternate away from the one
+// the previous call's H2D may still be reading.  Bind-time only: the stream is drained
+// first so no in-flight transfer is reading the buffers being released.
+static void EnsureCoalesceHostBuffers(ComputeState& cs, std::size_t bytes, hipStream_t stream) {
+    if (bytes == 0 || bytes <= cs.in_staging_host_bytes) {
+        return;
+    }
+    if (cs.in_staging_host_bytes > 0) {
+        HIP_CALL_THROW(hipStreamSynchronize(stream));
+    }
+    for (auto*& host : cs.in_staging_host) {
+        if (host != nullptr) {
+            (void)hipHostFree(host);
+            host = nullptr;
+        }
+    }
+    for (auto*& host : cs.in_staging_host) {
+        HIP_CALL_THROW(hipHostMalloc(&host, bytes, hipHostMallocDefault));
+        std::memset(host, 0, bytes);
+    }
+    for (auto& done : cs.in_staging_host_done) {
+        if (done == nullptr) {
+            HIP_CALL_THROW(hipEventCreateWithFlags(&done, hipEventDisableTiming));
+        }
+    }
+    cs.in_staging_host_bytes = bytes;
+    cs.in_staging_host_cur = 0;
+}
+
 // Staging capacity a program parameter needs.  Batched buffers (batch on axis 0)
 // are sized at max_dynamic_batch so the same allocation serves every compiled
 // bucket; smaller buckets bind a prefix.
@@ -735,40 +784,14 @@ void AllocateStaging(ComputeState& cs,
         return StagingBuffer{ptr, bytes, shape};
     }};
 
-    // ── Coalesced inputs: one device arena + one pinned host staging buffer ───
-    // Inputs become sub-views into the arena so bind/capture paths are unchanged,
-    // and copy gathers them host-side then issues a single H2D for the whole arena.
+    // ── Coalesced inputs ─────────────────────────────────────────────────────
+    // The input buffers are not allocated here: each compiled bucket gets its own
+    // packed arena, sized to that bucket's batch, built lazily by BindStagingParams.
+    // All this does is reserve the shared pinned host gather area up front, sized from
+    // the param_shapes we were handed -- the largest bucket during load-time prewarm --
+    // so the per-bucket binds that follow do not each grow (and re-pin) it.
     if (cs.coalesce_io) {
-        std::size_t offset{0};
-        for (const auto& name : param_shapes.names()) {
-            const std::string param_name{name};
-            if (std::string_view{name} == kScratchParam ||
-                cs.input_name_indices.count(param_name) == 0) {
-                continue;
-            }
-            const auto shape{param_shapes[name]};
-            const std::size_t bytes{buffer_bytes(shape)};
-            StagingBuffer buf{};
-            buf.size_bytes = bytes;
-            buf.shape = shape;
-            buf.arena_offset = offset;
-            buf.is_arena_view = true;
-            cs.staging_inputs.emplace(param_name, buf);
-            offset += AlignUp(bytes, kArenaAlign);
-        }
-        cs.in_arena_bytes = offset;
-
-        if (cs.in_arena_bytes > 0) {
-            // Stream-ordered arena alloc (freed via hipFreeAsync); completed by the
-            // hipStreamSynchronize at the end of AllocateStaging before first use.
-            HIP_CALL_THROW(hipMallocAsync(&cs.in_arena_dev, cs.in_arena_bytes, stream));
-            HIP_CALL_THROW(hipMemsetAsync(cs.in_arena_dev, 0, cs.in_arena_bytes, stream));
-            HIP_CALL_THROW(hipHostMalloc(&cs.in_staging_host, cs.in_arena_bytes, hipHostMallocDefault));
-            std::memset(cs.in_staging_host, 0, cs.in_arena_bytes);
-            for (auto& [param_name, buf] : cs.staging_inputs) {
-                buf.data = static_cast<char*>(cs.in_arena_dev) + buf.arena_offset;
-            }
-        }
+        EnsureCoalesceHostBuffers(cs, PackedArenaBytes(cs, param_shapes), stream);
         cs.staging_inputs_coalesced = true;
     } else {
         for (const auto& name : param_shapes.names()) {
@@ -816,50 +839,70 @@ static ComputeState::CoalesceResidency ProbeCoalesceResidency(
     return ComputeState::CoalesceResidency::kAllHost;
 }
 
-// Copy every coalesced input into its arena sub-view in one pass: gather all inputs into
-// the pinned host staging buffer, then issue one whole-arena H2D.  A batched input copies
-// only its real requested_batch rows (the pad tail is left as-is -- pad output rows are
-// sliced off downstream); others copy in full.  When refresh_ptrs is set the ORT data
-// pointers are (re)read and recorded here so the shape scan and this gather share one
-// traversal; otherwise the pointers already recorded by the scan are reused.  Requires
-// residency to be a resolved all-host state.
+// Copy every coalesced input into its slot in this bucket's arena: gather the inputs
+// into the pinned host buffer, flushing each chunk of the arena with an H2D as soon as
+// it is filled so the transfer of one chunk overlaps the gather of the next.  A batched
+// input copies only its real requested_batch rows (the pad tail is left as-is -- pad
+// output rows are sliced off downstream); others copy in full.  When refresh_ptrs is set
+// the ORT data pointers are (re)read and recorded here so the shape scan and this gather
+// share one traversal; otherwise the pointers already recorded by the scan are reused.
+// Requires residency to be a resolved all-host state and `bind` to carry an arena.
 static void CoalesceInputsCore(ComputeState& cs, const StagingBindResult& bind,
-    const Ort::KernelContext& ctx, const DynamicBatchContext& dyn,
+    const Ort::KernelContext& ctx, [[maybe_unused]] const DynamicBatchContext& dyn,
     hipStream_t stream, bool refresh_ptrs) {
-    const bool batch_pad{dyn.active && dyn.target_batch > dyn.requested_batch};
-    char* const host_base{static_cast<char*>(cs.in_staging_host)};
-    for (const auto& ib : bind.input_copies) {
-        const void* src{nullptr};
-        if (refresh_ptrs) {
-            src = ctx.GetInput(ib.ort_index).GetTensorRawData();
-            if (ib.ort_index < cs.cur_input_data.size()) {
-                cs.cur_input_data[ib.ort_index] = src;
-            }
-        } else {
-            src = ib.ort_index < cs.cur_input_data.size() ? cs.cur_input_data[ib.ort_index] : nullptr;
-            if (src == nullptr) {
-                src = ctx.GetInput(ib.ort_index).GetTensorRawData();
-            }
-        }
-        const bool batched{batch_pad && !ib.prog_lens.empty() &&
-            ib.prog_lens.front() == dyn.target_batch &&
-            ib.ort_index < cs.cur_input_axis0.size() &&
-            cs.cur_input_axis0[ib.ort_index] == static_cast<std::int64_t>(dyn.requested_batch)};
-        std::size_t copy_bytes{batched ? ib.row_bytes * dyn.requested_batch : ib.prog_bytes};
-        if (copy_bytes > ib.stage_capacity) {
-            // Truncating an input is silent data loss (wrong tokens, no error), so
-            // count it; Compute logs it once per session.  Reaching here means the
-            // staging capacity check missed a case.
-            ++cs.clamp_truncations;
-            copy_bytes = ib.stage_capacity;
-        }
-        if (copy_bytes == 0) {
-            continue;
-        }
-        std::memcpy(host_base + ib.arena_offset, src, copy_bytes);
+    // Alternate pinned buffers, and wait out the transfer that last drained the one we
+    // are about to fill, so this gather cannot overwrite bytes a previous call's H2D is
+    // still reading.  A never-recorded event is already complete, and by steady state
+    // the buffer is a full inference old, so this does not actually block.
+    const unsigned slot{cs.in_staging_host_cur};
+    char* const host_base{static_cast<char*>(cs.in_staging_host[slot])};
+    cs.in_staging_host_cur = slot ^ 1u;
+    if (cs.in_staging_host_done[slot] != nullptr &&
+        hipEventQuery(cs.in_staging_host_done[slot]) != hipSuccess) {
+        HIP_CALL_THROW(hipEventSynchronize(cs.in_staging_host_done[slot]));
     }
-    HIP_CALL_THROW(hipMemcpyAsync(cs.in_arena_dev, cs.in_staging_host,
-        cs.in_arena_bytes, hipMemcpyHostToDevice, stream));
+    char* const arena_base{static_cast<char*>(bind.arena_dev)};
+
+    for (const auto& chunk : bind.gather_chunks) {
+        const std::size_t last{chunk.first_input + chunk.input_count};
+        for (std::size_t i{chunk.first_input}; i < last; ++i) {
+            const auto& ib{bind.input_copies[i]};
+            const void* src{nullptr};
+            if (refresh_ptrs) {
+                src = ctx.GetInput(ib.ort_index).GetTensorRawData();
+                if (ib.ort_index < cs.cur_input_data.size()) {
+                    cs.cur_input_data[ib.ort_index] = src;
+                }
+            } else {
+                src = ib.ort_index < cs.cur_input_data.size() ? cs.cur_input_data[ib.ort_index] : nullptr;
+                if (src == nullptr) {
+                    src = ctx.GetInput(ib.ort_index).GetTensorRawData();
+                }
+            }
+            // Copy exactly the rows this input arrived with (its real axis-0 extent from
+            // the input scan), never the padded bucket size -- so the gather can never
+            // read past the source.  Any pad rows are left stale and sliced off the
+            // outputs downstream.  The runtime extent is the authority here, not the
+            // (static, sometimes-wrong) batch-axis mask.
+            const std::int64_t src_rows{ib.ort_index < cs.cur_input_axis0.size()
+                ? cs.cur_input_axis0[ib.ort_index] : -1};
+            std::size_t copy_bytes{src_rows > 0
+                ? ib.row_bytes * static_cast<std::size_t>(src_rows) : ib.prog_bytes};
+            if (copy_bytes > ib.stage_capacity) {
+                copy_bytes = ib.stage_capacity;
+            }
+            if (copy_bytes == 0) {
+                continue;
+            }
+            std::memcpy(host_base + ib.arena_offset, src, copy_bytes);
+        }
+        HIP_CALL_THROW(hipMemcpyAsync(arena_base + chunk.byte_offset,
+            host_base + chunk.byte_offset, chunk.byte_count, hipMemcpyHostToDevice, stream));
+    }
+    // Marks the point after which this pinned buffer is free to refill.
+    if (cs.in_staging_host_done[slot] != nullptr && !bind.gather_chunks.empty()) {
+        HIP_CALL_THROW(hipEventRecord(cs.in_staging_host_done[slot], stream));
+    }
 }
 
 void CopyInputsToStaging(ComputeState& cs,
@@ -878,7 +921,8 @@ void CopyInputsToStaging(ComputeState& cs,
     // (no names/strings/map lookups).  A device input or active seq padding (real tokens
     // at a per-slice interior offset) falls through to the per-input path below.
     const bool seq_no_pad{!seq.active || seq.target_len == seq.real_len};
-    if (cs.staging_inputs_coalesced && cs.in_staging_host != nullptr && seq_no_pad) {
+    if (cs.staging_inputs_coalesced && bind.arena_dev != nullptr &&
+        cs.in_staging_host[0] != nullptr && seq_no_pad) {
         if (cs.coalesce_residency == ComputeState::CoalesceResidency::kUnknown) {
             cs.coalesce_residency = ProbeCoalesceResidency(bind, ctx);
         }
@@ -903,13 +947,14 @@ void CopyInputsToStaging(ComputeState& cs,
             actual_shape = input_tensor.GetTensorTypeAndShapeInfo().GetShape();
         }
 
-        // A batched input arrives with requested_batch rows but the program (and
-        // staging) expect target_batch rows.  Batched == program axis-0 was bucketed up
-        // to target_batch AND the actual axis-0 (cached during the input scan, item 4 --
-        // no GetShape here) equals requested_batch; the second half rejects a fixed dim
-        // that merely coincides with target_batch.
+        // A batched input arrives with requested_batch rows but the program (and staging)
+        // expect target_batch rows.  Batched == the graph declares axis 0 as the batch,
+        // the program axis-0 was bucketed up to target_batch, AND the actual axis-0
+        // (cached during the input scan -- no GetShape here) equals requested_batch.  The
+        // last two clauses are what disambiguates when the graph could not tell us; on
+        // their own they would accept a fixed dim that merely coincides with the bucket.
         const bool batched{dyn.active && dyn.target_batch > dyn.requested_batch &&
-            !prog_lens.empty() && prog_lens.front() == dyn.target_batch &&
+            ib.batch_axis && !prog_lens.empty() && prog_lens.front() == dyn.target_batch &&
             ib.ort_index < cs.cur_input_axis0.size() &&
             cs.cur_input_axis0[ib.ort_index] == static_cast<std::int64_t>(dyn.requested_batch)};
 
@@ -936,11 +981,15 @@ void CopyInputsToStaging(ComputeState& cs,
             PadSeqTensor(src, ib.staging_data, outer, seq.real_len, seq.target_len,
                 inner, ib.element_size, stream);
         } else {
-            // Batched: copy the real requested_batch rows; unbatched: copy in full.  The
-            // pad tail is left as-is (no per-call zeroing) -- pad output rows are sliced
-            // off downstream.
-            std::size_t copy_bytes{batched ? ib.row_bytes * dyn.requested_batch
-                                           : ib.prog_bytes};
+            // Copy exactly the rows this input arrived with (its real axis-0 extent),
+            // never the padded bucket size, so we never read past the source; the pad
+            // tail is left as-is (no per-call zeroing) and sliced off the outputs
+            // downstream.  The runtime extent, not the static batch-axis mask, decides
+            // the byte count.
+            const std::int64_t src_rows{ib.ort_index < cs.cur_input_axis0.size()
+                ? cs.cur_input_axis0[ib.ort_index] : -1};
+            std::size_t copy_bytes{src_rows > 0
+                ? ib.row_bytes * static_cast<std::size_t>(src_rows) : ib.prog_bytes};
             if (copy_bytes > ib.stage_capacity) {
                 ++cs.clamp_truncations;  // silent data loss -- see the other clamp
                 copy_bytes = ib.stage_capacity;
@@ -956,15 +1005,14 @@ void CopyInputsToStaging(ComputeState& cs,
 bool TryFusedCoalesceGather(ComputeState& cs,
     const Ort::KernelContext& ctx, const DynamicBatchContext& dyn,
     ShapeKey shape_key, hipStream_t stream) {
-    if (!cs.coalesce_io || !cs.staging_inputs_coalesced ||
-        cs.in_staging_host == nullptr || cs.in_arena_dev == nullptr) {
+    if (!cs.coalesce_io || !cs.staging_inputs_coalesced || cs.in_staging_host[0] == nullptr) {
         return false;
     }
     if (cs.coalesce_residency != ComputeState::CoalesceResidency::kAllHost) {
         return false;
     }
     const auto it{cs.staging_bind_cache.find(shape_key)};
-    if (it == cs.staging_bind_cache.end()) {
+    if (it == cs.staging_bind_cache.end() || it->second.arena_dev == nullptr) {
         return false;
     }
     CoalesceInputsCore(cs, it->second, ctx, dyn, stream, /*refresh_ptrs=*/true);
@@ -972,30 +1020,91 @@ bool TryFusedCoalesceGather(ComputeState& cs,
     return true;
 }
 
+// Split the arena into contiguous slices, each covering a run of input_copies, so the
+// gather can flush a slice with an H2D while the CPU fills the next one.  Relies on the
+// arena offsets being strictly increasing in input_copies order (see PackedArenaBytes).
+// An arena smaller than one target slice stays a single transfer.
+static void BuildGatherChunks(StagingBindResult& bind) {
+    bind.gather_chunks.clear();
+    if (bind.arena_dev == nullptr || bind.arena_bytes == 0 || bind.input_copies.empty()) {
+        return;
+    }
+    const std::size_t wanted{std::clamp(bind.arena_bytes / kGatherChunkTargetBytes,
+        std::size_t{1}, kMaxGatherChunks)};
+    const std::size_t chunk_target{(bind.arena_bytes + wanted - 1) / wanted};
+    std::size_t first{0};
+    while (first < bind.input_copies.size()) {
+        const std::size_t byte_offset{bind.input_copies[first].arena_offset};
+        std::size_t last{first + 1};  // always take at least one input, however large
+        while (last < bind.input_copies.size() &&
+               bind.input_copies[last].arena_offset - byte_offset < chunk_target) {
+            ++last;
+        }
+        const std::size_t end{last < bind.input_copies.size()
+            ? bind.input_copies[last].arena_offset : bind.arena_bytes};
+        bind.gather_chunks.push_back(StagingBindResult::GatherChunk{
+            first, last - first, byte_offset, end - byte_offset});
+        first = last;
+    }
+}
+
 StagingBindResult BindStagingParams(ComputeState& cs,
     const migraphx::program_parameter_shapes& param_shapes,
     ShapeKey shape_key, hipStream_t stream)
 {
     StagingBindResult result;
-    result.hybrid.eligible = true;
-    result.hybrid.inputs_pointer_stable = true;
+
+    // Give this bucket its own packed input arena, sized to the bucket's own batch, so
+    // the H2D that flushes it moves exactly the bytes the bucket reads instead of a
+    // max_dynamic_batch-sized transfer.  Created once per bucket and pointer-stable
+    // thereafter, so it is safe to bake into a captured graph.  Plain hipMalloc (not the
+    // stream-ordered pool) for the same reason the scratch buffers use it.
+    std::size_t arena_offset{0};
+    if (cs.coalesce_io) {
+        auto& arena{cs.coalesce_arenas[shape_key]};
+        if (arena.dev == nullptr) {
+            arena.bytes = PackedArenaBytes(cs, param_shapes);
+            if (arena.bytes > 0) {
+                HIP_CALL_THROW(hipMalloc(&arena.dev, arena.bytes));
+                HIP_CALL_THROW(hipMemsetAsync(arena.dev, 0, arena.bytes, stream));
+            }
+        }
+        EnsureCoalesceHostBuffers(cs, arena.bytes, stream);
+        result.arena_dev = arena.dev;
+        result.arena_bytes = arena.bytes;
+    }
+
     for (const auto& name : param_shapes.names()) {
         const std::string param_name{name};
         if (const auto idx_it{cs.input_name_indices.find(param_name)};
             idx_it != cs.input_name_indices.end()) {
-            const auto stage_it{cs.staging_inputs.find(param_name)};
-            if (stage_it == cs.staging_inputs.end()) {
-                result.hybrid.eligible = false;  // input with no staging buffer
-                continue;
-            }
             const auto in_shape{param_shapes[name]};
-            result.params.add(name, migraphx::argument{in_shape, stage_it->second.data});
+            // Coalesced: carve the next slot out of this bucket's arena (offsets are
+            // assigned in the same param_shapes order PackedArenaBytes summed them, so
+            // they stay strictly increasing).  Otherwise use the standalone buffer.
+            void* staging{nullptr};
+            std::size_t capacity{0};
+            std::size_t offset{0};
+            if (result.arena_dev != nullptr) {
+                offset = arena_offset;
+                staging = static_cast<char*>(result.arena_dev) + offset;
+                capacity = in_shape.bytes();
+                arena_offset += AlignUp(in_shape.bytes(), kArenaAlign);
+            } else {
+                const auto stage_it{cs.staging_inputs.find(param_name)};
+                if (stage_it == cs.staging_inputs.end()) {
+                    continue;  // input with no staging buffer
+                }
+                staging = stage_it->second.data;
+                capacity = stage_it->second.size_bytes;
+            }
+            result.params.add(name, migraphx::argument{in_shape, staging});
             // Flat copy-plan entry so the per-call input copy needs no name/string/map work.
             StagingInputBind ib;
             ib.ort_index = idx_it->second;
-            ib.staging_data = stage_it->second.data;
-            ib.arena_offset = stage_it->second.arena_offset;
-            ib.stage_capacity = stage_it->second.size_bytes;
+            ib.staging_data = staging;
+            ib.arena_offset = offset;
+            ib.stage_capacity = capacity;
             ib.prog_bytes = in_shape.bytes();
             const auto in_lens{in_shape.lengths()};
             ib.prog_lens.assign(in_lens.begin(), in_lens.end());
@@ -1005,19 +1114,18 @@ StagingBindResult BindStagingParams(ComputeState& cs,
             // byte count as row_bytes * requested_batch with no per-call shape read.
             ib.row_bytes = (!ib.prog_lens.empty() && ib.prog_lens.front() > 0)
                 ? ib.prog_bytes / ib.prog_lens.front() : ib.prog_bytes;
+            // Resolved once here so the per-call copy does not consult the mask: the graph
+            // is the authority on whether axis 0 is the batch, and an input it says is not
+            // batched must never be row-sliced however its extents happen to line up.
+            ib.batch_axis = InputCarriesBatch(cs, ib.ort_index);
             ib.name = param_name;
             result.input_copies.push_back(std::move(ib));
-            result.hybrid.inputs.push_back(
-                CachedDirectInput{param_name, idx_it->second, in_shape});
-            result.hybrid.cur_input_ptrs.push_back(stage_it->second.data);
         } else if (std::string_view{name} == kScratchParam) {
             if (const auto scratch{GetOrAllocScratch(cs, param_shapes, shape_key, stream)}) {
                 result.params.add(name, migraphx::argument{scratch->shape, scratch->ptr});
                 // Cache the scratch slot so replay zeroing + the drift check skip the
                 // per-call scratch_bufs lookup (entries are never erased mid-session).
                 result.scratch_slot = &cs.scratch_bufs[shape_key];
-                result.hybrid.has_scratch = true;
-                result.hybrid.scratch_shape = scratch->shape;
             }
         } else if (const auto oi{ComputeOutputIndex(name)}; oi != -1) {
             const auto stage_it{cs.staging_outputs.find(param_name)};
@@ -1043,15 +1151,64 @@ StagingBindResult BindStagingParams(ComputeState& cs,
                                                           : out_shape.bytes());
             // Precompute the total byte count so the per-call copy skips shape.bytes().
             result.bound_output_bytes.push_back(out_shape.bytes());
-            result.hybrid.outputs.push_back(CachedDirectOutput{
-                param_name, static_cast<std::size_t>(oi), out_shape,
-                std::vector<std::int64_t>{out_lens.begin(), out_lens.end()}});
-            result.hybrid.prog_output_indices.push_back(static_cast<std::size_t>(oi));
-        } else {
-            result.hybrid.eligible = false;  // unbound/literal param -> no direct bind
+            // Whole-buffer capacity (max_dynamic_batch sized), which is what bounds the
+            // loan handed to ORT when the outputs are borrowed rather than copied.
+            result.bound_output_capacity.push_back(stage_it->second.size_bytes);
         }
     }
+    result.output_borrowed.assign(result.prog_output_indices.size(), 0);
+    BuildGatherChunks(result);
     return result;
+}
+
+bool BorrowStagingOutputs(StagingBindResult& bind,
+    const Ort::KernelContext& ctx, const DynamicBatchContext& dyn)
+{
+    const std::size_t count{bind.prog_output_indices.size()};
+    bind.output_borrowed.assign(count, 0);
+    if (count == 0 || count != bind.bound_output_capacity.size()) {
+        return false;
+    }
+    // The arm is thread-local and consumed by the first device allocation, so it has to
+    // be dropped again even if GetOutput throws or declines to allocate.
+    struct OutputHintGuard {
+        ~OutputHintGuard() { hip::DisarmOutputAlloc(); }
+    };
+
+    const bool batch_sliced{dyn.active && dyn.target_batch > dyn.requested_batch};
+    thread_local std::vector<std::int64_t> report_shape;
+    bool all_borrowed{true};
+    for (std::size_t i{0}; i < count; ++i) {
+        void* const staging{bind.bound_output_data[i]};
+        const auto& bucket_shape{bind.bound_output_ort_shapes[i]};
+        // Report the requested batch; the loan is sized for the whole bucket, so the pad
+        // rows the program writes land past the tensor's end but inside the buffer.
+        const std::vector<std::int64_t>* shape{&bucket_shape};
+        if (batch_sliced && !bucket_shape.empty() &&
+            static_cast<std::size_t>(bucket_shape.front()) == dyn.target_batch) {
+            report_shape.assign(bucket_shape.begin(), bucket_shape.end());
+            report_shape.front() = static_cast<std::int64_t>(dyn.requested_batch);
+            shape = &report_shape;
+        }
+        if (staging != nullptr && bind.bound_output_capacity[i] > 0) {
+            hip::ArmOutputAlloc(staging, bind.bound_output_capacity[i]);
+        }
+        void* ort_data{nullptr};
+        {
+            OutputHintGuard hint_guard;
+            auto output_tensor{ctx.GetOutput(bind.prog_output_indices[i],
+                shape->data(), shape->size())};
+            ort_data = output_tensor.GetTensorMutableRawData();
+        }
+        // ORT can hand back a buffer it already owns (io-binding), in which case the loan
+        // was not taken and this output still needs its copy.
+        if (ort_data != nullptr && ort_data == staging) {
+            bind.output_borrowed[i] = 1;
+        } else {
+            all_borrowed = false;
+        }
+    }
+    return all_borrowed;
 }
 
 void CopyStagingOutputsToOrt(const StagingBindResult& bind,
@@ -1065,6 +1222,10 @@ void CopyStagingOutputsToOrt(const StagingBindResult& bind,
         i < bind.bound_output_bytes.size() &&
         i < bind.bound_output_data.size(); ++i)
     {
+        // ORT is already pointing at this output's staging buffer -- nothing to copy.
+        if (i < bind.output_borrowed.size() && bind.output_borrowed[i] != 0) {
+            continue;
+        }
         const auto oi{bind.prog_output_indices[i]};
         // Staging source pointer resolved once at bind time (no map lookup here).
         void* const src{bind.bound_output_data[i]};
@@ -1151,21 +1312,34 @@ void FreeStaging(ComputeState& cs, hipStream_t stream) {
     // on a valid stream.  The subsequent AllocateStaging on the same stream reuses
     // the freed pool memory in stream order.
     for (auto& [name, buf] : cs.staging_inputs) {
-        // Arena sub-views are not independent allocations; the arena is freed below.
-        if (buf.data != nullptr && !buf.is_arena_view) {
+        if (buf.data != nullptr) {
             (void)hipFreeAsync(buf.data, stream);
         }
         buf.data = nullptr;
     }
-    if (cs.in_arena_dev != nullptr) {
-        (void)hipFreeAsync(cs.in_arena_dev, stream);
-        cs.in_arena_dev = nullptr;
+    // Per-bucket arenas are plain hipMalloc'd (they get baked into captured graphs, so
+    // they are kept out of the stream-ordered pool).  hipFree synchronizes the device,
+    // which also guarantees no in-flight H2D is still reading them.
+    for (auto& [key, arena] : cs.coalesce_arenas) {
+        if (arena.dev != nullptr) {
+            (void)hipFree(arena.dev);
+        }
     }
-    if (cs.in_staging_host != nullptr) {
-        (void)hipHostFree(cs.in_staging_host);
-        cs.in_staging_host = nullptr;
+    cs.coalesce_arenas.clear();
+    for (auto*& host : cs.in_staging_host) {
+        if (host != nullptr) {
+            (void)hipHostFree(host);
+            host = nullptr;
+        }
     }
-    cs.in_arena_bytes = 0;
+    for (auto& done : cs.in_staging_host_done) {
+        if (done != nullptr) {
+            (void)hipEventDestroy(done);
+            done = nullptr;
+        }
+    }
+    cs.in_staging_host_bytes = 0;
+    cs.in_staging_host_cur = 0;
     cs.staging_inputs_coalesced = false;
     // Re-verify coalesce eligibility against the next allocation's inputs.
     cs.coalesce_residency = ComputeState::CoalesceResidency::kUnknown;
@@ -1348,7 +1522,7 @@ void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
         entry != nullptr && entry->captured && entry->direct_bind)
     {
         if (!CheckCapturedPtrsMatch(*entry, dbc.cur_input_ptrs, dbc.cur_output_ptrs,
-                current_scratch, /*check_inputs=*/!dbc.inputs_pointer_stable)) {
+                current_scratch)) {
             // ORT recycled a buffer under us.  Re-capture, but if drift is
             // sustained give up on this path (permanent eager/staging fallback)
             // rather than re-capturing on every call.
