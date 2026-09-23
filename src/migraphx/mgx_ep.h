@@ -49,6 +49,8 @@ constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
 constexpr auto kPrecompileAtLoad = "ORT_MIGRAPHX_PRECOMPILE_AT_LOAD"sv;
 constexpr auto kCoalesceIO = "ORT_MIGRAPHX_COALESCE_IO"sv;
 constexpr auto kMlssUseSpecificOps = "ORT_MIGRAPHX_MLSS_USE_SPECIFIC_OPS"sv;
+// Comma-separated graph ids that skip automatic AMDMLSS
+constexpr auto kMlssExcludeGraphIds = "ORT_MIGRAPHX_MLSS_EXCLUDE_GRAPH_IDS"sv;
 constexpr auto kCpuControlFlow = "ORT_MIGRAPHX_CPU_CONTROL_FLOW"sv;
 constexpr auto kModelArch = "ORT_MIGRAPHX_MODEL_ARCH"sv;
 constexpr auto kStaticPadSeq = "ORT_MIGRAPHX_STATIC_PAD_SEQ"sv;
@@ -524,6 +526,11 @@ private:
     bool enable_int8_{};
     bool exhaustive_tune_{};
     std::string mlss_use_specific_ops_{};
+    // True when mlss_use_specific_ops_ was set by a provider option or environment variable,
+    // before the per-architecture default was applied
+    bool mlss_requested_explicitly_{};
+    // Extra graph ids from kMlssExcludeGraphIds
+    std::string mlss_exclude_graph_ids_{};
     // Ordered read-only problem-cache paths (app override, then DLL-adjacent shipped),
     // JSON-escaped for backend-option delivery.
     std::vector<std::string> problem_cache_paths_{};

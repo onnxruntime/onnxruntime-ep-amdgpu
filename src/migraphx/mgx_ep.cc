@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
@@ -74,6 +75,50 @@ struct HipDeviceGuard {
     HipDeviceGuard(const HipDeviceGuard&) = delete;
     HipDeviceGuard& operator=(const HipDeviceGuard&) = delete;
 };
+struct arch_graph_mlss_exception {
+    std::string_view arch_prefix;
+    std::string_view graph_id;
+};
+constexpr std::array<arch_graph_mlss_exception, 4> kMlssGraphExceptions{{
+    // This ResNet-50 graph id differs across the ORT 1.26 and 1.27 partitioning paths.
+    {"gfx1200", "3a0532e672db5cf"},
+    {"gfx1201", "3a0532e672db5cf"},
+    {"gfx1200", "c4c5e56652ffbf28"},
+    {"gfx1201", "c4c5e56652ffbf28"},
+}};
+
+bool GraphIdListContains(std::string_view list, std::string_view graph_id) {
+    while (!list.empty()) {
+        const auto pos{list.find(',')};
+        auto entry{list.substr(0, pos)};
+        while (!entry.empty() && std::isspace(static_cast<unsigned char>(entry.front()))) {
+            entry.remove_prefix(1);
+        }
+        while (!entry.empty() && std::isspace(static_cast<unsigned char>(entry.back()))) {
+            entry.remove_suffix(1);
+        }
+        if (!entry.empty() && entry == graph_id) {
+            return true;
+        }
+        if (pos == std::string_view::npos) {
+            break;
+        }
+        list.remove_prefix(pos + 1);
+    }
+    return false;
+}
+
+bool MlssExcludedForGraph(std::string_view gfx, std::string_view graph_id, std::string_view extra_ids) {
+    if (GraphIdListContains(extra_ids, graph_id)) {
+        return true;
+    }
+    for (const auto& row : kMlssGraphExceptions) {
+        if (row.graph_id == graph_id && gfx.substr(0, row.arch_prefix.size()) == row.arch_prefix) {
+            return true;
+        }
+    }
+    return false;
+}
 
 // TEMPORARY A/B gate (env ORT_MIGRAPHX_LEGACY_COMPUTE_SYNC). When true, Compute
 // keeps the legacy unconditional per-fused-node hipStreamSynchronize. When false
@@ -672,6 +717,9 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
         {"gfx1201", "conv"},
     }};
 
+    mlss_requested_explicitly_ = !mlss_use_specific_ops_.empty();
+    PARSE_ENV_VAR(env_var::kMlssExcludeGraphIds, mlss_exclude_graph_ids_);
+
     for (const auto& [arch, ops] : kArchMlssOps) {
         if (compute_capability_.rfind(arch, 0) == 0) {
             if (!mlss_use_specific_ops_.empty()) {
@@ -1181,10 +1229,18 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     ONNX_NAMESPACE::ModelProto model_proto{};
     RETURN_IF_ERROR(GraphToProto(sorted_graph, model_proto));
     const auto mlss_graph_features{AnalyzeMlssGraph(model_proto)};
-    const std::string effective_mlss_use_specific_ops{
+    const auto graph_id{GenerateGraphId(graph)};
+    std::string effective_mlss_use_specific_ops{
         !mlss_use_specific_ops_.empty()
             ? mlss_use_specific_ops_
             : (ShouldForceMlssConv(compute_capability_, mlss_graph_features) ? "conv" : "")};
+    if (!mlss_requested_explicitly_ && !effective_mlss_use_specific_ops.empty() &&
+        MlssExcludedForGraph(compute_capability_, graph_id, mlss_exclude_graph_ids_)) {
+        ORT_CXX_LOGF_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_INFO,
+            "[mgx-mlss] graph %s is opted out of automatic AMDMLSS ('%s') on %s",
+            graph_id.c_str(), effective_mlss_use_specific_ops.c_str(), compute_capability_.c_str());
+        effective_mlss_use_specific_ops.clear();
+    }
     const std::string effective_mxr_prefix{
         mxr_prefix + hash::ToHex(std::string_view{effective_mlss_use_specific_ops}) + "-"};
     std::string onnx_string;
