@@ -81,11 +81,6 @@ constexpr auto kBorrowOutputs = "ORT_MIGRAPHX_BORROW_OUTPUTS"sv;
 // Compute call rescans every input's shape instead of deriving them from the
 // representative input's batch. Default on.
 constexpr auto kBatchShapeProfile = "ORT_MIGRAPHX_BATCH_SHAPE_PROFILE"sv;
-// Escape hatch: when set to 1/true, downgrade the compile-time cross-batch op check from
-// a hard failure to a warning. Bucketing pads a request up to the compiled batch and the
-// pad rows hold stale arena data, so an op that folds axis 0 into its result corrupts the
-// rows the caller reads. Only set this if you know padding cannot reach those ops.
-constexpr auto kAllowCrossBatchOps = "ORT_MIGRAPHX_ALLOW_CROSS_BATCH_OPS"sv;
 }  // namespace env_vars
 
 // EP-owned device staging buffer (pointer-stable across runs so it can be
@@ -678,7 +673,6 @@ private:
     bool coalesce_io_enable_{};
     bool borrow_outputs_enable_{true};
     bool batch_shape_profile_enable_{true};
-    bool allow_cross_batch_ops_{};
     bool cpu_control_flow_enable_{};
     bool static_pad_seq_{};
     std::size_t static_pad_seq_len_{};

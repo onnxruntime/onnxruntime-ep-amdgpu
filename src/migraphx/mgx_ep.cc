@@ -653,7 +653,6 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kCoalesceIO, coalesce_io_enable_);
     PARSE_ENV_VAR(env_var::kBorrowOutputs, borrow_outputs_enable_);
     PARSE_ENV_VAR(env_var::kBatchShapeProfile, batch_shape_profile_enable_);
-    PARSE_ENV_VAR(env_var::kAllowCrossBatchOps, allow_cross_batch_ops_);
     PARSE_ENV_VAR(env_var::kStaticPadSeq, static_pad_seq_);
     // Not PARSE_ENV_VAR: we need to know whether the value was given, not just what it is.
     if (const auto pad_len_env{ParseEnvironmentVariable<std::size_t>(env_var::kStaticPadSeqLen)};
@@ -1238,31 +1237,6 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         "used with dynamic batching. Provide static input shapes before session creation. To use "
         "dynamic batching instead, disable ep.context_enable and configure "
         "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH and, optionally, ORT_MIGRAPHX_COMPILE_BATCHES.");
-
-    // Bucketing rounds a request up to a compiled batch, pads the inputs on axis 0 and
-    // slices the pad rows back off the outputs.  That is only sound when rows are
-    // independent -- and the pad rows are not zeroed, they hold whatever the input arena
-    // held on an earlier call.  An op that reduces, sorts or contracts over axis 0 folds
-    // that stale data into the rows the caller does read, yielding wrong numbers that look
-    // entirely reasonable.  Refuse to serve the model rather than let that go unnoticed.
-    if (max_dynamic_batch_ > 0) {
-        if (const auto cross_batch{FindCrossBatchNodes(sorted_nodes)}; !cross_batch.empty()) {
-            const auto listed{fmt::format("{}", fmt::join(
-                cross_batch | ranges::views::take(8), "; "))};
-            RETURN_IF(!allow_cross_batch_ops_,
-                "dynamic batching (ORT_MIGRAPHX_MAX_DYNAMIC_BATCH=", max_dynamic_batch_,
-                ") cannot be used with '", subgraph_name, "': ", cross_batch.size(),
-                " node(s) combine data across the batch axis, so the padding added to reach a "
-                "compiled batch size would corrupt the real rows. Offenders: ", listed,
-                ". Either disable dynamic batching, or set ", env_var::kAllowCrossBatchOps,
-                "=1 to proceed anyway if you know the padded rows cannot reach them.");
-            ORT_CXX_LOGF_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_WARNING,
-                "[mgx-batch] '%s': %zu node(s) combine data across the batch axis and "
-                "%s=1 is set; padded rows may corrupt results. Offenders: %s",
-                subgraph_name.c_str(), cross_batch.size(),
-                std::string{env_var::kAllowCrossBatchOps}.c_str(), listed.c_str());
-        }
-    }
 
     migraphx::program program;
     migraphx::onnx_options onnx_options;

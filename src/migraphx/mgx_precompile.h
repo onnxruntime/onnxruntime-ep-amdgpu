@@ -47,18 +47,6 @@ std::optional<std::vector<std::int64_t>> BuildBatchShapeProfile(const Ort::Const
 std::vector<char> BuildBatchAxisMask(const Ort::ConstGraph& graph,
     const Ort::ConstNode& fused_node, const Map<std::size_t>& input_name_indices);
 
-// Nodes that combine data across axis 0.  Dynamic batching rounds a request up to a
-// compiled bucket and slices the pad rows back off the outputs, which is sound only when
-// rows are computed independently -- and the pad rows carry whatever the input arena held
-// on an earlier call, not zeros.  An op that reduces, sorts, or contracts over axis 0
-// therefore folds that stale data into the rows the caller does read, producing wrong but
-// entirely plausible numbers.  Returns a human-readable entry per offending node
-// ("OpType(name): reason"); empty means the model is safe to bucket.  Errs toward
-// reporting where the cost is low -- an axes list it cannot constant-fold counts as
-// possibly axis 0 -- but reads a negative axis on an unranked tensor as a tail axis, and
-// does not descend into If/Loop/Scan subgraph bodies.
-std::vector<std::string> FindCrossBatchNodes(const std::vector<Ort::ConstNode>& nodes);
-
 // The shape hash Compute() uses for a bucket batch size / fixed static shapes.  The
 // caller derives the integer key (hash::ShapeKeyOf) and the MXR filename (ToHex).
 hash::Value ShapeHashForBucketBatch(const Map<std::size_t>& input_name_indices,
