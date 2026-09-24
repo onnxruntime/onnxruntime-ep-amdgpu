@@ -15,7 +15,7 @@ add_library(amdgpu-ep MODULE
         gpu_info.cc
         gpu_info.h
         gpu_interop.cc
-        gpu_interop.h       
+        gpu_interop.h
         gpu_stream_support.cc
         gpu_stream_support.h)
 
@@ -44,16 +44,9 @@ if(USE_DML)
 endif()
 
 if(WIN32)
-    # /DEF: is an MSVC linker flag: pass it bare under the MSVC-style driver
-    # (cl.exe / clang-cl), but forward it through a GNU-style driver (e.g. ROCm
-    # clang++) via -Wl, or it is mistaken for an input file.
-    if(MSVC)
-        set(_ep_def_flag /DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
-    else()
-        set(_ep_def_flag -Wl,/DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
-    endif()
-    set_property(TARGET amdgpu-ep APPEND_STRING
-            PROPERTY LINK_FLAGS ${_ep_def_flag})
+    set_target_properties(amdgpu-ep PROPERTIES
+        LINK_DEF_FILE "${PROJECT_SOURCE_DIR}/src/shared/symbols.def")
+
     install(TARGETS amdgpu-ep
             DESTINATION ".")
     install(FILES $<TARGET_PDB_FILE:amdgpu-ep>
