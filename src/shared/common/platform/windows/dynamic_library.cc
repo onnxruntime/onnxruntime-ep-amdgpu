@@ -6,11 +6,42 @@
 
 #include "common/dynamic_library.h"
 
+namespace {
+
+// Relative names resolve against the directory of the module this code is linked into, so
+// sibling DLLs load regardless of the host's search order (e.g. after
+// SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS), which drops the module's own folder).
+std::filesystem::path ResolveNextToThisModule(const std::filesystem::path& path) {
+    if (path.is_absolute()) {
+        return path;
+    }
+    HMODULE self{};
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&ResolveNextToThisModule), &self)) {
+        return path;
+    }
+    std::wstring module_path(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD len{GetModuleFileNameW(self, module_path.data(), static_cast<DWORD>(module_path.size()))};
+        if (len == 0) {
+            return path;
+        }
+        if (len < module_path.size()) {
+            module_path.resize(len);
+            break;
+        }
+        module_path.resize(module_path.size() * 2);
+    }
+    return std::filesystem::path{module_path}.parent_path() / path;
+}
+
+}  // namespace
+
 Ort::Status LoadDynamicLibrary(const PathString& path, void** handle) {
     if (handle == nullptr) {
         return MAKE_STATUS(ORT_INVALID_ARGUMENT);
     }
-    *handle = LoadLibraryExW(std::filesystem::path{path}.native().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    *handle = LoadLibraryExW(ResolveNextToThisModule(path).native().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (*handle == nullptr) {
         return MAKE_STATUS(ORT_FAIL, "LoadDynamicLibrary(): failed to load library");
     }
