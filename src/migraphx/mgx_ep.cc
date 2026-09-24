@@ -1246,7 +1246,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     std::string effective_mlss_use_specific_ops{
         !mlss_use_specific_ops_.empty()
             ? mlss_use_specific_ops_
-            : (ShouldForceMlssConv(compute_capability_, mlss_graph_features) ? "conv" : "")};
+            : (ShouldAutoForceMlssConv(compute_capability_, mlss_graph_features) ? "conv" : "")};
     if (!mlss_requested_explicitly_ && !effective_mlss_use_specific_ops.empty() &&
         MlssExcludedForGraph(compute_capability_, graph_id, mlss_exclude_graph_ids_)) {
         ORT_CXX_LOGF_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_INFO,

@@ -34,6 +34,8 @@ struct MlssGraphFeatures {
 
 MlssGraphFeatures AnalyzeMlssGraph(const ONNX_NAMESPACE::ModelProto& model);
 
+inline constexpr bool kEnableGfx115xMlssHeuristics = false;
+
 constexpr bool IsMlssArchPrefix(std::string_view value, std::string_view prefix) {
     return value.substr(0, prefix.size()) == prefix;
 }
@@ -85,6 +87,15 @@ constexpr bool ShouldForceMlssConv(std::string_view gfx, const MlssGraphFeatures
     return features.convolution_count >= 20 &&
            features.convolution_count * 20 >= features.node_count * 3 &&
            features.convolution_count * 4 <= features.node_count;
+}
+
+// Applies the rollout gate to the tested policy
+constexpr bool ShouldAutoForceMlssConv(std::string_view gfx, const MlssGraphFeatures& features) {
+    if ((IsMlssArchPrefix(gfx, "gfx1150") || IsMlssArchPrefix(gfx, "gfx1151")) &&
+        !kEnableGfx115xMlssHeuristics) {
+        return false;
+    }
+    return ShouldForceMlssConv(gfx, features);
 }
 
 namespace detail {
