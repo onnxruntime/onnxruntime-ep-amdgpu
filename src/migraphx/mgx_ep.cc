@@ -659,6 +659,8 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     context_file_path_ = info.context_file_path;
     context_node_name_prefix_ = info.context_node_name_prefix;
     hip_graph_enable_ = info.hip_graph_enable;
+    coresident_programs_ = info.coresident_programs;
+    max_resident_programs_ = info.max_resident_programs;
     max_dynamic_batch_ = info.max_dynamic_batch;
     compile_batches_ = info.compile_batches;
     precompile_at_load_ = info.precompile_at_load;
@@ -689,6 +691,8 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     PARSE_ENV_VAR(env_var::kDumpEpContextModel, context_enable_);
     PARSE_ENV_VAR(env_var::kExhaustiveTune, exhaustive_tune_);
     PARSE_ENV_VAR(env_var::kHipGraphEnable, hip_graph_enable_);
+    PARSE_ENV_VAR(env_var::kCoresidentPrograms, coresident_programs_);
+    PARSE_ENV_VAR(env_var::kMaxResidentPrograms, max_resident_programs_);
     PARSE_ENV_VAR(env_var::kMaxDynamicBatch, max_dynamic_batch_);
     PARSE_ENV_VAR(env_var::kCompileBatches, compile_batches_);
     PARSE_ENV_VAR(env_var::kPrecompileAtLoad, precompile_at_load_);
@@ -1159,12 +1163,19 @@ try {
 
     // Size the staging buffers once, for the largest bucket, so every smaller bucket
     // binds a prefix (mirrors AllocateStaging's max_dynamic_batch sizing).
+    // NOTE: "largest" here means largest BATCH, which only orders dynamic-batch buckets.
+    // Do not reuse this to pick a max across co-resident LLM programs -- prefill and
+    // decode are both batch 1, so the tie is broken by unordered_map order and could
+    // pick decode, sizing the buffers under a prefill capture (a write overrun, not a
+    // clamp).  A max over StagingBytesFor per parameter would be the right rule there.
     const migraphx::program* largest{nullptr};
     std::size_t largest_batch{0};
+    ShapeKey largest_key{};
     for (auto& [key, prog] : cs.cached_programs) {
         if (const auto b{prog_batch(prog)}; largest == nullptr || b > largest_batch) {
             largest_batch = b;
             largest = &prog;
+            largest_key = key;
         }
     }
     if (largest != nullptr) {
@@ -1172,7 +1183,9 @@ try {
         dyn_max.active = largest_batch > 0;
         dyn_max.requested_batch = largest_batch;
         dyn_max.target_batch = largest_batch;
-        AllocateStaging(cs, largest->get_parameter_shapes(), stream, dyn_max);
+        // First allocation of the session (staging_allocated is false here), so this
+        // sizes rather than checks; largest_key is only the memo's initial value.
+        AllocateStaging(cs, largest->get_parameter_shapes(), stream, dyn_max, largest_key);
     }
 
     // Capture the staging graph for each compiled bucket, caching the per-shape param
@@ -1366,6 +1379,17 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     // Propagate hipGraph / dynamic-batch configuration onto the compute state.
     auto& compute_state{state_it->second};
     compute_state.hip_graph_enable = hip_graph_enable_;
+    // Co-residency and dynamic batching both own the program cache's population
+    // policy; dynamic batching already retains every compiled bucket, so the flag
+    // is only meaningful on the unbounded-shape path.
+    compute_state.coresident_programs = coresident_programs_ && max_dynamic_batch_ == 0;
+    if (coresident_programs_ && max_dynamic_batch_ != 0) {
+        ORT_CXX_LOGF_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_INFO,
+            "[mgx] %s ignored: dynamic batching (max_dynamic_batch=%zu) already retains "
+            "every compiled bucket.",
+            env_var::kCoresidentPrograms.data(), max_dynamic_batch_);
+    }
+    compute_state.max_resident_programs = max_resident_programs_;
     compute_state.max_dynamic_batch = max_dynamic_batch_;
     compute_state.compile_batches = compile_batches_;
     compute_state.coalesce_io = coalesce_io_enable_;
@@ -1886,6 +1910,65 @@ bool EffectiveShapesEqualModuloBatch(
     return true;
 }
 
+// Mark shape_key as most-recently-used in the co-resident LRU.
+void TouchResident(ComputeState& cs, ShapeKey shape_key) {
+    auto& lru{cs.resident_lru};
+    if (const auto it{std::find(lru.begin(), lru.end(), shape_key)}; it != lru.end()) {
+        lru.erase(it);
+    }
+    lru.push_back(shape_key);
+}
+
+// Retain `program` under `shape_key`, bounded by max_resident_programs (LRU).
+// A program and everything captured against it are evicted together: a
+// CapturedHipGraph holds device pointers into its program's own arguments
+// (extra_outputs) and bakes them into the graph, so a graph entry outliving its
+// program would replay into freed memory.  The staging buffers are NOT freed --
+// they are shared by every resident program and are re-sized by AllocateStaging
+// when a program needs more than the current allocation.
+void RetainProgram(ComputeState& cs, ShapeKey shape_key, const migraphx::program& program,
+    hipStream_t stream) {
+    // The load-time paths (PreloadMxrPrograms / CompileMissingPrograms) insert into
+    // cached_programs directly, so the LRU can start out not knowing about keys the map
+    // already holds -- and then the bound is enforced against a short list while the map
+    // grows past it.  Adopt any stranger as least-recently-used before bounding.
+    if (cs.resident_lru.size() < cs.cached_programs.size()) {
+        for (const auto& entry : cs.cached_programs) {
+            if (std::find(cs.resident_lru.begin(), cs.resident_lru.end(), entry.first) ==
+                cs.resident_lru.end()) {
+                cs.resident_lru.insert(cs.resident_lru.begin(), entry.first);
+            }
+        }
+    }
+    cs.cached_programs.insert_or_assign(shape_key, program);
+    TouchResident(cs, shape_key);
+    if (cs.max_resident_programs == 0 || cs.resident_lru.size() <= cs.max_resident_programs) {
+        return;
+    }
+    // hipGraphExecDestroy on a graph still executing is undefined, and Compute does not
+    // drain the stream in the steady state, so drain once before dropping anything.
+    HIP_CALL_THROW(hipStreamSynchronize(stream));
+    while (cs.resident_lru.size() > cs.max_resident_programs) {
+        const auto victim{cs.resident_lru.front()};
+        cs.resident_lru.erase(cs.resident_lru.begin());
+        DestroyHipGraphsFor(cs, victim);
+        cs.direct_bind_cache.erase(victim);
+        cs.staging_bind_cache.erase(victim);
+        cs.cached_param_shapes.erase(victim);
+        // Scratch is per compiled variant, not shared, so it goes with the program.  The
+        // "never erased mid-session" invariant the cached scratch_slot pointers rely on
+        // only covers live binds, and both bind caches for this key are dropped above.
+        if (const auto sit{cs.scratch_bufs.find(victim)}; sit != cs.scratch_bufs.end()) {
+            if (sit->second.data != nullptr) {
+                (void)hipFree(sit->second.data);
+            }
+            cs.scratch_bufs.erase(sit);
+        }
+        cs.cached_programs.erase(victim);
+        ++cs.coresident_evictions;
+    }
+}
+
 // Resolve the program for shape_key: reuse the in-memory cached program if present,
 // otherwise load the .mxr or (re)parse + calibrate + compile + save, then drop any
 // per-shape caches bound to the previous program and record the active key.  Mirrors
@@ -1904,9 +1987,17 @@ void ResolveProgram(ComputeState& compute_state, const Ort::KernelContext& kerne
             cit != compute_state.cached_programs.end()) {
             program = cit->second;
             loaded_from_cache = true;
-        } else if (compute_state.hip_graph_enable && !dyn.active) {
+            if (compute_state.coresident_programs) {
+                TouchResident(compute_state, shape_key);
+                ++compute_state.coresident_hits;
+            }
+        } else if (compute_state.hip_graph_enable && !dyn.active &&
+                   !compute_state.coresident_programs) {
             // Unbounded dynamic-shape (e.g. LLM) path: keep only the current shape's
             // graph/staging, so invalidate before the program changes.
+            // Skipped under co-residency -- there the other shapes' graphs are exactly
+            // what we are keeping, and staging is re-sized on demand (AllocateStaging)
+            // rather than torn down on every shape switch.
             DestroyHipGraphs(compute_state);
         FreeStaging(compute_state,
             static_cast<hipStream_t>(kernel_context.GetGPUComputeStream()));
@@ -1973,7 +2064,12 @@ void ResolveProgram(ComputeState& compute_state, const Ort::KernelContext& kerne
         }
         // Keep the freshly compiled program so it (and its captured graph) survive
         // later shape/bucket switches.
-            if (dyn.active || !compute_state.defer_compilation) {
+            if (compute_state.coresident_programs) {
+            // Co-residency: retain every compiled program under an LRU bound, so a
+            // prefill<->decode switch is a map hit instead of a full recompile.
+            RetainProgram(compute_state, shape_key, program,
+                static_cast<hipStream_t>(kernel_context.GetGPUComputeStream()));
+        } else if (dyn.active || !compute_state.defer_compilation) {
             compute_state.cached_programs.emplace(shape_key, program);
         }
         // Freshly built -> drop anything cached against the old program.
@@ -2192,7 +2288,7 @@ std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
 
     if ((compute_state.hip_graph_enable || dyn.active || seq.active) && param_shapes.size() > 0) {
         const auto hip_stream{io.hip_stream};
-        AllocateStaging(compute_state, param_shapes, hip_stream, dyn);
+        AllocateStaging(compute_state, param_shapes, hip_stream, dyn, shape_key);
         // Item 3: reuse a cached binding for this shape hash.  Staging buffers and
         // scratch are pointer-stable until FreeStaging, so binding once and replaying
         // avoids re-doing N program_parameters.add() calls, string work, and a
@@ -2386,6 +2482,7 @@ void EmitHotPathTrace(const Ort::Logger& logger, const ComputeState& cs,
     ORT_CXX_LOGF_NOEXCEPT(logger, ORT_LOGGING_LEVEL_VERBOSE,
         "[mgx-hotpath] call=%llu mech=%s inputs=%zu batch=%zu->%zu fast_path=%d coalesced=%d "
         "residency=%s seq=%d pad=%d hipgraph{en=%d direct=%d hybrid=%d} recap{direct=%d hybrid=%d} "
+        "coresident{n=%zu hits=%llu evict=%llu stage_rebuild=%llu} "
         "| resolve_io=%.1f mechanism=%.1f finalize=%.1f cpu_total=%.1f gpu_tail=%.1f (us)",
         static_cast<unsigned long long>(call_index),
         mechanism,
@@ -2400,6 +2497,10 @@ void EmitHotPathTrace(const Ort::Logger& logger, const ComputeState& cs,
         cs.use_direct_hip_graph ? 1 : 0,
         cs.hybrid_output_enable ? 1 : 0,
         cs.direct_recapture_count, cs.hybrid_recapture_count,
+        cs.cached_programs.size(),
+        static_cast<unsigned long long>(cs.coresident_hits),
+        static_cast<unsigned long long>(cs.coresident_evictions),
+        static_cast<unsigned long long>(cs.staging_rebuilds),
         tr.resolve_us, tr.mechanism_us, tr.finalize_us, cpu_total_us, tr.gpu_tail_us);
 }
 
@@ -2450,6 +2551,19 @@ try {
     }
 
     status = FinalizeCompute(std::move(status), io.hip_stream);
+
+    // A clamped staging copy truncates an input and produces wrong results with no
+    // error anywhere, so surface it once per session at ERROR rather than leaving it
+    // to a VERBOSE trace nobody enables.
+    if (compute_state.clamp_truncations > 0 && !compute_state.clamp_truncation_logged) {
+        compute_state.clamp_truncation_logged = true;
+        ORT_CXX_LOGF_NOEXCEPT(ep_.GetLogger(), ORT_LOGGING_LEVEL_ERROR,
+            "[mgx-staging] input copy TRUNCATED to staging capacity (%llu occurrence(s)) -- "
+            "results are wrong. resident programs=%zu staging rebuilds=%llu",
+            static_cast<unsigned long long>(compute_state.clamp_truncations),
+            compute_state.cached_programs.size(),
+            static_cast<unsigned long long>(compute_state.staging_rebuilds));
+    }
     if (trace.enabled) {
         trace.finalize_us = trace.lap();
         // Trace-only: the production path finalizes the stream asynchronously, so drain

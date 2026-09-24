@@ -631,27 +631,97 @@ void ZeroScratchFor(ComputeState& cs, ShapeKey shape_key, hipStream_t stream) {
     HIP_CALL_THROW(hipMemsetAsync(it->second.data, 0, it->second.size_bytes, stream));
 }
 
-void AllocateStaging(ComputeState& cs,
-    const migraphx::program_parameter_shapes& param_shapes, hipStream_t stream,
+// Staging capacity a program parameter needs.  Batched buffers (batch on axis 0)
+// are sized at max_dynamic_batch so the same allocation serves every compiled
+// bucket; smaller buckets bind a prefix.
+//
+// SHARED on purpose: AllocateStaging sizes with this and StagingCoversShapes
+// checks with it.  A second, divergent copy would let the check pass while the
+// buffer is actually too small -- which fails as silent input truncation, not as
+// an error (see the clamp in the copy path).
+static std::size_t StagingBytesFor(const ComputeState& cs, const migraphx::shape& shape,
     const DynamicBatchContext& dyn)
 {
+    std::size_t bytes{shape.bytes()};
+    if (dyn.active && dyn.target_batch > 0) {
+        const auto lens{shape.lengths()};
+        if (!lens.empty() && lens.front() == dyn.target_batch) {
+            const std::size_t row_bytes{bytes / dyn.target_batch};
+            const std::size_t max_batch{std::max(cs.max_dynamic_batch, dyn.target_batch)};
+            bytes = row_bytes * max_batch;
+        }
+    }
+    return bytes;
+}
+
+// True when the existing staging allocation is large enough for every parameter
+// of `param_shapes`, and has a buffer for each of them.  False forces a rebuild.
+//
+// This only matters once more than one program is resident (co-residency): the
+// legacy path tears staging down on every program change, so the first program's
+// sizes are always the current program's sizes.  With several programs sharing
+// one set of staging buffers, a program compiled for a longer sequence needs more
+// than the allocation the first one sized.
+static bool StagingCoversShapes(const ComputeState& cs,
+    const migraphx::program_parameter_shapes& param_shapes, const DynamicBatchContext& dyn)
+{
+    for (const auto& name : param_shapes.names()) {
+        if (std::string_view{name} == kScratchParam) {
+            continue;  // scratch is owned separately (AllocScratchSlot grows it)
+        }
+        const std::string param_name{name};
+        const bool is_input{cs.input_name_indices.count(param_name) > 0};
+        if (!is_input && ComputeOutputIndex(name) == -1) {
+            continue;  // same filter AllocateStaging applies
+        }
+        const auto& map{is_input ? cs.staging_inputs : cs.staging_outputs};
+        const auto it{map.find(param_name)};
+        if (it == map.end()) {
+            return false;  // a parameter this allocation never saw
+        }
+        if (StagingBytesFor(cs, param_shapes[name], dyn) > it->second.size_bytes) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void AllocateStaging(ComputeState& cs,
+    const migraphx::program_parameter_shapes& param_shapes, hipStream_t stream,
+    const DynamicBatchContext& dyn, ShapeKey shape_key)
+{
     if (cs.staging_allocated) {
-        return;
+        // The coverage scan walks every program parameter and builds a std::string per
+        // name, and TryStaging calls this on EVERY staging inference -- so run it only
+        // where it can actually fire, and only once per key:
+        //   * already proven for this key -- buffers only grow, so the pass still holds;
+        //   * legacy hipGraph path (no co-residency) -- ResolveProgram's teardown frees
+        //     staging on every program change, so the buffers always belong to the
+        //     current program and a shortfall is impossible.  Keeping the plain bool
+        //     early-out here is what makes the flag-off hot path identical to before.
+        const bool proven{cs.staging_verified_key == shape_key};
+        if (proven || (!cs.coresident_programs && cs.hip_graph_enable)) {
+            return;
+        }
+        if (StagingCoversShapes(cs, param_shapes, dyn)) {
+            cs.staging_verified_key = shape_key;
+            return;
+        }
+        // Shortfall: the buffers must grow.  Captured graphs bake staging device
+        // pointers into their nodes (and into the folded zeroing memsets), and the
+        // staging path has no pointer-drift check, so freeing the buffers under a
+        // live graph would make every replay read freed memory -- silently.  Drain
+        // first, destroy the graphs, then free; same order as the shape-switch
+        // teardown in ResolveProgram.
+        HIP_CALL_THROW(hipStreamSynchronize(stream));
+        DestroyHipGraphs(cs);
+        cs.direct_bind_cache.clear();  // caches raw pointers into the graphs above
+        FreeStaging(cs, stream);       // also clears staging_bind_cache
+        ++cs.staging_rebuilds;
     }
 
-    // Batched buffers (batch on axis 0) are sized at max_dynamic_batch so the same
-    // allocation serves every compiled bucket; smaller buckets bind a prefix.
     const auto buffer_bytes{[&](const migraphx::shape& shape) -> std::size_t {
-        std::size_t bytes{shape.bytes()};
-        if (dyn.active && dyn.target_batch > 0) {
-            const auto lens{shape.lengths()};
-            if (!lens.empty() && lens.front() == dyn.target_batch) {
-                const std::size_t row_bytes{bytes / dyn.target_batch};
-                const std::size_t max_batch{std::max(cs.max_dynamic_batch, dyn.target_batch)};
-                bytes = row_bytes * max_batch;
-            }
-        }
-        return bytes;
+        return StagingBytesFor(cs, shape, dyn);
     }};
 
     const auto alloc_buffer{[&](const migraphx::shape& shape) -> StagingBuffer {
@@ -727,6 +797,8 @@ void AllocateStaging(ComputeState& cs,
 
     HIP_CALL_THROW(hipStreamSynchronize(stream));
     cs.staging_allocated = true;
+    // Sized from this key's shapes, so it trivially covers them.
+    cs.staging_verified_key = shape_key;
 }
 
 // Classify the coalesced inputs: any device-resident input disqualifies the coalesced
@@ -775,6 +847,10 @@ static void CoalesceInputsCore(ComputeState& cs, const StagingBindResult& bind,
             cs.cur_input_axis0[ib.ort_index] == static_cast<std::int64_t>(dyn.requested_batch)};
         std::size_t copy_bytes{batched ? ib.row_bytes * dyn.requested_batch : ib.prog_bytes};
         if (copy_bytes > ib.stage_capacity) {
+            // Truncating an input is silent data loss (wrong tokens, no error), so
+            // count it; Compute logs it once per session.  Reaching here means the
+            // staging capacity check missed a case.
+            ++cs.clamp_truncations;
             copy_bytes = ib.stage_capacity;
         }
         if (copy_bytes == 0) {
@@ -866,6 +942,7 @@ void CopyInputsToStaging(ComputeState& cs,
             std::size_t copy_bytes{batched ? ib.row_bytes * dyn.requested_batch
                                            : ib.prog_bytes};
             if (copy_bytes > ib.stage_capacity) {
+                ++cs.clamp_truncations;  // silent data loss -- see the other clamp
                 copy_bytes = ib.stage_capacity;
             }
             if (copy_bytes > 0) {
@@ -1103,6 +1180,7 @@ void FreeStaging(ComputeState& cs, hipStream_t stream) {
     cs.staging_inputs.clear();
     cs.staging_outputs.clear();
     cs.staging_allocated = false;
+    cs.staging_verified_key.reset();
     // Cached bindings reference the staging buffers just freed; drop them so they
     // are rebuilt against the next allocation.
     cs.staging_bind_cache.clear();
@@ -1117,6 +1195,18 @@ void DestroyHipGraphs(ComputeState& cs) {
         ResetCapturedGraph(entry);
     }
     cs.hip_graph_cache_direct.clear();
+}
+
+void DestroyHipGraphsFor(ComputeState& cs, ShapeKey shape_key) {
+    if (const auto it{cs.hip_graph_cache.find(shape_key)}; it != cs.hip_graph_cache.end()) {
+        ResetCapturedGraph(it->second);
+        cs.hip_graph_cache.erase(it);
+    }
+    if (const auto it{cs.hip_graph_cache_direct.find(shape_key)};
+        it != cs.hip_graph_cache_direct.end()) {
+        ResetCapturedGraph(it->second);
+        cs.hip_graph_cache_direct.erase(it);
+    }
 }
 
 // Copy every program output not pre-bound (its index absent from prog_output_indices)

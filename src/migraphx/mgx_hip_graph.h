@@ -82,13 +82,19 @@ void ZeroScratchFor(ComputeState& cs, ShapeKey shape_key, hipStream_t stream);
 
 // Allocate staging buffers (one per program input/output parameter).  Batched
 // buffers (batch on axis 0) are sized to max_dynamic_batch so a single set of
-// buffers serves every compiled bucket; all others are sized exactly.  No-op if
-// already allocated.  When static seq-padding is active the buffers are already
-// sized to the padded (target_len) shape because that is the compiled program's
-// shape, so no extra sizing is needed here.
+// buffers serves every compiled bucket; all others are sized exactly.  When static
+// seq-padding is active the buffers are already sized to the padded (target_len)
+// shape because that is the compiled program's shape, so no extra sizing is needed
+// here.
+//
+// When buffers already exist they are reused, EXCEPT when they are too small for
+// `param_shapes` -- then they are torn down (graphs first; see the body) and rebuilt.
+// That check only runs where it can fire, and only once per shape_key: the legacy
+// hipGraph path frees staging on every program change, so its buffers always match
+// the current program and the scan would be pure per-token overhead.
 void AllocateStaging(ComputeState& cs,
     const migraphx::program_parameter_shapes& param_shapes, hipStream_t stream,
-    const DynamicBatchContext& dyn);
+    const DynamicBatchContext& dyn, ShapeKey shape_key);
 
 // Copy ORT input tensors into their staging buffers, padding batched inputs up to
 // the target bucket batch when dynamic batching is active, and padding named
@@ -140,6 +146,17 @@ void FreeStaging(ComputeState& cs, hipStream_t stream);
 // Destroy all captured graphs held by a compute state (used to invalidate the
 // cache when the underlying program is recompiled).
 void DestroyHipGraphs(ComputeState& cs);
+
+// Destroy only the graphs captured for one shape key (both binding modes).  Used
+// when a single program is evicted from the co-resident cache: its captured
+// graphs hold device pointers into that program's own arguments, so they must go
+// with it while every other resident program's graph survives.
+//
+// Unlike DestroyHipGraphs -- which callers pair with a wholesale bind-cache clear --
+// this drops one key, so the CALLER must erase that key from direct_bind_cache and
+// staging_bind_cache (both hold a raw CapturedHipGraph*).  RetainProgram does.
+// Callers must also have drained the stream: destroying an executing graph is UB.
+void DestroyHipGraphsFor(ComputeState& cs, ShapeKey shape_key);
 
 // Warm up and capture a staging-path hipGraph for the currently bound `params` (no ORT
 // KernelContext required).  Exposed so load-time prewarm (ExecutionProvider::PrewarmHipGraphs)

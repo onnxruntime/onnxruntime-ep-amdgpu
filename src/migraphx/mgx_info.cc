@@ -135,6 +135,8 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kDumpSubgraphs, dump_subgraphs)
             .AddAssignmentToReference(provider_option::kForceRecompile, force_recompile)
             .AddAssignmentToReference(provider_option::kHipGraphEnable, hip_graph_enable)
+            .AddAssignmentToReference(provider_option::kCoresidentPrograms, coresident_programs)
+            .AddAssignmentToReference(provider_option::kMaxResidentPrograms, max_resident_programs)
             .AddAssignmentToReference(provider_option::kMaxDynamicBatch, max_dynamic_batch)
             .AddAssignmentToReference(provider_option::kPrecompileAtLoad, precompile_at_load)
             .AddAssignmentToReference(provider_option::kStaticPadSeq, static_pad_seq)

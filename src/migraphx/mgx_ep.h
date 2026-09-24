@@ -63,6 +63,13 @@ constexpr auto kStaticPadOutputs = "ORT_MIGRAPHX_STATIC_PAD_OUTPUTS"sv;
 // (pipelined) behaviors be compared in one build. Remove once the new path is
 // confirmed and the drain is deleted for good.
 constexpr auto kLegacyComputeSync = "ORT_MIGRAPHX_LEGACY_COMPUTE_SYNC"sv;
+// Co-residency: keep every compiled program resident (bounded by
+// kMaxResidentPrograms) instead of retaining only the active one, so an LLM's
+// prefill and decode programs -- and their captured graphs -- both survive the
+// shape switch rather than recompiling on each transition.  Default off.
+constexpr auto kCoresidentPrograms = "ORT_MIGRAPHX_CORESIDENT_PROGRAMS"sv;
+// LRU bound on the co-resident program cache.  0 means unbounded.
+constexpr auto kMaxResidentPrograms = "ORT_MIGRAPHX_MAX_RESIDENT_PROGRAMS"sv;
 // A/B / safety gate: when set (1/true), zero ALL captured graph output buffers
 // before every replay (the original behavior) instead of only the read-modify-
 // write outputs detected at capture. Lets the pre-replay memset fan-out reduction
@@ -206,9 +213,10 @@ struct DirectBindCache {
     std::vector<void*> cur_output_ptrs{};
     // Resolved pointers into the ComputeState maps (captured graph in hip_graph_cache_direct,
     // scratch slot) so steady-state replay does no re-search.  std::unordered_map addresses
-    // are stable until the entry is erased: scratch_bufs is never erased mid-session, and the
-    // graph map is cleared only by DestroyHipGraphs, which runs with direct_bind_cache.clear()
-    // (unbounded-shape path), dropping this dbc.  Null `graph` forces the cold capture path.
+    // are stable until the entry is erased: scratch_bufs is only erased by co-resident
+    // eviction, which erases this dbc first, and the graph map is cleared only by
+    // DestroyHipGraphs{,For}, each of which runs with the matching direct_bind_cache
+    // erase/clear, dropping this dbc.  Null `graph` forces the cold capture path.
     CapturedHipGraph* graph{nullptr};
     ScratchBuffer* scratch_slot{nullptr};
 };
@@ -329,6 +337,25 @@ struct ComputeState {
     // looks one up by the integer key it already computed -- no hex string / find).
     std::unordered_map<ShapeKey, migraphx::program> cached_programs{};
 
+    // ── Co-residency (ORT_MIGRAPHX_CORESIDENT_PROGRAMS) ──────────────────────
+    // Without it, cached_programs is only populated on the dynamic-batch /
+    // pre-planned paths, so the unbounded-shape (LLM) path recompiles on every
+    // prefill<->decode transition.  With it, every compiled program is retained
+    // under an LRU bound.  Off by default: the legacy single-program behavior is
+    // unchanged.
+    bool coresident_programs{};
+    std::size_t max_resident_programs{4};  // 0 = unbounded
+    // MRU-last list of resident keys; only maintained when coresident_programs.
+    std::vector<ShapeKey> resident_lru{};
+    // Instrumentation (read and logged from Compute, which owns the logger).
+    std::uint64_t coresident_hits{};
+    std::uint64_t coresident_evictions{};
+    std::uint64_t staging_rebuilds{};
+    // Incremented at the staging copy clamp: a copy that had to be truncated to
+    // fit the staging buffer silently produces wrong tokens, so it is surfaced.
+    std::uint64_t clamp_truncations{};
+    bool clamp_truncation_logged{};
+
     // ── Coalesced input arena (ORT_MIGRAPHX_COALESCE_IO) ─────────────────────
     // When coalesce_io is set, every input staging buffer's data points into a
     // single device arena (in_arena_dev) fed by one pinned host staging buffer
@@ -359,6 +386,10 @@ struct ComputeState {
     Map<StagingBuffer> staging_inputs{};
     Map<StagingBuffer> staging_outputs{};
     bool staging_allocated{};
+    // Shape key the current staging allocation has been proven to cover.  The coverage
+    // scan walks every program parameter, so it runs at most once per key rather than
+    // on every token; buffers only ever grow, so a pass stays valid until FreeStaging.
+    std::optional<ShapeKey> staging_verified_key{};
     // Scratch buffers keyed by shape hash.
     std::unordered_map<ShapeKey, ScratchBuffer> scratch_bufs{};
     // Captured graphs keyed by shape hash, split by binding mode so a shape's staging
@@ -549,6 +580,8 @@ private:
     fs::path context_file_path_{};
     fs::path external_initializers_file_name_{};
     bool hip_graph_enable_{};
+    bool coresident_programs_{};
+    std::size_t max_resident_programs_{4};
     std::size_t max_dynamic_batch_{};
     std::string compile_batches_{};
     bool precompile_at_load_{};
