@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
@@ -38,6 +39,7 @@
 #include "mgx_ep_ctx.h"
 #include "mgx_hip_graph.h"
 #include "mgx_info.h"
+#include "mgx_mlss_heuristics.h"
 #include "mgx_precompile.h"
 #include "mgx_program_ops.h"
 #include "mgx_utils.h"
@@ -73,6 +75,50 @@ struct HipDeviceGuard {
     HipDeviceGuard(const HipDeviceGuard&) = delete;
     HipDeviceGuard& operator=(const HipDeviceGuard&) = delete;
 };
+struct arch_graph_mlss_exception {
+    std::string_view arch_prefix;
+    std::string_view graph_id;
+};
+constexpr std::array<arch_graph_mlss_exception, 4> kMlssGraphExceptions{{
+    // This ResNet-50 graph id differs across the ORT 1.26 and 1.27 partitioning paths.
+    {"gfx1200", "3a0532e672db5cf"},
+    {"gfx1201", "3a0532e672db5cf"},
+    {"gfx1200", "c4c5e56652ffbf28"},
+    {"gfx1201", "c4c5e56652ffbf28"},
+}};
+
+bool GraphIdListContains(std::string_view list, std::string_view graph_id) {
+    while (!list.empty()) {
+        const auto pos{list.find(',')};
+        auto entry{list.substr(0, pos)};
+        while (!entry.empty() && std::isspace(static_cast<unsigned char>(entry.front()))) {
+            entry.remove_prefix(1);
+        }
+        while (!entry.empty() && std::isspace(static_cast<unsigned char>(entry.back()))) {
+            entry.remove_suffix(1);
+        }
+        if (!entry.empty() && entry == graph_id) {
+            return true;
+        }
+        if (pos == std::string_view::npos) {
+            break;
+        }
+        list.remove_prefix(pos + 1);
+    }
+    return false;
+}
+
+bool MlssExcludedForGraph(std::string_view gfx, std::string_view graph_id, std::string_view extra_ids) {
+    if (GraphIdListContains(extra_ids, graph_id)) {
+        return true;
+    }
+    for (const auto& row : kMlssGraphExceptions) {
+        if (row.graph_id == graph_id && gfx.substr(0, row.arch_prefix.size()) == row.arch_prefix) {
+            return true;
+        }
+    }
+    return false;
+}
 
 // TEMPORARY A/B gate (env ORT_MIGRAPHX_LEGACY_COMPUTE_SYNC). When true, Compute
 // keeps the legacy unconditional per-fused-node hipStreamSynchronize. When false
@@ -675,6 +721,9 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
         {"gfx1201", "conv"},
     }};
 
+    mlss_requested_explicitly_ = !mlss_use_specific_ops_.empty();
+    PARSE_ENV_VAR(env_var::kMlssExcludeGraphIds, mlss_exclude_graph_ids_);
+
     for (const auto& [arch, ops] : kArchMlssOps) {
         if (compute_capability_.rfind(arch, 0) == 0) {
             if (!mlss_use_specific_ops_.empty()) {
@@ -1192,6 +1241,21 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     Ort::Graph sorted_graph{graph.GetGraphView(sorted_nodes)};
     ONNX_NAMESPACE::ModelProto model_proto{};
     RETURN_IF_ERROR(GraphToProto(sorted_graph, model_proto));
+    const auto mlss_graph_features{AnalyzeMlssGraph(model_proto)};
+    const auto graph_id{GenerateGraphId(graph)};
+    std::string effective_mlss_use_specific_ops{
+        !mlss_use_specific_ops_.empty()
+            ? mlss_use_specific_ops_
+            : (ShouldAutoForceMlssConv(compute_capability_, mlss_graph_features) ? "conv" : "")};
+    if (!mlss_requested_explicitly_ && !effective_mlss_use_specific_ops.empty() &&
+        MlssExcludedForGraph(compute_capability_, graph_id, mlss_exclude_graph_ids_)) {
+        ORT_CXX_LOGF_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_INFO,
+            "[mgx-mlss] graph %s is opted out of automatic AMDMLSS ('%s') on %s",
+            graph_id.c_str(), effective_mlss_use_specific_ops.c_str(), compute_capability_.c_str());
+        effective_mlss_use_specific_ops.clear();
+    }
+    const std::string effective_mxr_prefix{
+        mxr_prefix + hash::ToHex(std::string_view{effective_mlss_use_specific_ops}) + "-"};
     std::string onnx_string;
     if (!model_proto.SerializeToString(&onnx_string) || onnx_string.empty()) {
         return Ort::Status{"Serializing a model proto to string failed!", ORT_EP_FAIL};
@@ -1246,7 +1310,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         if (!use_plan_cache) {
         fs::path mxr_path;
         if (!effective_cache_dir.empty()) {
-            mxr_path = effective_cache_dir / (mxr_prefix + input_shapes_hash_hex + ".mxr");
+            mxr_path = effective_cache_dir / (effective_mxr_prefix + input_shapes_hash_hex + ".mxr");
         }
         loaded_from_cache = !force_recompile_ && load_compiled_program(program, mxr_path);
         backend_telemetry_.loaded_from_cache = loaded_from_cache;
@@ -1258,7 +1322,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             migraphx::program_parameters params;
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
-            compile_program(program, t_, exhaustive_tune_, mlss_use_specific_ops_, compute_mode_,
+            compile_program(program, t_, exhaustive_tune_, effective_mlss_use_specific_ops, compute_mode_,
                 problem_cache_paths_);
             // context_enable needs this file on disk even if caching is otherwise disabled.
             if (!disable_compiled_model_caching_ || context_enable_) {
@@ -1274,7 +1338,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
 
     if (context_enable_) {
         // input_shapes_hash_hex is non-empty here: the RETURN_IF above requires has_input_shape.
-        const fs::path ep_context_mxr_path{mxr_prefix + input_shapes_hash_hex + ".mxr"};
+        const fs::path ep_context_mxr_path{effective_mxr_prefix + input_shapes_hash_hex + ".mxr"};
 
         EpContextNodeHelper ep_context_helper{*this, sorted_graph, fused_node};
         RETURN_IF_ERROR(ep_context_helper.CreateEpContextNode(ep_context_mxr_path, effective_cache_dir,
@@ -1297,7 +1361,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             has_input_shape,
             dump_subgraphs_,
             exhaustive_tune_,
-            mlss_use_specific_ops_,
+            effective_mlss_use_specific_ops,
             dynamic_ranges_,
             input_name_indices,
             output_name_indices,
@@ -1308,7 +1372,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             disable_compiled_model_caching_,
             force_recompile_,
             external_data_dir_,
-            mxr_prefix,
+            effective_mxr_prefix,
             problem_cache_paths_,
         });
 
@@ -1369,13 +1433,14 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     compute_state.defer_compilation = true;
     if (use_plan_cache) {
         RETURN_IF_ERROR(PreloadMxrPrograms(pre_plan, input_name_indices, compute_state.cached_programs,
-            force_recompile_, effective_cache_dir, mxr_prefix));
+            force_recompile_, effective_cache_dir, effective_mxr_prefix));
         if (precompile_at_load_) {
             RETURN_IF_ERROR(CompileMissingPrograms(pre_plan, input_name_indices, onnx_string,
                 compute_state.cached_programs, t_, enable_fp16_, enable_bf16_, enable_int8_, enable_fp8_,
-                int8_calibration_cache_available_, dynamic_ranges_, exhaustive_tune_, mlss_use_specific_ops_,
-                compute_mode_, problem_cache_paths_, disable_compiled_model_caching_, model_path,
-                external_data_dir_, effective_cache_dir, mxr_prefix));
+                int8_calibration_cache_available_, dynamic_ranges_, exhaustive_tune_,
+                effective_mlss_use_specific_ops, compute_mode_, problem_cache_paths_,
+                disable_compiled_model_caching_, model_path, external_data_dir_, effective_cache_dir,
+                effective_mxr_prefix));
         }
         if (!compute_state.cached_programs.empty()) {
             compute_state.program = SelectDefaultProgram(compute_state.cached_programs, pre_bucketed,
