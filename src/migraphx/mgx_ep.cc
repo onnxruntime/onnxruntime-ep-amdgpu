@@ -1795,10 +1795,66 @@ void LearnBatchShapeProfile(ComputeState& cs,
     cs.learn_have_prev = false;
 }
 
+// The input whose axis 0 is the scheduled batch, and that extent.
+//
+// A fixed leading dim must not win just by having the lowest ORT index: Triton then
+// concatenates a larger batch on the other inputs, this input still says 4, and the
+// program (and the output shape reported back) stay at 4 while those other rows are
+// truncated into the smaller buffer.  Inputs the graph says do not carry the batch are
+// ignored.  When the survivors disagree, the extent shared by the most inputs is the
+// scheduled batch; the lowest index is only the tie-break, which keeps the old answer
+// when every input agrees.
+struct BatchRepr {
+    bool found{false};
+    std::size_t index{0};
+    std::size_t batch{0};
+};
+
+BatchRepr SelectBatchRepresentative(const ComputeState& cs) {
+    const bool mask_known{!cs.input_batch_axis.empty()};
+    struct Tally {
+        std::size_t count{0};
+        std::size_t index{0};
+    };
+    // One entry when every batched input agrees; a fixed leading dim adds another.
+    std::vector<std::pair<std::int64_t, Tally>> tallies;
+    tallies.reserve(2);
+    for (std::size_t i{0}; i < cs.cur_input_axis0.size(); ++i) {
+        const auto axis0{cs.cur_input_axis0[i]};
+        if (axis0 <= 0) {
+            continue;
+        }
+        if (mask_known && !InputCarriesBatch(cs, i)) {
+            continue;
+        }
+        const auto it{std::find_if(tallies.begin(), tallies.end(),
+            [axis0](const auto& entry) { return entry.first == axis0; })};
+        if (it == tallies.end()) {
+            tallies.emplace_back(axis0, Tally{1, i});
+        } else {
+            ++it->second.count;
+            if (i < it->second.index) {
+                it->second.index = i;
+            }
+        }
+    }
+    if (tallies.empty()) {
+        return {};
+    }
+    const auto best{std::max_element(tallies.begin(), tallies.end(),
+        [](const auto& a, const auto& b) {
+            if (a.second.count != b.second.count) {
+                return a.second.count < b.second.count;
+            }
+            return a.second.index > b.second.index;  // tie: lowest index
+        })};
+    return {true, best->second.index, static_cast<std::size_t>(best->first)};
+}
+
 // Single pass over the model inputs: gather the raw dims (flattened), record each input's
-// rank and raw data ptr, and resolve the dynamic-batch bucket from the lowest-index input's
-// axis-0.  Fills `current_input_shapes` (a caller-owned reusable buffer) so the caller can
-// compare/hash without a per-call alloc.
+// rank and raw data ptr, and resolve the dynamic-batch bucket from the axis-0 the batched
+// inputs share.  Fills `current_input_shapes` (a caller-owned reusable buffer) so the caller
+// can compare/hash without a per-call alloc.
 //
 // Fast path: read just the representative input's axis-0 and skip the other N-1 shape
 // reads (an OrtTensorTypeAndShapeInfo allocation each).  That is valid when the batch is
@@ -1919,9 +1975,6 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
     compute_state.cur_input_ranks.reserve(scan_order.size());
     // Reused per input: dims read via the C API to avoid a GetShape() vector alloc each.
     std::vector<std::int64_t> dims;
-    bool have_batch_min{false};
-    std::size_t batch_min_index{0};
-    std::size_t requested_batch{0};
     for (const auto& entry : scan_order) {
         const auto index{entry.ort_index};
         const auto input_value{kernel_context.GetInput(index)};
@@ -1940,20 +1993,14 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
         if (index < compute_state.cur_input_axis0.size() && rank > 0) {
             compute_state.cur_input_axis0[index] = dims.front();
         }
-        // The batch is axis 0 of every input under a batching frontend (e.g. Triton
-        // prepends the batch dim to all inputs), so read it directly from the first
-        // (lowest-index) input that has an axis 0, rather than inferring which input
-        // "carries" the batch from static graph shapes.  That inference could latch onto
-        // the wrong input and mis-read the batch (e.g. see 9 rows but run as batch 8).
-        if (track_batch && rank > 0 && (!have_batch_min || index < batch_min_index)) {
-            have_batch_min = true;
-            batch_min_index = index;
-            requested_batch = static_cast<std::size_t>(dims.front());
-        }
     }
-    // Remember the representative input so the next call's fast path reads only it.
-    compute_state.has_batch_repr = have_batch_min;
-    compute_state.batch_repr_index = batch_min_index;
+    // The scheduled batch is the axis-0 extent the batched inputs share, not whichever
+    // input happens to be index 0.  A fixed leading dim there used to pin every later
+    // call (the fast path re-reads only this representative) to that constant.
+    const BatchRepr repr{track_batch ? SelectBatchRepresentative(compute_state) : BatchRepr{}};
+    const std::size_t requested_batch{repr.batch};
+    compute_state.has_batch_repr = repr.found;
+    compute_state.batch_repr_index = repr.index;
     if (track_batch && requested_batch > 0) {
         dyn.requested_batch = requested_batch;
         dyn.target_batch = ResolveTargetBatch(compute_state, requested_batch);

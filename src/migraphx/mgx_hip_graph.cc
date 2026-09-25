@@ -723,6 +723,12 @@ static bool StagingCoversShapes(const ComputeState& cs,
         if (!is_input && ComputeOutputIndex(name) == -1) {
             continue;  // same filter AllocateStaging applies
         }
+        // Coalesced inputs live in a per-bucket arena sized in BindStagingParams, not in
+        // the shared staging_inputs map.  Treating a miss there as a shortfall would
+        // rebuild staging on every bucket switch.
+        if (is_input && cs.staging_inputs_coalesced) {
+            continue;
+        }
         const auto& map{is_input ? cs.staging_inputs : cs.staging_outputs};
         const auto it{map.find(param_name)};
         if (it == map.end()) {
@@ -744,12 +750,16 @@ void AllocateStaging(ComputeState& cs,
         // name, and TryStaging calls this on EVERY staging inference -- so run it only
         // where it can actually fire, and only once per key:
         //   * already proven for this key -- buffers only grow, so the pass still holds;
-        //   * legacy hipGraph path (no co-residency) -- ResolveProgram's teardown frees
-        //     staging on every program change, so the buffers always belong to the
-        //     current program and a shortfall is impossible.  Keeping the plain bool
-        //     early-out here is what makes the flag-off hot path identical to before.
+        //   * legacy hipGraph path (no co-residency, no dynamic batch) -- ResolveProgram's
+        //     teardown frees staging on every program change, so the buffers always belong
+        //     to the current program and a shortfall is impossible.
+        // Dynamic batching keeps every bucket's program and does not free staging on a
+        // switch, so the first bucket's buffers would otherwise be reused for a larger one
+        // and the output shape reported to ORT would stay at that first batch.
         const bool proven{cs.staging_verified_key == shape_key};
-        if (proven || (!cs.coresident_programs && cs.hip_graph_enable)) {
+        const bool staging_tracks_program{!cs.coresident_programs && cs.hip_graph_enable &&
+            !dyn.active};
+        if (proven || staging_tracks_program) {
             return;
         }
         if (StagingCoversShapes(cs, param_shapes, dyn)) {
