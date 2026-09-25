@@ -675,8 +675,8 @@ target_compile_definitions(directx-ep
         DML_TARGET_VERSION_USE_LATEST
 )
 
-set_property(TARGET directx-ep APPEND_STRING
-        PROPERTY LINK_FLAGS /DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
+set_target_properties(directx-ep PROPERTIES
+    LINK_DEF_FILE "${PROJECT_SOURCE_DIR}/src/shared/symbols.def")
 
 install(TARGETS directx-ep
         DESTINATION ".")
