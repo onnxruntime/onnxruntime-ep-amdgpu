@@ -44,8 +44,15 @@ inline std::string ToHex(const uint64_t v) {
     return std::string{s.data(), ptr};
 }
 
+// Compact 64-bit form of a hash Value (the same low 64 bits ToHex renders), used as
+// an integer map key to avoid per-lookup hex-string allocation and string hashing.
+using ShapeKey = std::uint64_t;
+inline ShapeKey ShapeKeyOf(const Value& v) {
+    return v.at(0) | static_cast<uint64_t>(v.at(1)) << 32;
+}
+
 inline std::string ToHex(const Value& v) {
-    return ToHex(v.at(0) | static_cast<uint64_t>(v.at(1)) << 32);
+    return ToHex(ShapeKeyOf(v));
 }
 
 inline std::string ToHex(std::string_view t) {
