@@ -3,6 +3,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+#include <filesystem>
 
 #include "common/dynamic_library.h"
 
@@ -10,7 +11,29 @@ Ort::Status LoadDynamicLibrary(const PathString& path, void** handle) {
     if (handle == nullptr) {
         return MAKE_STATUS(ORT_INVALID_ARGUMENT);
     }
-    *handle = LoadLibraryExW(std::filesystem::path{path}.native().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    // Two Windows loader hazards when the umbrella EP is hosted by ONNX Runtime:
+    //   1. ORT calls SetDefaultDllDirectories() to harden the DLL search, which makes
+    //      LOAD_WITH_ALTERED_SEARCH_PATH illegal (ERROR_INVALID_PARAMETER 87).
+    //   2. Backends (migraphx-backend/hip-backend) are co-deployed next to THIS module and pull in
+    //      transitive deps (migraphx.dll -> migraphx_gpu.dll -> amdmlss.dll, rocm) from the SAME dir,
+    //      which the hardened process search will not find.
+    // Fix: resolve a bare filename to a full path in this module's directory, and load with
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR so that directory also resolves the backend's transitive deps
+    // (| DEFAULT_DIRS keeps application dir + System32 + AddDllDirectory dirs).
+    std::filesystem::path lib{path};
+    if (!lib.has_parent_path()) {
+        HMODULE self_module{};
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(&LoadDynamicLibrary), &self_module) != 0) {
+            wchar_t module_path[MAX_PATH]{};
+            if (GetModuleFileNameW(self_module, module_path, MAX_PATH) != 0) {
+                lib = std::filesystem::path{module_path}.remove_filename() / lib;
+            }
+        }
+    }
+    *handle = LoadLibraryExW(lib.native().c_str(), nullptr,
+                            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (*handle == nullptr) {
         return MAKE_STATUS(ORT_FAIL, "LoadDynamicLibrary(): failed to load library");
     }
