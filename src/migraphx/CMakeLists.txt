@@ -46,7 +46,7 @@ if(WIN32)
             ${PROJECT_SOURCE_DIR}/src/shared/common/platform/windows/dll_main.cc)
 
     set_target_properties(migraphx-ep PROPERTIES
-            LINK_DEF_FILE "${PROJECT_SOURCE_DIR}/src/shared/symbols.def")
+            LINK_DEF_FILE "${PROJECT_SOURCE_DIR}/src/migraphx/symbols.def")
 
     set(MGX_FILES
         "$<TARGET_FILE_DIR:migraphx::migraphx>/amdmlss.dll"
