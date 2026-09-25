@@ -675,16 +675,8 @@ target_compile_definitions(directx-ep
         DML_TARGET_VERSION_USE_LATEST
 )
 
-# /DEF: is an MSVC linker flag: pass it bare under the MSVC-style driver
-# (cl.exe / clang-cl), but forward it through a GNU-style driver (e.g. ROCm
-# clang++) via -Wl, or it is mistaken for an input file.
-if(MSVC)
-    set(_ep_def_flag /DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
-else()
-    set(_ep_def_flag -Wl,/DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
-endif()
-set_property(TARGET directx-ep APPEND_STRING
-        PROPERTY LINK_FLAGS ${_ep_def_flag})
+set_target_properties(directx-ep PROPERTIES
+    LINK_DEF_FILE "${PROJECT_SOURCE_DIR}/src/shared/symbols.def")
 
 install(TARGETS directx-ep
         DESTINATION ".")

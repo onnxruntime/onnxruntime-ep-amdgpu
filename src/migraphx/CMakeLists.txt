@@ -45,16 +45,8 @@ if(WIN32)
     target_sources(migraphx-ep PRIVATE
             ${PROJECT_SOURCE_DIR}/src/shared/common/platform/windows/dll_main.cc)
 
-    # /DEF: is an MSVC linker flag: pass it bare under the MSVC-style driver
-    # (cl.exe / clang-cl), but forward it through a GNU-style driver (e.g. ROCm
-    # clang++) via -Wl, or it is mistaken for an input file.
-    if(MSVC)
-        set(_ep_def_flag /DEF:${PROJECT_SOURCE_DIR}/src/migraphx/symbols.def)
-    else()
-        set(_ep_def_flag -Wl,/DEF:${PROJECT_SOURCE_DIR}/src/migraphx/symbols.def)
-    endif()
-    set_property(TARGET migraphx-ep APPEND_STRING
-            PROPERTY LINK_FLAGS ${_ep_def_flag})
+    set_target_properties(migraphx-ep PROPERTIES
+            LINK_DEF_FILE "${PROJECT_SOURCE_DIR}/src/shared/symbols.def")
 
     set(MGX_FILES
         "$<TARGET_FILE_DIR:migraphx::migraphx>/amdmlss.dll"
