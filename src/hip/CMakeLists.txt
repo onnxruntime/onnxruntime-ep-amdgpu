@@ -6,8 +6,8 @@ add_library(hip-ep MODULE hip_factory.cc)
 target_link_libraries(hip-ep PRIVATE plugin-ep-utils)
 
 if(WIN32)
-    set_property(TARGET hip-ep APPEND_STRING
-            PROPERTY LINK_FLAGS /DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
+   set_target_properties(directx-ep PROPERTIES
+           LINK_DEF_FILE "${PROJECT_SOURCE_DIR}/src/shared/symbols.def")
 
     install(TARGETS hip-ep
             DESTINATION ".")
