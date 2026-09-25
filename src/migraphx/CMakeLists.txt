@@ -27,6 +27,8 @@ add_library(migraphx-ep MODULE
         mgx_interop.h
         mgx_kernel_reg.cc
         mgx_kernel_reg.h
+        mgx_mlss_heuristics.cc
+        mgx_mlss_heuristics.h
         mgx_options.h
         mgx_utils.cc
         mgx_utils.h
@@ -45,8 +47,8 @@ if(WIN32)
     target_sources(migraphx-ep PRIVATE
             ${PROJECT_SOURCE_DIR}/src/shared/common/platform/windows/dll_main.cc)
 
-    set_property(TARGET migraphx-ep APPEND_STRING
-            PROPERTY LINK_FLAGS /DEF:${PROJECT_SOURCE_DIR}/src/migraphx/symbols.def)
+    set_target_properties(migraphx-ep PROPERTIES
+            LINK_DEF_FILE "${PROJECT_SOURCE_DIR}/src/migraphx/symbols.def")
 
     set(MGX_FILES
         "$<TARGET_FILE_DIR:migraphx::migraphx>/amdmlss.dll"

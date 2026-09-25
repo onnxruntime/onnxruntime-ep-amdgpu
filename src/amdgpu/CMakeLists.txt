@@ -15,7 +15,7 @@ add_library(amdgpu-ep MODULE
         gpu_info.cc
         gpu_info.h
         gpu_interop.cc
-        gpu_interop.h       
+        gpu_interop.h
         gpu_stream_support.cc
         gpu_stream_support.h)
 
@@ -44,8 +44,9 @@ if(USE_DML)
 endif()
 
 if(WIN32)
-    set_property(TARGET amdgpu-ep APPEND_STRING
-            PROPERTY LINK_FLAGS /DEF:${PROJECT_SOURCE_DIR}/src/shared/symbols.def)
+    set_target_properties(amdgpu-ep PROPERTIES
+        LINK_DEF_FILE "${PROJECT_SOURCE_DIR}/src/shared/symbols.def")
+
     install(TARGETS amdgpu-ep
             DESTINATION ".")
     install(FILES $<TARGET_PDB_FILE:amdgpu-ep>

@@ -52,6 +52,11 @@ struct ProviderInfo {
     fs::path context_file_path{};
     std::string context_node_name_prefix{};
     bool hip_graph_enable{};
+    bool coresident_programs{};
+    // 0 = unbounded. Mirrors the ComputeState/EP defaults; ProviderOptionsParser
+    // only invokes a parser for options actually supplied, so an absent option
+    // leaves this at 4 rather than zeroing it into 'unbounded'.
+    std::size_t max_resident_programs{4};
     std::size_t max_dynamic_batch{};
     std::string compile_batches{};
     bool precompile_at_load{};
@@ -61,6 +66,12 @@ struct ProviderInfo {
     std::size_t static_pad_seq_len{};
     std::string static_pad_inputs{};
     std::string static_pad_outputs{};
+
+    // External application-owned compute stream (see mgx_options.h). When
+    // has_user_compute_stream is set the EP adopts user_compute_stream rather than
+    // creating its own, mirroring the classic built-in MIGraphXExecutionProvider.
+    bool has_user_compute_stream{};
+    void* user_compute_stream{};
 
     ProviderInfo() = default;
 

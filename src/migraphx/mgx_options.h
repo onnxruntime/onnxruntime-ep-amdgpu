@@ -23,6 +23,8 @@ constexpr auto kCacheDir = "cache_dir"sv;
 constexpr auto kExhaustiveTune = "exhaustive_tune"sv;
 constexpr auto kDumpSubgraphs = "dump_subgraphs"sv;
 constexpr auto kHipGraphEnable = "hip_graph_enable"sv;
+constexpr auto kCoresidentPrograms = "coresident_programs"sv;
+constexpr auto kMaxResidentPrograms = "max_resident_programs"sv;
 constexpr auto kMaxDynamicBatch = "max_dynamic_batch"sv;
 constexpr auto kCompileBatches = "compile_batches"sv;
 constexpr auto kPrecompileAtLoad = "precompile_at_load"sv;
@@ -30,6 +32,15 @@ constexpr auto kCoalesceIO = "coalesce_io"sv;
 constexpr auto kMlssUseSpecificOps = "mlss_use_specific_ops"sv;
 constexpr auto kCpuControlFlow = "cpu_control_flow"sv;
 constexpr auto kModelArch = "model_arch"sv;
+
+// External application-owned compute stream. Mirrors the classic built-in
+// MIGraphXExecutionProvider: when set, the EP adopts this hipStream_t instead of
+// creating its own, so the application's pipeline and the EP share one stream
+// (no cross-stream race, no forced device-wide drain). kUserComputeStream carries
+// the stream handle as a decimal pointer address; kHasUserComputeStream is the
+// matching boolean flag. Providing a non-null kUserComputeStream implies the flag.
+constexpr auto kUserComputeStream = "user_compute_stream"sv;
+constexpr auto kHasUserComputeStream = "has_user_compute_stream"sv;
 
 // Static sequence-length padding.  When enabled, the EP pads the token axis of the
 // named inputs up to static_pad_seq_len (so a varying prefill length compiles the
@@ -58,6 +69,8 @@ constexpr std::pair<std::string_view, std::string_view> kLegacyOptionAliases[] =
     {"migraphx_int8_calibration_table_name", kInt8CalibTable},
     {"migraphx_int8_use_native_calibration_table", kInt8UseNativeCalibTable},
     {"migraphx_exhaustive_tune", kExhaustiveTune},
+    {"migraphx_user_compute_stream", kUserComputeStream},
+    {"migraphx_has_user_compute_stream", kHasUserComputeStream},
 };
 
 }  // namespace mgx_ep::provider_option
