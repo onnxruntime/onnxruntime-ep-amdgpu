@@ -65,6 +65,10 @@ if(WIN32)
         "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_gpu.pdb"
         "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_onnx.dll"
         "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_onnx.pdb"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_rocmlir.dll"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_rocmlir.pdb"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_triton.dll"
+        "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_triton.pdb"
         "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_tf.dll"
         "$<TARGET_FILE_DIR:migraphx::migraphx>/migraphx_tf.pdb")
 
