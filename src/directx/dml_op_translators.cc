@@ -210,12 +210,17 @@ std::optional<BroadcastResult> BroadcastShapes(
 // Translator helpers
 // ---------------------------------------------------------------------------
 
-static std::vector<std::string> GetInputNames(const OrtApi& ort_api, const OrtNode* node) {
-    return fusion_utils::GetNodeInputNames(ort_api, node);
+// Name funnels — accept a NodeView so translator bodies stay textually
+// unchanged (they call GetInputNames(ort_api, node) where `node` is now a
+// NodeView). Live view -> C-API read; snapshot view -> owned copied names.
+static std::vector<std::string> GetInputNames(const OrtApi& ort_api, const NodeView& node) {
+    if (node.is_snapshot()) return node.snapshot()->input_names;
+    return fusion_utils::GetNodeInputNames(ort_api, node.live_node());
 }
 
-static std::vector<std::string> GetOutputNames(const OrtApi& ort_api, const OrtNode* node) {
-    return fusion_utils::GetNodeOutputNames(ort_api, node);
+static std::vector<std::string> GetOutputNames(const OrtApi& ort_api, const NodeView& node) {
+    if (node.is_snapshot()) return node.snapshot()->output_names;
+    return fusion_utils::GetNodeOutputNames(ort_api, node.live_node());
 }
 
 static const DmlTensorInfo* LookupShape(
@@ -246,7 +251,16 @@ static void RebuildSubNodePointers(SubNode& sn) {
         sn.input_tensor_descs[i] = { DML_TENSOR_TYPE_BUFFER, &sn.input_buffer_descs[i] };
     for (size_t i = 0; i < sn.output_tensor_descs.size(); ++i)
         sn.output_tensor_descs[i] = { DML_TENSOR_TYPE_BUFFER, &sn.output_buffer_descs[i] };
-    sn.op_desc.Desc = sn.desc_storage.get();
+    // Only set op_desc.Desc if the sub_node did NOT already point it at its own
+    // operator desc. Every SubNode constructor sets op_desc = { OP, &storage->X }
+    // explicitly, and that pointer is move-stable (storage is a shared_ptr). For a
+    // MULTI-desc storage (e.g. RotaryEmbedding/MatMulNBits, where several op descs
+    // live in one struct), desc_storage.get() is the storage BASE = the FIRST
+    // member, NOT this sub_node's desc — so unconditionally assigning it here
+    // corrupts the op (DML reads a different desc's bytes, e.g. a SPLIT reading a
+    // SCALE_BIAS float 1.0 as its Axis). Preserve the explicit construction value.
+    if (sn.op_desc.Desc == nullptr)
+        sn.op_desc.Desc = sn.desc_storage.get();
 }
 
 static void RebuildTensorDescPointers(TranslatedOp& op) {
@@ -266,7 +280,14 @@ static void RebuildTensorDescPointers(TranslatedOp& op) {
         op.input_tensor_descs[i] = { DML_TENSOR_TYPE_BUFFER, &op.input_buffer_descs[i] };
     for (size_t i = 0; i < op.output_tensor_descs.size(); ++i)
         op.output_tensor_descs[i] = { DML_TENSOR_TYPE_BUFFER, &op.output_buffer_descs[i] };
-    op.op_desc.Desc = op.desc_storage.get();
+    // Same rule as RebuildSubNodePointers: preserve the PRIMARY op's explicit
+    // op_desc.Desc. For a multi-desc storage (GQA: fill_desc + MHA1 + dequant;
+    // RotaryEmbedding; MatMulNBits) desc_storage.get() is the storage BASE, NOT the
+    // primary's own desc — unconditionally assigning it makes DML read a different
+    // desc's bytes (e.g. GQA's FILL_VALUE_CONSTANT reading a garbage ValueDataType).
+    // Every translator sets result.op_desc = { OP, &storage->X } explicitly; keep it.
+    if (op.op_desc.Desc == nullptr)
+        op.op_desc.Desc = op.desc_storage.get();
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +297,7 @@ static void RebuildTensorDescPointers(TranslatedOp& op) {
 template <typename DescType, DML_OPERATOR_TYPE OpType>
 static std::optional<TranslatedOp> TranslateBinaryElementwise(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -326,7 +347,7 @@ static std::optional<TranslatedOp> TranslateBinaryElementwise(
 template <typename DescType, DML_OPERATOR_TYPE OpType>
 static std::optional<TranslatedOp> TranslateUnaryActivation(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -368,7 +389,7 @@ static std::optional<TranslatedOp> TranslateUnaryActivation(
 
 static std::optional<TranslatedOp> TranslateMatMul(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -478,7 +499,7 @@ static std::optional<TranslatedOp> TranslateMatMul(
 
 static std::optional<TranslatedOp> TranslateSoftmax(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -544,7 +565,7 @@ static std::optional<TranslatedOp> TranslateSoftmax(
 
 static std::optional<TranslatedOp> TranslateReshape(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& initializers) {
     auto inputs = GetInputNames(ort_api, node);
@@ -572,7 +593,7 @@ static std::optional<TranslatedOp> TranslateReshape(
 
 static std::optional<TranslatedOp> TranslateShapeOnly(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -638,7 +659,7 @@ TranslatedOp BuildIdentityOp(const DmlTensorInfo& tensor) {
 template <typename DescType, DML_OPERATOR_TYPE OpType, typename SetAttrsFn>
 static std::optional<TranslatedOp> TranslateUnaryWithAttrs(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&,
     SetAttrsFn set_attrs) {
@@ -677,7 +698,7 @@ static std::optional<TranslatedOp> TranslateUnaryWithAttrs(
 
 static std::optional<TranslatedOp> TranslateCast(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -724,7 +745,7 @@ static std::optional<TranslatedOp> TranslateCast(
 
 static std::optional<TranslatedOp> TranslateIsInf(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -782,7 +803,7 @@ static std::optional<TranslatedOp> TranslateIsInf(
 
 static std::optional<TranslatedOp> TranslateIsNaN(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -831,7 +852,7 @@ static std::optional<TranslatedOp> TranslateIsNaN(
 
 static std::optional<TranslatedOp> TranslateAffine(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -881,7 +902,7 @@ static std::optional<TranslatedOp> TranslateAffine(
 // Where (condition, X, Y) → DML_OPERATOR_ELEMENT_WISE_IF
 static std::optional<TranslatedOp> TranslateWhere(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -931,7 +952,7 @@ static std::optional<TranslatedOp> TranslateWhere(
 // support 2-input Sum here; the graph partitioner already limits to that.
 static std::optional<TranslatedOp> TranslateSum(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& init) {
     return TranslateBinaryElementwise<DML_ELEMENT_WISE_ADD_OPERATOR_DESC, DML_OPERATOR_ELEMENT_WISE_ADD>(
@@ -941,7 +962,7 @@ static std::optional<TranslatedOp> TranslateSum(
 // Mod — fmod attr selects TRUNCATE vs FLOOR
 static std::optional<TranslatedOp> TranslateMod(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -1006,7 +1027,7 @@ static std::optional<TranslatedOp> TranslateMod(
 // BitShift — direction attr: "LEFT" or "RIGHT"
 static std::optional<TranslatedOp> TranslateBitShift(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -1072,7 +1093,7 @@ static std::optional<TranslatedOp> TranslateBitShift(
 
 static std::optional<TranslatedOp> TranslateTranspose(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -1163,7 +1184,7 @@ static std::optional<TranslatedOp> TranslateTranspose(
 template <DML_REDUCE_FUNCTION ReduceFunc>
 static std::optional<TranslatedOp> TranslateReduce(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& initializers) {
     auto inputs = GetInputNames(ort_api, node);
@@ -1270,7 +1291,7 @@ static std::optional<TranslatedOp> TranslateReduce(
 template <DML_OPERATOR_TYPE OpType, typename DescType>
 static std::optional<TranslatedOp> TranslateArgMaxMin(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
@@ -1337,7 +1358,7 @@ static std::optional<TranslatedOp> TranslateArgMaxMin(
 // Hardmax → DML_OPERATOR_ACTIVATION_HARDMAX (axis attr)
 static std::optional<TranslatedOp> TranslateHardmax(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -1389,7 +1410,7 @@ static std::optional<TranslatedOp> TranslateHardmax(
 // LogSoftmax → DML_OPERATOR_ACTIVATION_LOG_SOFTMAX1 (same axis pattern as Softmax)
 static std::optional<TranslatedOp> TranslateLogSoftmax(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -1511,7 +1532,7 @@ static ConvKernelArgs ReadConvKernelArgs(
 
 static std::optional<TranslatedOp> TranslateConvImpl(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&,
     DML_CONVOLUTION_DIRECTION direction,
@@ -1782,7 +1803,7 @@ static std::optional<TranslatedOp> TranslateConvImpl(
 
 static std::optional<TranslatedOp> TranslateAveragePool(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&,
     bool global = false) {
@@ -1880,7 +1901,7 @@ static std::optional<TranslatedOp> TranslateAveragePool(
 
 static std::optional<TranslatedOp> TranslateMaxPool(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&,
     bool global = false) {
@@ -1987,7 +2008,7 @@ static std::optional<TranslatedOp> TranslateMaxPool(
 
 static std::optional<TranslatedOp> TranslateConcat(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -2057,7 +2078,7 @@ static std::optional<TranslatedOp> TranslateConcat(
 
 static std::optional<TranslatedOp> TranslateSplit(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -2132,7 +2153,7 @@ static std::optional<TranslatedOp> TranslateSplit(
 
 static std::optional<TranslatedOp> TranslateGather(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -2197,7 +2218,7 @@ static std::optional<TranslatedOp> TranslateGather(
 
 static std::optional<TranslatedOp> TranslateGatherElements(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -2249,7 +2270,7 @@ static std::optional<TranslatedOp> TranslateGatherElements(
 
 static std::optional<TranslatedOp> TranslateGatherND(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -2308,7 +2329,7 @@ static std::optional<TranslatedOp> TranslateGatherND(
 
 static std::optional<TranslatedOp> TranslatePad(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& initializers) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -2405,7 +2426,7 @@ static std::optional<TranslatedOp> TranslatePad(
 
 static std::optional<TranslatedOp> TranslateDepthToSpace(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -2462,7 +2483,7 @@ static std::optional<TranslatedOp> TranslateDepthToSpace(
 
 static std::optional<TranslatedOp> TranslateSpaceToDepth(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -2515,7 +2536,7 @@ static std::optional<TranslatedOp> TranslateSpaceToDepth(
 
 static std::optional<TranslatedOp> TranslateScatterElements(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -2567,7 +2588,7 @@ static std::optional<TranslatedOp> TranslateScatterElements(
 
 static std::optional<TranslatedOp> TranslateScatterND(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -2579,17 +2600,27 @@ static std::optional<TranslatedOp> TranslateScatterND(
     auto* updates_info = LookupShape(value_shapes, inputs[2]);
     if (!data_info || !indices_info || !updates_info) return std::nullopt;
 
-    // Read original ranks from ORT node type info (value_shapes has padded ranks).
+    // Read original ranks (value_shapes has 4D-padded ranks). On the live path
+    // this reads ORT type info off the node; on the deferred/snapshot path it
+    // reads the ranks captured into the snapshot by name.
     auto read_ort_rank = [&](bool is_input, size_t idx) -> size_t {
+        const auto& names = is_input ? inputs : outputs;
+        if (idx >= names.size()) return 0;
+        if (node.is_snapshot()) {
+            const auto& ranks = node.snapshot()->original_ranks;
+            auto it = ranks.find(names[idx]);
+            return (it != ranks.end()) ? it->second : 0;
+        }
+        const OrtNode* live = node.live_node();
         size_t n = 0;
-        if (is_input) ort_api.Node_GetNumInputs(node, &n); else ort_api.Node_GetNumOutputs(node, &n);
+        if (is_input) ort_api.Node_GetNumInputs(live, &n); else ort_api.Node_GetNumOutputs(live, &n);
         if (idx >= n) return 0;
         std::vector<const OrtValueInfo*> vis(n, nullptr);
-        if (is_input) ort_api.Node_GetInputs(node, vis.data(), n); else ort_api.Node_GetOutputs(node, vis.data(), n);
-        if (!vis[idx] || !vis[idx]->GetTypeInfo() || !vis[idx]->GetTypeInfo()->tensor_type_info) return 0;
-        size_t r = 0;
-        ort_api.GetDimensionsCount(vis[idx]->GetTypeInfo()->tensor_type_info.get(), &r);
-        return r;
+        if (is_input) ort_api.Node_GetInputs(live, vis.data(), n); else ort_api.Node_GetOutputs(live, vis.data(), n);
+        if (!vis[idx]) return 0;
+        fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ort_api, vis[idx]);
+        if (!s.has_type_info) return 0;
+        return s.rank;
     };
     size_t ort_data_rank    = read_ort_rank(true, 0);
     size_t ort_indices_rank = read_ort_rank(true, 1);
@@ -2645,7 +2676,7 @@ static std::optional<TranslatedOp> TranslateScatterND(
 
 static std::optional<TranslatedOp> TranslateSlice(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& initializers) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -2816,7 +2847,7 @@ static std::optional<TranslatedOp> TranslateSlice(
 
 static std::optional<TranslatedOp> TranslateResize(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& initializers) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -2828,9 +2859,7 @@ static std::optional<TranslatedOp> TranslateResize(
 
     OrtNodeAdapter adapter(node, ort_api);
 
-    const char* node_op = nullptr;
-    ort_api.Node_GetOperatorType(node, &node_op);
-    bool is_upsample = node_op && std::strcmp(node_op, "Upsample") == 0;
+    bool is_upsample = adapter.GetOpType() == "Upsample";
 
     std::string mode_str = adapter.GetAttributeString("mode", "nearest");
     std::string coord_transform = adapter.GetAttributeString(
@@ -3023,7 +3052,7 @@ static std::optional<TranslatedOp> TranslateResize(
 
 static std::optional<TranslatedOp> TranslateLayerNorm(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&,
     bool simplified = false,
@@ -3131,7 +3160,7 @@ static std::optional<TranslatedOp> TranslateLayerNorm(
 
 static std::optional<TranslatedOp> TranslateGroupNorm(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -3289,7 +3318,7 @@ static std::optional<TranslatedOp> TranslateGroupNorm(
 
 static std::optional<TranslatedOp> TranslateBatchNorm(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -3350,7 +3379,7 @@ static std::optional<TranslatedOp> TranslateBatchNorm(
 
 static std::optional<TranslatedOp> TranslateLRN(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -3401,7 +3430,7 @@ static std::optional<TranslatedOp> TranslateLRN(
 
 static std::optional<TranslatedOp> TranslateGemm(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -3495,7 +3524,7 @@ static std::optional<TranslatedOp> TranslateGemm(
 // ---------------------------------------------------------------------------
 static std::optional<TranslatedOp> TranslateTile(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& initializers) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -3595,7 +3624,7 @@ static std::optional<TranslatedOp> TranslateTile(
 // ---------------------------------------------------------------------------
 static std::optional<TranslatedOp> TranslateConstantOfShape(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto outputs = GetOutputNames(ort_api, node);
@@ -3662,7 +3691,7 @@ static std::optional<TranslatedOp> TranslateConstantOfShape(
 // ---------------------------------------------------------------------------
 static std::optional<TranslatedOp> TranslateRange(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& initializers) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -3785,7 +3814,7 @@ static std::optional<TranslatedOp> TranslateRange(
 
 static std::optional<TranslatedOp> TranslateClip(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& initializers) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -3890,7 +3919,7 @@ static std::optional<TranslatedOp> TranslateClip(
 
 static std::optional<TranslatedOp> TranslateQuantizeLinear(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -3960,7 +3989,7 @@ static std::optional<TranslatedOp> TranslateQuantizeLinear(
 
 static std::optional<TranslatedOp> TranslateDequantizeLinear(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -4023,7 +4052,7 @@ static std::optional<TranslatedOp> TranslateDequantizeLinear(
 // Gelu → DML_OPERATOR_ACTIVATION_GELU
 static std::optional<TranslatedOp> TranslateGelu(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -4058,7 +4087,7 @@ static std::optional<TranslatedOp> TranslateGelu(
 
 static std::optional<TranslatedOp> TranslateQuickGelu(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -4213,7 +4242,7 @@ static std::optional<TranslatedOp> TranslateQuickGelu(
 
 static std::optional<TranslatedOp> TranslateBiasSplitGelu(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -4335,7 +4364,7 @@ static std::optional<TranslatedOp> TranslateBiasSplitGelu(
 
 static std::optional<TranslatedOp> TranslateSkipLayerNorm(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&,
     bool simplified) {
@@ -4382,9 +4411,17 @@ static std::optional<TranslatedOp> TranslateSkipLayerNorm(
     auto in_tensor   = MakeTensorInfo(tensor_shape, in_info->data_type);
     auto skip_tensor = MakeTensorInfo(tensor_shape, skip_info->data_type);
 
-    auto* out_edge = LookupShape(value_shapes, outputs[0]);
-    auto out_tensor = out_edge ? MakeTensorInfo(out_edge->sizes, in_info->data_type)
-                               : MakeTensorInfo(tensor_shape, in_info->data_type);
+    // The node output MUST be in the SAME internal [B,S,H,1] layout as the primary
+    // Add's inputs (the whole op — Add → optional bias Add → MVN2 over axes {2,3} —
+    // operates in that layout). On the STATIC path ORT's shape inference reports
+    // outputs[0] already reshaped to [B,S,H,1] so LookupShape happened to match; on the
+    // RUNTIME-fusion path ONNX InferShapes reports the FLAT ONNX form ([1,1,1,4096],
+    // hidden at axis 3) — using that directly makes the primary Add's output desc
+    // [1,1,1,4096] diverge from its [1,1,4096,1] inputs → DML "Output size 1 in dim2
+    // vs ATensor 4096". Element count is identical either way, so building the output
+    // in [B,S,H,1] keeps the graph edge byte-size valid while fixing the dim mismatch.
+    // (Same static-vs-runtime divergence class as RotaryEmbedding's identity-out fix.)
+    auto out_tensor = MakeTensorInfo(tensor_shape, in_info->data_type);
 
     // gamma/beta/bias: [hidden] → [1, 1, hidden, 1] with stride-based broadcast.
     std::vector<uint32_t> gamma_sizes = { hidden_size };
@@ -4507,7 +4544,29 @@ static std::optional<TranslatedOp> TranslateSkipLayerNorm(
         mvn_store->desc.OutputTensor = &self.output_tensor_descs[0];
     };
     mvn_node.FixupPointers();
+    size_t mvn_sub_idx = result.sub_nodes.size();  // MVN is the last sub_node.
     result.sub_nodes.push_back(std::move(mvn_node));
+
+    // ONNX SkipSimplifiedLayerNormalization declares 4 outputs:
+    //   0 = normalized output (from MVN), 1 = mean, 2 = inv_std_var,
+    //   3 = input_skip_sum (input+skip[+bias], the residual consumed by the NEXT
+    //       layer's SkipLayerNorm). ORT routes output 3 from the Add node
+    //       (DmlOperatorSkipLayerNormalization.cpp:146-162). We produce outputs 0
+    //   and 3; mean/inv_std_var (1,2) are unsupported (ORT skips them too).
+    // When output 3 is present+consumed the graph builder looks up its producer
+    // slot, so output_source MUST be dense up to index 3 or the edge routing falls
+    // back to "slot k of the last sub_node" → MVN2 has 1 output → "FromNodeOutputIndex
+    // 3 exceeds output count 1" at CompileGraph. Route 3 → bias-Add sub (if bias) else
+    // primary Add (-1); 1,2 point at MVN as harmless never-consumed placeholders.
+    if (outputs.size() > 3 && !outputs[3].empty()) {
+        int skip_sum_src = has_bias ? 0 : -1;  // bias-Add sub 0, or primary Add.
+        result.output_source = {
+            { static_cast<int>(mvn_sub_idx), 0 },  // 0: normalized output
+            { static_cast<int>(mvn_sub_idx), 0 },  // 1: mean (unproduced placeholder)
+            { static_cast<int>(mvn_sub_idx), 0 },  // 2: inv_std_var (unproduced placeholder)
+            { skip_sum_src, 0 },                   // 3: input_skip_sum
+        };
+    }
 
     return result;
 }
@@ -4519,7 +4578,7 @@ static std::optional<TranslatedOp> TranslateSkipLayerNorm(
 
 static std::optional<TranslatedOp> TranslateDynamicQuantizeLinear(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -4563,7 +4622,7 @@ static std::optional<TranslatedOp> TranslateDynamicQuantizeLinear(
 
 static std::optional<TranslatedOp> TranslateQLinearMatMul(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -4702,7 +4761,7 @@ static std::optional<TranslatedOp> TranslateQLinearMatMul(
 
 static std::optional<TranslatedOp> TranslateMatMulInteger(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -4822,7 +4881,7 @@ static std::optional<TranslatedOp> TranslateMatMulInteger(
 
 static std::optional<TranslatedOp> TranslateMatMulIntegerToFloat(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -4931,7 +4990,7 @@ static std::optional<TranslatedOp> TranslateMatMulIntegerToFloat(
 
 static std::optional<TranslatedOp> TranslateOneHot(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& initializers) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -4992,7 +5051,7 @@ static std::optional<TranslatedOp> TranslateOneHot(
 
 static std::optional<TranslatedOp> TranslateTrilu(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& initializers) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -5055,7 +5114,7 @@ static std::optional<TranslatedOp> TranslateTrilu(
 
 static std::optional<TranslatedOp> TranslateQLinearAdd(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -5122,7 +5181,7 @@ static std::optional<TranslatedOp> TranslateQLinearAdd(
 
 static std::optional<TranslatedOp> TranslateLpNormalization(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -5175,7 +5234,7 @@ static std::optional<TranslatedOp> TranslateLpNormalization(
 
 static std::optional<TranslatedOp> TranslateEyeLike(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -5217,7 +5276,7 @@ static std::optional<TranslatedOp> TranslateEyeLike(
 
 static std::optional<TranslatedOp> TranslateReverseSequence(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -5271,7 +5330,7 @@ static std::optional<TranslatedOp> TranslateReverseSequence(
 
 static std::optional<TranslatedOp> TranslateCrop(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -5329,7 +5388,7 @@ static std::optional<TranslatedOp> TranslateCrop(
 
 static std::optional<TranslatedOp> TranslateMaxRoiPool(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -5386,7 +5445,7 @@ static std::optional<TranslatedOp> TranslateMaxRoiPool(
 
 static std::optional<TranslatedOp> TranslateMaxUnpool(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -5432,7 +5491,7 @@ static std::optional<TranslatedOp> TranslateMaxUnpool(
 
 static std::optional<TranslatedOp> TranslateMatMulNBits(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -5634,6 +5693,12 @@ static std::optional<TranslatedOp> TranslateMatMulNBits(
 
     gemm_node.fixup = [storage](SubNode& self) {
         RebuildSubNodePointers(self);
+        // RebuildSubNodePointers set self.op_desc.Desc = desc_storage.get(), which
+        // is the BASE of MatMulNBitsStorage (== &deq_desc, the FIRST member) — NOT
+        // the gemm_desc (the LAST member). Re-point op_desc.Desc at gemm_desc, else
+        // DML reads the Dequantize desc's fields as the GEMM's tensors (BTensor →
+        // the raw UINT4 weight → "invalid input tensor data type UINT4").
+        self.op_desc.Desc = &storage->gemm_desc;
         storage->gemm_desc.ATensor = &self.input_tensor_descs[0];
         storage->gemm_desc.BTensor = &self.input_tensor_descs[1];
         storage->gemm_desc.CTensor = nullptr;
@@ -5659,7 +5724,7 @@ static std::optional<TranslatedOp> TranslateMatMulNBits(
 
 static std::optional<TranslatedOp> TranslateAttention(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -6251,7 +6316,7 @@ static std::optional<TranslatedOp> TranslateAttention(
 
 static std::optional<TranslatedOp> TranslateQAttention(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -6890,7 +6955,7 @@ static std::optional<TranslatedOp> TranslateQAttention(
 
 static std::optional<TranslatedOp> TranslateEmbedLayerNormalization(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -7417,7 +7482,7 @@ static std::optional<TranslatedOp> TranslateEmbedLayerNormalization(
 
 static std::optional<TranslatedOp> TranslateMultiHeadAttention(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -7753,7 +7818,7 @@ static std::optional<TranslatedOp> TranslateMultiHeadAttention(
 
 static std::optional<TranslatedOp> TranslateRotaryEmbedding(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -7830,7 +7895,8 @@ static std::optional<TranslatedOp> TranslateRotaryEmbedding(
 
     // Storage struct owns all operator descs and intermediate shape data.
     struct RotaryStorage {
-        DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC copy_desc{};
+        DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC copy_desc{};        // primary strided→packed copy
+        DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC partial_copy_desc{}; // partial-rotary copy sub_node
         DML_SCALE_BIAS scale_bias{1.0f, 0.0f};
         DML_SPLIT_OPERATOR_DESC split_half_desc{};
         DML_GATHER_OPERATOR_DESC gather_cos_desc{};
@@ -8022,8 +8088,9 @@ static std::optional<TranslatedOp> TranslateRotaryEmbedding(
         storage->join_out_in_tds.resize(2);
     }
 
-    // Build the primary node (Identity copy) and TranslatedOp.
-    // Primary = Identity that reshapes input to [B,S,numHeads,rotaryDim].
+    // Build the primary node and TranslatedOp. The primary differs by path:
+    //   non-partial → ELEMENT_WISE_IDENTITY (strided→packed copy of the full input)
+    //   partial     → SPLIT (full head → rotaryDim + remainder); see below.
     TranslatedOp result;
 
     // All 4 ONNX inputs in input_tensors for consumption tracking.
@@ -8032,36 +8099,69 @@ static std::optional<TranslatedOp> TranslateRotaryEmbedding(
     auto cos_tensor = MakeTensorInfo(cos_info->sizes, data_dtype);
     auto sin_tensor = MakeTensorInfo(sin_info->sizes, data_dtype);
 
-    result.input_tensors = { storage->partial_in_strided, pos_tensor, cos_tensor, sin_tensor };
+    // Slot 0 shape depends on the path: the partial primary is a SPLIT over the FULL
+    // head (full_in_out=[...,headSize]); the non-partial primary copies the partial
+    // strided view. Set the full buffer desc (dtype/dimcount/bytes), not just Sizes,
+    // so the SPLIT's input desc is fully valid (RebuildTensorDescPointers only
+    // re-patches Sizes/Strides pointers, not the scalar fields).
+    DmlTensorInfo primary_in0 = partialRotary ? storage->full_in_out
+                                              : storage->partial_in_strided;
+    result.input_tensors = { primary_in0, pos_tensor, cos_tensor, sin_tensor };
     result.input_buffer_descs = {
-        storage->partial_in_strided.ToBufferDesc(), pos_tensor.ToBufferDesc(),
+        primary_in0.ToBufferDesc(), pos_tensor.ToBufferDesc(),
         cos_tensor.ToBufferDesc(), sin_tensor.ToBufferDesc()
     };
     result.input_tensor_descs.resize(4);
     result.primary_input_count = 1;
 
-    auto* out_edge = LookupShape(value_shapes, outputs[0]);
-    auto out_tensor = out_edge ? MakeTensorInfo(out_edge->sizes, data_dtype)
-                               : MakeTensorInfo(in_info->sizes, data_dtype);
-    result.output_tensors = { out_tensor };
-    result.output_buffer_descs = { out_tensor.ToBufferDesc() };
+    // output_tensors drives shape write-back and the fp16/fp32 exec-flag scan only —
+    // NOT physical primary output routing (subs read primary outputs by slot via
+    // input_from={-1,slot}; the SPLIT primary describes its two physical outputs in
+    // its fixup below, like GQA's FILL primary). Keep partial_in_packed here as the
+    // pre-existing write-back shape (guarded by !value_shapes.count).
+    result.output_tensors = { storage->partial_in_packed };
+    result.output_buffer_descs = { storage->partial_in_packed.ToBufferDesc() };
     result.output_tensor_descs.resize(1);
 
-    // Primary: trivial Identity pass-through on input_data.
-    // The real Identity copy (with strides) is a sub_node.
-    // We need a primary DML operator so the graph compiler creates a node.
-    struct PrimaryIdentityStorage {
-        DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC desc{};
-    };
-    auto primary_storage = std::make_shared<PrimaryIdentityStorage>();
-    result.desc_storage = primary_storage;
-    result.op_desc = { DML_OPERATOR_ELEMENT_WISE_IDENTITY, &primary_storage->desc };
-    result.fixup = [primary_storage](TranslatedOp& self) {
-        RebuildTensorDescPointers(self);
-        primary_storage->desc.InputTensor = &self.input_tensor_descs[0];
-        primary_storage->desc.OutputTensor = &self.output_tensor_descs[0];
-        primary_storage->desc.ScaleBias = nullptr;
-    };
+    result.desc_storage = storage;
+
+    if (partialRotary) {
+        // PARTIAL ROTARY: the primary is the input SPLIT (headSize → rotaryDim +
+        // remainder), NOT a strided copy. Its two outputs feed (slot 0 → copyInput
+        // sub via {-1,0}) the rotary compute and (slot 1 → joinOutput sub via
+        // {-1,1}) the untouched tail. This REPLACES the former standalone splitInput
+        // sub_node, which left the primary identity-copy orphaned (its output was
+        // consumed by nobody) → DML CompileGraph E_INVALIDARG on the runtime-fusion
+        // path, where the debug layer validates the whole fused graph as one unit.
+        uint32_t split_axis_in = static_cast<uint32_t>(inputOutputShape.size()) - 1;
+        result.op_desc = { DML_OPERATOR_SPLIT, &storage->split_input_desc };
+        result.fixup = [storage, split_axis_in](TranslatedOp& self) {
+            RebuildTensorDescPointers(self);
+            // Build the SPLIT's two physical output descs from storage (stable),
+            // NOT from self.output_tensor_descs (which is partial_in_packed).
+            storage->split_in_out_bufs[0] = storage->split_in_1.ToBufferDesc();
+            storage->split_in_out_bufs[1] = storage->split_in_2.ToBufferDesc();
+            storage->split_in_out_tds[0] = { DML_TENSOR_TYPE_BUFFER, &storage->split_in_out_bufs[0] };
+            storage->split_in_out_tds[1] = { DML_TENSOR_TYPE_BUFFER, &storage->split_in_out_bufs[1] };
+            storage->split_input_desc.InputTensor = &self.input_tensor_descs[0];
+            storage->split_input_desc.OutputCount = 2;
+            storage->split_input_desc.OutputTensors = storage->split_in_out_tds.data();
+            storage->split_input_desc.Axis = split_axis_in;
+        };
+    } else {
+        // NON-PARTIAL: primary = strided→packed copy (ELEMENT_WISE_IDENTITY with
+        // ScaleBias). Its output (partial_in_packed) is consumed by the downstream
+        // subs (SplitHalf / MulCos / Add read it via input_from={-1,0}). DML requires
+        // an identity's output dims == input dims, hence partialShape here; the flat
+        // final output is produced downstream by partial_out_strided.
+        result.op_desc = { DML_OPERATOR_ELEMENT_WISE_IDENTITY, &storage->copy_desc };
+        result.fixup = [storage](TranslatedOp& self) {
+            RebuildTensorDescPointers(self);
+            storage->copy_desc.InputTensor = &self.input_tensor_descs[0];
+            storage->copy_desc.OutputTensor = &self.output_tensor_descs[0];
+            storage->copy_desc.ScaleBias = &storage->scale_bias;
+        };
+    }
 
     // Build sub_nodes. Use dynamic index tracking.
     // Assign node indices based on active paths.
@@ -8080,40 +8180,30 @@ static std::optional<TranslatedOp> TranslateRotaryEmbedding(
     // We'll build sub_nodes in order and track their indices.
     std::vector<SubNode> sub_nodes;
 
-    // Optional: SplitInput for partial rotary.
+    // The input SPLIT for partial rotary is now the PRIMARY node (see above), so
+    // there is no standalone splitInput sub_node. splitInputIdx = -1 means "primary":
+    // downstream refs use input_from={-1, slot} to read the primary's SPLIT outputs
+    // (slot 0 = rotaryDim part, slot 1 = remainder). The joinOutput sub reads slot 1.
     int splitInputIdx = -1;
-    if (partialRotary) {
-        splitInputIdx = static_cast<int>(sub_nodes.size());
-        SubNode sn;
-        sn.input_tensors = { storage->full_in_out };
-        sn.input_buffer_descs = { storage->full_in_out.ToBufferDesc() };
-        sn.input_tensor_descs.resize(1);
-        sn.output_tensors = { storage->split_in_1, storage->split_in_2 };
-        sn.output_buffer_descs = { storage->split_in_1.ToBufferDesc(), storage->split_in_2.ToBufferDesc() };
-        sn.output_tensor_descs.resize(2);
-        sn.desc_storage = storage;
-        sn.op_desc = { DML_OPERATOR_SPLIT, &storage->split_input_desc };
-        sn.graph_inputs = { {inputDataIdx, 0} };
-        uint32_t local_axis = static_cast<uint32_t>(inputOutputShape.size()) - 1;
-        sn.fixup = [storage, local_axis](SubNode& self) {
-            RebuildSubNodePointers(self);
-            storage->split_in_out_bufs[0] = self.output_buffer_descs[0];
-            storage->split_in_out_bufs[1] = self.output_buffer_descs[1];
-            storage->split_in_out_tds[0] = { DML_TENSOR_TYPE_BUFFER, &storage->split_in_out_bufs[0] };
-            storage->split_in_out_tds[1] = { DML_TENSOR_TYPE_BUFFER, &storage->split_in_out_bufs[1] };
-            storage->split_input_desc.InputTensor = &self.input_tensor_descs[0];
-            storage->split_input_desc.OutputCount = 2;
-            storage->split_input_desc.OutputTensors = storage->split_in_out_tds.data();
-            storage->split_input_desc.Axis = local_axis;
-        };
-        sn.FixupPointers();
-        sub_nodes.push_back(std::move(sn));
-    }
 
     // Sub: CopyInput (Identity) — reshapes to [B,S,numHeads,rotaryDim].
-    int copyInputIdx = static_cast<int>(sub_nodes.size());
-    {
+    // Non-partial path: the strided→packed copy IS the primary, so there is no
+    // separate copyInput sub and copyInputIdx = -1 (subs read primary via {-1,0}).
+    // Partial path: the primary is the input SPLIT, so a real copyInput sub packs the
+    // SPLIT's slot-0 (rotaryDim) output for the rotary math; it reads the primary via
+    // input_from={-1,0}.
+    int copyInputIdx = -1;  // -1 = primary output (non-partial default).
+    if (partialRotary) {
+        copyInputIdx = static_cast<int>(sub_nodes.size());
         SubNode sn;
+        // Input desc is partial_in_strided (partialShape={B,S,numHeads,rotaryDim}
+        // with 4D strides), NOT the raw split_in_1 shape. For a 4D input the primary
+        // SPLIT's slot-0 output is {B,numHeads,S,rotaryDim}-packed in memory; the
+        // strided desc reinterprets that same memory as {B,S,numHeads,rotaryDim}
+        // logical (identical element count) so the rotary math sees the canonical
+        // layout. For a 3D input partial_in_strided is packed and equals split_in_1.
+        // This edge reads the primary SPLIT output 0 via input_from={-1,0}; the
+        // producer byte-count (split_in_1) matches this consumer's element count.
         sn.input_tensors = { storage->partial_in_strided };
         sn.input_buffer_descs = { storage->partial_in_strided.ToBufferDesc() };
         sn.input_tensor_descs.resize(1);
@@ -8121,17 +8211,15 @@ static std::optional<TranslatedOp> TranslateRotaryEmbedding(
         sn.output_buffer_descs = { storage->partial_in_packed.ToBufferDesc() };
         sn.output_tensor_descs.resize(1);
         sn.desc_storage = storage;
-        sn.op_desc = { DML_OPERATOR_ELEMENT_WISE_IDENTITY, &storage->copy_desc };
-        if (partialRotary) {
-            sn.input_from = { {splitInputIdx, 0} };
-        } else {
-            sn.graph_inputs = { {inputDataIdx, 0} };
-        }
+        // Own desc (partial_copy_desc) so it never shares with the non-partial
+        // primary's copy_desc.
+        sn.op_desc = { DML_OPERATOR_ELEMENT_WISE_IDENTITY, &storage->partial_copy_desc };
+        sn.input_from = { {splitInputIdx, 0} };  // {-1,0} = primary SPLIT output 0
         sn.fixup = [storage](SubNode& self) {
             RebuildSubNodePointers(self);
-            storage->copy_desc.InputTensor = &self.input_tensor_descs[0];
-            storage->copy_desc.OutputTensor = &self.output_tensor_descs[0];
-            storage->copy_desc.ScaleBias = &storage->scale_bias;
+            storage->partial_copy_desc.InputTensor = &self.input_tensor_descs[0];
+            storage->partial_copy_desc.OutputTensor = &self.output_tensor_descs[0];
+            storage->partial_copy_desc.ScaleBias = &storage->scale_bias;
         };
         sn.FixupPointers();
         sub_nodes.push_back(std::move(sn));
@@ -8472,7 +8560,7 @@ static std::optional<TranslatedOp> TranslateRotaryEmbedding(
 
 static std::optional<TranslatedOp> TranslateLpPool(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&,
     bool global = false) {
@@ -8571,7 +8659,7 @@ static std::optional<TranslatedOp> TranslateLpPool(
 
 static std::optional<TranslatedOp> TranslateCol2Im(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& initializers) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -8701,7 +8789,7 @@ static std::optional<TranslatedOp> TranslateCol2Im(
 
 static std::optional<TranslatedOp> TranslateQLinearConv(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -8895,7 +8983,7 @@ static std::optional<TranslatedOp> TranslateQLinearConv(
 
 static std::optional<TranslatedOp> TranslateConvInteger(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -9052,7 +9140,7 @@ static std::optional<TranslatedOp> TranslateConvInteger(
 
 static std::optional<TranslatedOp> TranslateQLinearAveragePool(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&,
     bool global = false) {
@@ -9186,7 +9274,7 @@ static std::optional<TranslatedOp> TranslateQLinearAveragePool(
 
 static std::optional<TranslatedOp> TranslateDynamicQuantizeMatMul(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -9390,7 +9478,7 @@ static std::optional<TranslatedOp> TranslateDynamicQuantizeMatMul(
 
 static std::optional<TranslatedOp> TranslateGroupQueryAttention(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -9416,22 +9504,36 @@ static std::optional<TranslatedOp> TranslateGroupQueryAttention(
     // Q: [B, S, qHidden], K: [B, kvS, kvHidden], V: [B, kvS, kvHidden]
     auto q_sizes = q_info->sizes;
     auto k_sizes = k_info->sizes;
-    auto v_sizes = v_info->sizes;
 
     auto get_rank_offset = [](const DmlTensorInfo* info) -> size_t {
         uint32_t r = info->original_rank ? info->original_rank : static_cast<uint32_t>(info->sizes.size());
         return info->sizes.size() >= r ? info->sizes.size() - r : 0;
     };
 
+    // Q/K/V may arrive in EITHER layout, and both occur within one model:
+    //   packed     [B, S, hidden]          (e.g. InferShapes-seeded, layer 0)
+    //   head-split [B, S, numHeads, dHead]  (RotaryEmbedding's raw 4D output, layers 1+)
+    // The two describe the SAME contiguous memory (hidden == numHeads*dHead). DML MHA1
+    // wants the PACKED form + a QueryHeadCount attribute, so we normalize here: take
+    // B,S as the first two logical dims and fold EVERY trailing dim into hidden (product,
+    // not just [off+2]). Reading only q_sizes[q_off+2] silently grabbed numHeads (40)
+    // for the head-split layout → wrong hidden → downstream weight_only Mul broadcast
+    // rejected [.,.,40] vs the [.,.,5120] scale → deferred compile failed.
+    auto trailing_product = [](const std::vector<uint32_t>& sizes, size_t from) -> uint32_t {
+        uint32_t p = 1;
+        for (size_t i = from; i < sizes.size(); ++i) p *= sizes[i];
+        return p;
+    };
+
     size_t q_off = get_rank_offset(q_info);
     uint32_t batchSize = q_sizes[q_off];
     uint32_t sequenceLength = q_sizes[q_off + 1];
-    uint32_t queryHiddenSize = q_sizes[q_off + 2];
+    uint32_t queryHiddenSize = trailing_product(q_sizes, q_off + 2);
     uint32_t queryHeadSize = queryHiddenSize / numHeads;
 
     size_t k_off = get_rank_offset(k_info);
     uint32_t kvSequenceLength = k_sizes[k_off + 1];
-    uint32_t kvHiddenSize = k_sizes[k_off + 2];
+    uint32_t kvHiddenSize = trailing_product(k_sizes, k_off + 2);
 
     float scale = adapter.GetAttributeFloat("scale", 0.0f);
     if (scale == 0.0f) scale = 1.0f / std::sqrt(static_cast<float>(queryHeadSize));
@@ -9441,56 +9543,104 @@ static std::optional<TranslatedOp> TranslateGroupQueryAttention(
     struct GQAStorage {
         DML_MULTIHEAD_ATTENTION1_OPERATOR_DESC mha1_desc{};
         DML_FILL_VALUE_CONSTANT_OPERATOR_DESC fill_desc{};
+        // The FILL_VALUE_CONSTANT primary generates the PastSequenceLengths zeros
+        // (INT32 [batchSize]) that feed MHA1 slot 11 when no seqlens graph input is
+        // present. Its output desc lives in storage (like MatMulNBits' deq_out_td),
+        // separate from the node's fp16 graph outputs in result.output_tensor_descs.
+        DmlTensorInfo fill_out_info;
+        DML_BUFFER_TENSOR_DESC fill_out_buf{};
+        DML_TENSOR_DESC fill_out_td{};
         int out_present_key = -1, out_present_value = -1;
     };
     auto storage = std::make_shared<GQAStorage>();
 
-    auto qt = MakeTensorInfo(q_sizes, q_info->data_type);
-    auto kt = MakeTensorInfo(k_sizes, k_info->data_type);
-    auto vt = MakeTensorInfo(v_sizes, v_info->data_type);
+    // Build Q/K/V in the canonical PACKED [B,S,hidden] layout (padded to 4D), NOT from
+    // the raw incoming sizes — those may be head-split [B,S,H,dHead] on layers fed by
+    // RotaryEmbedding's 4D output. Same memory, correct logical shape for MHA1. This
+    // makes every layer match the InferShapes-seeded packed layer-0 case exactly.
+    auto qt = MakeTensorInfo(PadToMinDims({batchSize, sequenceLength, queryHiddenSize}), q_info->data_type);
+    auto kt = MakeTensorInfo(PadToMinDims({batchSize, kvSequenceLength, kvHiddenSize}), k_info->data_type);
+    auto vt = MakeTensorInfo(PadToMinDims({batchSize, kvSequenceLength, kvHiddenSize}), v_info->data_type);
 
     std::vector<uint32_t> past_seq_shape = { batchSize };
     auto past_seq_tensor = MakeTensorInfo(PadToMinDims(past_seq_shape), DML_TENSOR_DATA_TYPE_INT32);
 
+    storage->fill_out_info = past_seq_tensor;
+    storage->fill_out_buf = past_seq_tensor.ToBufferDesc();
+    storage->fill_out_td = { DML_TENSOR_TYPE_BUFFER, &storage->fill_out_buf };
+
     float local_scale = scale;
     uint32_t local_num_heads = numHeads, local_kv_heads = kvNumHeads;
 
-    // --- Build the translator based on sequenceLength and fp16 ---
-    // For all cases: use FILL_VALUE_CONSTANT primary + MHA1 sub_node.
-    // When seqLen==1 and hasSeqLens, wire seqlens input; otherwise generate zeros.
-    TranslatedOp result;
-    result.input_tensors = { qt, kt, vt };
-    result.input_buffer_descs = { qt.ToBufferDesc(), kt.ToBufferDesc(), vt.ToBufferDesc() };
-    result.input_name_reorder = { queryIdx, keyIdx, valueIdx };
+    // --- Structure depends on whether real PastSequenceLengths exist ---
+    // DECODE (seqLen==1 && hasSeqLens): the seqLens graph input carries the REAL past
+    //   sequence lengths → MHA1 is the PRIMARY, consuming Q/K/V + seqLens (slot 11)
+    //   directly as graph inputs. NO FILL node. This mirrors ORT, which omits the
+    //   FILL_VALUE_CONSTANT entirely when sequenceLength==1
+    //   (DmlOperatorGroupQueryAttention.cpp:243-251), and avoids an ORPHANED FILL node
+    //   (its zeros would feed nothing since slot 11 comes from the graph input).
+    // PREFILL: no seqlens input → a FILL_VALUE_CONSTANT primary generates the
+    //   PastSequenceLengths zeros that feed the MHA1 sub_node's slot 11.
+    bool mha_is_primary = (sequenceLength == 1 && hasSeqLens);
 
-    if (sequenceLength == 1 && hasSeqLens) {
+    TranslatedOp result;
+    DmlTensorInfo slt{};
+    if (mha_is_primary) {
         auto* sl_info = LookupShape(value_shapes, inputs[seqLensIdx]);
         if (!sl_info) return std::nullopt;
-        auto slt = MakeTensorInfo(sl_info->sizes, sl_info->data_type);
-        result.input_tensors.push_back(slt);
-        result.input_buffer_descs.push_back(slt.ToBufferDesc());
-        result.input_name_reorder.push_back(seqLensIdx);
+        slt = MakeTensorInfo(sl_info->sizes, sl_info->data_type);
+        // Packed inputs Q/K/V/seqLens → sparse DML MHA1 schema slots 0/1/2/11.
+        result.input_tensors = { qt, kt, vt, slt };
+        result.input_buffer_descs = { qt.ToBufferDesc(), kt.ToBufferDesc(), vt.ToBufferDesc(), slt.ToBufferDesc() };
+        result.input_name_reorder = { queryIdx, keyIdx, valueIdx, seqLensIdx };
+        result.dml_input_slot_indices = { 0, 1, 2, 11 };
+        // nullopt = all 4 inputs wire to the primary MHA1 (no sub_node).
+    } else {
+        result.input_tensors = { qt, kt, vt };
+        result.input_buffer_descs = { qt.ToBufferDesc(), kt.ToBufferDesc(), vt.ToBufferDesc() };
+        result.input_name_reorder = { queryIdx, keyIdx, valueIdx };
+        result.primary_input_count = 0;  // GENUINE zero: FILL primary has no inputs; Q/K/V go to MHA1 sub_node.
     }
-
-    result.primary_input_count = 0;
     result.input_tensor_descs.resize(result.input_tensors.size());
 
     // Outputs: output, present_key, present_value.
-    auto* out0_info = LookupShape(value_shapes, outputs[0]);
-    if (!out0_info) {
-        result.output_tensors.push_back(MakeTensorInfo(PadToMinDims({batchSize, sequenceLength, queryHiddenSize}), q_info->data_type));
-    } else {
-        result.output_tensors.push_back(MakeTensorInfo(out0_info->sizes, q_info->data_type));
-    }
+    // output[0] is ALWAYS [batchSize, sequenceLength, queryHiddenSize] — the same
+    // shape as the query input. We compute it from Q rather than trusting the seeded
+    // value_shapes entry: ONNX InferShapes mis-derives the GQA (com.microsoft) output
+    // for this model, collapsing the hidden dim to numHeads (e.g. 5120→40) which then
+    // makes the downstream weight_only Mul's BroadcastShapes reject [.,.,40] vs the
+    // [.,.,5120] per-channel scale → translator nullopt → deferred compile fails.
+    // queryHiddenSize comes straight from the Q input's last dim, which is authoritative.
+    result.output_tensors.push_back(
+        MakeTensorInfo(PadToMinDims({batchSize, sequenceLength, queryHiddenSize}), q_info->data_type));
     result.output_buffer_descs.push_back(result.output_tensors[0].ToBufferDesc());
-    auto* pk_out = (outputs.size() > 1 && !outputs[1].empty()) ? LookupShape(value_shapes, outputs[1]) : nullptr;
+    // present_key / present_value. DML MHA1 with a PastSequenceLengthsTensor REQUIRES
+    // both present outputs (KV-cache append) — omitting them AVs inside CreateOperator
+    // (ORT always wires them, ort_dml_graph.log MHA1 outputs=3). On the runtime-fusion
+    // path ONNX InferShapes leaves the present shapes symbolic ([-1,8,-1,128], the
+    // total-seq dim is data-dependent) so LookupShape(outputs[1/2]) misses. Fall back
+    // to the past_key/past_value INPUT shapes: in a genai KV-cache decoder present
+    // aliases the past buffer (buffer sharing), so present.shape == past.shape, and the
+    // past inputs are graph inputs read from kctx with concrete runtime dims.
+    auto present_out_info = [&](size_t out_idx, size_t past_in_idx) -> const DmlTensorInfo* {
+        const DmlTensorInfo* info = (outputs.size() > out_idx && !outputs[out_idx].empty())
+            ? LookupShape(value_shapes, outputs[out_idx]) : nullptr;
+        if (info && !info->sizes.empty() &&
+            std::all_of(info->sizes.begin(), info->sizes.end(), [](uint32_t d){ return d > 0; }))
+            return info;
+        // Fall back to the corresponding past input shape (buffer-shared with present).
+        if (past_in_idx < inputs.size() && !inputs[past_in_idx].empty())
+            return LookupShape(value_shapes, inputs[past_in_idx]);
+        return nullptr;
+    };
+    auto* pk_out = present_out_info(1, pastKeyIdx);
     if (pk_out) {
         auto pkt = MakeTensorInfo(pk_out->sizes, q_info->data_type);
         result.output_tensors.push_back(pkt);
         result.output_buffer_descs.push_back(pkt.ToBufferDesc());
         storage->out_present_key = 1;
     }
-    auto* pv_out = (outputs.size() > 2 && !outputs[2].empty()) ? LookupShape(value_shapes, outputs[2]) : nullptr;
+    auto* pv_out = present_out_info(2, pastValueIdx);
     if (pv_out) {
         auto pvt = MakeTensorInfo(pv_out->sizes, q_info->data_type);
         result.output_tensors.push_back(pvt);
@@ -9499,19 +9649,56 @@ static std::optional<TranslatedOp> TranslateGroupQueryAttention(
     }
     result.output_tensor_descs.resize(result.output_tensors.size());
 
-    // Primary: FILL_VALUE_CONSTANT (zeros) or identity pass-through for seqlens.
+    result.desc_storage = storage;
+
+    if (mha_is_primary) {
+        // DECODE: MHA1 IS the primary. Packed inputs Q(itd0)/K(itd1)/V(itd2)/
+        // PastSeqLens(itd3) → sparse schema slots 0/1/2/11 (via dml_input_slot_indices).
+        // No FILL, no sub_node. Fixup uses PACKED desc positions (input_tensor_descs is
+        // size 4, not the 12-wide schema array of the sub_node path).
+        result.op_desc = { DML_OPERATOR_MULTIHEAD_ATTENTION1, &storage->mha1_desc };
+        result.fixup = [storage, local_scale, local_num_heads, local_kv_heads](TranslatedOp& self) {
+            RebuildTensorDescPointers(self);
+            storage->mha1_desc.QueryTensor              = &self.input_tensor_descs[0];
+            storage->mha1_desc.KeyTensor                = &self.input_tensor_descs[1];
+            storage->mha1_desc.ValueTensor              = &self.input_tensor_descs[2];
+            storage->mha1_desc.StackedQueryKeyTensor    = nullptr;
+            storage->mha1_desc.StackedKeyValueTensor    = nullptr;
+            storage->mha1_desc.StackedQueryKeyValueTensor = nullptr;
+            storage->mha1_desc.BiasTensor               = nullptr;
+            storage->mha1_desc.MaskTensor               = nullptr;
+            storage->mha1_desc.RelativePositionBiasTensor = nullptr;
+            storage->mha1_desc.PastKeyTensor            = nullptr;
+            storage->mha1_desc.PastValueTensor          = nullptr;
+            storage->mha1_desc.PastSequenceLengthsTensor = &self.input_tensor_descs[3];
+            storage->mha1_desc.OutputTensor             = &self.output_tensor_descs[0];
+            storage->mha1_desc.OutputPresentKeyTensor   = self.output_tensor_descs.size() > 1 ? &self.output_tensor_descs[1] : nullptr;
+            storage->mha1_desc.OutputPresentValueTensor = self.output_tensor_descs.size() > 2 ? &self.output_tensor_descs[2] : nullptr;
+            storage->mha1_desc.Scale = local_scale;
+            storage->mha1_desc.MaskFilterValue = -10000.0f;
+            storage->mha1_desc.QueryHeadCount = local_num_heads;
+            storage->mha1_desc.KeyValueHeadCount = local_kv_heads;
+            storage->mha1_desc.MaskType = DML_MULTIHEAD_ATTENTION_MASK_TYPE_NONE;
+        };
+        result.FixupPointers();
+        return result;
+    }
+
+    // PREFILL: Primary = FILL_VALUE_CONSTANT (zeros) feeding the MHA1 sub_node slot 11.
     storage->fill_desc.ValueDataType = DML_TENSOR_DATA_TYPE_INT32;
     storage->fill_desc.Value.Int32 = 0;
-    result.desc_storage = storage;
     result.op_desc = { DML_OPERATOR_FILL_VALUE_CONSTANT, &storage->fill_desc };
-    result.fixup = [storage, past_seq_tensor](TranslatedOp& self) {
+    result.fixup = [storage](TranslatedOp& self) {
         RebuildTensorDescPointers(self);
-        storage->fill_desc.OutputTensor = nullptr;
+        // Re-point the FILL output desc at storage's owned buffer desc (Sizes/Strides
+        // may have relocated with the DmlTensorInfo) and wire it as the primary output.
+        storage->fill_out_buf.Sizes = storage->fill_out_info.sizes.data();
+        storage->fill_out_buf.Strides = storage->fill_out_info.strides.empty()
+            ? nullptr : storage->fill_out_info.strides.data();
+        storage->fill_out_td = { DML_TENSOR_TYPE_BUFFER, &storage->fill_out_buf };
+        storage->fill_desc.OutputTensor = &storage->fill_out_td;
     };
     result.FixupPointers();
-
-    // Determine how PastSequenceLengths reaches MHA1.
-    bool seqlens_from_primary = !(sequenceLength == 1 && hasSeqLens);
 
     // Build the MHA1 sub_node with proper DML schema slot wiring.
     // DML MHA1 has 12 input slots (0-11). We use Q(0), K(1), V(2), PastSeqLens(11).
@@ -9537,14 +9724,11 @@ static std::optional<TranslatedOp> TranslateGroupQueryAttention(
         mha_node.input_buffer_descs[2] = vt.ToBufferDesc();
         mha_node.input_buffer_descs[11] = past_seq_tensor.ToBufferDesc();
 
-        // input_from: Q/K/V from graph_inputs (skip), slots 3-10 skip, slot 11 from primary or graph_inputs.
+        // input_from: Q/K/V via graph_inputs (skip sentinel), slots 3-10 skip, slot 11
+        // from the FILL primary output (prefill always generates the zeros here).
         mha_node.input_from.resize(12, {-2, 0});
-        if (seqlens_from_primary) {
-            mha_node.input_from[11] = {-1, 0};
-        }
+        mha_node.input_from[11] = {-1, 0};
         mha_node.graph_inputs = { {queryIdx, 0}, {keyIdx, 1}, {valueIdx, 2} };
-        if (!seqlens_from_primary)
-            mha_node.graph_inputs.push_back({seqLensIdx, 11});
 
         mha_node.output_tensors = result.output_tensors;
         for (auto& ot : mha_node.output_tensors)
@@ -9590,7 +9774,7 @@ static std::optional<TranslatedOp> TranslateGroupQueryAttention(
 
 static std::optional<TranslatedOp> TranslateQLinearConcat(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -9915,91 +10099,91 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["Dropout"] = TranslateUnaryActivation<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC, DML_OPERATOR_ELEMENT_WISE_IDENTITY>;
 
     // --- P0: unary with attributes ---
-    registry["LeakyRelu"] = [](const OrtApi& api, const OrtNode* node,
+    registry["LeakyRelu"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateUnaryWithAttrs<DML_ACTIVATION_LEAKY_RELU_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_LEAKY_RELU>(
-            api, node, vs, init, [](DML_ACTIVATION_LEAKY_RELU_OPERATOR_DESC* d, const OrtNode* n, const OrtApi& a) {
+            api, node, vs, init, [](DML_ACTIVATION_LEAKY_RELU_OPERATOR_DESC* d, const NodeView& n, const OrtApi& a) {
                 d->Alpha = OrtNodeAdapter(n, a).GetAttributeFloat("alpha", 0.01f);
             });
     };
-    registry["Elu"] = [](const OrtApi& api, const OrtNode* node,
+    registry["Elu"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateUnaryWithAttrs<DML_ACTIVATION_ELU_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_ELU>(
-            api, node, vs, init, [](DML_ACTIVATION_ELU_OPERATOR_DESC* d, const OrtNode* n, const OrtApi& a) {
+            api, node, vs, init, [](DML_ACTIVATION_ELU_OPERATOR_DESC* d, const NodeView& n, const OrtApi& a) {
                 d->Alpha = OrtNodeAdapter(n, a).GetAttributeFloat("alpha", 1.0f);
             });
     };
-    registry["Selu"] = [](const OrtApi& api, const OrtNode* node,
+    registry["Selu"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateUnaryWithAttrs<DML_ACTIVATION_SCALED_ELU_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_SCALED_ELU>(
-            api, node, vs, init, [](DML_ACTIVATION_SCALED_ELU_OPERATOR_DESC* d, const OrtNode* n, const OrtApi& a) {
+            api, node, vs, init, [](DML_ACTIVATION_SCALED_ELU_OPERATOR_DESC* d, const NodeView& n, const OrtApi& a) {
                 OrtNodeAdapter ad(n, a);
                 d->Alpha = ad.GetAttributeFloat("alpha", 1.6732632f);
                 d->Gamma = ad.GetAttributeFloat("gamma", 1.0507010f);
             });
     };
-    registry["Celu"] = [](const OrtApi& api, const OrtNode* node,
+    registry["Celu"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateUnaryWithAttrs<DML_ACTIVATION_CELU_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_CELU>(
-            api, node, vs, init, [](DML_ACTIVATION_CELU_OPERATOR_DESC* d, const OrtNode* n, const OrtApi& a) {
+            api, node, vs, init, [](DML_ACTIVATION_CELU_OPERATOR_DESC* d, const NodeView& n, const OrtApi& a) {
                 d->Alpha = OrtNodeAdapter(n, a).GetAttributeFloat("alpha", 1.0f);
             });
     };
-    registry["HardSigmoid"] = [](const OrtApi& api, const OrtNode* node,
+    registry["HardSigmoid"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateUnaryWithAttrs<DML_ACTIVATION_HARD_SIGMOID_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_HARD_SIGMOID>(
-            api, node, vs, init, [](DML_ACTIVATION_HARD_SIGMOID_OPERATOR_DESC* d, const OrtNode* n, const OrtApi& a) {
+            api, node, vs, init, [](DML_ACTIVATION_HARD_SIGMOID_OPERATOR_DESC* d, const NodeView& n, const OrtApi& a) {
                 OrtNodeAdapter ad(n, a);
                 d->Alpha = ad.GetAttributeFloat("alpha", 0.2f);
                 d->Beta  = ad.GetAttributeFloat("beta",  0.5f);
             });
     };
-    registry["Softplus"] = [](const OrtApi& api, const OrtNode* node,
+    registry["Softplus"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateUnaryWithAttrs<DML_ACTIVATION_SOFTPLUS_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_SOFTPLUS>(
-            api, node, vs, init, [](DML_ACTIVATION_SOFTPLUS_OPERATOR_DESC* d, const OrtNode* n, const OrtApi& a) {
+            api, node, vs, init, [](DML_ACTIVATION_SOFTPLUS_OPERATOR_DESC* d, const NodeView& n, const OrtApi& a) {
                 d->Steepness = OrtNodeAdapter(n, a).GetAttributeFloat("steepness", 1.0f);
             });
     };
-    registry["ThresholdedRelu"] = [](const OrtApi& api, const OrtNode* node,
+    registry["ThresholdedRelu"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateUnaryWithAttrs<DML_ACTIVATION_THRESHOLDED_RELU_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_THRESHOLDED_RELU>(
-            api, node, vs, init, [](DML_ACTIVATION_THRESHOLDED_RELU_OPERATOR_DESC* d, const OrtNode* n, const OrtApi& a) {
+            api, node, vs, init, [](DML_ACTIVATION_THRESHOLDED_RELU_OPERATOR_DESC* d, const NodeView& n, const OrtApi& a) {
                 d->Alpha = OrtNodeAdapter(n, a).GetAttributeFloat("alpha", 1.0f);
             });
     };
-    registry["Shrink"] = [](const OrtApi& api, const OrtNode* node,
+    registry["Shrink"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateUnaryWithAttrs<DML_ACTIVATION_SHRINK_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_SHRINK>(
-            api, node, vs, init, [](DML_ACTIVATION_SHRINK_OPERATOR_DESC* d, const OrtNode* n, const OrtApi& a) {
+            api, node, vs, init, [](DML_ACTIVATION_SHRINK_OPERATOR_DESC* d, const NodeView& n, const OrtApi& a) {
                 OrtNodeAdapter ad(n, a);
                 d->Bias  = ad.GetAttributeFloat("bias",  0.0f);
                 d->Threshold = ad.GetAttributeFloat("lambd", 0.5f);
             });
     };
-    registry["ParametricSoftplus"] = [](const OrtApi& api, const OrtNode* node,
+    registry["ParametricSoftplus"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateUnaryWithAttrs<DML_ACTIVATION_PARAMETRIC_SOFTPLUS_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_PARAMETRIC_SOFTPLUS>(
-            api, node, vs, init, [](DML_ACTIVATION_PARAMETRIC_SOFTPLUS_OPERATOR_DESC* d, const OrtNode* n, const OrtApi& a) {
+            api, node, vs, init, [](DML_ACTIVATION_PARAMETRIC_SOFTPLUS_OPERATOR_DESC* d, const NodeView& n, const OrtApi& a) {
                 OrtNodeAdapter ad(n, a);
                 d->Alpha = ad.GetAttributeFloat("alpha", 1.0f);
                 d->Beta  = ad.GetAttributeFloat("beta",  1.0f);
             });
     };
-    registry["ScaledTanh"] = [](const OrtApi& api, const OrtNode* node,
+    registry["ScaledTanh"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateUnaryWithAttrs<DML_ACTIVATION_SCALED_TANH_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_SCALED_TANH>(
-            api, node, vs, init, [](DML_ACTIVATION_SCALED_TANH_OPERATOR_DESC* d, const OrtNode* n, const OrtApi& a) {
+            api, node, vs, init, [](DML_ACTIVATION_SCALED_TANH_OPERATOR_DESC* d, const NodeView& n, const OrtApi& a) {
                 OrtNodeAdapter ad(n, a);
                 d->Alpha = ad.GetAttributeFloat("alpha", 1.0f);
                 d->Beta  = ad.GetAttributeFloat("beta",  1.0f);
@@ -10026,7 +10210,7 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["Max"]            = TranslateBinaryElementwise<DML_ELEMENT_WISE_MAX_OPERATOR_DESC,                            DML_OPERATOR_ELEMENT_WISE_MAX>;
     registry["Min"]            = TranslateBinaryElementwise<DML_ELEMENT_WISE_MIN_OPERATOR_DESC,                            DML_OPERATOR_ELEMENT_WISE_MIN>;
     // Pow has InputTensor/ExponentTensor, not ATensor/BTensor.
-    registry["Pow"] = [](const OrtApi& api, const OrtNode* node,
+    registry["Pow"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>&) -> std::optional<TranslatedOp> {
         auto inputs  = GetInputNames(api, node);
@@ -10062,7 +10246,7 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
         return result;
     };
     // PRelu has SlopeTensor not BTensor — use a custom lambda.
-    registry["PRelu"] = [](const OrtApi& api, const OrtNode* node,
+    registry["PRelu"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>&) -> std::optional<TranslatedOp> {
         auto inputs  = GetInputNames(api, node);
@@ -10119,17 +10303,17 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["LogSoftmax"]= TranslateLogSoftmax;
 
     // --- P3: Conv / Pooling ---
-    registry["Conv"] = [](const OrtApi& api, const OrtNode* node,
+    registry["Conv"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateConvImpl(api, node, vs, init, DML_CONVOLUTION_DIRECTION_FORWARD);
     };
-    registry["NhwcConv"] = [](const OrtApi& api, const OrtNode* node,
+    registry["NhwcConv"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateConvImpl(api, node, vs, init, DML_CONVOLUTION_DIRECTION_FORWARD, true);
     };
-    registry["ConvTranspose"] = [](const OrtApi& api, const OrtNode* node,
+    registry["ConvTranspose"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateConvImpl(api, node, vs, init, DML_CONVOLUTION_DIRECTION_BACKWARD);
@@ -10138,22 +10322,22 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["DmlFusedConv"]          = registry["Conv"];
     registry["DmlFusedConvTranspose"] = registry["ConvTranspose"];
 
-    registry["AveragePool"] = [](const OrtApi& api, const OrtNode* node,
+    registry["AveragePool"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateAveragePool(api, node, vs, init, false);
     };
-    registry["GlobalAveragePool"] = [](const OrtApi& api, const OrtNode* node,
+    registry["GlobalAveragePool"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateAveragePool(api, node, vs, init, true);
     };
-    registry["MaxPool"] = [](const OrtApi& api, const OrtNode* node,
+    registry["MaxPool"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateMaxPool(api, node, vs, init, false);
     };
-    registry["GlobalMaxPool"] = [](const OrtApi& api, const OrtNode* node,
+    registry["GlobalMaxPool"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateMaxPool(api, node, vs, init, true);
@@ -10177,7 +10361,7 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["Range"]          = TranslateRange;
 
     // Expand = broadcast identity (same as Reshape with broadcast strides)
-    registry["Expand"] = [](const OrtApi& api, const OrtNode* node,
+    registry["Expand"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         // Expand input[0] to the shape given by input[1].
@@ -10251,17 +10435,17 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     };
 
     // --- P5: Normalization ---
-    registry["LayerNormalization"] = [](const OrtApi& api, const OrtNode* node,
+    registry["LayerNormalization"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateLayerNorm(api, node, vs, init, false);
     };
-    registry["SimplifiedLayerNormalization"] = [](const OrtApi& api, const OrtNode* node,
+    registry["SimplifiedLayerNormalization"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateLayerNorm(api, node, vs, init, true);
     };
-    registry["InstanceNormalization"] = [](const OrtApi& api, const OrtNode* node,
+    registry["InstanceNormalization"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateLayerNorm(api, node, vs, init, false, 2);
@@ -10303,12 +10487,12 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["BiasSplitGelu"]     = TranslateBiasSplitGelu;
 
     // --- Batch 4: Transformer building blocks ---
-    registry["SkipLayerNormalization"] = [](const OrtApi& api, const OrtNode* node,
+    registry["SkipLayerNormalization"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateSkipLayerNorm(api, node, vs, init, false);
     };
-    registry["SkipSimplifiedLayerNormalization"] = [](const OrtApi& api, const OrtNode* node,
+    registry["SkipSimplifiedLayerNormalization"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateSkipLayerNorm(api, node, vs, init, true);
@@ -10343,12 +10527,12 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["EmbedLayerNormalization"] = TranslateEmbedLayerNormalization;
 
     // --- Remaining pooling ---
-    registry["LpPool"] = [](const OrtApi& api, const OrtNode* node,
+    registry["LpPool"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateLpPool(api, node, vs, init, false);
     };
-    registry["GlobalLpPool"] = [](const OrtApi& api, const OrtNode* node,
+    registry["GlobalLpPool"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateLpPool(api, node, vs, init, true);
@@ -10359,12 +10543,12 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["ConvInteger"]   = TranslateConvInteger;
 
     // --- Quantized pooling ---
-    registry["QLinearAveragePool"] = [](const OrtApi& api, const OrtNode* node,
+    registry["QLinearAveragePool"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateQLinearAveragePool(api, node, vs, init, false);
     };
-    registry["QLinearGlobalAveragePool"] = [](const OrtApi& api, const OrtNode* node,
+    registry["QLinearGlobalAveragePool"] = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         return TranslateQLinearAveragePool(api, node, vs, init, true);
