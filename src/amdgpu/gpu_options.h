@@ -23,6 +23,7 @@ constexpr auto kComputeMode = "compute_mode"sv;
 constexpr auto kProfile = "profile"sv;
 constexpr auto kCacheDir = "cache_dir"sv;
 constexpr auto kMlssUseSpecificOps = "mlss_use_specific_ops"sv;
+constexpr auto kHiprtcDisableProcesses = "hiprtc_disable_processes"sv;
 constexpr auto kCpuControlFlow = "cpu_control_flow"sv;
 constexpr auto kModelArch = "model_arch"sv;
 constexpr auto kHipGraphEnable = "hip_graph_enable"sv;

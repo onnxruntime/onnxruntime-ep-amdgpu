@@ -37,6 +37,7 @@ struct ProviderInfo {
     std::string int8_calibration_table_name{};
     bool int8_use_native_calibration_table{};
     bool exhaustive_tune{};
+    bool hiprtc_disable_processes{};
     bool dump_subgraphs{};
     std::string mlss_use_specific_ops{};
     std::string model_arch{};
