@@ -6,6 +6,7 @@
 #include "dml_execution_provider.h"
 #include "DmlExecutionProvider/DmlCommittedResourceAllocator.h"
 #include "dml_perf_timer.h"
+#include "dml_bucketized_buffer_allocator.h"
 
 namespace dml_ep {
 
@@ -33,6 +34,12 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
     {
         Flush();
         m_context->GetCurrentCompletionEvent().WaitForSignal(m_cpuSyncSpinningEnabled);
+    }
+
+    void PluginDmlExecutionProviderImpl::TrimUploadHeap() const
+    {
+        if (m_uploadHeap)
+            m_uploadHeap->Trim();
     }
 
     HRESULT __stdcall PluginDmlExecutionProviderImpl::AllocatePooledResource(
