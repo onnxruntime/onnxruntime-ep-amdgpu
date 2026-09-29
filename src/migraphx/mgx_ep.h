@@ -269,6 +269,7 @@ struct ComputeState {
     bool has_input_shapes{};
     bool dump_subgraphs_{};
     bool exhaustive_tune{};
+    bool hiprtc_disable_processes{};
     std::string mlss_use_specific_ops{};
     const Map<float>& dynamic_ranges;
     Map<size_t> input_name_indices;
@@ -556,6 +557,8 @@ private:
     bool enable_fp8_{};
     bool enable_int8_{};
     bool exhaustive_tune_{};
+    // Compile hiprtc kernels in-process instead of spawning migraphx-hiprtc-driver.
+    bool hiprtc_disable_processes_{};
     std::string mlss_use_specific_ops_{};
     // True when mlss_use_specific_ops_ was set by a provider option or environment variable,
     // before the per-architecture default was applied
