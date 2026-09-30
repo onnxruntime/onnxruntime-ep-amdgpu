@@ -149,6 +149,12 @@ namespace dml_ep {
 
         void WaitForOutstandingWork() const;
 
+        // Release unused capacity in the pooled UPLOAD staging heap back to the driver.
+        // Trim() is otherwise only invoked at session-init end; the deferred weight-upload
+        // path needs it after uploading so the burst-grown staging chunks are not held
+        // resident during token generation.
+        void TrimUploadHeap() const;
+
         // Allocate a resource from pools.  Releasing pooledResource returns it to the pool.
         STDMETHOD(AllocatePooledResource)(
             size_t size,

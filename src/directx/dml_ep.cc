@@ -3,6 +3,7 @@
 
 #include "dml_ep.h"
 #include "dml_plugin_OperatorRegistration.h"
+#include "dml_bucketized_buffer_allocator.h"
 #include "core/common/inlined_containers.h"
 #include "core/common/inlined_containers_fwd.h"
 #include "core/framework/fuse_nodes_funcs.h"
@@ -10,8 +11,210 @@
 #include "ep_fusion_manager.h"
 #include "full_graph_fusion.h"
 #include "quick_gelu_ep_fusion.h"
+#include "core/framework/abi_safe_attr_utils.h"
 
 namespace dml_ep {
+
+// ---------------------------------------------------------------------------
+// CaptureShapePrepChain — walk UPSTREAM from a dynamic partition's boundary
+// inputs, collecting the CPU-preferred shape-math producer nodes (Shape/Concat/
+// Gather/Slice/Cast/Mul/Div/Unsqueeze/Reshape/...) that compute data-dependent
+// reshape targets. These nodes are visible here (GetCapability sees the full
+// graph) but are EXCLUDED from the fused partition, so they must be captured now
+// as owned DeferredNodes and folded later at first Compute. Terminates at real
+// graph inputs (roots) or initializers.
+// ---------------------------------------------------------------------------
+static ExecutionProviderPlugin::ShapePrepChain CaptureShapePrepChain(
+    const OrtApi&                                    api,
+    const std::vector<const OrtNode*>&               all_nodes,
+    const std::vector<const OrtNode*>&               partition_nodes,
+    const std::unordered_map<std::string, const OrtValue*>& initializers)
+{
+    ExecutionProviderPlugin::ShapePrepChain chain;
+
+    static const std::unordered_set<std::string> kShapeMathOps = {
+        "Shape", "Concat", "Gather", "Slice", "Cast", "Mul", "Div",
+        "Unsqueeze", "Squeeze", "Reshape", "ConstantOfShape", "Add", "Sub",
+    };
+
+    // Producer map: output value name -> producing node.
+    std::unordered_map<std::string, const OrtNode*> producer;
+    for (const OrtNode* n : all_nodes) {
+        if (!n) continue;
+        for (const auto& on : fusion_utils::GetNodeOutputNames(api, n))
+            if (!on.empty()) producer[on] = n;
+    }
+
+    // Set of output names produced INSIDE the partition (not boundary crossings).
+    std::unordered_set<std::string> internal_outputs;
+    for (const OrtNode* n : partition_nodes)
+        for (const auto& on : fusion_utils::GetNodeOutputNames(api, n))
+            if (!on.empty()) internal_outputs.insert(on);
+
+    auto build_deferred = [&](const OrtNode* n) -> DeferredNode {
+        DeferredNode dn;
+        api.Node_GetId(n, &dn.id);
+        const char* s = nullptr;
+        if (api.Node_GetName(n, &s) == nullptr && s) dn.name = s;
+        s = nullptr;
+        if (api.Node_GetOperatorType(n, &s) == nullptr && s) dn.op_type = s;
+        s = nullptr;
+        if (api.Node_GetDomain(n, &s) == nullptr && s) dn.domain = s;
+        api.Node_GetSinceVersion(n, &dn.since_version);
+        dn.input_names  = fusion_utils::GetNodeInputNames(api, n);
+        dn.output_names = fusion_utils::GetNodeOutputNames(api, n);
+        size_t num_attrs = 0;
+        api.Node_GetNumAttributes(n, &num_attrs);
+        if (num_attrs > 0) {
+            std::vector<const OrtOpAttr*> attrs(num_attrs, nullptr);
+            api.Node_GetAttributes(n, attrs.data(), num_attrs);
+            for (const OrtOpAttr* attr : attrs) {
+                if (!attr) continue;
+                std::string aname = dml_ep::GetOpAttrName(attr, api);
+                if (aname.empty()) continue;
+                auto proto = dml_ep::BuildPluginAttributeProto(attr, api);
+                if (proto)
+                    dn.attr_protos[aname] = std::shared_ptr<ONNX_NAMESPACE::AttributeProto>(std::move(proto));
+            }
+        }
+        return dn;
+    };
+
+    // BFS upstream from every boundary input of the partition.
+    std::unordered_set<size_t> visited;
+    std::unordered_set<std::string> root_seen;
+    std::vector<std::string> frontier;
+    for (const OrtNode* n : partition_nodes)
+        for (const auto& in : fusion_utils::GetNodeInputNames(api, n))
+            if (!in.empty() && !internal_outputs.count(in)) frontier.push_back(in);
+
+    // ALSO capture shape-math chains that are currently INSIDE the Phase-4 group.
+    // The Phase-4 grouping and ORT's final fusion can diverge: a shape-producing
+    // node (e.g. the pos_ids Concat) grouped in here may be split OUT of the fused
+    // subgraph at Compile, becoming a boundary input with no folded value. Seed
+    // the frontier with the OUTPUTS of in-group nodes that are UNAMBIGUOUS shape
+    // producers so their chains fold. IMPORTANT: only ops that are ALWAYS shape
+    // math — NOT Mul/Add/Sub/Div/Cast, which are also tensor-COMPUTE ops that
+    // appear throughout the network (e.g. every SwiGLU MLP Mul) and would explode
+    // the capture into the whole graph.
+    // Seed ONLY from unambiguous shape-VECTOR producers. Gather/Slice/Cast are
+    // excluded as entry points (they also process real tensors); they are still
+    // traversed if reached from a Concat/Reshape shape-input upstream walk.
+    static const std::unordered_set<std::string> kShapeProducerOps = {
+        "Shape", "Concat", "Unsqueeze", "Squeeze", "ConstantOfShape", "Range",
+    };
+    for (const OrtNode* n : partition_nodes) {
+        std::string op = fusion_utils::GetNodeOpType(api, n);
+        if (!kShapeProducerOps.count(op)) continue;
+        for (const auto& on : fusion_utils::GetNodeOutputNames(api, n))
+            if (!on.empty()) frontier.push_back(on);
+    }
+
+    // MOST IMPORTANT seed: the SHAPE-DRIVER input of every data-dependent-shape op
+    // (Reshape/Expand/Tile) in the partition. The Reshape is IN the fused graph but
+    // its target (input[1], e.g. pos_ids Concat/output_0) is produced by an
+    // out-of-partition shape chain we must fold. Seed those driver inputs directly
+    // — robust to whether the driver is a boundary input or currently in-group.
+    static const std::unordered_map<std::string, size_t> kDriverInput = {
+        {"Reshape", 1}, {"Expand", 1}, {"Tile", 1}, {"ConstantOfShape", 0},
+    };
+    for (const OrtNode* n : partition_nodes) {
+        std::string op = fusion_utils::GetNodeOpType(api, n);
+        auto dit = kDriverInput.find(op);
+        if (dit == kDriverInput.end()) continue;
+        auto ins = fusion_utils::GetNodeInputNames(api, n);
+        if (dit->second < ins.size() && !ins[dit->second].empty()) {
+            DML_PERF_LOG("[ShapePrep] SEED driver op=", op, " input='", ins[dit->second], "'\n");
+            frontier.push_back(ins[dit->second]);
+        }
+    }
+
+    int guard = 0;
+    while (!frontier.empty() && guard++ < 512) {
+        std::string vname = frontier.back();
+        frontier.pop_back();
+        if (vname.empty()) continue;
+        // Roots: real graph input or initializer — record and stop. For INTEGER
+        // initializers (Gather index, Concat/Slice const), capture the VALUES so
+        // the folder can resolve those ops (they are not in the partition's
+        // initializer_view — the chain lives outside the partition).
+        {
+            auto iit = initializers.find(vname);
+            if (iit != initializers.end() && iit->second) {
+                const OrtValue* val = iit->second;
+                OrtTensorTypeAndShapeInfo* tsi = nullptr;
+                if (api.GetTensorTypeAndShape(const_cast<OrtValue*>(val), &tsi) == nullptr && tsi) {
+                    ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+                    api.GetTensorElementType(tsi, &dt);
+                    size_t cnt = 0;
+                    api.GetTensorShapeElementCount(tsi, &cnt);
+                    api.ReleaseTensorTypeAndShapeInfo(tsi);
+                    if (cnt > 0 && cnt <= 64 &&
+                        (dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+                         dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32)) {
+                        const void* raw = nullptr;
+                        if (api.GetTensorData(const_cast<OrtValue*>(val), &raw) == nullptr && raw) {
+                            std::vector<int64_t> iv(cnt);
+                            if (dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+                                const int64_t* p = static_cast<const int64_t*>(raw);
+                                for (size_t e = 0; e < cnt; ++e) iv[e] = p[e];
+                            } else {
+                                const int32_t* p = static_cast<const int32_t*>(raw);
+                                for (size_t e = 0; e < cnt; ++e) iv[e] = static_cast<int64_t>(p[e]);
+                            }
+                            DML_PERF_LOG("[ShapePrep] INIT '", vname, "' (", cnt, " ints)\n");
+                            chain.initializers[vname] = std::move(iv);
+                        }
+                    }
+                }
+            }
+            if (iit != initializers.end()) continue;
+        }
+        auto pit = producer.find(vname);
+        if (pit == producer.end()) {
+            // No producer inside this graph → a real graph input (root).
+            if (root_seen.insert(vname).second) chain.root_inputs.push_back(vname);
+            continue;
+        }
+        const OrtNode* prod = pit->second;
+        size_t nid = 0;
+        api.Node_GetId(prod, &nid);
+        if (visited.count(nid)) continue;
+        std::string prod_op = fusion_utils::GetNodeOpType(api, prod);
+        if (!kShapeMathOps.count(prod_op)) {
+            // Non-shape-math producer feeding a shape tensor — treat its output as
+            // a root (its shape/value must come from elsewhere; fold stops here).
+            DML_PERF_LOG("[ShapePrep] STOP at '", vname, "' producer op=", prod_op,
+                         " (not shape-math)\n");
+            if (root_seen.insert(vname).second) chain.root_inputs.push_back(vname);
+            continue;
+        }
+        visited.insert(nid);
+        DML_PERF_LOG("[ShapePrep] CAPTURE op=", prod_op, " out='", vname, "'\n");
+        chain.nodes.push_back(build_deferred(prod));
+        for (const auto& in : fusion_utils::GetNodeInputNames(api, prod))
+            if (!in.empty()) frontier.push_back(in);
+    }
+
+    // Reverse so the chain is roughly topological (roots first). The folder also
+    // runs a fixpoint, so exact order is not required, but this reduces passes.
+    std::reverse(chain.nodes.begin(), chain.nodes.end());
+    return chain;
+}
+
+    // OFF-by-default opt-in gate for the deferred-compile runtime-fusion path.
+    // Reads DML_RUNTIME_FUSION once (cached). When false, no dynamic partitions
+    // are claimed and only the static Tier-0 path runs.
+    static bool RuntimeFusionEnabled() noexcept {
+        static const bool s_enabled = []() noexcept {
+            char buf[16] = {};
+            size_t len = 0;
+            if (getenv_s(&len, buf, sizeof(buf), "DML_RUNTIME_FUSION") != 0 || len == 0)
+                return false;
+            return buf[0] == '1' || buf[0] == 't' || buf[0] == 'T';
+        }();
+        return s_enabled;
+    }
 
     // ep_name must match the name under which this EP is registered with ORT.
     // Kernels stamped with a different name than the running EP's GetName() will never
@@ -45,7 +248,8 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     IDMLDevice* dml_device_,
     Microsoft::WRL::ComPtr<ExecutionContext> executionContext,
     std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder,
-    bool enableHostAccessible)
+    bool enableHostAccessible,
+    bool enableGraphCapture)
     : OrtEp{NegotiatedOrtApiVersion()}
     , ApiPtrs{api_ptrs}
     , name_{name}
@@ -53,6 +257,10 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     , m_dmlDevice{dml_device_}
     , m_context{executionContext}
 {
+    // Runtime (deferred, dynamic-shape) graph fusion opt-in, from ep.directml.enable_graph_capture.
+    // Selects the ORT-style runtime fusion path (GetCapabilityImpl gates Phase-3 vs Phase-4 on
+    // this). Set BEFORE constructing the inner provider so the pass-through below forwards it.
+    m_graphCaptureEnabled = enableGraphCapture;
     GetName = GetNameImpl;
     OrtEp::GetCapability = GetCapabilityImpl;
     OrtEp::Compile = CompileImpl;
@@ -338,6 +546,14 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::DmlKernelImplAdapter_Compute(
 {
     auto* self = static_cast<DmlKernelImplAdapter*>(this_ptr);
 
+    // TODO(abi-safety): ABI-UNSAFE hard break — reinterpret_cast of an
+    // ORT-allocated OrtKernelContext to the internal onnxruntime::OpKernelContext
+    // assumes the plugin was compiled against the exact struct layout of the ORT
+    // runtime that produced it (genuine cross-DLL assumption, unlike the type-info
+    // reads which read plugin-allocated objects). Only reached by the ABI-UNSAFE
+    // kernel fallback (path=unsafe) for ops with no ABI-safe kernel. Remove by
+    // eliminating the fallback (give every op an ABI-safe kernel) or by driving
+    // Compute through OrtApi kernel-context accessors.
     auto* op_ctx = reinterpret_cast<onnxruntime::OpKernelContext*>(context);
 
     try {
@@ -480,7 +696,12 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
             return state->ort_api_ptr->CreateStatus(ORT_FAIL, error_msg.c_str());
         }
 
-        // Cast OrtKernelInfo to OpKernelInfo (ABI-UNSAFE!)
+        // TODO(abi-safety): ABI-UNSAFE hard break — reinterpret_cast of an
+        // ORT-allocated OrtKernelInfo to the internal onnxruntime::OpKernelInfo
+        // assumes the plugin's compiled struct layout matches the ORT runtime that
+        // produced it (genuine cross-DLL assumption). Only reached by this
+        // ABI-UNSAFE kernel fallback (path=unsafe). Remove by eliminating the
+        // fallback (ABI-safe kernel for every op) or via OrtApi accessors.
         const auto& kernel_info = *reinterpret_cast<const onnxruntime::OpKernelInfo*>(info);
 
         // Call the lambda - creates PluginDmlAbiOpKernel which can access constant inputs
@@ -631,6 +852,11 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
     // -----------------------------------------------------------------------
     std::unordered_map<std::string, std::vector<int64_t>> resolved_shapes;
     bool tier0_claimed = false;
+    // Set true when Phase-4 (runtime-fusion) claims a dynamic partition. Static
+    // Phase-3 sets tier0_claimed; Phase-4 sets this. Either being true routes the
+    // Tier-2/Tier-1 fallback through the exclusion-aware path so already-claimed
+    // nodes are not double-claimed. See the branch at "if (!tier0_claimed ...)".
+    bool dynamic_claimed = false;
     std::unordered_set<size_t> tier0ClaimedNodeIds;
     {
 
@@ -640,20 +866,11 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         auto GetStaticDims = [&](const OrtValueInfo* vi) -> std::vector<int64_t> {
             if (!vi) return {};
             // Check ORT metadata first.
-            auto* ti = vi->GetTypeInfo();
-            if (ti && ti->tensor_type_info) {
-                auto* si = ti->tensor_type_info.get();
-                if (si && si->HasShape()) {
-                    size_t rank = 0;
-                    ep->ort_api.GetDimensionsCount(si, &rank);
-                    if (rank > 0) {
-                        std::vector<int64_t> dims(rank, -1);
-                        ep->ort_api.GetDimensions(si, dims.data(), rank);
-                        bool all_static = true;
-                        for (auto d : dims) if (d < 0) { all_static = false; break; }
-                        if (all_static) return dims;
-                    }
-                }
+            fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ep->ort_api, vi);
+            if (s.has_type_info && s.has_shape && s.rank > 0) {
+                bool all_static = true;
+                for (auto d : s.dims) if (d < 0) { all_static = false; break; }
+                if (all_static) return s.dims;
             }
             // Fallback: check resolved_shapes by name.
             auto name = fusion_utils::GetValueInfoName(ep->ort_api,vi);
@@ -679,22 +896,23 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                     if (all_static) return false;
                 }
             }
-            auto* ti = vi->GetTypeInfo();
-            if (!ti || !ti->tensor_type_info) return true;
-            auto* si = ti->tensor_type_info.get();
-            if (!si || !si->HasShape()) return true;
-            size_t rank = 0;
-            ep->ort_api.GetDimensionsCount(si, &rank);
-            if (rank == 0) return false;
-            std::vector<int64_t> dims(rank, -1);
-            ep->ort_api.GetDimensions(si, dims.data(), rank);
-            for (auto d : dims) if (d < 0) return true;
+            fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ep->ort_api, vi);
+            if (!s.has_type_info || !s.has_shape) return true;
+            if (s.rank == 0) return false;  // true scalar — static
+            for (auto d : s.dims) if (d < 0) return true;
             return false;
         };
 
         // Helper: mutate a ValueInfo's shape to resolved static dims.
         auto SetResolvedDims = [&](const OrtValueInfo* vi, const std::vector<int64_t>& dims) {
             if (!vi || dims.empty()) return;
+            // TODO(abi-safety): this reaches into OrtTypeInfo/OrtTensorTypeAndShapeInfo
+            // internal layout to obtain a MUTABLE shape-info for SetDimensions. Unlike
+            // the read sites, this cannot move to the C-API: GetValueInfoTypeInfo /
+            // CastTypeInfoToTensorInfo return only `const OrtTensorTypeAndShapeInfo*`,
+            // and there is no C-API to set a ValueInfo's shape. Blocked until such an
+            // accessor exists; the internal write is safe only because the plugin owns
+            // the object's layout (embeds ORT's graph code). See feedback_abi_safe_only.
             auto* ti = vi->GetTypeInfo();
             if (ti && ti->tensor_type_info) {
                 auto* si = const_cast<OrtTensorTypeAndShapeInfo*>(ti->tensor_type_info.get());
@@ -1235,7 +1453,17 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
             return groups.size() - 1;
         };
 
+        // ORT-parity path selection (inference_session.cc:2388 if/else): when runtime fusion is
+        // active, the DYNAMIC path (Phase 4) claims the WHOLE fuseable graph — static-shape
+        // partitions included (they resolve to one shape signature). So SKIP static Phase-2
+        // grouping + Phase-3 claiming; leave `groups` empty so Phase-3 is a no-op. When OFF,
+        // static Phase 2/3 run exactly as before (byte-identical). Primary trigger is the real
+        // ep.directml.enable_graph_capture flag (GraphCaptureEnabled); DML_RUNTIME_FUSION is a
+        // test-only override to force the dynamic path on a non-OGA harness.
+        const bool useRuntimeFusion = ep->GraphCaptureEnabled() || RuntimeFusionEnabled();
+
         for (const OrtNode* node : nodesInTopologicalOrder) {
+            if (useRuntimeFusion) break;  // static grouping skipped — Phase 4 owns the graph
             size_t nid = 0;
             ep->ort_api.Node_GetId(node, &nid);
 
@@ -1370,6 +1598,132 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
             if (st) ep->ort_api.ReleaseStatus(st);
         }
 
+        // ===================================================================
+        // PHASE 4 — Runtime-fusion (deferred) claim. ON when useRuntimeFusion
+        // (ep.directml.enable_graph_capture, or the DML_RUNTIME_FUSION test override).
+        // When active, static Phase 2/3 were skipped, so this re-groups the WHOLE
+        // fuseable graph WITHOUT the dynamic-shape boundary (all other boundaries
+        // kept), and claims each structurally-admissible group into
+        // m_tier0DynamicGroupHashes. These partitions snapshot in CompileImpl and
+        // compile lazily at first Compute.
+        // ===================================================================
+        if (useRuntimeFusion) {
+            std::vector<PartitionGroup> dgroups;
+            std::unordered_map<std::string, size_t> doutput_to_group;
+            auto dnew_group = [&]() -> size_t {
+                dgroups.push_back(PartitionGroup{});
+                return dgroups.size() - 1;
+            };
+
+            for (const OrtNode* node : nodesInTopologicalOrder) {
+                size_t nid = 0;
+                ep->ort_api.Node_GetId(node, &nid);
+                if (tier0ClaimedNodeIds.count(nid)) continue;  // already static-claimed
+
+                auto input_names  = fusion_utils::GetNodeInputNames(ep->ort_api, node);
+                auto output_names = fusion_utils::GetNodeOutputNames(ep->ort_api, node);
+
+                // Same boundaries as Phase-2 EXCEPT the dynamic-shape one.
+                bool is_fuseable = !cpuPreferredNodes.count(nid)
+                    && ep->IsNodeSupportedByDml(node, graph_support_info, deviceDataTypeMask)
+                    && HasTranslator(tier0_registry, ep->ort_api, node)
+                    && !fusion_utils::NodeHasEmptyEdge(ep->ort_api, node, ep->m_graphInitializerMap);
+
+                if (!is_fuseable) {
+                    for (const auto& name : input_names) {
+                        auto it = doutput_to_group.find(name);
+                        if (it != doutput_to_group.end() && !dgroups[it->second].finalized)
+                            dgroups[it->second].finalized = true;
+                    }
+                    continue;
+                }
+
+                std::vector<size_t> open_upstream;
+                for (const auto& name : input_names) {
+                    auto it = doutput_to_group.find(name);
+                    if (it == doutput_to_group.end()) continue;
+                    size_t gid = it->second;
+                    if (dgroups[gid].finalized) continue;
+                    if (std::find(open_upstream.begin(), open_upstream.end(), gid) == open_upstream.end())
+                        open_upstream.push_back(gid);
+                }
+
+                size_t target_gid;
+                if (open_upstream.empty()) {
+                    target_gid = dnew_group();
+                } else {
+                    target_gid = open_upstream[0];
+                    for (size_t k = 1; k < open_upstream.size(); ++k) {
+                        size_t src = open_upstream[k];
+                        for (auto* n : dgroups[src].nodes)
+                            dgroups[target_gid].nodes.push_back(n);
+                        dgroups[src].nodes.clear();
+                        dgroups[src].finalized = true;
+                        for (auto& [name, gid] : doutput_to_group)
+                            if (gid == src) gid = target_gid;
+                    }
+                }
+                dgroups[target_gid].nodes.push_back(node);
+                for (const auto& name : output_names)
+                    doutput_to_group[name] = target_gid;
+            }
+
+            // Admit + claim each dynamic group (shape-blind).
+            for (auto& g : dgroups) {
+                if (g.nodes.empty() || g.claimed) continue;
+                // A single-node dynamic group buys nothing over per-op dispatch and
+                // adds snapshot/compile overhead; require at least 2 nodes to fuse.
+                if (g.nodes.size() < 2) continue;
+
+                if (!FullGraphFusion::ValidateTier0Structural(ep->ort_api, g.nodes,
+                        resolved_shapes, ep->m_graphInitializerMap)) {
+                    DML_PERF_LOG("[RuntimeFusion] Phase-4 SKIP: ValidateTier0Structural failed (",
+                                 g.nodes.size(), " nodes)\n");
+                    continue;
+                }
+
+                OrtNodeFusionOptions fusion_options{NegotiatedOrtApiVersion(), true};
+                OrtStatus* st = ep->ep_api.EpGraphSupportInfo_AddNodesToFuse(
+                    graph_support_info, g.nodes.data(), g.nodes.size(), &fusion_options);
+                if (!st) {
+                    std::vector<size_t> node_ids;
+                    node_ids.reserve(g.nodes.size());
+                    for (const OrtNode* n : g.nodes) {
+                        size_t nid = 0;
+                        ep->ort_api.Node_GetId(n, &nid);
+                        node_ids.push_back(nid);
+                        // CRITICAL: also mark these as tier0-claimed so the Tier-2
+                        // pattern-fusion + Tier-1 single-node fallback below (which
+                        // runs whenever the STATIC Phase-3 claimed nothing, i.e.
+                        // tier0_claimed==false) EXCLUDES them. Without this the same
+                        // nodes get double-claimed — once by this dynamic partition
+                        // and again by Tier-2 (e.g. QuickGelu) — corrupting ORT's
+                        // partitioning and crashing at Compute.
+                        tier0ClaimedNodeIds.insert(nid);
+                    }
+                    std::sort(node_ids.begin(), node_ids.end());
+                    size_t part_hash = HashNodeIds(node_ids);
+                    ep->m_tier0DynamicGroupHashes.insert(part_hash);
+                    g.claimed = true;
+                    dynamic_claimed = true;
+                    DML_PERF_LOG("[RuntimeFusion] Phase-4 CLAIM: dynamic partition (",
+                                 g.nodes.size(), " nodes)\n");
+
+                    // Capture the CPU-preferred shape-math chain feeding this
+                    // partition's boundary inputs, so first-Compute can fold it from
+                    // concrete dims (Option A). Keyed by the same partition hash
+                    // CompileImpl uses to route to CompileDeferred.
+                    auto chain = CaptureShapePrepChain(
+                        ep->ort_api, nodesInTopologicalOrder, g.nodes, ep->m_graphInitializerMap);
+                    DML_PERF_LOG("[RuntimeFusion] Phase-4 shape-prep chain: ", chain.nodes.size(),
+                                 " nodes, ", chain.root_inputs.size(), " roots\n");
+                    ep->m_dynamicShapePrepChains[part_hash] = std::move(chain);
+                } else {
+                    ep->ort_api.ReleaseStatus(st);
+                }
+            }
+        }
+
     } // end Tier-0 route
     } // end scope for helpers (GetStaticDims, HasDynamicShape, etc.)
 
@@ -1377,10 +1731,10 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
     // TryTranslateNodes calls so CompileImpl can seed BuildSubgraphInfo.
     ep->m_resolvedShapes = resolved_shapes;
 
-    if (!tier0_claimed) {
-        // No Tier-0 partitions were claimed (dynamic shapes, or all candidate
-        // groups failed ValidateTier0).  Fall through to Tier-2 pattern fusion
-        // + Tier-1 single-node claiming.
+    if (!tier0_claimed && !dynamic_claimed) {
+        // NOTHING was claimed by either static Phase-3 or dynamic Phase-4. Safe to
+        // run Tier-2 pattern fusion + Tier-1 single-node with no exclusion set,
+        // since no node is already in a Tier-0 partition.
 
         // Run graph-level fusions in a single greedy pass (largest pattern wins).
         // Each matched fusion group is submitted to ORT via AddNodesToFuse and
@@ -1429,13 +1783,15 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
             }
         }
     } else {
-        // Tier-0 claimed at least one partition. Claim any remaining unclaimed
-        // nodes via Tier-2 pattern fusions, then Tier-1 single-node.
+        // Tier-0 claimed at least one partition — STATIC (Phase-3) and/or DYNAMIC
+        // (Phase-4 runtime fusion). Claim any remaining unclaimed nodes via Tier-2
+        // pattern fusions, then Tier-1 single-node.
         //
         // Tier-2 ApplyFusions scans ALL graph nodes, not just unclaimed ones.
         // Without an exclusion set it will match patterns (e.g. QuickGelu) on
         // nodes already inside a Tier-0 partition, creating overlapping fused
         // groups that crash at inference time. Exclude Tier-0 claimed nodes
+        // (tier0ClaimedNodeIds now includes Phase-4's dynamic-partition nodes)
         // so ApplyFusions only considers genuinely unclaimed nodes.
         std::unordered_set<size_t> tier0AndCpuExcluded = cpuPreferredNodes;
         tier0AndCpuExcluded.insert(tier0ClaimedNodeIds.begin(),
@@ -1520,6 +1876,49 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
             }
         }
 
+        // Runtime-fusion (deferred) route: a partition claimed shape-blind in
+        // GetCapabilityImpl's Phase-4. Snapshot it now (while graphs[i] is alive)
+        // and defer the DML compile to first Compute. Only populated when
+        // RuntimeFusionEnabled(). Disjoint from m_tier0GroupHashes.
+        if (!ep->m_tier0DynamicGroupHashes.empty()) {
+            size_t num_nodes = 0;
+            ep->ort_api.Graph_GetNumNodes(graphs[i], &num_nodes);
+            std::vector<const OrtNode*> sg_nodes(num_nodes, nullptr);
+            if (num_nodes > 0)
+                ep->ort_api.Graph_GetNodes(graphs[i], sg_nodes.data(), num_nodes);
+            std::vector<size_t> sg_ids;
+            sg_ids.reserve(num_nodes);
+            for (const OrtNode* n : sg_nodes)
+                if (n) sg_ids.push_back(fusion_utils::GetNodeId(ep->ort_api, n));
+            std::sort(sg_ids.begin(), sg_ids.end());
+            size_t sg_hash = HashNodeIds(sg_ids);
+
+            if (ep->m_tier0DynamicGroupHashes.count(sg_hash)) {
+                DML_PERF_LOG("[CompileImpl] RuntimeFusion: dynamic hash match, snapshotting nodes=", num_nodes, "\n");
+                static const ExecutionProviderPlugin::ShapePrepChain kEmptyChain{};
+                auto chain_it = ep->m_dynamicShapePrepChains.find(sg_hash);
+                const auto& chain = (chain_it != ep->m_dynamicShapePrepChains.end())
+                    ? chain_it->second : kEmptyChain;
+                node_compute_infos[i] = FullGraphFusion::CompileDeferred(
+                    ep->ort_api,
+                    graphs[i],
+                    ep->m_graphInitializerMap,
+                    ep->m_executionProvider.get(),
+                    ep->m_resolvedShapes,
+                    chain.nodes,
+                    chain.root_inputs,
+                    chain.initializers);
+                if (node_compute_infos[i]) {
+                    DML_PERF_LOG("[CompileImpl] RuntimeFusion: snapshot SUCCESS\n");
+                    continue;
+                }
+                // A claimed dynamic partition that fails to snapshot cannot fall
+                // back per-op — fail the Run.
+                return ep->ort_api.CreateStatus(ORT_EP_FAIL,
+                    "RuntimeFusion: CompileDeferred snapshot failed for a claimed dynamic partition");
+            }
+        }
+
         // Tier-2 route: pattern-matched fusions.
         node_compute_infos[i] = EpFusionManager::CompileFusion(
             ep->ort_api,
@@ -1562,8 +1961,8 @@ void ORT_API_CALL ExecutionProviderPlugin::ReleaseNodeComputeInfosImpl(
 {
     (void)this_ptr;
     for (size_t i = 0; i < num_node_compute_infos; ++i) {
-        // Each OrtNodeComputeInfo is a heap-allocated QuickGeluNodeComputeInfo.
-        // The destructor releases the compiled state (IDMLCompiledOperator, etc.).
+        // Each OrtNodeComputeInfo is a heap-allocated compute-info; its destructor
+        // releases the compiled state (IDMLCompiledOperator, etc.).
         delete node_compute_infos[i];
         node_compute_infos[i] = nullptr;
     }
@@ -1971,15 +2370,13 @@ std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const O
 
             // Null input = missing optional edge — treat as GPU tensor (don't pull to CPU).
             // Matches ORT's fallback_cpu_capability.cc which skips null NodeArgs naturally.
-            if (input == nullptr || input->GetTypeInfo() == nullptr
-                || input->GetTypeInfo()->tensor_type_info == nullptr
-                || input->GetTypeInfo()->tensor_type_info.get() == nullptr) {
+            fusion_utils::ValueInfoShape input_s = fusion_utils::GetValueInfoShape(ort_api, input);
+            if (input == nullptr || !input_s.has_type_info) {
                 place_in_cpu = false;
                 break;
             }
 
-            ONNXTensorElementDataType datatype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-            ort_api.GetTensorElementType(input->GetTypeInfo()->tensor_type_info.get(), &datatype);
+            ONNXTensorElementDataType datatype = input_s.elem_type;
 
             // skip placing on CPU if the data typs is float16 or bfloat16 or
             // float8e4m3fn, float8e4m3fnuz, floate5m2, floate5m2fnuz or float4e2m1
@@ -2349,15 +2746,11 @@ bool ExecutionProviderPlugin::IsSmallInitializer(const OrtGraph* graph, const Or
         return false; // not an initializer
     }
 
-    size_t dimsCount = 0;
-    std::vector<int64_t> dims;
-    ort_api.GetDimensionsCount(valueInfo->GetTypeInfo()->tensor_type_info.get(), &dimsCount);
-    dims.resize(dimsCount);
-    ort_api.GetDimensions(valueInfo->GetTypeInfo()->tensor_type_info.get(), dims.data(), dims.size());
+    fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ort_api, valueInfo);
 
     // Check if "small" enough
     int64_t size = 1;
-    for (auto& dim : dims) {
+    for (auto& dim : s.dims) {
         size *= dim;
     }
 
