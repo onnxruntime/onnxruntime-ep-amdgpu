@@ -79,12 +79,19 @@ struct arch_graph_mlss_exception {
     std::string_view arch_prefix;
     std::string_view graph_id;
 };
-constexpr std::array<arch_graph_mlss_exception, 4> kMlssGraphExceptions{{
+constexpr std::array<arch_graph_mlss_exception, 10> kMlssGraphExceptions{{
     // This ResNet-50 graph id differs across the ORT 1.26 and 1.27 partitioning paths.
     {"gfx1200", "3a0532e672db5cf"},
     {"gfx1201", "3a0532e672db5cf"},
     {"gfx1200", "c4c5e56652ffbf28"},
     {"gfx1201", "c4c5e56652ffbf28"},
+    // gfx1151: these graphs are >10% slower with MLSS (Strix Halo CSV).
+    {"gfx1151", "67df030d9ebfa160"},  // ResNet50_fp32
+    {"gfx1151", "aa9a41a6ddb96490"},  // UL:ResNet50_fp32
+    {"gfx1151", "978a900bc57a94bc"},  // Resnet101
+    {"gfx1151", "bc101f5eec4be31a"},  // Resnet152
+    {"gfx1151", "4810903a8d51b9f3"},  // RetinaNet
+    {"gfx1151", "5a4ab77616ae4199"},  // Topaz:PhotoAI:expoi-v1-fp32-256x256-1x
 }};
 
 bool GraphIdListContains(std::string_view list, std::string_view graph_id) {
