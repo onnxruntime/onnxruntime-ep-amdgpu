@@ -101,6 +101,20 @@ std::vector<std::size_t> GenerateCompiledBatchSizes(std::size_t max_batch_size,
 {
     if (!compile_batches_spec.empty()) {
         if (auto batch_sizes{ParseCompileBatches(compile_batches_spec)}; !batch_sizes.empty()) {
+            // Drop buckets above the declared ceiling: an explicit list is typically set
+            // globally for several models, and a bucket the frontend can never request
+            // still costs a compiled program and sizes that bucket's input arena.
+            if (max_batch_size > 0) {
+                batch_sizes.erase(
+                    std::remove_if(batch_sizes.begin(), batch_sizes.end(),
+                        [max_batch_size](std::size_t bs) { return bs > max_batch_size; }),
+                    batch_sizes.end());
+                // Keep a bucket at the ceiling so a full-size request still lands on a
+                // compiled bucket rather than compiling a program of its own.
+                if (batch_sizes.empty() || batch_sizes.back() != max_batch_size) {
+                    batch_sizes.push_back(max_batch_size);
+                }
+            }
             return batch_sizes;
         }
     }

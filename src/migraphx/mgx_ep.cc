@@ -784,12 +784,15 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
            dynamic batching (the staging path) to take effect. */
     }
 
-    // If compile_batches is set, derive max_dynamic_batch from the spec's max value.
-    if (!compile_batches_.empty()) {
+    // If compile_batches is set but the model declared no max_dynamic_batch, derive it
+    // from the spec's max value.  Only in that direction: the bucket list is usually
+    // set once globally (one env var, several models), and letting it raise a
+    // per-model max_dynamic_batch would compile buckets above the batch the frontend
+    // can ever send and size the staging buffers for them.  GenerateCompiledBatchSizes
+    // clamps the list to max_dynamic_batch for the models that do declare one.
+    if (!compile_batches_.empty() && max_dynamic_batch_ == 0) {
         if (const auto explicit_sizes{ParseCompileBatches(compile_batches_)}; !explicit_sizes.empty()) {
-            if (const auto derived_max{explicit_sizes.back()}; max_dynamic_batch_ < derived_max) {
-                max_dynamic_batch_ = derived_max;
-            }
+            max_dynamic_batch_ = explicit_sizes.back();
         }
     }
 
@@ -907,20 +910,22 @@ ExecutionProvider::~ExecutionProvider() {
         }};
         destroy_captured(cs.hip_graph_cache);
         destroy_captured(cs.hip_graph_cache_direct);
-        // Staging inputs/outputs and the coalesce arena come from hipMallocAsync, so
+        // Staging inputs/outputs and the coalesce arenas come from hipMallocAsync, so
         // they are released with hipFreeAsync.  Best-effort teardown: the free is
         // queued on the default stream and reclaimed with the context at exit.
         for (auto& [param_name, buf] : cs.staging_inputs) {
-            // Arena sub-views are not independent allocations; the arena is freed below.
-            if (buf.data != nullptr && !buf.is_arena_view) {
+            if (buf.data != nullptr) {
                 (void)hipFreeAsync(buf.data, nullptr);
             }
             buf.data = nullptr;
         }
-        if (cs.in_arena_dev != nullptr) {
-            (void)hipFreeAsync(cs.in_arena_dev, nullptr);
-            cs.in_arena_dev = nullptr;
+        for (auto& [key, arena] : cs.coalesce_arenas) {
+            if (arena.dev != nullptr) {
+                (void)hipFreeAsync(arena.dev, nullptr);
+                arena.dev = nullptr;
+            }
         }
+        cs.coalesce_arenas.clear();
         if (cs.in_staging_host != nullptr) {
             (void)hipHostFree(cs.in_staging_host);
             cs.in_staging_host = nullptr;
@@ -1162,7 +1167,10 @@ try {
     }};
 
     // Size the staging buffers once, for the largest bucket, so every smaller bucket
-    // binds a prefix (mirrors AllocateStaging's max_dynamic_batch sizing).
+    // binds a prefix (mirrors AllocateStaging's max_dynamic_batch sizing).  Under
+    // coalesce_io this is what sizes the shared pinned gather buffer to the largest
+    // arena up front; the per-bucket arenas themselves are created by the
+    // BindStagingParams loop below, so no bucket has to grow the buffer mid-session.
     // NOTE: "largest" here means largest BATCH, which only orders dynamic-batch buckets.
     // Do not reuse this to pick a max across co-resident LLM programs -- prefill and
     // decode are both batch 1, so the tie is broken by unordered_map order and could
@@ -1963,6 +1971,14 @@ void RetainProgram(ComputeState& cs, ShapeKey shape_key, const migraphx::program
                 (void)hipFree(sit->second.data);
             }
             cs.scratch_bufs.erase(sit);
+        }
+        // The coalesce arena is per bucket too, and the bind that pointed into it was
+        // dropped above, so it goes with the program rather than accumulating.
+        if (const auto ait{cs.coalesce_arenas.find(victim)}; ait != cs.coalesce_arenas.end()) {
+            if (ait->second.dev != nullptr) {
+                (void)hipFreeAsync(ait->second.dev, stream);
+            }
+            cs.coalesce_arenas.erase(ait);
         }
         cs.cached_programs.erase(victim);
         ++cs.coresident_evictions;
