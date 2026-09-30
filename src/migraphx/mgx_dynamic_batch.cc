@@ -164,4 +164,26 @@ void PadSeqTensor(const void* src_data, void* dst_data,
     }
 }
 
+void PadBatchTensor(void* dst_data, std::size_t real_rows, std::size_t target_rows,
+    std::size_t row_bytes, hipStream_t stream)
+{
+    if (real_rows == 0 || target_rows <= real_rows || row_bytes == 0) {
+        return;
+    }
+    char* const dst{static_cast<char*>(dst_data)};
+    const char* const last_row{dst + (real_rows - 1) * row_bytes};
+    char* const pad{dst + real_rows * row_bytes};
+    const std::size_t slots{target_rows - real_rows};
+
+    // Seed one pad row from the last real row, then double the filled region each step
+    // so the launch count is O(log slots) instead of one copy per pad row.
+    HIP_CALL_THROW(hipMemcpyAsync(pad, last_row, row_bytes, hipMemcpyDeviceToDevice, stream));
+    for (std::size_t filled{1}; filled < slots;) {
+        const std::size_t chunk{std::min(filled, slots - filled)};
+        HIP_CALL_THROW(hipMemcpyAsync(pad + filled * row_bytes, pad,
+            chunk * row_bytes, hipMemcpyDeviceToDevice, stream));
+        filled += chunk;
+    }
+}
+
 }  // namespace mgx_ep

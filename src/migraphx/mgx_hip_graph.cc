@@ -845,9 +845,10 @@ static ComputeState::CoalesceResidency ProbeCoalesceResidency(
 // Copy every coalesced input into this bucket's arena: gather a chunk of inputs into
 // the pinned host buffer, flush it with an H2D, and move on -- so the CPU gather of one
 // chunk overlaps the DMA of the previous one instead of the whole arena waiting for the
-// last memcpy.  A batched input copies only its real requested_batch rows (the pad tail
-// is left as-is -- pad output rows are sliced off downstream); others copy in full, and
-// each chunk's H2D stops at its last live byte so a padded call does not ship the tail.
+// last memcpy.  A batched input copies its real requested_batch rows and replicates the
+// last of them across the pad rows (which the program computes on); others copy in full.
+// Each chunk's H2D stops at its last live byte, so a chunk whose inputs are all unbatched
+// and short of their slots does not ship the dead tails.
 // When refresh_ptrs is set the ORT data pointers are (re)read and recorded here so the
 // shape scan and this gather share one traversal; otherwise the pointers already
 // recorded by the scan are reused.  Requires residency to be a resolved all-host state.
@@ -893,6 +894,27 @@ static void CoalesceInputsCore(ComputeState& cs, const StagingBindResult& bind,
                 continue;
             }
             std::memcpy(host_base + ib.arena_offset, src, copy_bytes);
+
+            // The program computes on the pad rows even though their outputs get sliced
+            // off, so whatever an earlier (larger) call left in this slot is live input --
+            // another request's rows, which scatter the embedding gathers and make replay
+            // time depend on the previous batch.  Replicate the last real row instead, in
+            // the pinned buffer this chunk is about to ship anyway, so it costs no extra
+            // DMA.  real_rows comes from the post-clamp copy_bytes so a truncated copy
+            // still replicates the last row that actually landed.
+            if (batched && ib.row_bytes > 0) {
+                char* const slot{host_base + ib.arena_offset};
+                const std::size_t real_rows{copy_bytes / ib.row_bytes};
+                const std::size_t cap_rows{
+                    std::min(ib.prog_bytes, ib.stage_capacity) / ib.row_bytes};
+                if (real_rows > 0) {
+                    const char* const last_row{slot + (real_rows - 1) * ib.row_bytes};
+                    for (std::size_t r{real_rows}; r < cap_rows; ++r) {
+                        std::memcpy(slot + r * ib.row_bytes, last_row, ib.row_bytes);
+                    }
+                    copy_bytes = std::max(copy_bytes, cap_rows * ib.row_bytes);
+                }
+            }
             live_end = std::max(live_end, ib.arena_offset + copy_bytes);
         }
         if (const std::size_t transfer_bytes{live_end - chunk.byte_offset}; transfer_bytes > 0) {
@@ -978,9 +1000,10 @@ void CopyInputsToStaging(ComputeState& cs,
             PadSeqTensor(src, ib.staging_data, outer, seq.real_len, seq.target_len,
                 inner, ib.element_size, stream);
         } else {
-            // Batched: copy the real requested_batch rows; unbatched: copy in full.  The
-            // pad tail is left as-is (no per-call zeroing) -- pad output rows are sliced
-            // off downstream.
+            // Batched: copy the real requested_batch rows, then fill the pad rows by
+            // replicating the last real one; unbatched: copy in full.  Leaving the pad
+            // rows as-is would feed the program an earlier call's rows (see the
+            // coalesced gather above for why that matters).
             std::size_t copy_bytes{batched ? ib.row_bytes * dyn.requested_batch
                                            : ib.prog_bytes};
             if (copy_bytes > ib.stage_capacity) {
@@ -990,6 +1013,11 @@ void CopyInputsToStaging(ComputeState& cs,
             if (copy_bytes > 0) {
                 HIP_CALL_THROW(hipMemcpyAsync(ib.staging_data, src, copy_bytes,
                     hipMemcpyDefault, stream));
+                if (batched && ib.row_bytes > 0) {
+                    PadBatchTensor(ib.staging_data, copy_bytes / ib.row_bytes,
+                        std::min(ib.prog_bytes, ib.stage_capacity) / ib.row_bytes,
+                        ib.row_bytes, stream);
+                }
             }
         }
     }
