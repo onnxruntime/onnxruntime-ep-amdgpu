@@ -1512,13 +1512,18 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromCache(const Ort::ConstGr
     try {
         EpContextNodeReader ep_ctx_reader{*this, graph, logger_, ctx_cache_dir,
             compute_capability_, current_sdk_version};
+        auto program{ep_ctx_reader.GetProgram()};
+        if (!program_outputs_are_standard(program)) {
+            throw std::runtime_error{
+                "EPContext contains a non-standard MIGraphX output; regenerate it"};
+        }
 
         ep_context_compute_states_.emplace(name,
             EpContextComputeState{
                 mutex_,
                 device_id_,
                 t_,
-                ep_ctx_reader.GetProgram(),
+                std::move(program),
                 input_name_indices,
                 output_name_indices,
             });

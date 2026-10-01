@@ -3,17 +3,30 @@
 
 #include "mgx_program_ops.h"
 
+#include <algorithm>
 #include <cstddef>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace mgx_ep {
 
+bool program_outputs_are_standard(const migraphx::program& prog) {
+    const auto outputs{prog.get_output_shapes()};
+    return std::all_of(outputs.begin(), outputs.end(),
+        [](const migraphx::shape& shape) { return shape.standard(); });
+}
+
 bool load_compiled_program(migraphx::program& prog, const fs::path& path)
 try {
     if (!path.empty() && exists(path)) {
-        prog = migraphx::load(path.string().c_str());
+        auto loaded{migraphx::load(path.string().c_str())};
+        if (!program_outputs_are_standard(loaded)) {
+            return false;
+        }
+        prog = std::move(loaded);
         return true;
     }
     return false;
@@ -96,6 +109,8 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
     // Set the flag here so Maximum means something without patching migraphx.
     options.set_exhaustive_tune_flag(exhaustive_tune || compute_mode == ComputeMode::Maximum);
 
+    options.set_advance_backend_option("standardize_outputs", true);
+
     // read_only_problem_cache_files are system-level/shipped caches migraphx must never write
     // back. Passed as a %s argument so a '%' in a path is not read as a format specifier.
     // migraphx builds with the problem-cache feature consume the key; older ones ignore it.
@@ -123,6 +138,10 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
         }
     }
     prog.compile(target, options);
+    if (!program_outputs_are_standard(prog)) {
+        throw std::runtime_error{
+            "MIGraphX compiled a non-standard output for ONNX Runtime"};
+    }
 }
 
 }  // namespace mgx_ep

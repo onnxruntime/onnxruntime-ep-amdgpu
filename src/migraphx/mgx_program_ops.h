@@ -19,6 +19,8 @@ bool load_compiled_program(migraphx::program& prog, const fs::path& path);
 
 void save_compiled_program(const migraphx::program& prog, const fs::path& path);
 
+bool program_outputs_are_standard(const migraphx::program& prog);
+
 void calibrate_and_quantize(const migraphx::program& prog, const migraphx::target& target,
     const migraphx::program_parameters& params,
     bool fp16_enable, bool bf16_enable, bool int8_enable, bool fp8_enable, bool int8_calibration_cache_available,
