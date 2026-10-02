@@ -288,8 +288,8 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
                                                       size_t num_devices,
                                                       const OrtSessionOptions* session_options,
                                                       const OrtLogger* logger,
-                                                      OrtEp** ep) noexcept 
-{
+                                                      OrtEp** ep) noexcept
+try {
     auto* factory = static_cast<ProviderFactory*>(this_ptr);
 
     factory->ort_api.DisableMemPattern(const_cast<OrtSessionOptions*>(session_options));
@@ -326,17 +326,24 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
     }
     DML_PERF_LOG("[GraphCapture] ep.directml.enable_graph_capture=", enable_graph_capture ? 1 : 0, "\n");
 
+    // Host-accessible (CUSTOM/L0) decode inputs are force-disabled regardless of the session flag;
+    // decode inputs go through the CPU path instead (genai routes to the CPU interface when the EP
+    // advertises no host-accessible allocator). The CUSTOM/L0 allocator is OrtEnv-shared and OGA caches
+    // a raw pointer to it for the model's lifetime — device-bound state the backend cannot free at
+    // model boundaries, which complicates device-removal recovery. The plugin owns this policy.
+    enable_host_accessible = false;
+
     *ep = nullptr;
     if (num_devices > 1) {
         return factory->ort_api.CreateStatus(ORT_INVALID_ARGUMENT,
             "DirectML EP supports selection for a single or none devices");
     }
 
-    // Create DML device and execution context for the selected adapter.
-    // Share ONE ID3D12Device across all EP instances (factory->d3d12_device), created once and reused.
-    // D3D12 resources are device-local, so the factory-scoped host-accessible allocator (built below on
-    // this device) is only valid for buffers bound in an EP that uses the SAME device -> the device
-    // MUST be shared, not freshly created per EP. Command queue / DML device / ExecutionContext stay
+    // Create DML device and execution context for the selected adapter. Share ONE ID3D12Device across
+    // a model's EP instances (factory->d3d12_device), created once and reused. D3D12 resources are
+    // device-local, so the factory-scoped host-accessible allocator (built on this device) is only
+    // valid for buffers bound in an EP that uses the SAME device -> the device MUST be shared across a
+    // model's EPs, not freshly created per EP. Command queue / DML device / ExecutionContext stay
     // per-EP (they are cheap and the context lifetime is per-session).
     if (!factory->d3d12_device) {
         factory->d3d12_device = factory->CreateD3d12Device();
@@ -346,7 +353,7 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
     Microsoft::WRL::ComPtr<IDMLDevice> dml_device = factory->CreateDMLDevice(d3d12_device);
 
     auto context = wil::MakeOrThrow<ExecutionContext>(
-        d3d12_device.Get(), 
+        d3d12_device.Get(),
         dml_device.Get(),
         cmd_queue.Get(),
         false,
@@ -379,6 +386,21 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
     *ep = factory->m_ep.release();
     return nullptr;
 }
+catch (const wil::ResultException& e) {
+    // CreateEpImpl is a noexcept ORT ABI callback: a C++ exception escaping here would hit the
+    // noexcept boundary and std::terminate the process. Convert to an OrtStatus so ORT/OGA can
+    // surface the failure and the caller can continue to the next model.
+    auto* factory = static_cast<ProviderFactory*>(this_ptr);
+    if (ep != nullptr) *ep = nullptr;
+    return factory->ort_api.CreateStatus(ORT_EP_FAIL,
+        MakeString("DirectML EP creation failed (hr=", e.GetErrorCode(), "): ", e.what()).c_str());
+}
+catch (const std::exception& e) {
+    auto* factory = static_cast<ProviderFactory*>(this_ptr);
+    if (ep != nullptr) *ep = nullptr;
+    return factory->ort_api.CreateStatus(ORT_EP_FAIL,
+        MakeString("DirectML EP creation failed: ", e.what()).c_str());
+}
 
 void ORT_API_CALL ProviderFactory::ReleaseEpImpl(OrtEpFactory* this_ptr, OrtEp* ep) noexcept
 {
@@ -396,12 +418,18 @@ void ORT_API_CALL ProviderFactory::ReleaseEpImpl(OrtEpFactory* this_ptr, OrtEp* 
             }
         }
         delete provider;
+        // NOTE: the factory-shared d3d12_device and host_accessible_allocator_ are deliberately NOT
+        // reset here. Once served through CreateAllocatorImpl they are registered as OrtEnv-shared
+        // allocators and OGA caches raw pointers to them in a process-global singleton. Freeing them
+        // at a model boundary is a use-after-free (segfaults the next model); genai releases them at
+        // the model boundary via CloseAMDGPUInterface.
     }
 }
 
 OrtStatus* ORT_API_CALL ProviderFactory::CreateAllocatorImpl(OrtEpFactory* this_ptr, const OrtMemoryInfo* memory_info,
                                                               const OrtKeyValuePairs* allocator_options,
-                                                              OrtAllocator** allocator) noexcept {
+                                                              OrtAllocator** allocator) noexcept
+try {
     auto& factory = *static_cast<ProviderFactory*>(this_ptr);
 
     // HOST_ACCESSIBLE (decode inputs): host-accessible on DML is OPT-IN via ep.directml.enable_host_accessible
@@ -460,6 +488,18 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateAllocatorImpl(OrtEpFactory* this_
     // OrtEp::CreateAllocator in ExecutionProviderPlugin::CreateAllocatorImpl.
     *allocator = std::make_unique<CpuAllocator>(memory_info).release();
     return nullptr;
+}
+catch (const std::exception& e) {
+    // noexcept ABI boundary (session-init): allocator construction / CreatePreferredAllocators can
+    // throw bad_alloc or a D3D12 resource-creation failure. Convert to OrtStatus.
+    auto& factory = *static_cast<ProviderFactory*>(this_ptr);
+    if (allocator != nullptr) *allocator = nullptr;
+    return factory.ort_api.CreateStatus(ORT_FAIL, MakeString("CreateAllocator failed: ", e.what()).c_str());
+}
+catch (...) {
+    auto& factory = *static_cast<ProviderFactory*>(this_ptr);
+    if (allocator != nullptr) *allocator = nullptr;
+    return factory.ort_api.CreateStatus(ORT_FAIL, "CreateAllocator failed: unknown exception");
 }
 
 void ORT_API_CALL ProviderFactory::ReleaseAllocatorImpl(OrtEpFactory* /*this*/, OrtAllocator* allocator) noexcept {

@@ -105,7 +105,7 @@ bool ORT_API_CALL DMLDataTransfer::CanCopyImpl(const OrtDataTransferImpl* this_p
 OrtStatus* ORT_API_CALL DMLDataTransfer::CopyTensorsImpl(OrtDataTransferImpl* this_ptr,
                                                          const OrtValue** src_tensors_ptr, OrtValue** dst_tensors_ptr,
                                                          OrtSyncStream** streams_ptr, size_t num_tensors) noexcept
-{
+try {
     DMLDataTransfer& impl = *static_cast<DMLDataTransfer*>(this_ptr);
 
     // Lazy attach: if the EP was not attached at construction time (factory-level transfer
@@ -125,9 +125,28 @@ OrtStatus* ORT_API_CALL DMLDataTransfer::CopyTensorsImpl(OrtDataTransferImpl* th
         return impl.ort_api.CreateStatus(ORT_FAIL, "DMLDataTransfer: execution provider not attached");
     }
 
-    provider->CopyTensorsPlugin(src_tensors_ptr, dst_tensors_ptr, streams_ptr, num_tensors);
-
-    return nullptr;
+    // Propagate the copy's status instead of discarding it: a GPU->CPU readback here flushes the
+    // queue and waits on the fence, which is exactly where a device suspend/removal surfaces. If we
+    // swallowed the failure (returning nullptr==success) the caller would proceed on stale/NaN data.
+    return provider->CopyTensorsPlugin(src_tensors_ptr, dst_tensors_ptr, streams_ptr, num_tensors);
+}
+catch (const wil::ResultException& e) {
+    // CopyTensorsImpl is a noexcept ORT ABI callback. The readback path throws on device
+    // removal/suspend (fence wait / Map fail via ORT_THROW_IF_FAILED); letting that escape the
+    // noexcept boundary would std::terminate the host. Convert to an OrtStatus so ORT can fail the
+    // Run and the caller can continue (matching the CreateEpImpl / DmlAbiKernel_Compute handling).
+    auto& impl = *static_cast<DMLDataTransfer*>(this_ptr);
+    return impl.ort_api.CreateStatus(ORT_FAIL,
+        MakeString("DMLDataTransfer copy failed (hr=", e.GetErrorCode(), "): ", e.what()).c_str());
+}
+catch (const std::exception& e) {
+    auto& impl = *static_cast<DMLDataTransfer*>(this_ptr);
+    return impl.ort_api.CreateStatus(ORT_FAIL,
+        MakeString("DMLDataTransfer copy failed: ", e.what()).c_str());
+}
+catch (...) {
+    auto& impl = *static_cast<DMLDataTransfer*>(this_ptr);
+    return impl.ort_api.CreateStatus(ORT_FAIL, "DMLDataTransfer copy failed: unknown exception");
 }
 
 /*static*/

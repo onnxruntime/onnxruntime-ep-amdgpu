@@ -273,6 +273,7 @@ static OrtStatus* ORT_API_CALL QuickGelu_Compute(
     if (!state || !state->provider || !state->ort_api) return nullptr;
 
     const OrtApi& api = *state->ort_api;
+    try {
     // Get input and read its concrete runtime shape.
     const OrtValue* input_value = nullptr;
     {
@@ -389,6 +390,14 @@ static OrtStatus* ORT_API_CALL QuickGelu_Compute(
 
     state->provider->QueueReference(active_kernel->compiled_op.Get());
     return nullptr;
+    }
+    catch (const std::exception& e) {
+        // noexcept ABI boundary: ExecuteOperator/allocations can throw on device removal or bad_alloc.
+        return api.CreateStatus(ORT_FAIL, (std::string("QuickGelu_Compute failed: ") + e.what()).c_str());
+    }
+    catch (...) {
+        return api.CreateStatus(ORT_FAIL, "QuickGelu_Compute failed: unknown exception");
+    }
 }
 
 static void ORT_API_CALL QuickGelu_ReleaseState(

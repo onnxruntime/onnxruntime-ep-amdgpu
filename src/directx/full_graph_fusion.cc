@@ -115,6 +115,8 @@ static OrtStatus* ORT_API_CALL FullGraph_Compute(
     if (!state || !state->provider || !state->ort_api) return nullptr;
     const OrtApi& api = *state->ort_api;
 
+    try {
+
     state->compute_call_count++;
 
     // -----------------------------------------------------------------------
@@ -355,6 +357,17 @@ static OrtStatus* ORT_API_CALL FullGraph_Compute(
 #endif
 
     return nullptr;
+
+    }
+    catch (const std::exception& e) {
+        // noexcept ABI boundary: Flush()/ExecuteOperator throw WIL ResultException on device
+        // removal/suspend, and allocations can throw bad_alloc. Convert to an OrtStatus so ORT
+        // fails the Run gracefully instead of terminating the host (matches CreateEpImpl/CopyTensorsImpl).
+        return api.CreateStatus(ORT_FAIL, MakeString("FullGraph_Compute failed: ", e.what()).c_str());
+    }
+    catch (...) {
+        return api.CreateStatus(ORT_FAIL, "FullGraph_Compute failed: unknown exception");
+    }
 }
 
 // ---------------------------------------------------------------------------
