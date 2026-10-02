@@ -337,6 +337,7 @@ static OrtStatus* ORT_API_CALL BiasGelu_Compute(
     if (!state || !state->provider || !state->ort_api) return nullptr;
 
     const OrtApi& api = *state->ort_api;
+    try {
     // The fused kernel receives only the main (non-initializer) input at runtime.
     // The bias is a model weight already on the GPU — its handle is stored in state.
     const OrtValue* input0 = nullptr;
@@ -464,6 +465,14 @@ static OrtStatus* ORT_API_CALL BiasGelu_Compute(
 
     state->provider->QueueReference(active_kernel->compiled_op.Get());
     return nullptr;
+    }
+    catch (const std::exception& e) {
+        // noexcept ABI boundary: ExecuteOperator/allocations can throw on device removal or bad_alloc.
+        return api.CreateStatus(ORT_FAIL, (std::string("BiasGelu_Compute failed: ") + e.what()).c_str());
+    }
+    catch (...) {
+        return api.CreateStatus(ORT_FAIL, "BiasGelu_Compute failed: unknown exception");
+    }
 }
 
 static void ORT_API_CALL BiasGelu_ReleaseState(

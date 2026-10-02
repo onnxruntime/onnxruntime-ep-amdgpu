@@ -711,16 +711,19 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
             Microsoft::WRL::ComPtr<IUnknown> di;
             tensor->GetDataInterface(di.GetAddressOf());
             if (di) {
-                // Could be the allocation handle (DEFAULT) or, for host-accessible, the mapped ptr
-                // reinterpreted — DecodeResource handles the host-accessible case by pointer identity.
                 ID3D12Resource* r = DecodeResource(di.Get());
                 if (r) return r;
             }
         }
-        // Host-accessible / raw-pointer path: the tensor's data ptr is the mapped cpu_ptr.
-        if (void* raw = tensor->GetData()) {
-            ID3D12Resource* r = DecodeResource(raw);
-            if (r) return r;
+        // Host-accessible raw-pointer fallback: a CUSTOM/L0 tensor's data ptr is the mapped cpu_ptr,
+        // which DecodeResource resolves by pointer identity against the host-accessible allocator.
+        // Gate on that allocator existing: when host-accessible is disabled, a non-data-interface
+        // tensor's data ptr is genuine bytes, not a handle, and blind-casting it would deref garbage.
+        if (m_hostAccessibleAllocator) {
+            if (void* raw = tensor->GetData()) {
+                ID3D12Resource* r = DecodeResource(raw);
+                if (r) return r;
+            }
         }
         return nullptr;
     }
@@ -729,9 +732,26 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
     {
         const size_t dataSizeInBytes = ComputeByteSizeFromTensor(*dst);
 
-        ID3D12Resource* srcData = ResolveTensorResource(src);
         ID3D12Resource* dstData = ResolveTensorResource(dst);
-        ORT_THROW_HR_IF(E_INVALIDARG, !srcData || !dstData);
+        ORT_THROW_HR_IF(E_INVALIDARG, !dstData);
+
+        ID3D12Resource* srcData = ResolveTensorResource(src);
+        if (!srcData) {
+            // ORT classified this copy as GPU->GPU from the source's memory-device type, but the source
+            // carries no plugin GPU allocation handle — it is a tensor whose data pointer is raw host
+            // bytes, not a PluginDmlAllocationInfo. Upload it into the (real) dst resource rather than
+            // failing, mirroring CpuToGpuCopy.
+            if (const void* rawSrc = src->GetData()) {
+                m_uploadHeap->BeginUploadToGpu(dstData, 0, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                               AsByteSpan(rawSrc, dataSizeInBytes));
+                if (!m_sessionInitialized) {
+                    FlushUploadsIfReady();
+                }
+                return;
+            }
+            // No GPU resource and no host data — genuinely unresolvable.
+            ORT_THROW_HR(E_INVALIDARG);
+        }
 
         m_context->CopyBufferRegion(dstData, 0, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srcData, 0, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, dataSizeInBytes);
     }
