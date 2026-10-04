@@ -36,6 +36,34 @@ add_library(migraphx-ep MODULE
 
 target_link_libraries(migraphx-ep PRIVATE migraphx::c hip-shared flatbuffers)
 
+# One device kernel places packed real rows into the arena and replicates the pad.
+# hipcc is optional: without it the gather keeps the host-side row replicate.
+if(NOT WIN32)
+    find_program(MGX_HIPCC NAMES hipcc
+        HINTS "$ENV{ROCM_PATH}/bin" /opt/rocm/bin /opt/rocm-7.2.0/bin)
+    if(MGX_HIPCC)
+        set(_pad_obj "${CMAKE_CURRENT_BINARY_DIR}/mgx_pad_kernel.o")
+        add_custom_command(
+            OUTPUT "${_pad_obj}"
+            COMMAND "${MGX_HIPCC}" -c -fPIC -O3 -std=c++17
+                -I"${CMAKE_CURRENT_SOURCE_DIR}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/mgx_pad_kernel.hip"
+                -o "${_pad_obj}"
+            DEPENDS
+                "${CMAKE_CURRENT_SOURCE_DIR}/mgx_pad_kernel.hip"
+                "${CMAKE_CURRENT_SOURCE_DIR}/mgx_pad_kernel.h"
+            COMMENT "Compiling batch-pad kernel"
+            VERBATIM)
+        set_source_files_properties("${_pad_obj}" PROPERTIES
+            EXTERNAL_OBJECT TRUE
+            GENERATED TRUE)
+        target_sources(migraphx-ep PRIVATE "${_pad_obj}")
+        target_compile_definitions(migraphx-ep PRIVATE MGX_EP_HAVE_PAD_KERNEL)
+    else()
+        message(STATUS "hipcc not found; padded gathers replicate rows on the host")
+    endif()
+endif()
+
 if(MSVC)
     target_link_options(migraphx-ep PRIVATE "/DELAYLOAD:amdhip64_7.dll")
     target_link_libraries(migraphx-ep PRIVATE delayimp)

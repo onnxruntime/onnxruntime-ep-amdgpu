@@ -75,7 +75,11 @@ constexpr auto kMaxResidentPrograms = "ORT_MIGRAPHX_MAX_RESIDENT_PROGRAMS"sv;
 // write outputs detected at capture. Lets the pre-replay memset fan-out reduction
 // be disabled if a model's outputs are misclassified. Default off (detect + skip).
 constexpr auto kForceZeroAllGraphOutputs = "ORT_MIGRAPHX_FORCE_ZERO_ALL_OUTPUTS"sv;
-}  // namespace env_vars
+// When set (1/true), host inputs are treated as pinned without hipPointerGetAttributes.
+// Matches a deployment that always binds pinned inputs (Triton input_pinned_memory).
+// Default off: a pageable pointer on the direct-DMA path makes hipMemcpyAsync synchronize.
+constexpr auto kTrustPinnedInputs = "ORT_MIGRAPHX_TRUST_PINNED_INPUTS"sv;
+}  // namespace env_var
 
 // EP-owned device staging buffer (pointer-stable across runs so it can be
 // safely baked into a captured hipGraph).  Plain hipMalloc/hipFree owned;
@@ -435,6 +439,15 @@ struct ComputeState {
     CoalesceResidency coalesce_residency{CoalesceResidency::kUnknown};
     // Per ORT input index.  ptr is the last pointer probed; a new pointer re-queries.
     std::vector<HostPinProbe> input_pin_probe{};
+    // Packed real-row gather for a padded batch: device image of the packed host
+    // bytes, plus the descriptor list the single pad kernel reads.  Grown to the
+    // largest call and reused.  Not used when the batch already fills the bucket.
+    void* coalesce_pack_dev{nullptr};
+    std::size_t coalesce_pack_bytes{0};
+    void* pad_desc_dev{nullptr};
+    std::size_t pad_desc_bytes{0};
+    void* pad_desc_host{nullptr};
+    std::size_t pad_desc_host_bytes{0};
     // Set when the fused shape-scan already coalesced this call's inputs, so the staging
     // copy is skipped.  Reset at the start of every input scan.
     bool inputs_coalesced_this_call{false};

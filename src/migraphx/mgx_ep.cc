@@ -935,6 +935,18 @@ ExecutionProvider::~ExecutionProvider() {
             (void)hipHostFree(cs.in_staging_host);
             cs.in_staging_host = nullptr;
         }
+        if (cs.coalesce_pack_dev != nullptr) {
+            (void)hipFree(cs.coalesce_pack_dev);
+            cs.coalesce_pack_dev = nullptr;
+        }
+        if (cs.pad_desc_dev != nullptr) {
+            (void)hipFree(cs.pad_desc_dev);
+            cs.pad_desc_dev = nullptr;
+        }
+        if (cs.pad_desc_host != nullptr) {
+            (void)hipHostFree(cs.pad_desc_host);
+            cs.pad_desc_host = nullptr;
+        }
         for (auto& [param_name, buf] : cs.staging_outputs) {
             if (buf.data != nullptr) {
                 // Drop from the allocator's borrowed registry before releasing.
@@ -1228,6 +1240,29 @@ try {
             break;
         }
         ++prewarmed;
+    }
+
+    // A failed fold keeps out-of-graph memsets in front of every replay.  Say so at
+    // load; the replay path itself is unchanged.
+    std::size_t unfolded{0};
+    for (const auto& [shape_key, entry] : cs.hip_graph_cache) {
+        if (!entry.captured || entry.zeroing_in_graph) {
+            continue;
+        }
+        bool scratch{false};
+        if (const auto it{cs.scratch_bufs.find(shape_key)}; it != cs.scratch_bufs.end() &&
+            it->second.data != nullptr && it->second.size_bytes > 0) {
+            scratch = true;
+        }
+        if (scratch || !entry.captured_output_zeroes.empty()) {
+            ++unfolded;
+        }
+    }
+    if (unfolded > 0) {
+        ORT_CXX_LOGF_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_WARNING,
+            "[mgx-prewarm] %zu hipGraph bucket(s) did not fold scratch/output zeroing; "
+            "replay will memset before each launch",
+            unfolded);
     }
 
     (void)hipStreamSynchronize(stream);
@@ -1772,10 +1807,11 @@ void RewriteBatchAxis(std::vector<std::int64_t>& shapes, const std::vector<std::
 // call-to-call, so read just the representative (lowest-index) input's shape.  When its
 // non-batch dims match and the requested batch is unchanged or maps to the same compiled
 // bucket, refresh data pointers, reuse the cached template, and set
-// `shapes_known_unchanged` so the caller skips the compare/rehash.  A bucket change, a
-// representative non-batch dim change, seq activity, the first call, or a non-batching
-// model falls through to the full scan.  `staging_bind` receives the coalesce bind when
-// the fused gather runs.
+// `shapes_known_unchanged` so the caller skips the compare/rehash.  A bucket change with
+// the same non-batch dims rewrites axis 0 and returns without the N-way shape read; the
+// caller rehashes and selects the other precompiled program.  A representative non-batch
+// dim change, seq activity, the first call, or a non-batching model falls through to the
+// full scan.  `staging_bind` receives the coalesce bind when the fused gather runs.
 void GatherInputShapesAndBatch(ComputeState& compute_state,
     const Ort::KernelContext& kernel_context, DynamicBatchContext& dyn,
     std::vector<std::int64_t>& current_input_shapes, bool seq_active,
@@ -1822,10 +1858,11 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
                     compute_state.batch_repr_tail.begin(), compute_state.batch_repr_tail.end())};
             const bool batch_same{requested_batch == compute_state.last_dyn_requested_batch};
             bool same_bucket{false};
+            std::size_t bucket{0};
             if (tail_same && !batch_same && requested_batch > 0 &&
                 !compute_state.compiled_batch_sizes.empty()) {
-                const auto bucket{FindNearestCompiledBatchSize(
-                    requested_batch, compute_state.compiled_batch_sizes)};
+                bucket = FindNearestCompiledBatchSize(
+                    requested_batch, compute_state.compiled_batch_sizes);
                 same_bucket = bucket > 0 && bucket == compute_state.last_dyn_target_batch;
             }
             if (tail_same && (batch_same || same_bucket)) {
@@ -1860,6 +1897,31 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
                     }
                 }
                 shapes_known_unchanged = true;
+                return;
+            }
+            // Different compiled bucket, same non-batch dims.  Rewrite axis 0 from the
+            // previous requested batch and let the caller hash the new effective shape.
+            // Pointers are cleared so the gather cannot reuse the previous request.
+            // The old shape key is not used: the program and the arena belong to `bucket`.
+            if (tail_same && !batch_same && bucket > 0 &&
+                !compute_state.last_input_ranks.empty()) {
+                const auto from{static_cast<std::int64_t>(compute_state.last_dyn_requested_batch)};
+                const auto to{static_cast<std::int64_t>(requested_batch)};
+                RewriteBatchAxis(compute_state.last_input_shapes,
+                    compute_state.last_input_ranks, from, to);
+                for (auto& axis0 : compute_state.cur_input_axis0) {
+                    if (axis0 == from) {
+                        axis0 = to;
+                    }
+                }
+                current_input_shapes = compute_state.last_input_shapes;
+                compute_state.cur_input_ranks = compute_state.last_input_ranks;
+                std::fill(compute_state.cur_input_data.begin(),
+                    compute_state.cur_input_data.end(), nullptr);
+                dyn.requested_batch = requested_batch;
+                dyn.target_batch = bucket;
+                dyn.active = true;
+                shapes_known_unchanged = false;
                 return;
             }
         }

@@ -20,6 +20,7 @@
 #include "hip/allocator.h"
 #include "hip/utils.h"
 #include "mgx_dynamic_batch.h"
+#include "mgx_pad_kernel.h"
 #include "common/env_var.h"
 
 namespace mgx_ep {
@@ -36,14 +37,24 @@ bool ForceZeroAllOutputsEnabled() {
     return enabled;
 }
 
+// Off by default.  A pageable host pointer passed to hipMemcpyAsync synchronizes
+// the device, so the direct-DMA path keeps probing unless the process promises
+// every host input is pinned.
+bool TrustPinnedInputsEnabled() {
+    static const bool enabled{
+        ParseEnvironmentVariableWithDefault<bool>(env_var::kTrustPinnedInputs, false)};
+    return enabled;
+}
+
 // Arena slot alignment: every coalesced input sub-view starts on this boundary so
 // the device kernels that consume it stay aligned.
 constexpr std::size_t kArenaAlign = 256;
 
 // Gather chunking: the pinned-host gather of one chunk overlaps the H2D of the
-// previous one.  An arena under the target stays a single transfer -- there is not
-// enough DMA to hide below that, and the cap keeps the extra hipMemcpyAsync launches
-// from outweighing the overlap on a large arena.
+// previous one.  The first chunk is small so its H2D starts while the CPU is still
+// reading the rest of the inputs.  Later chunks stay large, and the cap keeps the
+// launch count from outweighing the overlap on a large arena.
+constexpr std::size_t kGatherFirstChunkBytes = 64 * 1024;
 constexpr std::size_t kGatherChunkTargetBytes = 512 * 1024;
 constexpr std::size_t kMaxGatherChunks = 8;
 // Below this, a dedicated hipMemcpyAsync costs more CPU than folding the copy into
@@ -727,6 +738,9 @@ static std::size_t PackedArenaBytes(const ComputeState& cs,
 // Grow the shared pinned gather buffer to hold at least `bytes`.  One buffer serves
 // every bucket because only one call gathers at a time, so it tracks the largest
 // arena seen rather than being allocated per bucket.
+static void EnsureDeviceBytes(void*& ptr, std::size_t& cap, std::size_t bytes, hipStream_t stream);
+static void EnsurePinnedBytes(void*& ptr, std::size_t& cap, std::size_t bytes, hipStream_t stream);
+
 static void EnsureCoalesceHostBuffer(ComputeState& cs, std::size_t bytes, hipStream_t stream)
 {
     if (bytes == 0 || bytes <= cs.in_staging_host_bytes) {
@@ -742,6 +756,13 @@ static void EnsureCoalesceHostBuffer(ComputeState& cs, std::size_t bytes, hipStr
     HIP_CALL_THROW(hipHostMalloc(&cs.in_staging_host, bytes, hipHostMallocDefault));
     std::memset(cs.in_staging_host, 0, bytes);
     cs.in_staging_host_bytes = bytes;
+#if defined(MGX_EP_HAVE_PAD_KERNEL)
+    // Sized with the gather buffer so the first padded inference does not hipMalloc.
+    EnsureDeviceBytes(cs.coalesce_pack_dev, cs.coalesce_pack_bytes, cs.in_staging_host_bytes, stream);
+    const std::size_t desc_bytes{std::max(cs.input_name_indices.size(), std::size_t{1}) * sizeof(PadRowDesc)};
+    EnsureDeviceBytes(cs.pad_desc_dev, cs.pad_desc_bytes, desc_bytes, stream);
+    EnsurePinnedBytes(cs.pad_desc_host, cs.pad_desc_host_bytes, desc_bytes, stream);
+#endif
 }
 
 void AllocateStaging(ComputeState& cs,
@@ -874,6 +895,9 @@ static bool HostPointerIsPinned(ComputeState& cs, std::size_t index, const void*
     if (ptr == nullptr) {
         return false;
     }
+    if (TrustPinnedInputsEnabled()) {
+        return true;
+    }
     if (index >= cs.input_pin_probe.size()) {
         cs.input_pin_probe.resize(index + 1);
     }
@@ -888,6 +912,200 @@ static bool HostPointerIsPinned(ComputeState& cs, std::size_t index, const void*
         slot.pinned = err == hipSuccess && attr.type == hipMemoryTypeHost;
     }
     return slot.pinned;
+}
+
+// Grow a plain hipMalloc buffer.  Synchronizes only when the existing allocation is
+// too small, which happens on the first padded call, not on the steady path.
+static void EnsureDeviceBytes(void*& ptr, std::size_t& cap, std::size_t bytes, hipStream_t stream) {
+    if (bytes == 0 || bytes <= cap) {
+        return;
+    }
+    if (ptr != nullptr) {
+        HIP_CALL_THROW(hipStreamSynchronize(stream));
+        HIP_CALL_THROW(hipFree(ptr));
+        ptr = nullptr;
+        cap = 0;
+    }
+    HIP_CALL_THROW(hipMalloc(&ptr, bytes));
+    cap = bytes;
+}
+
+static void EnsurePinnedBytes(void*& ptr, std::size_t& cap, std::size_t bytes, hipStream_t stream) {
+    if (bytes == 0 || bytes <= cap) {
+        return;
+    }
+    if (ptr != nullptr) {
+        HIP_CALL_THROW(hipStreamSynchronize(stream));
+        HIP_CALL_THROW(hipHostFree(ptr));
+        ptr = nullptr;
+        cap = 0;
+    }
+    HIP_CALL_THROW(hipHostMalloc(&ptr, bytes, hipHostMallocDefault));
+    cap = bytes;
+}
+
+// Padded batch, kernel available: pack only the real rows, H2D that packed image in
+// chunks, then one kernel scatters each input into its arena slot and replicates the
+// last real row across the pad.  Large pinned inputs stay on their own DMA plus
+// PadBatchTensor.  Returns false when this path does not apply (exact bucket, or the
+// pad kernel was not built); the caller then keeps the host-replicate gather.
+static bool CoalescePackedPad(ComputeState& cs, const StagingBindResult& bind,
+    const Ort::KernelContext& ctx, const DynamicBatchContext& dyn,
+    hipStream_t stream, bool refresh_ptrs) {
+#if !defined(MGX_EP_HAVE_PAD_KERNEL)
+    (void)cs;
+    (void)bind;
+    (void)ctx;
+    (void)dyn;
+    (void)stream;
+    (void)refresh_ptrs;
+    return false;
+#else
+    const bool batch_pad{dyn.active && dyn.target_batch > dyn.requested_batch};
+    if (!batch_pad || cs.in_staging_host == nullptr || bind.arena_dev == nullptr) {
+        return false;
+    }
+    char* const host_base{static_cast<char*>(cs.in_staging_host)};
+    char* const arena_base{static_cast<char*>(bind.arena_dev)};
+    struct Packed {
+        std::size_t pack_offset{};
+        char* dst{};
+        std::uint32_t row_bytes{};
+        std::uint32_t real_rows{};
+        std::uint32_t target_rows{};
+    };
+    std::vector<Packed> packed;
+    packed.reserve(bind.input_copies.size());
+    std::size_t pack_cursor{0};
+    std::size_t h2d_offset{0};
+    int h2d_chunks{0};
+    char* pack_dev{nullptr};
+    // Queue one H2D of completed packed bytes.  The first chunk is small so it
+    // overlaps GetInput of the inputs that follow.  Host ranges already written
+    // are not touched again, so the async copy is safe against the rest of the pack.
+    const auto flush_pack{[&](bool drain) {
+        if (h2d_offset >= pack_cursor) {
+            return;
+        }
+        if (pack_dev == nullptr) {
+            EnsureDeviceBytes(cs.coalesce_pack_dev, cs.coalesce_pack_bytes,
+                std::max(pack_cursor, cs.in_staging_host_bytes), stream);
+            pack_dev = static_cast<char*>(cs.coalesce_pack_dev);
+        }
+        while (h2d_offset < pack_cursor && h2d_chunks < static_cast<int>(kMaxGatherChunks)) {
+            const std::size_t ready{pack_cursor - h2d_offset};
+            const std::size_t target{h2d_chunks == 0 ? kGatherFirstChunkBytes
+                                                     : kGatherChunkTargetBytes};
+            const bool last_launch{h2d_chunks + 1 >= static_cast<int>(kMaxGatherChunks)};
+            if (!drain && (!last_launch && ready < target)) {
+                return;
+            }
+            if (!drain && last_launch) {
+                return;
+            }
+            const std::size_t nbytes{(drain && (last_launch || ready < target))
+                ? ready : std::min(target, ready)};
+            HIP_CALL_THROW(hipMemcpyAsync(pack_dev + h2d_offset, host_base + h2d_offset,
+                nbytes, hipMemcpyHostToDevice, stream));
+            h2d_offset += nbytes;
+            ++h2d_chunks;
+            if (!drain) {
+                return;
+            }
+        }
+    }};
+
+    for (const auto& ib : bind.input_copies) {
+        const void* src{nullptr};
+        if (refresh_ptrs) {
+            src = ctx.GetInput(ib.ort_index).GetTensorRawData();
+            if (ib.ort_index < cs.cur_input_data.size()) {
+                cs.cur_input_data[ib.ort_index] = src;
+            }
+        } else {
+            src = ib.ort_index < cs.cur_input_data.size() ? cs.cur_input_data[ib.ort_index] : nullptr;
+            if (src == nullptr) {
+                src = ctx.GetInput(ib.ort_index).GetTensorRawData();
+            }
+        }
+        const bool batched{!ib.prog_lens.empty() &&
+            ib.prog_lens.front() == dyn.target_batch &&
+            ib.ort_index < cs.cur_input_axis0.size() &&
+            cs.cur_input_axis0[ib.ort_index] == static_cast<std::int64_t>(dyn.requested_batch)};
+        std::size_t copy_bytes{batched ? ib.row_bytes * dyn.requested_batch : ib.prog_bytes};
+        if (copy_bytes > ib.stage_capacity) {
+            ++cs.clamp_truncations;
+            copy_bytes = ib.stage_capacity;
+        }
+        if (copy_bytes == 0 || src == nullptr) {
+            continue;
+        }
+        const std::size_t cap_rows{ib.row_bytes > 0
+            ? std::min(ib.prog_bytes, ib.stage_capacity) / ib.row_bytes : 0};
+        const std::size_t real_rows{ib.row_bytes > 0 ? copy_bytes / ib.row_bytes : 0};
+        if (copy_bytes >= kDirectDmaMinBytes && HostPointerIsPinned(cs, ib.ort_index, src)) {
+            HIP_CALL_THROW(hipMemcpyAsync(arena_base + ib.arena_offset, src, copy_bytes,
+                hipMemcpyHostToDevice, stream));
+            if (batched && ib.row_bytes > 0 && real_rows > 0) {
+                PadBatchTensor(arena_base + ib.arena_offset, real_rows, cap_rows,
+                    ib.row_bytes, stream);
+            }
+            continue;
+        }
+        const std::size_t aligned{(pack_cursor + 15u) & ~std::size_t{15}};
+        const bool fits_u32{ib.row_bytes <= UINT32_MAX && real_rows <= UINT32_MAX &&
+            cap_rows <= UINT32_MAX && copy_bytes <= UINT32_MAX};
+        const bool fits_host{aligned + copy_bytes <= cs.in_staging_host_bytes};
+        if (!fits_u32 || !fits_host || (batched && (ib.row_bytes == 0 || real_rows == 0 ||
+            cap_rows < real_rows))) {
+            HIP_CALL_THROW(hipMemcpyAsync(arena_base + ib.arena_offset, src, copy_bytes,
+                hipMemcpyHostToDevice, stream));
+            if (batched && ib.row_bytes > 0 && real_rows > 0) {
+                PadBatchTensor(arena_base + ib.arena_offset, real_rows, cap_rows,
+                    ib.row_bytes, stream);
+            }
+            continue;
+        }
+        std::memcpy(host_base + aligned, src, copy_bytes);
+        Packed slot;
+        slot.pack_offset = aligned;
+        slot.dst = arena_base + ib.arena_offset;
+        if (batched) {
+            slot.row_bytes = static_cast<std::uint32_t>(ib.row_bytes);
+            slot.real_rows = static_cast<std::uint32_t>(real_rows);
+            slot.target_rows = static_cast<std::uint32_t>(cap_rows);
+        } else {
+            slot.row_bytes = static_cast<std::uint32_t>(copy_bytes);
+            slot.real_rows = 1;
+            slot.target_rows = 1;
+        }
+        packed.push_back(slot);
+        pack_cursor = aligned + copy_bytes;
+        flush_pack(false);
+    }
+    if (packed.empty()) {
+        return true;
+    }
+    while (h2d_offset < pack_cursor) {
+        flush_pack(true);
+    }
+    const std::size_t desc_bytes{packed.size() * sizeof(PadRowDesc)};
+    EnsureDeviceBytes(cs.pad_desc_dev, cs.pad_desc_bytes, desc_bytes, stream);
+    EnsurePinnedBytes(cs.pad_desc_host, cs.pad_desc_host_bytes, desc_bytes, stream);
+    auto* host_descs{static_cast<PadRowDesc*>(cs.pad_desc_host)};
+    for (std::size_t i{0}; i < packed.size(); ++i) {
+        host_descs[i].dst = packed[i].dst;
+        host_descs[i].src = pack_dev + packed[i].pack_offset;
+        host_descs[i].row_bytes = packed[i].row_bytes;
+        host_descs[i].real_rows = packed[i].real_rows;
+        host_descs[i].target_rows = packed[i].target_rows;
+    }
+    HIP_CALL_THROW(hipMemcpyAsync(cs.pad_desc_dev, cs.pad_desc_host, desc_bytes,
+        hipMemcpyHostToDevice, stream));
+    HIP_CALL_THROW(LaunchPadReplicateRows(static_cast<const PadRowDesc*>(cs.pad_desc_dev),
+        static_cast<unsigned>(packed.size()), stream));
+    return true;
+#endif
 }
 
 // Copy every coalesced input into this bucket's arena: gather a chunk of inputs into
@@ -905,6 +1123,9 @@ static bool HostPointerIsPinned(ComputeState& cs, std::size_t index, const void*
 static void CoalesceInputsCore(ComputeState& cs, const StagingBindResult& bind,
     const Ort::KernelContext& ctx, const DynamicBatchContext& dyn,
     hipStream_t stream, bool refresh_ptrs) {
+    if (CoalescePackedPad(cs, bind, ctx, dyn, stream, refresh_ptrs)) {
+        return;
+    }
     const bool batch_pad{dyn.active && dyn.target_batch > dyn.requested_batch};
     char* const host_base{static_cast<char*>(cs.in_staging_host)};
     char* const arena_base{static_cast<char*>(bind.arena_dev)};
@@ -1135,27 +1356,33 @@ StagingBindResult* TryFusedCoalesceGather(ComputeState& cs,
 }
 
 // Split the bound inputs into contiguous runs so the gather can flush a run while the
-// CPU fills the next one.  Runs are grown to kGatherChunkTargetBytes and capped at
-// kMaxGatherChunks: below the target there is not enough DMA to hide, and past the cap
-// the extra hipMemcpyAsync launches cost more than the overlap buys.
+// CPU fills the next one.  The first run closes around kGatherFirstChunkBytes so that
+// H2D overlaps the rest of the gather.  Later runs grow to kGatherChunkTargetBytes,
+// and the whole arena still fits in kMaxGatherChunks.
 static void BuildGatherChunks(StagingBindResult& result)
 {
     result.gather_chunks.clear();
     if (result.input_copies.empty() || result.arena_bytes == 0) {
         return;
     }
-    const std::size_t target{std::max(kGatherChunkTargetBytes,
+    const std::size_t later_target{std::max(kGatherChunkTargetBytes,
         result.arena_bytes / kMaxGatherChunks)};
 
     StagingBindResult::GatherChunk chunk{};
     chunk.byte_offset = result.input_copies.front().arena_offset;
+    std::size_t chunks_pushed{0};
     for (std::size_t i{0}; i < result.input_copies.size(); ++i) {
         const auto& ib{result.input_copies[i]};
         ++chunk.input_count;
         chunk.byte_count = (ib.arena_offset + ib.stage_capacity) - chunk.byte_offset;
         const bool last{i + 1 == result.input_copies.size()};
-        if (last || chunk.byte_count >= target) {
+        const std::size_t target{chunks_pushed == 0
+            ? std::min(kGatherFirstChunkBytes, later_target) : later_target};
+        // After kMaxGatherChunks - 1 runs have closed, hold the rest for the last one.
+        const bool force_hold{!last && chunks_pushed + 1 >= kMaxGatherChunks};
+        if (last || (!force_hold && chunk.byte_count >= target)) {
             result.gather_chunks.push_back(chunk);
+            ++chunks_pushed;
             if (!last) {
                 chunk = StagingBindResult::GatherChunk{};
                 chunk.first_input = i + 1;
@@ -1454,6 +1681,21 @@ void FreeStaging(ComputeState& cs, hipStream_t stream) {
         cs.in_staging_host = nullptr;
     }
     cs.in_staging_host_bytes = 0;
+    if (cs.coalesce_pack_dev != nullptr) {
+        (void)hipFree(cs.coalesce_pack_dev);
+        cs.coalesce_pack_dev = nullptr;
+    }
+    cs.coalesce_pack_bytes = 0;
+    if (cs.pad_desc_dev != nullptr) {
+        (void)hipFree(cs.pad_desc_dev);
+        cs.pad_desc_dev = nullptr;
+    }
+    cs.pad_desc_bytes = 0;
+    if (cs.pad_desc_host != nullptr) {
+        (void)hipHostFree(cs.pad_desc_host);
+        cs.pad_desc_host = nullptr;
+    }
+    cs.pad_desc_host_bytes = 0;
     cs.input_pin_probe.clear();
     cs.staging_inputs_coalesced = false;
     // Re-verify coalesce eligibility against the next allocation's inputs.
