@@ -110,10 +110,10 @@ void CopyInputsToStaging(ComputeState& cs,
 // Steady-state fusion of the shape scan and the coalesced gather: when the coalesced
 // arena is active, its residency is known host-resident, and the bind for shape_key is
 // cached, this reads each input's data pointer and copies it into the arena in a single
-// pass (so the later CopyInputsToStaging is skipped).  Returns false -- caller keeps its
-// normal scan + copy -- when the coalesced path does not apply.  Caller guarantees no
-// seq padding is active for this call.
-bool TryFusedCoalesceGather(ComputeState& cs,
+// pass (so the later CopyInputsToStaging is skipped).  Returns that bind.  Nullptr
+// means the coalesced path did not apply and the caller keeps its normal scan + copy.
+// Caller guarantees no seq padding is active for this call.
+StagingBindResult* TryFusedCoalesceGather(ComputeState& cs,
     const Ort::KernelContext& ctx, const DynamicBatchContext& dyn,
     ShapeKey shape_key, hipStream_t stream);
 

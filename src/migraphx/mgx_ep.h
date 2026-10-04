@@ -230,6 +230,7 @@ struct StagingBindResult {
     std::vector<std::size_t> bound_output_row_bytes{};    // bytes per axis-0 row per bound output (batch-slice math)
     std::vector<std::size_t> bound_output_bytes{};        // total bucket byte count per bound output (precomputed)
     std::vector<void*> bound_output_data{};               // staging src ptr per bound output (resolved once)
+    std::vector<std::size_t> bound_output_capacity{};     // staging allocation bytes (ArmOutputAlloc)
     std::vector<StagingInputBind> input_copies{};         // flat per-input copy plan (built once)
 
     // ── Coalesced input arena for this bucket ────────────────────────────────
@@ -266,6 +267,39 @@ using ShapeKey = hash::ShapeKey;
 struct InputScanEntry {
     std::string name;
     std::size_t ort_index{};
+    int seq_axis{-1};  // token axis from static_pad_input_axes, or -1
+};
+
+// One named seq-pad input resolved to an ORT index at compile time, so Compute
+// does not hash the parameter name on every call.
+struct SeqPadInput {
+    std::size_t ort_index{};
+    int axis{};
+};
+
+// Cached hipPointerGetAttributes result for one ORT input.  Refreshed when the
+// pointer value changes; cleared by FreeStaging.
+struct HostPinProbe {
+    const void* ptr{nullptr};
+    bool pinned{false};
+};
+
+// Flat parameter plan for the eager and EP-context paths.  Built once per
+// compiled shape (dtype checked then); later calls only rebind pointers.
+struct EagerParamBind {
+    bool is_input{true};
+    std::string name;
+    std::size_t index{};
+    migraphx::shape argument_shape{};
+    std::vector<std::int64_t> ort_shape{};
+};
+
+struct EagerBindCache {
+    bool ready{false};
+    ShapeKey shape_key{};
+    std::vector<EagerParamBind> params{};
+    std::vector<std::size_t> output_indices{};
+    std::vector<char> output_prebound{};
 };
 
 struct ComputeState {
@@ -337,6 +371,9 @@ struct ComputeState {
     std::size_t static_pad_seq_len{};
     bool static_pad_seq_len_from_env{};  // set explicitly via env -> overrides the mask
     Map<int> static_pad_input_axes{};   // input param name -> token axis (inputs keep real names)
+    // Same inputs as ORT indices, in map iteration order.  Compute reads one of them.
+    std::vector<SeqPadInput> static_pad_inputs_by_index{};
+    std::optional<std::size_t> attention_mask_index{};
     // Outputs are program params named "#output_N", not their ONNX names, so the
     // slice must match on ORT output INDEX, not name.  Resolved from the user's
     // "logits:1" spec via output_name_indices at Compile time.
@@ -388,16 +425,16 @@ struct ComputeState {
     std::size_t in_staging_host_bytes{};
     // Coalesce input residency, stable for a given deployment (a caller such as Triton
     // binds each input to the same memory kind every call).  Determined once and reused
-    // instead of rescanning N inputs per inference; reset by FreeStaging.  Pinned host
-    // sources DMA straight into the arena (no CPU copy); pageable sources are gathered
-    // into the pinned host buffer then flushed with chunked H2Ds; a device input
-    // disqualifies the coalesced path.
-    // Host-vs-device only, matching the built-in EP: all-host inputs are gathered into
-    // the pinned staging buffer and flushed chunk by chunk; any device input falls back
-    // to the per-input staging copy.  (No pinned-vs-pageable split.)
+    // instead of rescanning N inputs per inference; reset by FreeStaging.  A device
+    // input disqualifies the coalesced path.  Among host inputs, a large pinned source
+    // is DMA'd straight into the arena; pageable sources and small inputs are gathered
+    // into the pinned staging buffer and flushed in chunks.  Pin results live in
+    // input_pin_probe and are cleared by FreeStaging.
     enum class CoalesceResidency : std::uint8_t {
         kUnknown, kAllHost, kHasDevice };
     CoalesceResidency coalesce_residency{CoalesceResidency::kUnknown};
+    // Per ORT input index.  ptr is the last pointer probed; a new pointer re-queries.
+    std::vector<HostPinProbe> input_pin_probe{};
     // Set when the fused shape-scan already coalesced this call's inputs, so the staging
     // copy is skipped.  Reset at the start of every input scan.
     bool inputs_coalesced_this_call{false};
@@ -469,6 +506,18 @@ struct ComputeState {
     // last full scan; the steady-state scan reads only its shape to confirm the batch.
     std::size_t batch_repr_index{};
     bool has_batch_repr{};
+    // Non-batch dims of the representative input, from the last full scan.  The
+    // same-bucket fast path reuses the cached shapes only when these still match.
+    std::uint32_t batch_repr_rank{};
+    std::vector<std::int64_t> batch_repr_tail{};
+    // Shape key resolved on the previous call.  Reused when the effective hash is
+    // unchanged so Compute does not call ShapeKeyOf again.
+    ShapeKey last_shape_key{};
+    bool has_last_shape_key{};
+    // Reused by HashEffectiveInputShapes so a shape change does not allocate.
+    std::vector<std::int64_t> effective_shape_scratch{};
+    // Eager-path parameter plan.  Invalidated when that shape's program is rebuilt.
+    EagerBindCache eager_bind{};
 
     // Program parameter shapes keyed by shape hash, so each bucket keeps its shapes
     // and the hot path skips the get_parameter_shapes() rebuild. Dropped per-hash on
@@ -483,6 +532,8 @@ struct EpContextComputeState {
     migraphx::program program;
     Map<size_t> input_name_indices;
     Map<size_t> output_name_indices;
+    // One program for the life of the state, so a single plan is enough.
+    EagerBindCache eager_bind{};
 };
 
 struct ExecutionProvider : OrtEp, ApiPtrs {

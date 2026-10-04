@@ -63,14 +63,19 @@ namespace {
 // Mirrors the built-in EP's HipDeviceGuard.
 struct HipDeviceGuard {
     int prev_{0};
+    bool changed_{false};
     explicit HipDeviceGuard(int dev) {
         HIP_CALL_THROW(hipGetDevice(&prev_));
         if (dev != prev_) {
             HIP_CALL_THROW(hipSetDevice(dev));
+            changed_ = true;
         }
     }
     ~HipDeviceGuard() {
-        (void)hipSetDevice(prev_);  // best-effort restore; never throw from a dtor
+        // The thread was already on this device; a restore would be a second driver call.
+        if (changed_) {
+            (void)hipSetDevice(prev_);  // best-effort restore; never throw from a dtor
+        }
     }
     HipDeviceGuard(const HipDeviceGuard&) = delete;
     HipDeviceGuard& operator=(const HipDeviceGuard&) = delete;
@@ -1417,6 +1422,16 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
                 "(max_dynamic_batch > 0); disable one", ORT_EP_FAIL};
         }
         compute_state.static_pad_input_axes = ParseNameAxisSpec(static_pad_inputs_);
+        compute_state.static_pad_inputs_by_index.clear();
+        compute_state.static_pad_inputs_by_index.reserve(compute_state.static_pad_input_axes.size());
+        for (const auto& [name, axis] : compute_state.static_pad_input_axes) {
+            if (const auto it{input_name_indices.find(name)}; it != input_name_indices.end()) {
+                compute_state.static_pad_inputs_by_index.push_back(SeqPadInput{it->second, axis});
+            }
+        }
+        if (const auto it{input_name_indices.find("attention_mask")}; it != input_name_indices.end()) {
+            compute_state.attention_mask_index = it->second;
+        }
         // Outputs: MIGraphX program params are named "#output_N", not their ONNX
         // names, so resolve the user's "logits:1" spec to (ORT output index -> axis)
         // via output_name_indices; the runtime slice matches on index.
@@ -1654,6 +1669,8 @@ struct ComputeIOInfo {
     bool shapes_known_unchanged{false};  // trace: batch-unchanged steady-state fast path hit
     const migraphx::program_parameter_shapes* param_shapes{nullptr};
     hipStream_t     hip_stream{nullptr};  // ORT compute stream, resolved once per call
+    // Set when the fused coalesce gather already looked this key up.
+    StagingBindResult* staging_bind{nullptr};
 };
 
 // Map an actual input shape to the shape the program is compiled for, in place: a
@@ -1661,21 +1678,27 @@ struct ComputeIOInfo {
 // batch, and a named seq input has its token axis padded up to the static target
 // length.  Single source of truth for the transform applied by both the shape hash
 // and the parse-time parameter shapes, so the two can never drift.
-void ApplyEffectiveShape(std::vector<std::int64_t>& shape, const std::string& name,
+void ApplyEffectiveShape(std::vector<std::int64_t>& shape, int seq_axis,
     const DynamicBatchContext& dyn, const StaticSeqContext& seq) {
     if (dyn.active && !shape.empty() &&
         static_cast<std::size_t>(shape.front()) == dyn.requested_batch) {
         shape.front() = static_cast<std::int64_t>(dyn.target_batch);
     }
+    if (seq.active && seq_axis >= 0 && static_cast<std::size_t>(seq_axis) < shape.size() &&
+        static_cast<std::size_t>(shape[seq_axis]) == seq.real_len) {
+        shape[seq_axis] = static_cast<std::int64_t>(seq.target_len);
+    }
+}
+
+void ApplyEffectiveShape(std::vector<std::int64_t>& shape, const std::string& name,
+    const DynamicBatchContext& dyn, const StaticSeqContext& seq) {
+    int seq_axis{-1};
     if (seq.active && seq.input_axes != nullptr) {
         if (const auto it{seq.input_axes->find(name)}; it != seq.input_axes->end()) {
-            const int axis{it->second};
-            if (axis >= 0 && static_cast<std::size_t>(axis) < shape.size() &&
-                static_cast<std::size_t>(shape[axis]) == seq.real_len) {
-                shape[axis] = static_cast<std::int64_t>(seq.target_len);
-            }
+            seq_axis = it->second;
         }
     }
+    ApplyEffectiveShape(shape, seq_axis, dyn, seq);
 }
 
 // Resolve static seq-padding for this call (inert when disabled).  A named input is
@@ -1688,48 +1711,42 @@ StaticSeqContext ResolveSeqPadding(ComputeState& compute_state,
     if (!compute_state.static_pad_seq) {
         return seq;
     }
-    const auto& input_name_indices{compute_state.input_name_indices};
-        // Take the target from the attention mask (axis 1; axis 0 is batch, scaled by num_beams).
-        // It carries the length the caller is really generating with, and is the same length it
-        // sized its KV cache to.  The configured value cannot be trusted here: for OGA it is
-        // config.search.max_length, read while the session is created, so a caller that sets
-        // max_length on GeneratorParams sets it too late for us and we would pad to the model's
-        // full context.  An explicit env value still wins; models with no mask keep the
-        // configured length.
-        static const std::string kAttentionMaskInput{"attention_mask"};
-        std::size_t target{compute_state.static_pad_seq_len};
-        if (not compute_state.static_pad_seq_len_from_env) {
-            if (const auto mask_it{input_name_indices.find(kAttentionMaskInput)};
-                mask_it != input_name_indices.end()) {
-                const auto mask_shape{
-                    kernel_context.GetInput(mask_it->second).GetTensorTypeAndShapeInfo().GetShape()};
-                if (mask_shape.size() > 1 && mask_shape[1] > 0) {
-                    target = static_cast<std::size_t>(mask_shape[1]);
-                }
-            }
+    // Take the target from the attention mask (axis 1; axis 0 is batch, scaled by num_beams).
+    // It carries the length the caller is really generating with, and is the same length it
+    // sized its KV cache to.  The configured value cannot be trusted here: for OGA it is
+    // config.search.max_length, read while the session is created, so a caller that sets
+    // max_length on GeneratorParams sets it too late for us and we would pad to the model's
+    // full context.  An explicit env value still wins; models with no mask keep the
+    // configured length.  The mask index was resolved at compile time.
+    std::size_t target{compute_state.static_pad_seq_len};
+    if (!compute_state.static_pad_seq_len_from_env && compute_state.attention_mask_index.has_value()) {
+        const auto mask_shape{kernel_context.GetInput(*compute_state.attention_mask_index)
+            .GetTensorTypeAndShapeInfo().GetShape()};
+        if (mask_shape.size() > 1 && mask_shape[1] > 0) {
+            target = static_cast<std::size_t>(mask_shape[1]);
         }
-        for (const auto& [name, axis] : compute_state.static_pad_input_axes) {
-            if (target == 0) {
-                break;  // nothing usable to pad to -> leave shapes untouched (inert, as before)
-            }
-            const auto it{input_name_indices.find(name)};
-            if (it == input_name_indices.end()) {
-                continue;
-            }
-            const auto shape{kernel_context.GetInput(it->second).GetTensorTypeAndShapeInfo().GetShape()};
-            if (axis < 0 || static_cast<size_t>(axis) >= shape.size()) {
-                continue;
-            }
-            const auto extent{static_cast<size_t>(shape[axis])};
-            if (extent > 1 && extent < target) {
-                seq.active = true;
-                seq.real_len = extent;
-                seq.target_len = target;
-                seq.input_axes = &compute_state.static_pad_input_axes;
-                seq.output_axes_by_index = &compute_state.static_pad_output_axes_by_index;
-                break;  // all named inputs share the same token length this call
-            }
+    }
+    // Named inputs share one token length.  The first in-range axis decides: a prefill
+    // extent in (1, target) pads, and decode (extent == 1) or an already-max prompt returns
+    // without reading the rest.
+    for (const auto& rep : compute_state.static_pad_inputs_by_index) {
+        if (target == 0) {
+            break;  // nothing usable to pad to -> leave shapes untouched (inert, as before)
         }
+        const auto shape{kernel_context.GetInput(rep.ort_index).GetTensorTypeAndShapeInfo().GetShape()};
+        if (rep.axis < 0 || static_cast<std::size_t>(rep.axis) >= shape.size()) {
+            continue;
+        }
+        const auto extent{static_cast<std::size_t>(shape[rep.axis])};
+        if (extent > 1 && extent < target) {
+            seq.active = true;
+            seq.real_len = extent;
+            seq.target_len = target;
+            seq.input_axes = &compute_state.static_pad_input_axes;
+            seq.output_axes_by_index = &compute_state.static_pad_output_axes_by_index;
+        }
+        break;
+    }
     return seq;
 }
 
@@ -1738,16 +1755,31 @@ StaticSeqContext ResolveSeqPadding(ComputeState& compute_state,
 // axis-0.  Fills `current_input_shapes` (a caller-owned reusable buffer -- item 3) so the
 // caller can compare/hash without a per-call alloc.
 //
+// Rewrite axis-0 entries that carry the previous requested batch.  Fixed dims that
+// merely equal the compiled bucket are left alone (they do not equal `from`).
+void RewriteBatchAxis(std::vector<std::int64_t>& shapes, const std::vector<std::uint32_t>& ranks,
+    std::int64_t from, std::int64_t to) {
+    std::size_t off{0};
+    for (const std::uint32_t rank : ranks) {
+        if (rank > 0 && off < shapes.size() && shapes[off] == from) {
+            shapes[off] = to;
+        }
+        off += rank;
+    }
+}
+
 // Fast path: under dynamic batching with seq padding inactive, only the batch changes
-// call-to-call, so read just the representative (lowest-index) input's axis-0.  If it
-// matches the previous call every input shape is unchanged: refresh only the data pointers,
-// reuse the cached template, and set `shapes_known_unchanged` so the caller skips the
-// compare/rehash.  A batch change, seq activity, first call, or non-batching model falls
-// through to the full scan.
+// call-to-call, so read just the representative (lowest-index) input's shape.  When its
+// non-batch dims match and the requested batch is unchanged or maps to the same compiled
+// bucket, refresh data pointers, reuse the cached template, and set
+// `shapes_known_unchanged` so the caller skips the compare/rehash.  A bucket change, a
+// representative non-batch dim change, seq activity, the first call, or a non-batching
+// model falls through to the full scan.  `staging_bind` receives the coalesce bind when
+// the fused gather runs.
 void GatherInputShapesAndBatch(ComputeState& compute_state,
     const Ort::KernelContext& kernel_context, DynamicBatchContext& dyn,
     std::vector<std::int64_t>& current_input_shapes, bool seq_active,
-    hipStream_t hip_stream, bool& shapes_known_unchanged) {
+    hipStream_t hip_stream, bool& shapes_known_unchanged, StagingBindResult*& staging_bind) {
     shapes_known_unchanged = false;
     compute_state.inputs_coalesced_this_call = false;
     const auto& input_name_indices{compute_state.input_name_indices};
@@ -1759,7 +1791,12 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
         compute_state.input_scan_order.clear();
         compute_state.input_scan_order.reserve(input_name_indices.size());
         for (const auto& [name, index] : input_name_indices) {
-            compute_state.input_scan_order.push_back(InputScanEntry{name, index});
+            int seq_axis{-1};
+            if (const auto axis_it{compute_state.static_pad_input_axes.find(name)};
+                axis_it != compute_state.static_pad_input_axes.end()) {
+                seq_axis = axis_it->second;
+            }
+            compute_state.input_scan_order.push_back(InputScanEntry{name, index, seq_axis});
         }
     }
     const auto& scan_order{compute_state.input_scan_order};
@@ -1780,17 +1817,41 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
             repr_dims.resize(repr_rank);
             Ort::ThrowOnError(Ort::GetApi().GetDimensions(repr_handle, repr_dims.data(), repr_rank));
             const auto requested_batch{static_cast<std::size_t>(repr_dims.front())};
-            if (requested_batch == compute_state.last_dyn_requested_batch) {
-                // Batch unchanged -> every input shape is unchanged; reuse the cached
-                // ranks / axis0 / dims template.  Fuse the coalesced gather into this
-                // pass when the arena is active; otherwise just refresh the data pointers
-                // for the copy that follows.
+            const bool tail_same{repr_rank == compute_state.batch_repr_rank &&
+                std::equal(repr_dims.begin() + 1, repr_dims.end(),
+                    compute_state.batch_repr_tail.begin(), compute_state.batch_repr_tail.end())};
+            const bool batch_same{requested_batch == compute_state.last_dyn_requested_batch};
+            bool same_bucket{false};
+            if (tail_same && !batch_same && requested_batch > 0 &&
+                !compute_state.compiled_batch_sizes.empty()) {
+                const auto bucket{FindNearestCompiledBatchSize(
+                    requested_batch, compute_state.compiled_batch_sizes)};
+                same_bucket = bucket > 0 && bucket == compute_state.last_dyn_target_batch;
+            }
+            if (tail_same && (batch_same || same_bucket)) {
+                // Same effective shape.  A new requested batch still has to land in
+                // cur_input_axis0 / last_input_shapes before the pad copy reads them,
+                // or a shorter buffer would be copied at the compiled-bucket size.
+                if (!batch_same) {
+                    const auto from{static_cast<std::int64_t>(compute_state.last_dyn_requested_batch)};
+                    const auto to{static_cast<std::int64_t>(requested_batch)};
+                    RewriteBatchAxis(compute_state.last_input_shapes,
+                        compute_state.last_input_ranks, from, to);
+                    for (auto& axis0 : compute_state.cur_input_axis0) {
+                        if (axis0 == from) {
+                            axis0 = to;
+                        }
+                    }
+                }
                 dyn.requested_batch = requested_batch;
                 dyn.target_batch = compute_state.last_dyn_target_batch;
                 dyn.active = true;
-                const ShapeKey fast_key{hash::ShapeKeyOf(compute_state.last_input_shapes_hash)};
-                if (!TryFusedCoalesceGather(compute_state, kernel_context, dyn, fast_key,
-                        hip_stream)) {
+                const ShapeKey fast_key{compute_state.has_last_shape_key
+                    ? compute_state.last_shape_key
+                    : hash::ShapeKeyOf(compute_state.last_input_shapes_hash)};
+                staging_bind = TryFusedCoalesceGather(compute_state, kernel_context, dyn, fast_key,
+                    hip_stream);
+                if (staging_bind == nullptr) {
                     for (const auto& entry : scan_order) {
                         if (entry.ort_index < compute_state.cur_input_data.size()) {
                             compute_state.cur_input_data[entry.ort_index] =
@@ -1844,6 +1905,8 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
             have_batch_min = true;
             batch_min_index = index;
             requested_batch = static_cast<std::size_t>(dims.front());
+            compute_state.batch_repr_rank = static_cast<std::uint32_t>(rank);
+            compute_state.batch_repr_tail.assign(dims.begin() + 1, dims.end());
         }
     }
     // Remember the representative input so the next call's fast path reads only it.
@@ -1865,11 +1928,11 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
 // gathered in current_input_shapes + cur_input_ranks (no GetShape() re-fetch).  Used
 // for both the first-call seed and the shape-changed rehash so there is a single
 // hashing code path -- the two can never produce divergent keys for identical inputs.
-hash::Value HashEffectiveInputShapes(const ComputeState& compute_state,
+hash::Value HashEffectiveInputShapes(ComputeState& compute_state,
     const std::vector<std::int64_t>& current_input_shapes,
     const DynamicBatchContext& dyn, const StaticSeqContext& seq) {
     hash::Value input_shapes_hash{};
-    std::vector<std::int64_t> dims;
+    auto& dims{compute_state.effective_shape_scratch};
     std::size_t shape_off{0};
     std::size_t rank_idx{0};
     for (const auto& entry : compute_state.input_scan_order) {
@@ -1877,7 +1940,7 @@ hash::Value HashEffectiveInputShapes(const ComputeState& compute_state,
         dims.assign(current_input_shapes.begin() + shape_off,
                     current_input_shapes.begin() + shape_off + rank);
         shape_off += rank;
-        ApplyEffectiveShape(dims, entry.name, dyn, seq);
+        ApplyEffectiveShape(dims, entry.seq_axis, dyn, seq);
         hash::Hash(input_shapes_hash,
             gsl::span<const std::int64_t>{dims.data(), dims.size()});
     }
@@ -2092,6 +2155,9 @@ void ResolveProgram(ComputeState& compute_state, const Ort::KernelContext& kerne
         compute_state.staging_bind_cache.erase(shape_key);
         compute_state.direct_bind_cache.erase(shape_key);
         compute_state.cached_param_shapes.erase(shape_key);
+        if (compute_state.eager_bind.ready && compute_state.eager_bind.shape_key == shape_key) {
+            compute_state.eager_bind.ready = false;
+        }
     }
     // Program now matches this call's shapes; record its key for the next compare.
     compute_state.active_program_shape_key = shape_key;
@@ -2117,7 +2183,7 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
     auto& current_input_shapes{compute_state.input_shapes_scratch};
     bool shapes_known_unchanged{false};
     GatherInputShapesAndBatch(compute_state, kernel_context, dyn, current_input_shapes,
-        seq.active, io.hip_stream, shapes_known_unchanged);
+        seq.active, io.hip_stream, shapes_known_unchanged, io.staging_bind);
     // When the scan proved the shapes unchanged (batch identical to the previous call) it
     // left current_input_shapes stale, so trust the flag and skip the full-buffer compare.
     const bool shapes_unchanged{shapes_known_unchanged ||
@@ -2158,7 +2224,10 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
     }
 
     // Integer key for the per-shape hot caches and the cached_programs lookup.
-    const ShapeKey shape_key{hash::ShapeKeyOf(input_shapes_hash)};
+    // An unchanged effective hash already has this key from the previous call.
+    const bool reuse_key{(shapes_unchanged || effective_unchanged) && compute_state.has_last_shape_key};
+    const ShapeKey shape_key{reuse_key ? compute_state.last_shape_key
+                                       : hash::ShapeKeyOf(input_shapes_hash)};
 
     // The active program matches iff its compiled key equals this call's.  (shapes_
     // unchanged already set true; the first call left it false so it compiles below.)
@@ -2206,6 +2275,9 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
     // (input pad / output slice); the direct-bind path cannot be used.
     const bool needs_batch_pad{dyn.active && dyn.target_batch > dyn.requested_batch};
     const bool needs_seq_pad{seq.active && seq.target_len > seq.real_len};
+
+    compute_state.last_shape_key = shape_key;
+    compute_state.has_last_shape_key = true;
 
     io.dyn = dyn;
     io.seq = seq;
@@ -2311,13 +2383,17 @@ std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
         // scratch lookup on every inference.  The binding is resolved before the input
         // copy because it also carries the flat input-copy plan the copy consumes, so
         // the per-call copy touches no parameter names, std::strings, or map lookups.
-        auto bind_it{compute_state.staging_bind_cache.find(shape_key)};
-        if (bind_it == compute_state.staging_bind_cache.end()) {
-            bind_it = compute_state.staging_bind_cache.emplace(
-                shape_key,
-                BindStagingParams(compute_state, param_shapes, shape_key, hip_stream)).first;
+        StagingBindResult* bind_ptr{io.staging_bind};
+        if (bind_ptr == nullptr) {
+            auto bind_it{compute_state.staging_bind_cache.find(shape_key)};
+            if (bind_it == compute_state.staging_bind_cache.end()) {
+                bind_it = compute_state.staging_bind_cache.emplace(
+                    shape_key,
+                    BindStagingParams(compute_state, param_shapes, shape_key, hip_stream)).first;
+            }
+            bind_ptr = &bind_it->second;
         }
-        auto& bind{bind_it->second};
+        auto& bind{*bind_ptr};
         CopyInputsToStaging(compute_state, bind, kernel_context, hip_stream, dyn, seq);
 
         // Equivalent to !io.needs_padding, resolved once in ResolveComputeIO: target_batch
@@ -2336,10 +2412,10 @@ std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
             };
             for (std::size_t i{0}; i < hyb.outputs.size(); ++i) {
                 const auto& out{hyb.outputs[i]};
-                if (const auto stage_it{compute_state.staging_outputs.find(out.name)};
-                    stage_it != compute_state.staging_outputs.end() &&
-                    stage_it->second.data != nullptr) {
-                    hip::ArmOutputAlloc(stage_it->second.data, stage_it->second.size_bytes);
+                // bound_output_data is filled in the same order as hybrid.outputs.
+                if (i < bind.bound_output_data.size() && bind.bound_output_data[i] != nullptr &&
+                    i < bind.bound_output_capacity.size()) {
+                    hip::ArmOutputAlloc(bind.bound_output_data[i], bind.bound_output_capacity[i]);
                 }
                 OutputHintGuard hint_guard;
                 auto output_tensor{kernel_context.GetOutput(out.output_index,
@@ -2361,61 +2437,95 @@ std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
     return std::nullopt;
 }
 
-// Mechanism (built-in EP's standard run): eager fallback with no hipGraph.  Build
-// program_parameters against the ORT tensors, run the program, and materialize any
-// extra outputs.  Terminal: the last path in the chain always runs and returns a
-// Status.
-Ort::Status RunEager(ComputeState& compute_state,
-    const Ort::KernelContext& kernel_context, const ComputeIOInfo& io) {
-    const auto& input_name_indices{compute_state.input_name_indices};
-    auto& program{compute_state.program};
-    const auto& param_shapes{*io.param_shapes};
-
-    migraphx::program_parameters compute_params;
-    auto output_shapes{program.get_output_shapes()};
-    std::vector<size_t> output_indices;
-    const auto hip_stream{io.hip_stream};
+// Walk program parameters once: record each input/output binding and check dtype.
+// Later calls with the same shape_key only rebind pointers.  `what` is the
+// function name used in the existing error strings.
+Ort::Status FillEagerBind(EagerBindCache& cache, ShapeKey shape_key, migraphx::program& program,
+    const Map<std::size_t>& input_name_indices, const Ort::KernelContext& kernel_context,
+    const char* what) {
+    if (cache.ready && cache.shape_key == shape_key) {
+        return STATUS_OK;
+    }
+    const auto param_shapes{program.get_parameter_shapes()};
+    const auto output_shapes{program.get_output_shapes()};
+    cache = EagerBindCache{};
+    cache.shape_key = shape_key;
+    cache.params.reserve(param_shapes.size());
+    cache.output_prebound.assign(output_shapes.size(), 0);
     if (param_shapes.size() > 0) {
         for (std::string name : param_shapes.names()) {
-            if (input_name_indices.count(name) > 0) {
-                const auto index{input_name_indices.at(name)};
-                auto input_tensor{kernel_context.GetInput(index)};
-                auto tensor_info{input_tensor.GetTensorTypeAndShapeInfo()};
-                auto tensor_type{tensor_info.GetElementType()};
-
+            if (const auto it{input_name_indices.find(name)}; it != input_name_indices.end()) {
+                auto input_tensor{kernel_context.GetInput(it->second)};
+                const auto tensor_type{input_tensor.GetTensorTypeAndShapeInfo().GetElementType()};
                 migraphx_shape_datatype_t datatype;
                 GetMIGraphXType(tensor_type, datatype);
-
                 const auto prog_shape{param_shapes[name.c_str()]};
                 if (datatype != prog_shape.type()) {
-                    throw std::runtime_error{"NodeComputeInfo::Compute(): tensor parameter type mismatch"};
+                    throw std::runtime_error{std::string{what} + ": tensor parameter type mismatch"};
                 }
-                void* input_data{GetGpuInputData(compute_state, kernel_context, name, index, prog_shape, hip_stream)};
-                compute_params.add(name.c_str(), migraphx::argument{prog_shape, input_data});
+                EagerParamBind param;
+                param.is_input = true;
+                param.index = it->second;
+                param.argument_shape = prog_shape;
+                param.name = std::move(name);
+                cache.params.push_back(std::move(param));
             } else if (const auto oi{ComputeOutputIndex(name)}; oi != -1) {
-                // Output argument (#output_N): reuse the shared parser instead of an
-                // inline find/Trim/ToInteger of the index.
-                const auto output_index{static_cast<size_t>(oi)};
-                    output_indices.emplace_back(output_index);
-
-                    auto output_shape{output_shapes[output_index]};
-                    const auto lengths{output_shape.lengths()};
-                    std::vector<int64_t> tensor_shape{lengths.begin(), lengths.end()};
-                    auto output_tensor{kernel_context.GetOutput(output_index, tensor_shape.data(), tensor_shape.size())};
-                    void* output_data{output_tensor.GetTensorMutableRawData()};
-                    auto argument_shape{param_shapes[name.c_str()]};
-                    compute_params.add(name.c_str(), migraphx::argument{argument_shape, output_data});
-                } else {
-                    return Ort::Status{MakeString("NodeComputeInfo::Compute(): unbound program parameter '",
+                const auto output_index{static_cast<std::size_t>(oi)};
+                if (output_index >= output_shapes.size()) {
+                    return Ort::Status{MakeString(what, ": unbound program parameter '",
                         name, "'").c_str(), ORT_EP_FAIL};
+                }
+                cache.output_indices.push_back(output_index);
+                cache.output_prebound[output_index] = 1;
+                const auto output_shape{output_shapes[output_index]};
+                const auto lengths{output_shape.lengths()};
+                EagerParamBind param;
+                param.is_input = false;
+                param.index = output_index;
+                param.argument_shape = param_shapes[name.c_str()];
+                param.ort_shape.assign(lengths.begin(), lengths.end());
+                param.name = std::move(name);
+                cache.params.push_back(std::move(param));
+            } else {
+                return Ort::Status{MakeString(what, ": unbound program parameter '",
+                    name, "'").c_str(), ORT_EP_FAIL};
             }
+        }
+    }
+    cache.ready = true;
+    return STATUS_OK;
+}
+
+// Mechanism (built-in EP's standard run): eager fallback with no hipGraph.  Bind
+// the cached parameter plan to this call's tensors, run the program, and
+// materialize any extra outputs.  Terminal: the last path in the chain always
+// runs and returns a Status.
+Ort::Status RunEager(ComputeState& compute_state,
+    const Ort::KernelContext& kernel_context, const ComputeIOInfo& io) {
+    auto& program{compute_state.program};
+    RETURN_IF_ERROR(FillEagerBind(compute_state.eager_bind, io.shape_key, program,
+        compute_state.input_name_indices, kernel_context, "NodeComputeInfo::Compute()"));
+
+    migraphx::program_parameters compute_params;
+    const auto hip_stream{io.hip_stream};
+    for (const auto& param : compute_state.eager_bind.params) {
+        if (param.is_input) {
+            void* input_data{GetGpuInputData(compute_state, kernel_context, param.name, param.index,
+                param.argument_shape, hip_stream)};
+            compute_params.add(param.name.c_str(), migraphx::argument{param.argument_shape, input_data});
+        } else {
+            auto output_tensor{kernel_context.GetOutput(param.index,
+                param.ort_shape.data(), param.ort_shape.size())};
+            compute_params.add(param.name.c_str(), migraphx::argument{
+                param.argument_shape, output_tensor.GetTensorMutableRawData()});
         }
     }
     {
         std::lock_guard lock{compute_state.mutex};
 
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-        CopyUnboundOutputsToOrt(kernel_context, hip_stream, prog_outputs, output_indices);
+        CopyUnboundOutputsToOrt(kernel_context, hip_stream, prog_outputs,
+            compute_state.eager_bind.output_indices);
     }
     return STATUS_OK;
 }
@@ -2613,54 +2723,27 @@ try {
 
 Ort::Status EpContextNodeComputeInfo::Compute(EpContextComputeState& compute_state, const Ort::KernelContext& kernel_context) noexcept
 try {
-    const auto& input_name_indices{compute_state.input_name_indices};
     auto& program{compute_state.program};
 
     // Pin this (possibly pool-owned) thread to the EP's GPU before the kernel
     // launch below (see HipDeviceGuard); set once instead of before run_async.
     const HipDeviceGuard dev_guard{compute_state.device_id};
 
-    auto param_shapes{program.get_parameter_shapes()};
-    auto output_shapes{program.get_output_shapes()};
+    // shape_key 0: this state owns one program, so the plan is built once.
+    RETURN_IF_ERROR(FillEagerBind(compute_state.eager_bind, /*shape_key*/0, program,
+        compute_state.input_name_indices, kernel_context, "EpContextNodeComputeInfo::Compute()"));
 
     migraphx::program_parameters compute_params;
-    std::vector<size_t> output_indices;
-
-    if (param_shapes.size() > 0) {
-        for (std::string name : param_shapes.names()) {
-            if (input_name_indices.count(name) > 0) {
-                const auto index{input_name_indices.at(name)};
-                auto input_tensor{kernel_context.GetInput(index)};
-                auto tensor_info{input_tensor.GetTensorTypeAndShapeInfo()};
-                auto tensor_type{tensor_info.GetElementType()};
-
-                migraphx_shape_datatype_t datatype;
-                GetMIGraphXType(tensor_type, datatype);
-
-                if (auto prog_shape{param_shapes[name.c_str()]}; datatype != prog_shape.type()) {
-                    throw std::runtime_error{"EpContextNodeComputeInfo::Compute(): tensor parameter type mismatch"};
-                }
-                compute_params.add(name.c_str(), migraphx::argument{param_shapes[name.c_str()],
-                    const_cast<void*>(input_tensor.GetTensorRawData())});
-            } else {
-                constexpr std::string_view name_prefix{"#output_"};
-                if (const auto pos{name.find(name_prefix)}; pos != std::string_view::npos) {
-                    const auto sub{name.substr(pos + name_prefix.length())};
-                    auto output_index{ToInteger<size_t>(Trim(sub, std::isdigit))};
-                    output_indices.emplace_back(output_index);
-
-                    auto output_shape{output_shapes[output_index]};
-                    const auto lengths{output_shape.lengths()};
-                    std::vector<int64_t> tensor_shape{lengths.begin(), lengths.end()};
-                    auto output_tensor{kernel_context.GetOutput(output_index, tensor_shape.data(), tensor_shape.size())};
-                    void* output_data{output_tensor.GetTensorMutableRawData()};
-                    auto argument_shape{param_shapes[name.c_str()]};
-                    compute_params.add(name.c_str(), migraphx::argument{argument_shape, output_data});
-                } else {
-                    return Ort::Status{MakeString("EpContextNodeComputeInfo::Compute(): unbound program parameter '",
-                        name, "'").c_str(), ORT_EP_FAIL};
-                }
-            }
+    for (const auto& param : compute_state.eager_bind.params) {
+        if (param.is_input) {
+            auto input_tensor{kernel_context.GetInput(param.index)};
+            compute_params.add(param.name.c_str(), migraphx::argument{param.argument_shape,
+                const_cast<void*>(input_tensor.GetTensorRawData())});
+        } else {
+            auto output_tensor{kernel_context.GetOutput(param.index,
+                param.ort_shape.data(), param.ort_shape.size())};
+            compute_params.add(param.name.c_str(), migraphx::argument{param.argument_shape,
+                output_tensor.GetTensorMutableRawData()});
         }
     }
     {
@@ -2669,9 +2752,11 @@ try {
         auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
 
-        if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
+        const auto& prebound{compute_state.eager_bind.output_prebound};
+        if (auto output_size{prog_outputs.size()};
+            compute_state.eager_bind.output_indices.size() < output_size) {
             for (size_t i{}; i < output_size; ++i) {
-                if (ranges::find(output_indices, i) != output_indices.end()) {
+                if (i < prebound.size() && prebound[i] != 0) {
                     continue;
                 }
                 auto gpu_resource{prog_outputs[i]};

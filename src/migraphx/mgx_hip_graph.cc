@@ -12,6 +12,7 @@
 #include <mutex>
 #include <numeric>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -45,6 +46,9 @@ constexpr std::size_t kArenaAlign = 256;
 // from outweighing the overlap on a large arena.
 constexpr std::size_t kGatherChunkTargetBytes = 512 * 1024;
 constexpr std::size_t kMaxGatherChunks = 8;
+// Below this, a dedicated hipMemcpyAsync costs more CPU than folding the copy into
+// the chunked gather.  At or above it, a pinned source is DMA'd from the caller's buffer.
+constexpr std::size_t kDirectDmaMinBytes = 4096;
 
 // Product of a length vector (1 for an empty/scalar shape).
 std::size_t ProductOf(const std::vector<std::size_t>& lengths) {
@@ -842,6 +846,48 @@ static ComputeState::CoalesceResidency ProbeCoalesceResidency(
     return ComputeState::CoalesceResidency::kAllHost;
 }
 
+// Replicate the last real row across the pad rows.  Each step copies a prefix of the
+// pad region onto the unfilled half, so source and destination do not overlap.  The
+// pad region ends up holding the same last-row contents as one memcpy per row, in
+// O(log pad rows) copies.
+static void ReplicateLastRowHost(char* slot, std::size_t real_rows, std::size_t cap_rows,
+    std::size_t row_bytes) {
+    if (real_rows == 0 || cap_rows <= real_rows || row_bytes == 0) {
+        return;
+    }
+    char* const pad{slot + real_rows * row_bytes};
+    std::memcpy(pad, slot + (real_rows - 1) * row_bytes, row_bytes);
+    const std::size_t slots{cap_rows - real_rows};
+    for (std::size_t filled{1}; filled < slots;) {
+        const std::size_t chunk{std::min(filled, slots - filled)};
+        std::memcpy(pad + filled * row_bytes, pad, chunk * row_bytes);
+        filled += chunk;
+    }
+}
+
+// True when `ptr` is pinned host memory.  A pageable pointer fails the attribute
+// query; that failure is cleared so a later HIP call does not observe it.  The
+// result is cached on the input index until the pointer changes.
+static bool HostPointerIsPinned(ComputeState& cs, std::size_t index, const void* ptr) {
+    if (ptr == nullptr) {
+        return false;
+    }
+    if (index >= cs.input_pin_probe.size()) {
+        cs.input_pin_probe.resize(index + 1);
+    }
+    auto& slot{cs.input_pin_probe[index]};
+    if (slot.ptr != ptr) {
+        hipPointerAttribute_t attr{};
+        const auto err{hipPointerGetAttributes(&attr, ptr)};
+        if (err != hipSuccess) {
+            (void)hipGetLastError();
+        }
+        slot.ptr = ptr;
+        slot.pinned = err == hipSuccess && attr.type == hipMemoryTypeHost;
+    }
+    return slot.pinned;
+}
+
 // Copy every coalesced input into this bucket's arena: gather a chunk of inputs into
 // the pinned host buffer, flush it with an H2D, and move on -- so the CPU gather of one
 // chunk overlaps the DMA of the previous one instead of the whole arena waiting for the
@@ -849,6 +895,8 @@ static ComputeState::CoalesceResidency ProbeCoalesceResidency(
 // last of them across the pad rows (which the program computes on); others copy in full.
 // Each chunk's H2D stops at its last live byte, so a chunk whose inputs are all unbatched
 // and short of their slots does not ship the dead tails.
+// A pinned input at least kDirectDmaMinBytes is DMA'd from the caller's buffer into its
+// arena slot and left out of the host gather, so the chunk flush cannot overwrite it.
 // When refresh_ptrs is set the ORT data pointers are (re)read and recorded here so the
 // shape scan and this gather share one traversal; otherwise the pointers already
 // recorded by the scan are reused.  Requires residency to be a resolved all-host state.
@@ -858,12 +906,25 @@ static void CoalesceInputsCore(ComputeState& cs, const StagingBindResult& bind,
     const bool batch_pad{dyn.active && dyn.target_batch > dyn.requested_batch};
     char* const host_base{static_cast<char*>(cs.in_staging_host)};
     char* const arena_base{static_cast<char*>(bind.arena_dev)};
+    struct HostSpan { std::size_t begin; std::size_t end; };
+    std::vector<HostSpan> host_spans;
 
     for (const auto& chunk : bind.gather_chunks) {
         // Track the chunk's last live byte while gathering, so the flush below covers
-        // exactly the rows that were written.
+        // exactly the rows that were written when every input took the host path.
         std::size_t live_end{chunk.byte_offset};
         const std::size_t chunk_end{chunk.first_input + chunk.input_count};
+        host_spans.clear();
+        bool any_direct{false};
+        bool span_open{false};
+        std::size_t span_lo{0};
+        std::size_t span_hi{0};
+        const auto close_span{[&]() {
+            if (span_open && span_hi > span_lo) {
+                host_spans.push_back(HostSpan{span_lo, span_hi});
+            }
+            span_open = false;
+        }};
         for (std::size_t i{chunk.first_input}; i < chunk_end; ++i) {
             const auto& ib{bind.input_copies[i]};
             const void* src{nullptr};
@@ -893,6 +954,23 @@ static void CoalesceInputsCore(ComputeState& cs, const StagingBindResult& bind,
             if (copy_bytes == 0) {
                 continue;
             }
+            const std::size_t cap_rows{ib.row_bytes > 0
+                ? std::min(ib.prog_bytes, ib.stage_capacity) / ib.row_bytes : 0};
+            const std::size_t real_rows{ib.row_bytes > 0 ? copy_bytes / ib.row_bytes : 0};
+            // Large pinned inputs skip the host gather.  Pad rows are filled on the
+            // device so the host buffer never holds this slot.
+            if (copy_bytes >= kDirectDmaMinBytes &&
+                HostPointerIsPinned(cs, ib.ort_index, src)) {
+                close_span();
+                any_direct = true;
+                HIP_CALL_THROW(hipMemcpyAsync(arena_base + ib.arena_offset, src, copy_bytes,
+                    hipMemcpyHostToDevice, stream));
+                if (batched && ib.row_bytes > 0 && real_rows > 0) {
+                    PadBatchTensor(arena_base + ib.arena_offset, real_rows, cap_rows,
+                        ib.row_bytes, stream);
+                }
+                continue;
+            }
             std::memcpy(host_base + ib.arena_offset, src, copy_bytes);
 
             // The program computes on the pad rows even though their outputs get sliced
@@ -902,24 +980,37 @@ static void CoalesceInputsCore(ComputeState& cs, const StagingBindResult& bind,
             // the pinned buffer this chunk is about to ship anyway, so it costs no extra
             // DMA.  real_rows comes from the post-clamp copy_bytes so a truncated copy
             // still replicates the last row that actually landed.
-            if (batched && ib.row_bytes > 0) {
-                char* const slot{host_base + ib.arena_offset};
-                const std::size_t real_rows{copy_bytes / ib.row_bytes};
-                const std::size_t cap_rows{
-                    std::min(ib.prog_bytes, ib.stage_capacity) / ib.row_bytes};
-                if (real_rows > 0) {
-                    const char* const last_row{slot + (real_rows - 1) * ib.row_bytes};
-                    for (std::size_t r{real_rows}; r < cap_rows; ++r) {
-                        std::memcpy(slot + r * ib.row_bytes, last_row, ib.row_bytes);
-                    }
-                    copy_bytes = std::max(copy_bytes, cap_rows * ib.row_bytes);
-                }
+            if (batched && ib.row_bytes > 0 && real_rows > 0) {
+                ReplicateLastRowHost(host_base + ib.arena_offset, real_rows, cap_rows, ib.row_bytes);
+                copy_bytes = std::max(copy_bytes, cap_rows * ib.row_bytes);
             }
-            live_end = std::max(live_end, ib.arena_offset + copy_bytes);
+            const std::size_t begin{ib.arena_offset};
+            const std::size_t end{begin + copy_bytes};
+            if (!span_open) {
+                span_lo = begin;
+                span_hi = end;
+                span_open = true;
+            } else if (begin <= span_hi) {
+                span_hi = std::max(span_hi, end);
+            } else {
+                close_span();
+                span_lo = begin;
+                span_hi = end;
+                span_open = true;
+            }
+            live_end = std::max(live_end, end);
         }
-        if (const std::size_t transfer_bytes{live_end - chunk.byte_offset}; transfer_bytes > 0) {
-            HIP_CALL_THROW(hipMemcpyAsync(arena_base + chunk.byte_offset,
-                host_base + chunk.byte_offset, transfer_bytes, hipMemcpyHostToDevice, stream));
+        close_span();
+        if (!any_direct) {
+            if (const std::size_t transfer_bytes{live_end - chunk.byte_offset}; transfer_bytes > 0) {
+                HIP_CALL_THROW(hipMemcpyAsync(arena_base + chunk.byte_offset,
+                    host_base + chunk.byte_offset, transfer_bytes, hipMemcpyHostToDevice, stream));
+            }
+        } else {
+            for (const auto& span : host_spans) {
+                HIP_CALL_THROW(hipMemcpyAsync(arena_base + span.begin, host_base + span.begin,
+                    span.end - span.begin, hipMemcpyHostToDevice, stream));
+            }
         }
     }
 }
@@ -1023,22 +1114,22 @@ void CopyInputsToStaging(ComputeState& cs,
     }
 }
 
-bool TryFusedCoalesceGather(ComputeState& cs,
+StagingBindResult* TryFusedCoalesceGather(ComputeState& cs,
     const Ort::KernelContext& ctx, const DynamicBatchContext& dyn,
     ShapeKey shape_key, hipStream_t stream) {
     if (!cs.coalesce_io || !cs.staging_inputs_coalesced || cs.in_staging_host == nullptr) {
-        return false;
+        return nullptr;
     }
     if (cs.coalesce_residency != ComputeState::CoalesceResidency::kAllHost) {
-        return false;
+        return nullptr;
     }
     const auto it{cs.staging_bind_cache.find(shape_key)};
     if (it == cs.staging_bind_cache.end() || it->second.arena_dev == nullptr) {
-        return false;
+        return nullptr;
     }
     CoalesceInputsCore(cs, it->second, ctx, dyn, stream, /*refresh_ptrs=*/true);
     cs.inputs_coalesced_this_call = true;
-    return true;
+    return &it->second;
 }
 
 // Split the bound inputs into contiguous runs so the gather can flush a run while the
@@ -1176,6 +1267,7 @@ StagingBindResult BindStagingParams(ComputeState& cs,
             // Cache the staging source pointer so the per-call output copy needs no
             // staging_outputs map lookup (mirrors the input_copies plan).
             result.bound_output_data.push_back(stage_it->second.data);
+            result.bound_output_capacity.push_back(stage_it->second.size_bytes);
             // Precompute the ORT (int64) bucket shape so the per-call output copy
             // does not rebuild it every inference (it only slices it when padding).
             const auto out_lens{out_shape.lengths()};
@@ -1206,11 +1298,18 @@ void CopyStagingOutputsToOrt(const StagingBindResult& bind,
     const DynamicBatchContext& dyn,
     const StaticSeqContext& seq)
 {
-    for (std::size_t i{}; i < bind.prog_output_indices.size() &&
-        i < bind.bound_output_shapes.size() &&
-        i < bind.bound_output_ort_shapes.size() &&
-        i < bind.bound_output_bytes.size() &&
-        i < bind.bound_output_data.size(); ++i)
+    // These vectors are appended together in BindStagingParams.  A mismatch is a
+    // bind bug; check once instead of on every output.
+    const std::size_t n{bind.prog_output_indices.size()};
+    if (bind.bound_output_shapes.size() != n ||
+        bind.bound_output_ort_shapes.size() != n ||
+        bind.bound_output_bytes.size() != n ||
+        bind.bound_output_data.size() != n ||
+        bind.bound_output_row_bytes.size() != n ||
+        bind.bound_output_capacity.size() != n) {
+        throw std::logic_error{"staging output bind vectors diverged"};
+    }
+    for (std::size_t i{0}; i < n; ++i)
     {
         const auto oi{bind.prog_output_indices[i]};
         // Staging source pointer resolved once at bind time (no map lookup here).
@@ -1251,8 +1350,7 @@ void CopyStagingOutputsToOrt(const StagingBindResult& bind,
         thread_local std::vector<std::int64_t> sliced_shape;
         if (batch_sliced) {
             // row_bytes precomputed at bind (item 3): bytes / target_batch.
-            const std::size_t row_bytes{i < bind.bound_output_row_bytes.size()
-                ? bind.bound_output_row_bytes[i] : bytes / dyn.target_batch};
+            const std::size_t row_bytes{bind.bound_output_row_bytes[i]};
             sliced_shape.assign(cached_ort_shape.begin(), cached_ort_shape.end());
             sliced_shape.front() = static_cast<std::int64_t>(dyn.requested_batch);
             bytes = row_bytes * dyn.requested_batch;
@@ -1315,6 +1413,7 @@ void FreeStaging(ComputeState& cs, hipStream_t stream) {
         cs.in_staging_host = nullptr;
     }
     cs.in_staging_host_bytes = 0;
+    cs.input_pin_probe.clear();
     cs.staging_inputs_coalesced = false;
     // Re-verify coalesce eligibility against the next allocation's inputs.
     cs.coalesce_residency = ComputeState::CoalesceResidency::kUnknown;
