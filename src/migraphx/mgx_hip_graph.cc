@@ -47,8 +47,10 @@ constexpr std::size_t kArenaAlign = 256;
 constexpr std::size_t kGatherChunkTargetBytes = 512 * 1024;
 constexpr std::size_t kMaxGatherChunks = 8;
 // Below this, a dedicated hipMemcpyAsync costs more CPU than folding the copy into
-// the chunked gather.  At or above it, a pinned source is DMA'd from the caller's buffer.
-constexpr std::size_t kDirectDmaMinBytes = 4096;
+// the chunked gather.  256 KiB keeps the common per-feature inputs on that gather
+// even at batch 32 (a [64] int32 input is 8 KiB there).  Only a pinned source at
+// or above this size is DMA'd from the caller's buffer.
+constexpr std::size_t kDirectDmaMinBytes = 256 * 1024;
 
 // Product of a length vector (1 for an empty/scalar shape).
 std::size_t ProductOf(const std::vector<std::size_t>& lengths) {
@@ -123,7 +125,7 @@ void MaterializeExtraOutputs(const Ort::KernelContext& ctx, hipStream_t stream,
         auto output_tensor{ctx.GetOutput(extra.output_index, report_shape->data(), report_shape->size())};
         void* dst{output_tensor.GetTensorMutableRawData()};
         if (bytes > 0) {
-            // Stream-ordered async D2D, matching CopyStagingOutputsToOrt on this same
+            // Stream-ordered async D2D, matching EnqueueStagingOutputCopies on this same
             // graph-replay path (correctness comes from the per-Run stream drain).
             HIP_CALL_THROW(hipMemcpyAsync(dst, extra.gpu_data, bytes,
                 hipMemcpyDeviceToDevice, stream));
@@ -1293,10 +1295,11 @@ StagingBindResult BindStagingParams(ComputeState& cs,
     return result;
 }
 
-void CopyStagingOutputsToOrt(const StagingBindResult& bind,
-    const Ort::KernelContext& ctx, hipStream_t stream,
+void ResolveStagingOutputDests(const StagingBindResult& bind,
+    const Ort::KernelContext& ctx,
     const DynamicBatchContext& dyn,
-    const StaticSeqContext& seq)
+    const StaticSeqContext& seq,
+    std::vector<StagingOutputCopy>& copies)
 {
     // These vectors are appended together in BindStagingParams.  A mismatch is a
     // bind bug; check once instead of on every output.
@@ -1309,6 +1312,17 @@ void CopyStagingOutputsToOrt(const StagingBindResult& bind,
         bind.bound_output_capacity.size() != n) {
         throw std::logic_error{"staging output bind vectors diverged"};
     }
+    copies.clear();
+    copies.reserve(n);
+
+    // Disarm even when GetOutput throws, so a leftover hint cannot satisfy a later alloc.
+    struct OutputHintGuard {
+        ~OutputHintGuard() { hip::DisarmOutputAlloc(); }
+    };
+    // Reused across outputs and calls.  GetOutput copies the shape out before the
+    // next iteration overwrites it.
+    thread_local std::vector<std::int64_t> sliced_shape;
+
     for (std::size_t i{0}; i < n; ++i)
     {
         const auto oi{bind.prog_output_indices[i]};
@@ -1320,7 +1334,9 @@ void CopyStagingOutputsToOrt(const StagingBindResult& bind,
         // batch buckets report the correct dimensions.
         const auto& out_shape{bind.bound_output_shapes[i]};
         const auto& cached_ort_shape{bind.bound_output_ort_shapes[i]};
-        // Precomputed at bind (item 6); bounded by the loop like its sibling vectors.
+        // Precomputed at bind; bounded by the loop like its sibling vectors.
+        // Stays at the program byte count on the seq path so element_size below is
+        // the un-shrunk size.  The batch-slice path overwrites it with the prefix.
         std::size_t bytes{bind.bound_output_bytes[i]};
 
         // Slice a batched output down to the requested batch.
@@ -1345,11 +1361,10 @@ void CopyStagingOutputsToOrt(const StagingBindResult& bind,
         // Report the cached bucket shape as-is unless a slice is needed (batch or
         // seq), in which case work on a per-thread reusable buffer.  The batch-1 steady
         // state needs no slice and never touches it; the padded-prefill slice reuses the
-        // buffer's capacity (item 5), so it allocates nothing after warmup.
+        // buffer's capacity, so it allocates nothing after warmup.
         const std::vector<std::int64_t>* report_shape{&cached_ort_shape};
-        thread_local std::vector<std::int64_t> sliced_shape;
         if (batch_sliced) {
-            // row_bytes precomputed at bind (item 3): bytes / target_batch.
+            // row_bytes precomputed at bind: bytes / target_batch.
             const std::size_t row_bytes{bind.bound_output_row_bytes[i]};
             sliced_shape.assign(cached_ort_shape.begin(), cached_ort_shape.end());
             sliced_shape.front() = static_cast<std::int64_t>(dyn.requested_batch);
@@ -1361,9 +1376,19 @@ void CopyStagingOutputsToOrt(const StagingBindResult& bind,
             report_shape = &sliced_shape;
         }
 
+        // Contiguous results reuse the staging allocation, which is already sized to
+        // max_dynamic_batch.  GetOutput reports the sliced shape, so the caller reads
+        // only the current batch.  capacity is that reservation; a request larger than
+        // it falls through to a normal allocation.
+        if (seq_axis < 0 && src != nullptr) {
+            hip::ArmOutputAlloc(src, bind.bound_output_capacity[i]);
+        }
+        OutputHintGuard hint_guard;
         auto output_tensor{ctx.GetOutput(oi, report_shape->data(), report_shape->size())};
-        void* dst{output_tensor.GetTensorMutableRawData()};
 
+        StagingOutputCopy copy;
+        copy.dst = output_tensor.GetTensorMutableRawData();
+        copy.src = src;
         if (seq_axis >= 0) {
             // Per outer slice, copy the first real_len rows (inner_count elems each).
             std::size_t outer{1};
@@ -1374,18 +1399,34 @@ void CopyStagingOutputsToOrt(const StagingBindResult& bind,
             const auto lengths{out_shape.lengths()};
             const std::size_t total_elems{ProductOf(lengths)};
             const std::size_t element_size{total_elems > 0 ? bytes / total_elems : 0};
-            const std::size_t src_slice_bytes{seq.target_len * inner * element_size};
-            const std::size_t dst_slice_bytes{seq.real_len * inner * element_size};
-            for (std::size_t o{0}; o < outer; ++o) {
-                if (dst_slice_bytes > 0) {
+            copy.seq_axis = seq_axis;
+            copy.outer = outer;
+            copy.src_slice_bytes = seq.target_len * inner * element_size;
+            copy.dst_slice_bytes = seq.real_len * inner * element_size;
+        } else {
+            copy.bytes = bytes;
+        }
+        copies.push_back(copy);
+    }
+}
+
+void EnqueueStagingOutputCopies(const std::vector<StagingOutputCopy>& copies, hipStream_t stream)
+{
+    for (const auto& copy : copies) {
+        if (copy.seq_axis >= 0) {
+            for (std::size_t o{0}; o < copy.outer; ++o) {
+                if (copy.dst_slice_bytes > 0) {
                     HIP_CALL_THROW(hipMemcpyAsync(
-                        static_cast<char*>(dst) + o * dst_slice_bytes,
-                        static_cast<const char*>(src) + o * src_slice_bytes,
-                        dst_slice_bytes, hipMemcpyDefault, stream));
+                        static_cast<char*>(copy.dst) + o * copy.dst_slice_bytes,
+                        static_cast<const char*>(copy.src) + o * copy.src_slice_bytes,
+                        copy.dst_slice_bytes, hipMemcpyDefault, stream));
                 }
             }
-        } else if (bytes > 0) {
-            HIP_CALL_THROW(hipMemcpyAsync(dst, src, bytes, hipMemcpyDefault, stream));
+        } else if (copy.dst != copy.src && copy.bytes > 0) {
+            // dst == src: GetOutput returned the armed max-batch buffer.  The graph
+            // writes that buffer, and the tensor shape is already the slice.
+            HIP_CALL_THROW(hipMemcpyAsync(copy.dst, copy.src, copy.bytes,
+                hipMemcpyDefault, stream));
         }
     }
 }

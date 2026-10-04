@@ -125,15 +125,36 @@ StagingBindResult BindStagingParams(ComputeState& cs,
     const migraphx::program_parameter_shapes& param_shapes,
     ShapeKey shape_key, hipStream_t stream);
 
-// Copy staging output buffers back into the ORT output tensors, slicing batched
-// outputs down to the requested batch when dynamic batching is active, and slicing
-// named outputs down to real_len on their token axis when static seq-padding is active.
-// The per-output staging source pointer is read from bind.bound_output_data (resolved
-// once by BindStagingParams), so no per-call staging_outputs map lookup is needed.
-void CopyStagingOutputsToOrt(const StagingBindResult& bind,
-    const Ort::KernelContext& ctx, hipStream_t stream,
+// One ORT output published from a staging buffer.  ResolveStagingOutputDests fills
+// this before the graph launch; EnqueueStagingOutputCopies consumes it after.
+struct StagingOutputCopy {
+    void* dst{nullptr};
+    void* src{nullptr};
+    // Contiguous copy size (full output, or a batch-axis prefix).  Zero when seq_axis is set.
+    std::size_t bytes{0};
+    // >= 0: compact real_len rows out of a padded token axis.  That copy is strided,
+    // so it is never aliased onto src.
+    int seq_axis{-1};
+    std::size_t outer{0};
+    std::size_t src_slice_bytes{0};
+    std::size_t dst_slice_bytes{0};
+};
+
+// Publish each staging output as an ORT tensor before hipGraphLaunch.  A contiguous
+// result (the full bucket, or the requested-batch prefix) arms the max-batch staging
+// buffer so GetOutput reuses it and does not hipMalloc.  The shape passed to GetOutput
+// is the slice the caller reads.  A strided sequence slice is not armed.  `copies` is
+// cleared and reused; the caller keeps it across the launch.
+void ResolveStagingOutputDests(const StagingBindResult& bind,
+    const Ort::KernelContext& ctx,
     const DynamicBatchContext& dyn,
-    const StaticSeqContext& seq);
+    const StaticSeqContext& seq,
+    std::vector<StagingOutputCopy>& copies);
+
+// Queue device copies for destinations that did not reuse the staging buffer.
+// A reused buffer (dst == src) already holds the graph's write, so it is skipped.
+void EnqueueStagingOutputCopies(const std::vector<StagingOutputCopy>& copies,
+    hipStream_t stream);
 
 // Free all staging buffers and reset the allocation flag (used when the program
 // is recompiled for a new shape so buffers are re-sized on next use).  Buffers are

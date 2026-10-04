@@ -2428,9 +2428,14 @@ std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
                 hyb, shape_key, scratch, dyn,
                 compute_state.hybrid_output_enable, compute_state.hybrid_recapture_count);
         } else {
-        RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
+            // Publish outputs before the launch so a fallback allocation does not
+            // hipMalloc (and device-sync) on top of the graph just queued.  When the
+            // armed max-batch buffer is accepted, the copy below is a no-op.
+            thread_local std::vector<StagingOutputCopy> output_copies;
+            ResolveStagingOutputDests(bind, kernel_context, dyn, seq, output_copies);
+            RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
                 bind, shape_key, dyn);
-            CopyStagingOutputsToOrt(bind, kernel_context, hip_stream, dyn, seq);
+            EnqueueStagingOutputCopies(output_copies, hip_stream);
         }
         return STATUS_OK;
     }
