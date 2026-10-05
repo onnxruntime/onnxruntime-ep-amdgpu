@@ -65,17 +65,35 @@ def find_ep_folder():
     return folder
 
 
-def read_cache_result():
-    """Return 'hit' or 'miss' from the newest telemetry line that reports it."""
+def telemetry_lines():
+    """The EP's telemetry log as a list of lines, or [] if it does not exist yet."""
     try:
-        lines = TELEMETRY.read_text(encoding="utf-8", errors="replace").splitlines()
+        return TELEMETRY.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        return None
-    for line in reversed(lines):
-        for field in line.split():
-            if field.startswith("mxr_cache="):
-                return field.split("=", 1)[1]
-    return None
+        return []
+
+
+def read_cache_result(baseline, timeout_s=5.0):
+    """Return 'hit' or 'miss' from a telemetry line written by THIS run.
+
+    Only lines appended after `baseline` (the line count taken before the
+    session was created) are considered. The log is append-only and shared by
+    every run, so without that cut-off a run that writes nothing would report
+    the *previous* run's result as if it were its own.
+
+    The EP emits its record -- one line per session, enqueued while the session
+    is being created -- from a background thread, so the line may not have
+    reached disk yet. Poll for it rather than reading once.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        for line in reversed(telemetry_lines()[baseline:]):
+            for field in line.split():
+                if field.startswith("mxr_cache="):
+                    return field.split("=", 1)[1]
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.1)
 
 
 def make_inputs(session, batch):
@@ -102,7 +120,7 @@ def main():
     p.add_argument("--out-dir", default=str(HERE / "output"),
                    help="folder for everything this script produces (default: output)")
     p.add_argument("--cache-dir", default=None,
-                   help="folder for .mxr files (default: <out-dir>/mxr_cache)")
+                   help="folder for .mxr files (default: <out-dir>/mxr_cache/<mode>)")
     p.add_argument("--embed-mode", type=int, default=0, choices=[0, 1],
                    help="EPContext only: 0 keeps the .mxr as a separate file, "
                         "1 embeds it inside the context model (default: 0)")
@@ -126,7 +144,10 @@ def main():
 
     # Everything produced by a run lands under one folder so it is easy to look at.
     out_dir = Path(args.out_dir).resolve()
-    cache_dir = Path(args.cache_dir).resolve() if args.cache_dir else out_dir / "mxr_cache"
+    # Each mode gets its own cache folder. Sharing one would let --mode env
+    # report a HIT on its very first run, off an .mxr that --mode cache wrote.
+    cache_dir = (Path(args.cache_dir).resolve() if args.cache_dir
+                 else out_dir / "mxr_cache" / args.mode)
     context_dir = out_dir / "context_models"
     results = out_dir / "results"
     # Embedded and non-embedded context models are different files, so keep them apart.
@@ -228,6 +249,10 @@ def main():
     # Create the session, then run it once
     # ------------------------------------------------------------------
     print("\ncreating session ...")
+    # Anything already in the telemetry log belongs to an earlier run. Note the
+    # cut-off before the EP gets a chance to append, so read_cache_result() can
+    # tell this run's verdict from a stale one.
+    telemetry_baseline = len(telemetry_lines())
     t0 = time.perf_counter()
     try:
         session = ort.InferenceSession(str(model_to_open), sess_options=session_options)
@@ -260,13 +285,14 @@ def main():
     # Some models compile during session creation and others during the first
     # inference, so the total is the only number that is fair to compare.
 
-    state = read_cache_result()
+    state = read_cache_result(telemetry_baseline)
     if state == "hit":
         print("  cache              HIT  -- loaded a compiled program from disk")
     elif state == "miss":
         print("  cache              MISS -- compiled the model from scratch")
     else:
-        print("  cache              unknown (no telemetry written)")
+        print("  cache              unknown -- this run wrote no telemetry line")
+        print("                     (telemetry disabled, or the EP reported nothing)")
 
     # Show what is on disk. With EPContext and no cache_dir the .mxr is written
     # next to the context model, so look in both places.
@@ -275,7 +301,12 @@ def main():
     artefacts = sorted(cache_dir.glob("*.mxr")) + sorted(context_dir.glob("*"))
     if artefacts:
         for f in artefacts:
-            print(f"    {f.parent.name}/{f.name}  ({f.stat().st_size / 1e6:.1f} MB)")
+            # --cache-dir can point outside out_dir, in which case show it in full.
+            try:
+                label = f.relative_to(out_dir)
+            except ValueError:
+                label = f
+            print(f"    {label}  ({f.stat().st_size / 1e6:.1f} MB)")
     else:
         print("    (no .mxr or context model -- nothing was cached)")
 

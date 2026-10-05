@@ -82,7 +82,7 @@ environment variable wins.
 |---|---|
 | `--model <path>` | Use a different model. Defaults to `resnet50-v2-7.onnx` in this folder. |
 | `--out-dir <path>` | Where everything produced by a run is written. Defaults to `output` in this folder. |
-| `--cache-dir <path>` | Where `.mxr` files are written. Defaults to `<out-dir>/mxr_cache`. |
+| `--cache-dir <path>` | Where `.mxr` files are written. Defaults to `<out-dir>/mxr_cache/<mode>`. |
 | `--embed-mode 0\|1` | EPContext only. `0` keeps the compiled program in a separate `.mxr`, `1` embeds it in the context model. |
 | `--ep-dir <path>` | Use a specific EP build instead of the installed package. |
 | `--reset` | Clear the cache, context models and saved results, so the next run is a cold one. |
@@ -95,10 +95,14 @@ environment variable wins.
 
 ```
 output/
-  mxr_cache/         compiled programs (.mxr) for --mode cache and --mode env
+  mxr_cache/<mode>/  compiled programs (.mxr), one folder per mode
   context_models/    *_ctx.onnx and its .mxr for --mode epcontext
   results/           saved outputs, used to compare one run against the next
 ```
+
+Each mode caches into its own folder, so switching modes always starts cold.
+Were they to share one, `--mode env` would report a cache hit on its first ever
+run, off a file `--mode cache` had written.
 
 Each run lists what is in there, so you can see the files appear on the first
 run and be reused on the second.
@@ -128,6 +132,13 @@ than inferred from timing.
 
 - `MISS` — the model was compiled from scratch. Expected on the first run.
 - `HIT` — a compiled program was loaded from disk.
+- `unknown` — this run wrote no telemetry line, so there is nothing to report.
+  Usually means telemetry is off (`ORT_AMDGPU_EP_TELEMETRY_DISABLE`).
+
+The provider appends one line per session to a log shared by every run, from a
+background thread. The script notes how long that log is before creating the
+session and only reads past that point, so a run that reports nothing says
+`unknown` rather than quietly repeating the previous run's verdict.
 
 **For a model with dynamic input shapes this indicator always reports `MISS`,
 even when the cache was used.** Those models are compiled on the first inference
