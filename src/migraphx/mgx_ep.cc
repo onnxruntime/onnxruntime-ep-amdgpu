@@ -1899,22 +1899,22 @@ void GatherInputShapesAndBatch(ComputeState& compute_state,
                 shapes_known_unchanged = true;
                 return;
             }
-            // Different compiled bucket, same non-batch dims.  Rewrite axis 0 from the
-            // previous requested batch and let the caller hash the new effective shape.
+            // Different compiled bucket, same non-batch dims.  Rewrite axis 0 on a copy
+            // of the previous shapes.  last_input_shapes must stay as the previous
+            // request: ResolveComputeIO treats equal vectors as unchanged and would
+            // otherwise keep the previous bucket's program (and report its batch).
             // Pointers are cleared so the gather cannot reuse the previous request.
-            // The old shape key is not used: the program and the arena belong to `bucket`.
             if (tail_same && !batch_same && bucket > 0 &&
                 !compute_state.last_input_ranks.empty()) {
                 const auto from{static_cast<std::int64_t>(compute_state.last_dyn_requested_batch)};
                 const auto to{static_cast<std::int64_t>(requested_batch)};
-                RewriteBatchAxis(compute_state.last_input_shapes,
-                    compute_state.last_input_ranks, from, to);
+                current_input_shapes = compute_state.last_input_shapes;
+                RewriteBatchAxis(current_input_shapes, compute_state.last_input_ranks, from, to);
                 for (auto& axis0 : compute_state.cur_input_axis0) {
                     if (axis0 == from) {
                         axis0 = to;
                     }
                 }
-                current_input_shapes = compute_state.last_input_shapes;
                 compute_state.cur_input_ranks = compute_state.last_input_ranks;
                 std::fill(compute_state.cur_input_data.begin(),
                     compute_state.cur_input_data.end(), nullptr);
