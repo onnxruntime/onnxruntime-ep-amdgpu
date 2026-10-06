@@ -84,7 +84,6 @@ constexpr std::array<arch_graph_mlss_exception, 10> kMlssGraphExceptions{{
     {"gfx1201", "3a0532e672db5cf"},
     {"gfx1200", "c4c5e56652ffbf28"},
     {"gfx1201", "c4c5e56652ffbf28"},
-    // gfx1151: these graphs are >10% slower with MLSS
     {"gfx1151", "67df030d9ebfa160"},
     {"gfx1151", "aa9a41a6ddb96490"},
     {"gfx1151", "978a900bc57a94bc"},
