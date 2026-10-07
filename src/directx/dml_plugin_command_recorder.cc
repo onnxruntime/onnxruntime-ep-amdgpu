@@ -6,6 +6,8 @@
 #include "dml_bucketized_buffer_allocator.h"
 #include "dml_perf_timer.h"
 #include <cstdio>
+#include <vector>
+#include <d3d12sdklayers.h>  // ID3D12InfoQueue / D3D12_MESSAGE (debug-layer drain on device removal)
 
 namespace dml_ep {
 
@@ -408,6 +410,114 @@ void PluginDmlCommandRecorder::CloseAndExecute(_In_opt_ ID3D12GraphicsCommandLis
             static_cast<uint32_t>(dmlRemovedReason),
             static_cast<uint32_t>(d3dRemovedReason));
         PERF_TIMER_LOG(_reasonBuf);
+
+        // Drain the DML debug-layer InfoQueue FIRST. dmlReason=0x887A0005
+        // (DEVICE_REMOVED) with d3dReason=0 means the DML device reports removal while
+        // the D3D device's own removed-reason is S_OK — a DML-side removal that DRED
+        // (a D3D12 TDR mechanism) may NOT populate. But the DML debug layer, if armed
+        // (DML_D3D12_DEBUG=1), queues a validation/error message into the SAME
+        // ID3D12InfoQueue that DrainDmlDebugMessages reads — captured here before the
+        // throw so the removal cause (bad binding / dispatch / shape) is logged.
+        {
+            Microsoft::WRL::ComPtr<ID3D12InfoQueue> info_queue;
+            if (SUCCEEDED(m_d3dDevice->QueryInterface(IID_PPV_ARGS(info_queue.GetAddressOf())))) {
+                UINT64 msg_count = info_queue->GetNumStoredMessages();
+                char _iqBuf[96];
+                std::snprintf(_iqBuf, sizeof(_iqBuf),
+                    "[Recorder] D3D12InfoQueue on removal: %llu messages\n",
+                    static_cast<unsigned long long>(msg_count));
+                PERF_TIMER_LOG(_iqBuf);
+                for (UINT64 mi = 0; mi < msg_count; ++mi) {
+                    SIZE_T msg_len = 0;
+                    if (FAILED(info_queue->GetMessage(mi, nullptr, &msg_len))) continue;
+                    std::vector<uint8_t> buf(msg_len);
+                    auto* msg = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+                    if (FAILED(info_queue->GetMessage(mi, msg, &msg_len))) continue;
+                    if (msg->pDescription) {
+                        PERF_TIMER_LOG("[D3D12InfoQueue] ");
+                        PERF_TIMER_LOG(msg->pDescription);
+                        PERF_TIMER_LOG("\n");
+                    }
+                }
+            } else {
+                PERF_TIMER_LOG("[Recorder] D3D12InfoQueue unavailable (debug layer NOT armed — "
+                               "DML_D3D12_DEBUG=1 not in effect this run)\n");
+            }
+        }
+
+        // DRED post-mortem: if the debug layer + DRED were enabled (DML_D3D12_DEBUG=1,
+        // see dml_factory.cc), the device exposes ID3D12DeviceRemovedExtendedData with
+        // (1) an auto-breadcrumb chain — the GPU ops that executed, so the LAST
+        // completed op before the hang localizes the culprit node — and (2) page-fault
+        // info — the VA a shader accessed OOB → which buffer binding is undersized.
+        Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedData> dred;
+        HRESULT dredQi = m_d3dDevice->QueryInterface(IID_PPV_ARGS(dred.GetAddressOf()));
+        if (FAILED(dredQi)) {
+            PERF_TIMER_LOG("[DRED] unavailable: QI ID3D12DeviceRemovedExtendedData failed "
+                           "(DRED not enabled — set DML_D3D12_DEBUG=1 before launch to arm it)\n");
+        }
+        if (SUCCEEDED(dredQi)) {
+            D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs{};
+            HRESULT bcHr = dred->GetAutoBreadcrumbsOutput(&breadcrumbs);
+            if (FAILED(bcHr) || !breadcrumbs.pHeadAutoBreadcrumbNode)
+                PERF_TIMER_LOG("[DRED] no breadcrumbs (hr fail or empty — AutoBreadcrumbs not armed)\n");
+            if (SUCCEEDED(bcHr)) {
+                const auto* node = breadcrumbs.pHeadAutoBreadcrumbNode;
+                int chain = 0;
+                while (node && chain < 8) {
+                    UINT last = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+                    char _bcBuf[256];
+                    std::snprintf(_bcBuf, sizeof(_bcBuf),
+                        "[DRED] breadcrumb node %d: cmdList='%ls' queue='%ls' opsCompleted=%u / total=%u\n",
+                        chain,
+                        node->pCommandListDebugNameW ? node->pCommandListDebugNameW : L"?",
+                        node->pCommandQueueDebugNameW ? node->pCommandQueueDebugNameW : L"?",
+                        last, node->BreadcrumbCount);
+                    PERF_TIMER_LOG(_bcBuf);
+                    // Dump the last few op types around the failure point.
+                    UINT start = last > 4 ? last - 4 : 0;
+                    UINT end = (last + 1 < node->BreadcrumbCount) ? last + 1 : node->BreadcrumbCount;
+                    for (UINT i = start; i < end; ++i) {
+                        char _opBuf[96];
+                        std::snprintf(_opBuf, sizeof(_opBuf),
+                            "[DRED]   op[%u] = %d%s\n", i,
+                            static_cast<int>(node->pCommandHistory[i]),
+                            (i == last ? "  <-- last completed before hang" : ""));
+                        PERF_TIMER_LOG(_opBuf);
+                    }
+                    node = node->pNext;
+                    ++chain;
+                }
+            }
+            D3D12_DRED_PAGE_FAULT_OUTPUT page_fault{};
+            HRESULT pfHr = dred->GetPageFaultAllocationOutput(&page_fault);
+            if (FAILED(pfHr))
+                PERF_TIMER_LOG("[DRED] no page-fault data (hr fail — PageFault not armed)\n");
+            if (SUCCEEDED(pfHr)) {
+                char _pfBuf[128];
+                std::snprintf(_pfBuf, sizeof(_pfBuf),
+                    "[DRED] PAGE FAULT VA=0x%016llX (0 = no page fault; hang is likely a bad "
+                    "dispatch/shader-loop, not OOB)\n",
+                    static_cast<unsigned long long>(page_fault.PageFaultVA));
+                PERF_TIMER_LOG(_pfBuf);
+                for (const auto* alloc = page_fault.pHeadExistingAllocationNode; alloc; alloc = alloc->pNext) {
+                    char _alBuf[192];
+                    std::snprintf(_alBuf, sizeof(_alBuf),
+                        "[DRED]   existing-alloc '%ls' type=%d\n",
+                        alloc->ObjectNameW ? alloc->ObjectNameW : L"?",
+                        static_cast<int>(alloc->AllocationType));
+                    PERF_TIMER_LOG(_alBuf);
+                }
+                for (const auto* alloc = page_fault.pHeadRecentFreedAllocationNode; alloc; alloc = alloc->pNext) {
+                    char _alBuf[192];
+                    std::snprintf(_alBuf, sizeof(_alBuf),
+                        "[DRED]   recently-freed-alloc '%ls' type=%d\n",
+                        alloc->ObjectNameW ? alloc->ObjectNameW : L"?",
+                        static_cast<int>(alloc->AllocationType));
+                    PERF_TIMER_LOG(_alBuf);
+                }
+            }
+        }
     }
 #endif
     ORT_THROW_IF_FAILED(dmlRemovedReason);

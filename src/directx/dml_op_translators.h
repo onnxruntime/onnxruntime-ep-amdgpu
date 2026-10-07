@@ -15,6 +15,8 @@
 #include <onnxruntime_c_api.h>
 #include <wrl/client.h>
 
+#include "node_view.h"
+
 namespace dml_ep {
 
 struct DmlTensorInfo {
@@ -88,10 +90,17 @@ struct TranslatedOp {
     // are non-contiguous (Query=0, Key=1, Value=2, Bias=6, Mask=7, ...).
     std::vector<size_t> dml_input_slot_indices;
 
-    // How many inputs wire to the primary node.  0 = input_tensors.size().
-    // When >0, only the first N inputs create edges to the primary; the
-    // remaining inputs are available for sub_node graph_inputs wiring.
-    size_t primary_input_count = 0;
+    // How many inputs wire to the primary node.
+    //   nullopt (default) = wire ALL inputs (input_tensors.size()) — the common
+    //     single-node case where the primary consumes every ONNX input.
+    //   N (>=0)           = wire exactly the first N inputs to the primary; the
+    //     remaining inputs are available for sub_node graph_inputs wiring.
+    // N == 0 is a GENUINE zero (e.g. GQA's FILL_VALUE_CONSTANT primary has no
+    // inputs — all ONNX inputs flow to sub_nodes via their graph_inputs). Using
+    // optional here disambiguates "explicit 0 primary inputs" from "unset → all";
+    // a plain 0-sentinel would route ONNX inputs into an input-less primary and
+    // DML CompileGraph rejects the edge (ToNodeInputIndex exceeds op input count).
+    std::optional<size_t> primary_input_count;
 
     // Per-output sub_node routing.  Maps ONNX output index →
     // {sub_node_index, output_slot}.  When empty (default), all outputs
@@ -113,7 +122,7 @@ struct TranslatedOp {
 
 using OpTranslatorFn = std::function<std::optional<TranslatedOp>(
     const OrtApi&                                            ort_api,
-    const OrtNode*                                           node,
+    const NodeView&                                          node,
     const std::unordered_map<std::string, DmlTensorInfo>&    value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&  initializers)>;
 
