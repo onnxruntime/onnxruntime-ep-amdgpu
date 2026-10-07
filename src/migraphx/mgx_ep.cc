@@ -79,9 +79,17 @@ struct arch_graph_mlss_exception {
     std::string_view arch_prefix;
     std::string_view graph_id;
 };
-constexpr std::array<arch_graph_mlss_exception, 10> kMlssGraphExceptions{{
+constexpr std::array<arch_graph_mlss_exception, 18> kMlssGraphExceptions{{
+    {"gfx1150", "3a0532e672db5cf"},
+    {"gfx1151", "3a0532e672db5cf"},
+    {"gfx1152", "3a0532e672db5cf"},
+    {"gfx1153", "3a0532e672db5cf"},
     {"gfx1200", "3a0532e672db5cf"},
     {"gfx1201", "3a0532e672db5cf"},
+    {"gfx1150", "c4c5e56652ffbf28"},
+    {"gfx1151", "c4c5e56652ffbf28"},
+    {"gfx1152", "c4c5e56652ffbf28"},
+    {"gfx1153", "c4c5e56652ffbf28"},
     {"gfx1200", "c4c5e56652ffbf28"},
     {"gfx1201", "c4c5e56652ffbf28"},
     {"gfx1151", "67df030d9ebfa160"},
