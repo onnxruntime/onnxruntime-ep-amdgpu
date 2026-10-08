@@ -1,6 +1,7 @@
 // Copyright (c) Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
+#include <cstdlib>
 #include <string>
 #include <DirectML.h>
 
@@ -301,19 +302,29 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
     // it can OOM at session init on some board/ReBAR configs). Value "1"/"true" enables it.
     // Read via GetSessionOptionsConfigEntries (bulk), mirroring the umbrella/migraphx backends.
     bool enable_host_accessible = false;
+    // Graph capture (ep.directml.enable_graph_capture): the flag that selects the runtime
+    // (deferred, dynamic-shape) fusion path over static fusion — mirrors ORT's
+    // if(IsGraphCaptureEnabled()) transformer selection (inference_session.cc:2388). The AMDGPU
+    // umbrella (onnxruntime-genai ep/amdgpu/session_options.cpp) emits it under the ep.directml.*
+    // namespace, the SAME namespace this backend already receives ep.directml.enable_host_accessible
+    // through — NOT the ep.dml.* namespace ORT's in-tree DML EP uses (that EP is not in this stack's
+    // path; the plugin is). Default off -> static fusion. The [GraphCapture] log below reports the
+    // value received.
+    bool enable_graph_capture = false;
     {
         OrtKeyValuePairs* config_entries = nullptr;
         if (factory->ort_api.GetSessionOptionsConfigEntries(session_options, &config_entries) == nullptr
                 && config_entries != nullptr) {
             const Ort::KeyValuePairs kv{config_entries};
             for (const auto& [key, value] : kv.GetKeyValuePairs()) {
-                if (key == "ep.directml.enable_host_accessible") {
+                if (key == "ep.directml.enable_host_accessible")
                     enable_host_accessible = (value == "1" || value == "true");
-                    break;
-                }
+                else if (key == "ep.directml.enable_graph_capture")
+                    enable_graph_capture = (value == "1" || value == "true");
             }
         }
     }
+    DML_PERF_LOG("[GraphCapture] ep.directml.enable_graph_capture=", enable_graph_capture ? 1 : 0, "\n");
 
     *ep = nullptr;
     if (num_devices > 1) {
@@ -348,7 +359,8 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
         dml_device.Get(),
         context,
         &factory->host_accessible_allocator_,  // shared across EP instances (fixes 2-session MISS)
-        enable_host_accessible);               // opt-in from ep.directml.enable_host_accessible
+        enable_host_accessible,                // opt-in from ep.directml.enable_host_accessible
+        enable_graph_capture);                 // opt-in from ep.directml.enable_graph_capture (runtime fusion)
 
     // keep a non-owning raw pointer to the EP for use in the data transfer implementation
     factory->m_ep_raw = factory->m_ep.get();
@@ -574,6 +586,36 @@ std::vector<Microsoft::WRL::ComPtr<IDXCoreAdapter>> ProviderFactory::GetAdapters
 
 void ProviderFactory::CreateD3DDeviceFromAdapter(IDXCoreAdapter* adapter, Microsoft::WRL::ComPtr<ID3D12Device>& device)
 {
+    // Opt-in D3D12 debug layer (env DML_D3D12_DEBUG=1). Must be enabled BEFORE
+    // device creation; it is the prerequisite for the DML debug layer, which
+    // routes precise operator-validation messages to the ID3D12InfoQueue that
+    // DrainDmlDebugMessages reads. Gated to the DML_PERF_PROFILE build tier so it
+    // lives alongside the code that drains those messages (DrainDmlDebugMessages /
+    // DrainDredAfterRemoval); a normal build neither arms nor drains.
+#ifdef DML_PERF_PROFILE
+    {
+        char buf[8] = {};
+        size_t len = 0;
+        if (getenv_s(&len, buf, sizeof(buf), "DML_D3D12_DEBUG") == 0 && len > 0 && buf[0] == '1') {
+            Microsoft::WRL::ComPtr<ID3D12Debug> d3d12_debug;
+            if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(d3d12_debug.ReleaseAndGetAddressOf()))))
+                d3d12_debug->EnableDebugLayer();
+
+            // DRED (Device Removed Extended Data): on a GPU hang / device-removed
+            // (DXGI_ERROR_DEVICE_HUNG 0x887A0005), DRED captures auto-breadcrumbs (the
+            // last GPU operations that executed before the hang → names the culprit
+            // node) and page-fault info (the VA a shader accessed OOB → which buffer
+            // binding is wrong). Must be enabled BEFORE device creation. Read back via
+            // ID3D12DeviceRemovedExtendedData after removal (see DrainDredAfterRemoval).
+            Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred_settings;
+            if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(dred_settings.ReleaseAndGetAddressOf())))) {
+                dred_settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dred_settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            }
+        }
+    }
+#endif
+
     auto feature_level = D3D_FEATURE_LEVEL_11_0;
     if (IsNPU(adapter)) {
         feature_level = D3D_FEATURE_LEVEL_1_0_GENERIC;

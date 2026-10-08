@@ -62,10 +62,26 @@ if(USE_HIPDNN OR USE_MIGRAPHX OR USE_ROCM)
         hip/utils.cc
         hip/utils.h)
 
+    # On Windows this is always the AMD (rocclr/clang) HIP platform. ROCm's
+    # hip-config.cmake otherwise probes it by running `hipconfig --platform`,
+    # which fails when the ROCm install path contains spaces (e.g.
+    # "C:\Program Files\AMD\ROCm") and silently falls back to the nvidia
+    # config -- leaving hip::amdhip64 without its release properties.
+    if(WIN32 AND NOT DEFINED HIP_PLATFORM)
+        set(HIP_PLATFORM "amd" CACHE STRING "HIP platform")
+    endif()
+
     find_package(hip REQUIRED)
     target_link_libraries(hip-shared PUBLIC plugin-ep-utils hip::host)
     if(WIN32)
         get_property(_amdhip64_location TARGET hip::amdhip64 PROPERTY IMPORTED_LOCATION_RELEASE)
+        if(NOT _amdhip64_location)
+            message(FATAL_ERROR
+                "hip::amdhip64 has no IMPORTED_LOCATION_RELEASE. The HIP package at "
+                "'${hip_DIR}' did not load its AMD release targets (HIP_PLATFORM="
+                "'${HIP_PLATFORM}'). Check that a valid AMD ROCm install is being "
+                "found and that HIP_PLATFORM resolves to 'amd'.")
+        endif()
         cmake_path(GET _amdhip64_location PARENT_PATH _hip_path)
         foreach(_file
             amdhip64_7.dll
