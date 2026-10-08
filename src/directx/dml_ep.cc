@@ -238,7 +238,16 @@ static ExecutionProviderPlugin::ShapePrepChain CaptureShapePrepChain(
     }
     
 ExecutionProviderPlugin::~ExecutionProviderPlugin() {
-    m_context->Close();
+    // Close() drains the command queue (CommandQueue::Close -> WaitForSignal). After a device removal
+    // the fence never signals; WaitForSignal returns on device-removed, but CloseAndExecute /
+    // SetEventOnCompletion can still throw. A throw escaping a destructor -> std::terminate (and
+    // during stack unwinding it is unconditionally fatal), so swallow any exception here. The device
+    // is already dead; there is nothing to recover, we only need teardown to complete cleanly.
+    try {
+        m_context->Close();
+    } catch (...) {
+        // Device removed / teardown failure — nothing actionable; let destruction finish.
+    }
 }
 
 ExecutionProviderPlugin::ExecutionProviderPlugin(
@@ -784,7 +793,7 @@ static bool HasTranslator(const OpTranslatorRegistry& reg,
 
 OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_ptr, const OrtGraph* graph,
                                                                  OrtEpGraphSupportInfo* graph_support_info) noexcept
-{
+try {
     auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
     size_t numNodes = 0;
     ep->ort_api.Graph_GetNumNodes(graph, &numNodes);
@@ -1830,14 +1839,29 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
     ep->m_isGetCapabilityCompleted = true;
     return nullptr;
 }
+catch (const std::exception& e) {
+    // noexcept ABI boundary (session-init): node enumeration / fusion grouping allocate and can
+    // throw bad_alloc or a helper exception. Convert to OrtStatus so session creation fails
+    // gracefully instead of terminating the host.
+    auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+    return ep->ort_api.CreateStatus(ORT_FAIL, MakeString("GetCapability failed: ", e.what()).c_str());
+}
+catch (...) {
+    auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+    return ep->ort_api.CreateStatus(ORT_FAIL, "GetCapability failed: unknown exception");
+}
 
 OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_ptr, _In_ const OrtGraph** graphs,
                                     _In_ const OrtNode** fused_nodes, _In_ size_t count,
                                     _Out_writes_all_(count) OrtNodeComputeInfo** node_compute_infos,
                                     _Out_writes_(count) OrtNode** ep_context_nodes) noexcept
-{
+try {
     auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
 
+    // Deferred-snapshot compile drains GPU work during direct-to-VRAM weight upload
+    // (BuildDeferredSnapshot -> WaitForOutstandingWork -> Flush/WaitForSignal), which throws on a
+    // device removal (TDR) mid-upload. The function-try-block guarding this callback converts that
+    // to a marked ORT_FAIL instead of std::terminate.
     for (size_t i = 0; i < count; ++i) {
         node_compute_infos[i] = nullptr;
         ep_context_nodes[i]   = nullptr;
@@ -1953,6 +1977,17 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
 
     return nullptr;
 }
+catch (const std::exception& e) {
+    // noexcept ABI boundary (session-init): fusion compile allocates and can throw bad_alloc or a
+    // callee exception (incl. a TDR mid weight-upload). Convert to OrtStatus so session creation
+    // fails gracefully. e.what() carries DIRECTX_DEVICE_REMOVED_MARKER on a TDR (ThrowDeviceRemoved).
+    auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+    return ep->ort_api.CreateStatus(ORT_FAIL, MakeString("Compile failed: ", e.what()).c_str());
+}
+catch (...) {
+    auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+    return ep->ort_api.CreateStatus(ORT_FAIL, "Compile failed: unknown exception");
+}
 
 void ORT_API_CALL ExecutionProviderPlugin::ReleaseNodeComputeInfosImpl(
     OrtEp* this_ptr,
@@ -2001,7 +2036,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::SetDynamicOptionsImpl(
 OrtStatus* ORT_API_CALL ExecutionProviderPlugin::OnRunStartImpl(
     _In_ OrtEp* this_ptr,
     const OrtRunOptions* run_options) noexcept
-{
+try {
     auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
 
     // On runtimes older than v27 ORT does not call OrtEp::OnSessionInitializationEnd,
@@ -2014,22 +2049,45 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::OnRunStartImpl(
     ep->m_executionProvider.get()->OnRunStart(*run_options);
     return nullptr;
 }
+catch (const std::exception& e) {
+    // noexcept ABI boundary: OnSessionInitializationEnd/OnRunStart reach Flush()+WaitForSignal,
+    // which throw on device removal/suspend. Convert to OrtStatus so ORT fails the Run gracefully.
+    // e.what() carries DIRECTX_DEVICE_REMOVED_MARKER on a TDR (ThrowDeviceRemoved) for host detection.
+    auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+    return ep->ort_api.CreateStatus(ORT_FAIL, MakeString("OnRunStart failed: ", e.what()).c_str());
+}
+catch (...) {
+    auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+    return ep->ort_api.CreateStatus(ORT_FAIL, "OnRunStart failed: unknown exception");
+}
 
 OrtStatus* ORT_API_CALL ExecutionProviderPlugin::OnRunEndImpl(
     _In_ OrtEp* this_ptr,
     const OrtRunOptions* run_options,
     bool sync_stream) noexcept
-{
+try {
     auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
 
+    // OnRunEnd() submits all deferred GPU work (Flush -> CloseAndExecute), which throws on a device
+    // removal (TDR) — the common point at which a removal during the run surfaces.
     ep->m_executionProvider.get()->OnRunEnd();
     return nullptr;
+}
+catch (const std::exception& e) {
+    // noexcept ABI boundary: OnRunEnd reaches Flush(), which throws on device removal/suspend.
+    // e.what() carries DIRECTX_DEVICE_REMOVED_MARKER on a TDR (ThrowDeviceRemoved) for host detection.
+    auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+    return ep->ort_api.CreateStatus(ORT_FAIL, MakeString("OnRunEnd failed: ", e.what()).c_str());
+}
+catch (...) {
+    auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+    return ep->ort_api.CreateStatus(ORT_FAIL, "OnRunEnd failed: unknown exception");
 }
 
 OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CreateAllocatorImpl(_In_ OrtEp* this_ptr,
                                                                      const OrtMemoryInfo* memory_info,
                                                                      OrtAllocator** allocator) noexcept
-{
+try {
     auto& impl = *static_cast<ExecutionProviderPlugin*>(this_ptr);
     *allocator = nullptr;
 
@@ -2067,6 +2125,18 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CreateAllocatorImpl(_In_ OrtEp*
     *allocator = allocators[0];
     return nullptr;
 }
+catch (const std::exception& e) {
+    // noexcept ABI boundary (session-init): CreatePreferredAllocators builds D3D12-backed allocators
+    // and can throw bad_alloc or a resource-creation failure. Convert to OrtStatus.
+    auto& impl = *static_cast<ExecutionProviderPlugin*>(this_ptr);
+    if (allocator != nullptr) *allocator = nullptr;
+    return impl.ort_api.CreateStatus(ORT_FAIL, MakeString("CreateAllocator failed: ", e.what()).c_str());
+}
+catch (...) {
+    auto& impl = *static_cast<ExecutionProviderPlugin*>(this_ptr);
+    if (allocator != nullptr) *allocator = nullptr;
+    return impl.ort_api.CreateStatus(ORT_FAIL, "CreateAllocator failed: unknown exception");
+}
 
 OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CreateSyncStreamForDeviceImpl(
     _In_ OrtEp* this_ptr,
@@ -2102,11 +2172,24 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::IsConcurrentRunSupportedImpl(_I
     return nullptr;
 }
 
-OrtStatus* ORT_API_CALL ExecutionProviderPlugin::OnSessionInitializationEndImpl(_In_ OrtEp* this_ptr) noexcept {
+OrtStatus* ORT_API_CALL ExecutionProviderPlugin::OnSessionInitializationEndImpl(_In_ OrtEp* this_ptr) noexcept
+try {
     auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
 
+    // Post-init weight flush/trim submits GPU work and throws on a TDR.
     ep->m_executionProvider->OnSessionInitializationEnd();
     return nullptr;
+}
+catch (const std::exception& e) {
+    // noexcept ABI boundary: OnSessionInitializationEnd reaches Flush()+WaitForSignal, which throw
+    // on device removal/suspend. Convert to OrtStatus so session init fails gracefully. e.what()
+    // carries DIRECTX_DEVICE_REMOVED_MARKER on a TDR (ThrowDeviceRemoved) for host detection.
+    auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+    return ep->ort_api.CreateStatus(ORT_FAIL, MakeString("OnSessionInitializationEnd failed: ", e.what()).c_str());
+}
+catch (...) {
+    auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+    return ep->ort_api.CreateStatus(ORT_FAIL, "OnSessionInitializationEnd failed: unknown exception");
 }
 
 bool ExecutionProviderPlugin::IsCpuAllocator(const OrtMemoryInfo* memory_info)

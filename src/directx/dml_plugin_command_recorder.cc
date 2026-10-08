@@ -282,9 +282,10 @@ void PluginDmlCommandRecorder::ExecuteCommandList(
         // The fence value at which the current command allocator may be re-used will now be higher
         m_commandAllocatorRing.UpdateCurrentAllocatorCompletionEvent(m_queue->GetNextCompletionEvent());
 
-        // Fail early if something horrifying happens
-        ORT_THROW_IF_FAILED(m_dmlDevice->GetDeviceRemovedReason());
-        ORT_THROW_IF_FAILED(m_d3dDevice->GetDeviceRemovedReason());
+        // Fail early if something horrifying happens. Mark device-removal (TDR) so the host can detect
+        // and restart; a removed device is unrecoverable in-process.
+        ThrowIfDeviceRemovedOrFailed(m_dmlDevice->GetDeviceRemovedReason());
+        ThrowIfDeviceRemovedOrFailed(m_d3dDevice->GetDeviceRemovedReason());
 
         return;
     }
@@ -520,8 +521,10 @@ void PluginDmlCommandRecorder::CloseAndExecute(_In_opt_ ID3D12GraphicsCommandLis
         }
     }
 #endif
-    ORT_THROW_IF_FAILED(dmlRemovedReason);
-    ORT_THROW_IF_FAILED(d3dRemovedReason);
+    // Emit the stable DIRECTX_DEVICE_REMOVED_MARKER (via ThrowIfDeviceRemovedOrFailed) so the host can
+    // detect a TDR from the error message and restart — a removed device cannot be recovered in-process.
+    ThrowIfDeviceRemovedOrFailed(dmlRemovedReason);
+    ThrowIfDeviceRemovedOrFailed(d3dRemovedReason);
 
 #ifdef DML_PERF_PROFILE
     { uint64_t _t = PerfNowUs(); PERF_TIMER_LOG("[PERF] CloseAndExecute TOTAL: ", _t, " us (+", _t - _cae_t0, " total)\n"); }
