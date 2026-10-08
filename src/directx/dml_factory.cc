@@ -7,6 +7,7 @@
 
 #include "dml_ep.h"
 #include "dml_factory.h"
+#include "DmlExecutionProvider/ErrorHandling.h"  // ThrowIfDeviceRemovedOrFailed + DIRECTX_DEVICE_REMOVED_MARKER
 
 namespace dml_ep {
 
@@ -345,7 +346,21 @@ try {
     // valid for buffers bound in an EP that uses the SAME device -> the device MUST be shared across a
     // model's EPs, not freshly created per EP. Command queue / DML device / ExecutionContext stay
     // per-EP (they are cheap and the context lifetime is per-session).
-    if (!factory->d3d12_device) {
+    //
+    // NOTE: a removed device (GPU hang / TDR) is permanently dead and is NOT rebuilt here. In-process
+    // recovery is not viable — the device stays poisoned and host-level caches (e.g. genai) still hold
+    // stale device-bound handles, so the only correct recovery is a host process restart. The EP's job
+    // on TDR is to surface a clean error (the noexcept-boundary guards) and let the host restart; it
+    // must not silently rebuild the device and limp on.
+    //
+    // If the cached device was already removed by a PRIOR session's TDR, every later session reuses it
+    // and would otherwise fail with an incidental create HRESULT (e.g. CreateCommandQueue). Detect the
+    // dead device up front and throw the marked device-removed error so every post-TDR session reports
+    // DIRECTX_DEVICE_REMOVED_MARKER consistently (same classification as the original TDR), rather than
+    // a confusing generic failure. The function-try-block guarding this callback converts it to ORT_FAIL.
+    if (factory->d3d12_device) {
+        ThrowIfDeviceRemovedOrFailed(factory->d3d12_device->GetDeviceRemovedReason());
+    } else {
         factory->d3d12_device = factory->CreateD3d12Device();
     }
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device = factory->d3d12_device;

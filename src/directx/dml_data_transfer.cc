@@ -140,6 +140,8 @@ catch (const wil::ResultException& e) {
         MakeString("DMLDataTransfer copy failed (hr=", e.GetErrorCode(), "): ", e.what()).c_str());
 }
 catch (const std::exception& e) {
+    // e.what() carries DIRECTX_DEVICE_REMOVED_MARKER when the failure was a TDR (see
+    // ThrowDeviceRemoved); MakeString appends it verbatim, so the host still detects the marker.
     auto& impl = *static_cast<DMLDataTransfer*>(this_ptr);
     return impl.ort_api.CreateStatus(ORT_FAIL,
         MakeString("DMLDataTransfer copy failed: ", e.what()).c_str());

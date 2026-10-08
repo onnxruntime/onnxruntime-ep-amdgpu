@@ -213,6 +213,10 @@ static OrtStatus* ORT_API_CALL FullGraph_Compute(
             DML_PERF_LOG("[RuntimeFusion] sig=", sig, " MISS — compiling variant\n");
             CompiledVariant variant;
             bool ok = false;
+            // Capture the throw message so a device-removed TDR during the first-Compute weight upload
+            // (CompileFromSnapshot -> Flush/WaitForSignal) still carries DIRECTX_DEVICE_REMOVED_MARKER
+            // out to the host; otherwise the fixed fallback string below would drop it.
+            std::string compileError;
             ORT_TRY {
                 ok = CompileFromSnapshot(api, *state->snapshot, runtime_input_dims,
                                          state->provider, state, variant);
@@ -220,11 +224,16 @@ static OrtStatus* ORT_API_CALL FullGraph_Compute(
             ORT_CATCH(const std::exception& e) {
                 ORT_HANDLE_EXCEPTION([&]() {
                     DML_PERF_LOG("[RuntimeFusion] CompileFromSnapshot threw: ", e.what(), "\n");
+                    compileError = e.what();
                 });
                 ok = false;
             }
-            if (!ok)
+            if (!ok) {
+                if (!compileError.empty())
+                    return api.CreateStatus(ORT_FAIL,
+                        ("RuntimeFusion: deferred compile failed: " + compileError).c_str());
                 return api.CreateStatus(ORT_FAIL, "RuntimeFusion: deferred compile failed");
+            }
             auto [it, _] = state->signature_cache.emplace(sig, std::move(variant));
             state->ActivateVariant(it->second);
         }
@@ -350,6 +359,8 @@ static OrtStatus* ORT_API_CALL FullGraph_Compute(
     // into one deferred submission, so the GPU can execute it while the CPU records
     // the next partition. Flush() is non-blocking; per-dispatch UAV barriers and
     // command-queue fence ordering preserve correctness across the split lists.
+    // Flush() throws on a device removal (TDR); the function-try-block guarding this
+    // callback converts it to a marked ORT_FAIL.
     state->provider->Flush();
 
 #ifdef DML_PERF_PROFILE
