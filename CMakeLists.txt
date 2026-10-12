@@ -55,9 +55,8 @@ option(USE_MIGRAPHX "Build the MIGraphX Execution Provider" ON)
 option(USE_HIP "Build the HIP (morphizen) backend shim" ON)
 
 if(USE_AMDGPU)
-    # The AMDGPU wrapper always needs the MIGraphX backend, so force it on.
-    # DirectML and HIP stay optional and follow their configured values above.
-    set(CACHE{USE_MIGRAPHX} TYPE BOOL FORCE VALUE ON)
+    set(CACHE{USE_MIGRAPHX} TYPE BOOL FORCE VALUE OFF)
+    set(CACHE{USE_HIP} TYPE BOOL FORCE VALUE ON)
 endif()
 
 add_subdirectory(src)
