@@ -21,6 +21,7 @@ constexpr auto kForceRecompile = "force_recompile"sv;
 constexpr auto kComputeMode = "compute_mode"sv;
 constexpr auto kCacheDir = "cache_dir"sv;
 constexpr auto kExhaustiveTune = "exhaustive_tune"sv;
+constexpr auto kHiprtcDisableProcesses = "hiprtc_disable_processes"sv;
 constexpr auto kDumpSubgraphs = "dump_subgraphs"sv;
 constexpr auto kHipGraphEnable = "hip_graph_enable"sv;
 constexpr auto kCoresidentPrograms = "coresident_programs"sv;
