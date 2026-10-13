@@ -134,6 +134,7 @@ Items are added as a python dictionary when invoking the MIGraphX execution prov
 | migraphx_int8_calibration_table_name | <absolute path to calibration table> | 6.0 | Path to a set of input calibration data for int8 static model quantization. |
 | migraphx_int8_use_native_calibration_table | 1 or 0 | 6.0 | Use a calibration table from Nvidia native int8 format or json dumped format. |
 | migraphx_exhaustive_tune | 1 or 0 (default 0) | 6.2 | Enable exhaustive tuning of parameters as part of compilation via the MIGraphX API. Adds additional compile time for a potential perf boost.|
+| hiprtc_disable_processes | 1 or 0 (default 0) | 7.14 | Compile hiprtc kernels inside the application process instead of spawning `migraphx-hiprtc-driver` (which exchanges data through temporary files). Use where child processes or file writes are not allowed. Kernels are then compiled sequentially, so compilation is slower; the compiled program and already-cached `.mxr` files are unaffected. Passed to MIGraphX as the `hiprtc_disable_processes` compile backend option. |
 | migraphx_mem_limit | INT | 6.4 | Set the memory limit used for memory arena. Default uses ORTs default_memory_arena_cfg value. |
 | migraphx_arena_extend_strategy | kNextPowerOfTwo (default) or kSameAsRequested | 6.4 | Strategy used to extend the memory arena. |
 | migraphx_external_alloc | Address | 6.4 | Address of external memory allocator function used for this EP. Useful for reading in larger models weights. |
