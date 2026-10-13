@@ -172,6 +172,10 @@ void SortHeterogenousDXCoreAdapterList(std::vector<AdapterInfo>& adapter_infos, 
 
 D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* d3d12_device)
 {
+    // Always use the COMPUTE queue. Define DML_USE_DIRECT_QUEUE at build time to
+    // instead mimic ORT's DmlExecutionProvider queue selection (dml_provider_factory.cc
+    // CalculateCommandListType).
+#ifdef DML_USE_DIRECT_QUEUE
     D3D12_FEATURE_DATA_FEATURE_LEVELS feature_levels = {};
 
     D3D_FEATURE_LEVEL feature_levels_list[] = {
@@ -186,9 +190,8 @@ D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* d3d12_device)
     feature_levels.pFeatureLevelsRequested = feature_levels_list;
     THROW_IF_FAILED(d3d12_device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &feature_levels, sizeof(feature_levels)));
 
-    // Match ORT's DmlExecutionProvider queue selection (dml_provider_factory.cc
-    // CalculateCommandListType): use the COMPUTE queue only for core/NPU-class devices;
-    // every real DX12 GPU uses the DIRECT (3D/graphics) queue.
+    // Use the COMPUTE queue only for core/NPU-class devices; every real DX12 GPU
+    // uses the DIRECT (3D/graphics) queue.
     auto use_compute_command_list = (feature_levels.MaxSupportedFeatureLevel <= D3D_FEATURE_LEVEL_1_0_CORE);
 
     if (use_compute_command_list) {
@@ -196,6 +199,10 @@ D3D12_COMMAND_LIST_TYPE CalculateCommandListType(ID3D12Device* d3d12_device)
     }
 
     return D3D12_COMMAND_LIST_TYPE_DIRECT;
+#else
+    (void)d3d12_device;
+    return D3D12_COMMAND_LIST_TYPE_COMPUTE;
+#endif
 }
 
 }  // namespace
