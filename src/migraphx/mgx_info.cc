@@ -131,6 +131,7 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kInt8UseNativeCalibTable, int8_use_native_calibration_table)
             .AddAssignmentToReference(provider_option::kInt8CalibTable, int8_calibration_table_name)
             .AddAssignmentToReference(provider_option::kExhaustiveTune, exhaustive_tune)
+            .AddAssignmentToReference(provider_option::kHiprtcDisableProcesses, hiprtc_disable_processes)
             .AddAssignmentToReference(provider_option::kDisableCaching, disable_caching)
             .AddAssignmentToReference(provider_option::kDumpSubgraphs, dump_subgraphs)
             .AddAssignmentToReference(provider_option::kForceRecompile, force_recompile)

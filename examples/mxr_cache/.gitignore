@@ -1,0 +1,5 @@
+# The model is downloaded by the user (see README), not checked in.
+*.onnx
+
+# Everything a run produces: .mxr files, context models, saved outputs.
+output/

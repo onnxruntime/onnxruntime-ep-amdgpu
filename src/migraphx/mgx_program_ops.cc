@@ -89,7 +89,7 @@ static std::string build_read_only_problem_cache_option(const std::vector<std::s
 
 void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune,
     const std::string& mlss_use_specific_ops, ComputeMode compute_mode,
-    const std::vector<std::string>& problem_cache_paths) {
+    const std::vector<std::string>& problem_cache_paths, bool hiprtc_disable_processes) {
     migraphx::compile_options options;
     options.set_fast_math(false);
 
@@ -118,6 +118,17 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
         const auto json{build_read_only_problem_cache_option(problem_cache_paths)};
         options.set_advance_backend_options("%s", json.c_str());
     }
+    // Compile hiprtc kernels in-process (sequentially) instead of spawning
+    // migraphx-hiprtc-driver. Only sent when requested; the compiled program is unaffected.
+    if (hiprtc_disable_processes) {
+        options.set_advance_backend_option("hiprtc_disable_processes", true);
+    }
+#ifdef _WIN32
+    // Default MLIR op selection. MIGraphX gives this backend option the lowest precedence,
+    // so MIGRAPHX_MLIR_USE_SPECIFIC_OPS, when set, still overrides it.
+    options.set_advance_backend_option("mlir_use_specific_ops",
+        std::vector<std::string>{"dot", "convolution", "fused", "attention"});
+#endif
     if (!mlss_use_specific_ops.empty()) {
         // MIGraphX expects a list of op names; split the comma-separated value.
         std::vector<std::string> ops;
