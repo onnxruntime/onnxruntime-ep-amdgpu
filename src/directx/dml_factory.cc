@@ -289,132 +289,131 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
                                                       size_t num_devices,
                                                       const OrtSessionOptions* session_options,
                                                       const OrtLogger* logger,
-                                                      OrtEp** ep) noexcept
-try {
-    auto* factory = static_cast<ProviderFactory*>(this_ptr);
+                                                      OrtEp** ep) noexcept {
+    try {
+        auto* factory = static_cast<ProviderFactory*>(this_ptr);
 
-    factory->ort_api.DisableMemPattern(const_cast<OrtSessionOptions*>(session_options));
-    factory->ort_api.SetSessionExecutionMode(const_cast<OrtSessionOptions*>(session_options), ExecutionMode::ORT_SEQUENTIAL);
+        factory->ort_api.DisableMemPattern(const_cast<OrtSessionOptions*>(session_options));
+        factory->ort_api.SetSessionExecutionMode(const_cast<OrtSessionOptions*>(session_options), ExecutionMode::ORT_SEQUENTIAL);
 
-    // Host-accessible (CUSTOM/L0) decode inputs are OPT-IN, requested by the caller (e.g. OGA) via the
-    // "ep.directml.enable_host_accessible" session config entry. The umbrella forwards ep.directml.*
-    // entries verbatim, so it arrives here in session_options. Default off: unless explicitly enabled,
-    // the DML backend does not build the CUSTOM/L0 allocator (see dml_execution_provider.cc for why —
-    // it can OOM at session init on some board/ReBAR configs). Value "1"/"true" enables it.
-    // Read via GetSessionOptionsConfigEntries (bulk), mirroring the umbrella/migraphx backends.
-    bool enable_host_accessible = false;
-    // Graph capture (ep.directml.enable_graph_capture): the flag that selects the runtime
-    // (deferred, dynamic-shape) fusion path over static fusion — mirrors ORT's
-    // if(IsGraphCaptureEnabled()) transformer selection (inference_session.cc:2388). The AMDGPU
-    // umbrella (onnxruntime-genai ep/amdgpu/session_options.cpp) emits it under the ep.directml.*
-    // namespace, the SAME namespace this backend already receives ep.directml.enable_host_accessible
-    // through — NOT the ep.dml.* namespace ORT's in-tree DML EP uses (that EP is not in this stack's
-    // path; the plugin is). Default off -> static fusion. The [GraphCapture] log below reports the
-    // value received.
-    bool enable_graph_capture = false;
-    {
-        OrtKeyValuePairs* config_entries = nullptr;
-        if (factory->ort_api.GetSessionOptionsConfigEntries(session_options, &config_entries) == nullptr
-                && config_entries != nullptr) {
-            const Ort::KeyValuePairs kv{config_entries};
-            for (const auto& [key, value] : kv.GetKeyValuePairs()) {
-                if (key == "ep.directml.enable_host_accessible")
-                    enable_host_accessible = (value == "1" || value == "true");
-                else if (key == "ep.directml.enable_graph_capture")
-                    enable_graph_capture = (value == "1" || value == "true");
+        // Host-accessible (CUSTOM/L0) decode inputs are OPT-IN, requested by the caller (e.g. OGA) via the
+        // "ep.directml.enable_host_accessible" session config entry. The umbrella forwards ep.directml.*
+        // entries verbatim, so it arrives here in session_options. Default off: unless explicitly enabled,
+        // the DML backend does not build the CUSTOM/L0 allocator (see dml_execution_provider.cc for why —
+        // it can OOM at session init on some board/ReBAR configs). Value "1"/"true" enables it.
+        // Read via GetSessionOptionsConfigEntries (bulk), mirroring the umbrella/migraphx backends.
+        bool enable_host_accessible = false;
+        // Graph capture (ep.directml.enable_graph_capture): the flag that selects the runtime
+        // (deferred, dynamic-shape) fusion path over static fusion — mirrors ORT's
+        // if(IsGraphCaptureEnabled()) transformer selection (inference_session.cc:2388). The AMDGPU
+        // umbrella (onnxruntime-genai ep/amdgpu/session_options.cpp) emits it under the ep.directml.*
+        // namespace, the SAME namespace this backend already receives ep.directml.enable_host_accessible
+        // through — NOT the ep.dml.* namespace ORT's in-tree DML EP uses (that EP is not in this stack's
+        // path; the plugin is). Default off -> static fusion. The [GraphCapture] log below reports the
+        // value received.
+        bool enable_graph_capture = false;
+        {
+            OrtKeyValuePairs* config_entries = nullptr;
+            if (factory->ort_api.GetSessionOptionsConfigEntries(session_options, &config_entries) == nullptr
+                    && config_entries != nullptr) {
+                const Ort::KeyValuePairs kv{config_entries};
+                for (const auto& [key, value] : kv.GetKeyValuePairs()) {
+                    if (key == "ep.directml.enable_host_accessible")
+                        enable_host_accessible = (value == "1" || value == "true");
+                    else if (key == "ep.directml.enable_graph_capture")
+                        enable_graph_capture = (value == "1" || value == "true");
+                }
             }
         }
+        DML_PERF_LOG("[GraphCapture] ep.directml.enable_graph_capture=", enable_graph_capture ? 1 : 0, "\n");
+
+        // Host-accessible (CUSTOM/L0) decode inputs are force-disabled regardless of the session flag;
+        // decode inputs go through the CPU path instead (genai routes to the CPU interface when the EP
+        // advertises no host-accessible allocator). The CUSTOM/L0 allocator is OrtEnv-shared and OGA caches
+        // a raw pointer to it for the model's lifetime — device-bound state the backend cannot free at
+        // model boundaries, which complicates device-removal recovery. The plugin owns this policy.
+        enable_host_accessible = false;
+
+        *ep = nullptr;
+        if (num_devices > 1) {
+            return factory->ort_api.CreateStatus(ORT_INVALID_ARGUMENT,
+                "DirectML EP supports selection for a single or none devices");
+        }
+
+        // Create DML device and execution context for the selected adapter. Share ONE ID3D12Device across
+        // a model's EP instances (factory->d3d12_device), created once and reused. D3D12 resources are
+        // device-local, so the factory-scoped host-accessible allocator (built on this device) is only
+        // valid for buffers bound in an EP that uses the SAME device -> the device MUST be shared across a
+        // model's EPs, not freshly created per EP. Command queue / DML device / ExecutionContext stay
+        // per-EP (they are cheap and the context lifetime is per-session).
+        //
+        // NOTE: a removed device (GPU hang / TDR) is permanently dead and is NOT rebuilt here. In-process
+        // recovery is not viable — the device stays poisoned and host-level caches (e.g. genai) still hold
+        // stale device-bound handles, so the only correct recovery is a host process restart. The EP's job
+        // on TDR is to surface a clean error (the noexcept-boundary guards) and let the host restart; it
+        // must not silently rebuild the device and limp on.
+        //
+        // If the cached device was already removed by a PRIOR session's TDR, every later session reuses it
+        // and would otherwise fail with an incidental create HRESULT (e.g. CreateCommandQueue). Detect the
+        // dead device up front and throw the marked device-removed error so every post-TDR session reports
+        // DIRECTX_DEVICE_REMOVED_MARKER consistently (same classification as the original TDR), rather than
+        // a confusing generic failure. The function-try-block guarding this callback converts it to ORT_FAIL.
+        if (factory->d3d12_device) {
+            ThrowIfDeviceRemovedOrFailed(factory->d3d12_device->GetDeviceRemovedReason());
+        } else {
+            factory->d3d12_device = factory->CreateD3d12Device();
+        }
+        Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device = factory->d3d12_device;
+        Microsoft::WRL::ComPtr<ID3D12CommandQueue> cmd_queue = factory->CreateCommandQueue(d3d12_device);
+        Microsoft::WRL::ComPtr<IDMLDevice> dml_device = factory->CreateDMLDevice(d3d12_device);
+
+        auto context = wil::MakeOrThrow<ExecutionContext>(
+            d3d12_device.Get(),
+            dml_device.Get(),
+            cmd_queue.Get(),
+            false,
+            false);
+
+        factory->m_ep = std::make_unique<ExecutionProviderPlugin>(
+            static_cast<const ApiPtrs&>(*factory), // use the ApiPtrs base already initialized
+            factory->ep_name_,
+            d3d12_device.Get(),
+            dml_device.Get(),
+            context,
+            &factory->host_accessible_allocator_,  // shared across EP instances (fixes 2-session MISS)
+            enable_host_accessible,                // opt-in from ep.directml.enable_host_accessible
+            enable_graph_capture);                 // opt-in from ep.directml.enable_graph_capture (runtime fusion)
+
+        // keep a non-owning raw pointer to the EP for use in the data transfer implementation
+        factory->m_ep_raw = factory->m_ep.get();
+
+        // Attach the new EP to the factory-owned data transfer so copies can be serviced.
+        if (factory->dml_data_transfer_implementation) {
+            factory->dml_data_transfer_implementation->AttachExecutionProvider(
+                factory->m_ep_raw->GetInternalExecutionProvider());
+            factory->dml_data_transfer_implementation->AttachFactoryEpRef(&factory->m_ep_raw);
+            // Register this EP so the shared data transfer can route each copy to the EP that owns the
+            // tensor (its own ExecutionContext/queue/fence). Multiple sessions share this one transfer.
+            factory->dml_data_transfer_implementation->RegisterProvider(
+                factory->m_ep_raw->GetInternalExecutionProvider());
+        }
+
+        *ep = factory->m_ep.release();
+        return nullptr;
+    } catch (const wil::ResultException& e) {
+        // CreateEpImpl is a noexcept ORT ABI callback: a C++ exception escaping here would hit the
+        // noexcept boundary and std::terminate the process. Convert to an OrtStatus so ORT/OGA can
+        // surface the failure and the caller can continue to the next model.
+        auto* factory = static_cast<ProviderFactory*>(this_ptr);
+        if (ep != nullptr) *ep = nullptr;
+        return factory->ort_api.CreateStatus(ORT_EP_FAIL,
+            MakeString("DirectML EP creation failed (hr=", e.GetErrorCode(), "): ", e.what()).c_str());
+    } catch (const std::exception& e) {
+        auto* factory = static_cast<ProviderFactory*>(this_ptr);
+        if (ep != nullptr) *ep = nullptr;
+        return factory->ort_api.CreateStatus(ORT_EP_FAIL,
+            MakeString("DirectML EP creation failed: ", e.what()).c_str());
     }
-    DML_PERF_LOG("[GraphCapture] ep.directml.enable_graph_capture=", enable_graph_capture ? 1 : 0, "\n");
-
-    // Host-accessible (CUSTOM/L0) decode inputs are force-disabled regardless of the session flag;
-    // decode inputs go through the CPU path instead (genai routes to the CPU interface when the EP
-    // advertises no host-accessible allocator). The CUSTOM/L0 allocator is OrtEnv-shared and OGA caches
-    // a raw pointer to it for the model's lifetime — device-bound state the backend cannot free at
-    // model boundaries, which complicates device-removal recovery. The plugin owns this policy.
-    enable_host_accessible = false;
-
-    *ep = nullptr;
-    if (num_devices > 1) {
-        return factory->ort_api.CreateStatus(ORT_INVALID_ARGUMENT,
-            "DirectML EP supports selection for a single or none devices");
-    }
-
-    // Create DML device and execution context for the selected adapter. Share ONE ID3D12Device across
-    // a model's EP instances (factory->d3d12_device), created once and reused. D3D12 resources are
-    // device-local, so the factory-scoped host-accessible allocator (built on this device) is only
-    // valid for buffers bound in an EP that uses the SAME device -> the device MUST be shared across a
-    // model's EPs, not freshly created per EP. Command queue / DML device / ExecutionContext stay
-    // per-EP (they are cheap and the context lifetime is per-session).
-    //
-    // NOTE: a removed device (GPU hang / TDR) is permanently dead and is NOT rebuilt here. In-process
-    // recovery is not viable — the device stays poisoned and host-level caches (e.g. genai) still hold
-    // stale device-bound handles, so the only correct recovery is a host process restart. The EP's job
-    // on TDR is to surface a clean error (the noexcept-boundary guards) and let the host restart; it
-    // must not silently rebuild the device and limp on.
-    //
-    // If the cached device was already removed by a PRIOR session's TDR, every later session reuses it
-    // and would otherwise fail with an incidental create HRESULT (e.g. CreateCommandQueue). Detect the
-    // dead device up front and throw the marked device-removed error so every post-TDR session reports
-    // DIRECTX_DEVICE_REMOVED_MARKER consistently (same classification as the original TDR), rather than
-    // a confusing generic failure. The function-try-block guarding this callback converts it to ORT_FAIL.
-    if (factory->d3d12_device) {
-        ThrowIfDeviceRemovedOrFailed(factory->d3d12_device->GetDeviceRemovedReason());
-    } else {
-        factory->d3d12_device = factory->CreateD3d12Device();
-    }
-    Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device = factory->d3d12_device;
-    Microsoft::WRL::ComPtr<ID3D12CommandQueue> cmd_queue = factory->CreateCommandQueue(d3d12_device);
-    Microsoft::WRL::ComPtr<IDMLDevice> dml_device = factory->CreateDMLDevice(d3d12_device);
-
-    auto context = wil::MakeOrThrow<ExecutionContext>(
-        d3d12_device.Get(),
-        dml_device.Get(),
-        cmd_queue.Get(),
-        false,
-        false);
-
-    factory->m_ep = std::make_unique<ExecutionProviderPlugin>(
-        static_cast<const ApiPtrs&>(*factory), // use the ApiPtrs base already initialized
-        factory->ep_name_,
-        d3d12_device.Get(),
-        dml_device.Get(),
-        context,
-        &factory->host_accessible_allocator_,  // shared across EP instances (fixes 2-session MISS)
-        enable_host_accessible,                // opt-in from ep.directml.enable_host_accessible
-        enable_graph_capture);                 // opt-in from ep.directml.enable_graph_capture (runtime fusion)
-
-    // keep a non-owning raw pointer to the EP for use in the data transfer implementation
-    factory->m_ep_raw = factory->m_ep.get();
-
-    // Attach the new EP to the factory-owned data transfer so copies can be serviced.
-    if (factory->dml_data_transfer_implementation) {
-        factory->dml_data_transfer_implementation->AttachExecutionProvider(
-            factory->m_ep_raw->GetInternalExecutionProvider());
-        factory->dml_data_transfer_implementation->AttachFactoryEpRef(&factory->m_ep_raw);
-        // Register this EP so the shared data transfer can route each copy to the EP that owns the
-        // tensor (its own ExecutionContext/queue/fence). Multiple sessions share this one transfer.
-        factory->dml_data_transfer_implementation->RegisterProvider(
-            factory->m_ep_raw->GetInternalExecutionProvider());
-    }
-
-    *ep = factory->m_ep.release();
-    return nullptr;
-}
-catch (const wil::ResultException& e) {
-    // CreateEpImpl is a noexcept ORT ABI callback: a C++ exception escaping here would hit the
-    // noexcept boundary and std::terminate the process. Convert to an OrtStatus so ORT/OGA can
-    // surface the failure and the caller can continue to the next model.
-    auto* factory = static_cast<ProviderFactory*>(this_ptr);
-    if (ep != nullptr) *ep = nullptr;
-    return factory->ort_api.CreateStatus(ORT_EP_FAIL,
-        MakeString("DirectML EP creation failed (hr=", e.GetErrorCode(), "): ", e.what()).c_str());
-}
-catch (const std::exception& e) {
-    auto* factory = static_cast<ProviderFactory*>(this_ptr);
-    if (ep != nullptr) *ep = nullptr;
-    return factory->ort_api.CreateStatus(ORT_EP_FAIL,
-        MakeString("DirectML EP creation failed: ", e.what()).c_str());
 }
 
 void ORT_API_CALL ProviderFactory::ReleaseEpImpl(OrtEpFactory* this_ptr, OrtEp* ep) noexcept
@@ -443,78 +442,77 @@ void ORT_API_CALL ProviderFactory::ReleaseEpImpl(OrtEpFactory* this_ptr, OrtEp* 
 
 OrtStatus* ORT_API_CALL ProviderFactory::CreateAllocatorImpl(OrtEpFactory* this_ptr, const OrtMemoryInfo* memory_info,
                                                               const OrtKeyValuePairs* allocator_options,
-                                                              OrtAllocator** allocator) noexcept
-try {
-    auto& factory = *static_cast<ProviderFactory*>(this_ptr);
+                                                              OrtAllocator** allocator) noexcept {
+    try {
+        auto& factory = *static_cast<ProviderFactory*>(this_ptr);
 
-    // HOST_ACCESSIBLE (decode inputs): host-accessible on DML is OPT-IN via ep.directml.enable_host_accessible
-    // (see dml_execution_provider.cc). Two outcomes:
-    //   * Flag ON  -> the real CUSTOM/L0 allocator was built; one of the lookups below is non-null and we
-    //                 return it (OGA binds decode inputs to a genuine D3D12-backed resource).
-    //   * Flag OFF -> m_hostAccessibleSupported stayed false, no allocator was built, both lookups return
-    //                 null, and we serve a plain CPU allocator + RETURN. This must NOT fall through to the
-    //                 IsGpuAllocator branch below: the pinned memory_info is GPU-typed, so falling through
-    //                 would hand back a VRAM allocator for what the caller believes is CPU memory (its own
-    //                 latent crash). The CPU allocator is harmless here because on the flag-off path
-    //                 nothing binds these buffers as a D3D12 resource (raw-ORT eagerly CREATES the
-    //                 allocator at init but never allocates through it or binds it; OGA, which WOULD bind,
-    //                 only reaches this path when it hasn't set the flag, in which case its own
-    //                 null-allocator fallback keeps decode inputs off host-accessible entirely).
-    // The EP is created before ORT drives allocation (CreateEp precedes CreateAllocator).
-    if (factory.ort_api.MemoryInfoGetDeviceMemType(memory_info) == OrtDeviceMemoryType_HOST_ACCESSIBLE) {
-        if (factory.host_accessible_allocator_) {
-            *allocator = factory.host_accessible_allocator_.get();
+        // HOST_ACCESSIBLE (decode inputs): host-accessible on DML is OPT-IN via ep.directml.enable_host_accessible
+        // (see dml_execution_provider.cc). Two outcomes:
+        //   * Flag ON  -> the real CUSTOM/L0 allocator was built; one of the lookups below is non-null and we
+        //                 return it (OGA binds decode inputs to a genuine D3D12-backed resource).
+        //   * Flag OFF -> m_hostAccessibleSupported stayed false, no allocator was built, both lookups return
+        //                 null, and we serve a plain CPU allocator + RETURN. This must NOT fall through to the
+        //                 IsGpuAllocator branch below: the pinned memory_info is GPU-typed, so falling through
+        //                 would hand back a VRAM allocator for what the caller believes is CPU memory (its own
+        //                 latent crash). The CPU allocator is harmless here because on the flag-off path
+        //                 nothing binds these buffers as a D3D12 resource (raw-ORT eagerly CREATES the
+        //                 allocator at init but never allocates through it or binds it; OGA, which WOULD bind,
+        //                 only reaches this path when it hasn't set the flag, in which case its own
+        //                 null-allocator fallback keeps decode inputs off host-accessible entirely).
+        // The EP is created before ORT drives allocation (CreateEp precedes CreateAllocator).
+        if (factory.ort_api.MemoryInfoGetDeviceMemType(memory_info) == OrtDeviceMemoryType_HOST_ACCESSIBLE) {
+            if (factory.host_accessible_allocator_) {
+                *allocator = factory.host_accessible_allocator_.get();
+                return nullptr;
+            }
+            if (factory.m_ep_raw != nullptr) {
+                if (auto internal = factory.m_ep_raw->GetInternalExecutionProvider()) {
+                    if (auto host_alloc = internal->GetHostAccessibleAllocator()) {
+                        *allocator = host_alloc.get();
+                        return nullptr;
+                    }
+                }
+            }
+            // Flag off / no host-accessible allocator built -> serve a plain CPU allocator.
+            *allocator = std::make_unique<CpuAllocator>(memory_info).release();
             return nullptr;
         }
-        if (factory.m_ep_raw != nullptr) {
+
+        // DEFAULT (GPU/VRAM) memtype: route to the REAL per-session GPU allocator
+        // (DmlBucketizedBufferAllocator via CreatePreferredAllocators()[0]) instead of the CpuAllocator
+        // stub below. The stub returns plain malloc with no D3D12 resource, so when a GPU-resident tensor
+        // pointer (e.g. a GroupQueryAttention output) reaches DecodeResource->DecodeDataHandle it is
+        // blind-cast to a PluginDmlAllocationInfo* and AddRef'd through a garbage vtable -> 0xC0000005.
+        // The real GPU allocator's Alloc returns a genuine PluginDmlAllocationInfo* that DecodeDataHandle
+        // can decode. m_ep_raw is valid here (CreateEp precedes CreateAllocator, same as HOST_ACCESSIBLE
+        // above). Single shared ID3D12Device (factory rejects num_devices>1), so a factory-served GPU
+        // buffer is valid for the session's queue.
+        if (factory.IsGpuAllocator(memory_info) && factory.m_ep_raw != nullptr) {
             if (auto internal = factory.m_ep_raw->GetInternalExecutionProvider()) {
-                if (auto host_alloc = internal->GetHostAccessibleAllocator()) {
-                    *allocator = host_alloc.get();
+                auto allocators = internal->CreatePreferredAllocators();
+                if (!allocators.empty() && allocators[0] != nullptr) {
+                    *allocator = allocators[0];  // GPU allocator (DmlBucketizedBufferAllocator)
                     return nullptr;
                 }
             }
         }
-        // Flag off / no host-accessible allocator built -> serve a plain CPU allocator.
+
+        // Return a passthrough allocator that wraps the memory_info. The real per-session
+        // GPU allocator (DmlBucketizedBufferAllocator) is created by the EP-level
+        // OrtEp::CreateAllocator in ExecutionProviderPlugin::CreateAllocatorImpl.
         *allocator = std::make_unique<CpuAllocator>(memory_info).release();
         return nullptr;
+    } catch (const std::exception& e) {
+        // noexcept ABI boundary (session-init): allocator construction / CreatePreferredAllocators can
+        // throw bad_alloc or a D3D12 resource-creation failure. Convert to OrtStatus.
+        auto& factory = *static_cast<ProviderFactory*>(this_ptr);
+        if (allocator != nullptr) *allocator = nullptr;
+        return factory.ort_api.CreateStatus(ORT_FAIL, MakeString("CreateAllocator failed: ", e.what()).c_str());
+    } catch (...) {
+        auto& factory = *static_cast<ProviderFactory*>(this_ptr);
+        if (allocator != nullptr) *allocator = nullptr;
+        return factory.ort_api.CreateStatus(ORT_FAIL, "CreateAllocator failed: unknown exception");
     }
-
-    // DEFAULT (GPU/VRAM) memtype: route to the REAL per-session GPU allocator
-    // (DmlBucketizedBufferAllocator via CreatePreferredAllocators()[0]) instead of the CpuAllocator
-    // stub below. The stub returns plain malloc with no D3D12 resource, so when a GPU-resident tensor
-    // pointer (e.g. a GroupQueryAttention output) reaches DecodeResource->DecodeDataHandle it is
-    // blind-cast to a PluginDmlAllocationInfo* and AddRef'd through a garbage vtable -> 0xC0000005.
-    // The real GPU allocator's Alloc returns a genuine PluginDmlAllocationInfo* that DecodeDataHandle
-    // can decode. m_ep_raw is valid here (CreateEp precedes CreateAllocator, same as HOST_ACCESSIBLE
-    // above). Single shared ID3D12Device (factory rejects num_devices>1), so a factory-served GPU
-    // buffer is valid for the session's queue.
-    if (factory.IsGpuAllocator(memory_info) && factory.m_ep_raw != nullptr) {
-        if (auto internal = factory.m_ep_raw->GetInternalExecutionProvider()) {
-            auto allocators = internal->CreatePreferredAllocators();
-            if (!allocators.empty() && allocators[0] != nullptr) {
-                *allocator = allocators[0];  // GPU allocator (DmlBucketizedBufferAllocator)
-                return nullptr;
-            }
-        }
-    }
-
-    // Return a passthrough allocator that wraps the memory_info. The real per-session
-    // GPU allocator (DmlBucketizedBufferAllocator) is created by the EP-level
-    // OrtEp::CreateAllocator in ExecutionProviderPlugin::CreateAllocatorImpl.
-    *allocator = std::make_unique<CpuAllocator>(memory_info).release();
-    return nullptr;
-}
-catch (const std::exception& e) {
-    // noexcept ABI boundary (session-init): allocator construction / CreatePreferredAllocators can
-    // throw bad_alloc or a D3D12 resource-creation failure. Convert to OrtStatus.
-    auto& factory = *static_cast<ProviderFactory*>(this_ptr);
-    if (allocator != nullptr) *allocator = nullptr;
-    return factory.ort_api.CreateStatus(ORT_FAIL, MakeString("CreateAllocator failed: ", e.what()).c_str());
-}
-catch (...) {
-    auto& factory = *static_cast<ProviderFactory*>(this_ptr);
-    if (allocator != nullptr) *allocator = nullptr;
-    return factory.ort_api.CreateStatus(ORT_FAIL, "CreateAllocator failed: unknown exception");
 }
 
 void ORT_API_CALL ProviderFactory::ReleaseAllocatorImpl(OrtEpFactory* /*this*/, OrtAllocator* allocator) noexcept {
