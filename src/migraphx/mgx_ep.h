@@ -587,7 +587,7 @@ private:
     std::size_t max_resident_programs_{4};
     std::size_t max_dynamic_batch_{};
     std::string compile_batches_{};
-    bool precompile_at_load_{};
+    bool precompile_at_load_{true};
     bool coalesce_io_enable_{};
     bool cpu_control_flow_enable_{};
     bool static_pad_seq_{};
