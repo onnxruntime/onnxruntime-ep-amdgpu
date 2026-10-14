@@ -37,6 +37,7 @@ struct ProviderInfo {
     std::string int8_calibration_table_name{};
     bool int8_use_native_calibration_table{};
     bool exhaustive_tune{};
+    bool hiprtc_disable_processes{};
     bool dump_subgraphs{};
     std::string mlss_use_specific_ops{};
     std::string model_arch{};
@@ -59,7 +60,7 @@ struct ProviderInfo {
     std::size_t max_resident_programs{4};
     std::size_t max_dynamic_batch{};
     std::string compile_batches{};
-    bool precompile_at_load{};
+    bool precompile_at_load{true};
     bool coalesce_io{};
     bool cpu_control_flow{};
     bool static_pad_seq{};

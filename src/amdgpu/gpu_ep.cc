@@ -257,11 +257,23 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 get_name(mgx_ep::provider_option::kForceRecompile).c_str(),
                 std::to_string(info.force_recompile.value()).c_str()));
         }
+        if (info.precompile_at_load.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kPrecompileAtLoad).c_str(),
+                std::to_string(info.precompile_at_load.value()).c_str()));
+        }
         if (info.exhaustive_tune.has_value()) {
             THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
                 local_session_options,
                 get_name(mgx_ep::provider_option::kExhaustiveTune).c_str(),
                 std::to_string(info.exhaustive_tune.value()).c_str()));
+        }
+        if (info.hiprtc_disable_processes.has_value()) {
+            THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
+                local_session_options,
+                get_name(mgx_ep::provider_option::kHiprtcDisableProcesses).c_str(),
+                std::to_string(info.hiprtc_disable_processes.value()).c_str()));
         }
         if (info.compute_mode.has_value()) {
             THROW_IF_ERROR(ort_api.AddSessionConfigEntry(
