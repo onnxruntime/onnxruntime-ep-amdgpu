@@ -60,7 +60,7 @@ struct ProviderInfo {
     std::size_t max_resident_programs{4};
     std::size_t max_dynamic_batch{};
     std::string compile_batches{};
-    bool precompile_at_load{};
+    bool precompile_at_load{true};
     bool coalesce_io{};
     bool cpu_control_flow{};
     bool static_pad_seq{};

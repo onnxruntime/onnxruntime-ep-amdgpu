@@ -38,6 +38,7 @@ ProviderInfo::ProviderInfo(const ProviderOptions& provider_options) {
             .AddAssignmentToReference(provider_option::kDisableCaching, disable_caching)
             .AddAssignmentToReference(provider_option::kCacheDir, cache_dir)
             .AddAssignmentToReference(provider_option::kForceRecompile, force_recompile)
+            .AddAssignmentToReference(provider_option::kPrecompileAtLoad, precompile_at_load)
             .AddAssignmentToReference(provider_option::kExhaustiveTune, exhaustive_tune)
             .AddAssignmentToReference(provider_option::kHiprtcDisableProcesses, hiprtc_disable_processes)
             .AddAssignmentToReference(provider_option::kComputeMode, compute_mode)

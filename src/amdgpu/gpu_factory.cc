@@ -7,6 +7,9 @@
 #endif
 
 #include <algorithm>
+#include <mutex>
+#include <string_view>
+#include <vector>
 
 #include "common/enumerate.h"
 #include "common/dynamic_library.h"
@@ -52,6 +55,47 @@ constexpr auto directmlBackend{LIBRARY_PREFIX ORT_TSTR("directx-backend") LIBRAR
 #endif
 constexpr auto migraphxBackend{LIBRARY_PREFIX ORT_TSTR("migraphx-backend") LIBRARY_SUFFIX};
 constexpr auto hipBackend{LIBRARY_PREFIX ORT_TSTR("hip-backend") LIBRARY_SUFFIX};
+
+// One amdgpu-ep.dll can be registered under several EP names (the WinML package advertises
+// both MIGraphXExecutionProvider and AMDGPUExecutionProvider), which creates one factory per
+// name, each with its own backends. Under an automatic EP selection policy ORT collects
+// custom op domains from every registered factory, so if each one reported its backends'
+// domains (com.amd from hip) ORT would register the same domain twice and fail session
+// creation with "Domain already set in registry". Only one live factory reports them.
+//
+// With explicit EP selection ORT asks only the selected factory, so the others lose the
+// domains. The owner is therefore the oldest factory registered under the preferred name,
+// falling back to the oldest factory; ownership passes on when the owner is released.
+constexpr std::string_view kCustomOpDomainOwnerName{"AMDGPUExecutionProvider"};
+
+struct LiveFactory {
+    const ProviderFactory* factory;
+    bool preferred;
+};
+
+// Every live ProviderFactory, preferred-name factories first, each group oldest first;
+// the front entry owns the custom op domains.
+std::mutex g_factories_mutex;
+std::vector<LiveFactory> g_factories;
+
+void AddLiveFactory(const ProviderFactory* factory, std::string_view ep_name) {
+    const bool preferred{ep_name == kCustomOpDomainOwnerName};
+    std::lock_guard lock{g_factories_mutex};
+    const auto end_of_preferred{std::find_if(g_factories.begin(), g_factories.end(),
+        [](const LiveFactory& f) { return !f.preferred; })};
+    g_factories.insert(preferred ? end_of_preferred : g_factories.end(), LiveFactory{factory, preferred});
+}
+
+void RemoveLiveFactory(const ProviderFactory* factory) {
+    std::lock_guard lock{g_factories_mutex};
+    g_factories.erase(std::remove_if(g_factories.begin(), g_factories.end(),
+        [factory](const LiveFactory& f) { return f.factory == factory; }), g_factories.end());
+}
+
+bool OwnsCustomOpDomains(const ProviderFactory* factory) {
+    std::lock_guard lock{g_factories_mutex};
+    return !g_factories.empty() && g_factories.front().factory == factory;
+}
 }
 
 ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_api_base, const char* ep_name, const OrtLogger* default_logger)
@@ -215,9 +259,12 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
         &hip_ep_factory_, 1, &factories_created));
     custom_op_backends_.push_back(hip_ep_factory_);
 #endif
+
+    AddLiveFactory(this, ep_name_);
 }
 
 ProviderFactory::~ProviderFactory() {
+    RemoveLiveFactory(this);
 
     telemetry_writer_.Stop();
 
@@ -424,6 +471,9 @@ Ort::Status ProviderFactory::GetNumCustomOpDomains(size_t* num_domains) const {
     // -- so the union of every built backend's domains must be reported here
     // regardless of the eventual profile selection.
     *num_domains = 0;
+    if (!OwnsCustomOpDomains(this)) {
+        return STATUS_OK;
+    }
     for (OrtEpFactory* factory : custom_op_backends_) {
         if (factory == nullptr || factory->GetNumCustomOpDomains == nullptr) {
             continue;
@@ -439,6 +489,12 @@ Ort::Status ProviderFactory::GetCustomOpDomains(OrtCustomOpDomain** domains, siz
     // Each backend fills its own slice of the caller's buffer, whose size ORT took
     // from GetNumCustomOpDomains. Clamp to the space left so a backend reporting
     // more domains here than it did there cannot overrun the buffer.
+    if (!OwnsCustomOpDomains(this)) {
+        // Ownership can only move between the two calls if another factory is registered or
+        // released concurrently; leave ORT no stale slots in that case.
+        std::fill_n(domains, num_domains, nullptr);
+        return STATUS_OK;
+    }
     size_t offset = 0;
     for (OrtEpFactory* factory : custom_op_backends_) {
         if (factory == nullptr || factory->GetCustomOpDomains == nullptr ||
