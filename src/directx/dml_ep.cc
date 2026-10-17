@@ -847,6 +847,26 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         nodesInTopologicalOrder.resize(numNodes);
         ep->ort_api.Graph_GetNodes(graph, nodesInTopologicalOrder.data(), numNodes);
 
+        // EPContext reload: a precompiled EPContext model carries "EPContext" nodes instead
+        // of the original ops. Claim them directly (one single-node partition each) so ORT
+        // routes them to this EP; CompileImpl's consume path deserializes the embedded DML
+        // graph rather than re-translating from ONNX. Skip the normal Tier-0/1/2 analysis.
+        {
+            bool claimed_epctx = false;
+            for (const OrtNode* node : nodesInTopologicalOrder) {
+                const char* op_type = nullptr;
+                ep->ort_api.Node_GetOperatorType(node, &op_type);
+                if (op_type != nullptr && std::string_view(op_type) == "EPContext") {
+                    ep->ep_api.EpGraphSupportInfo_AddSingleNode(graph_support_info, node);
+                    claimed_epctx = true;
+                }
+            }
+            if (claimed_epctx) {
+                ep->m_isGetCapabilityCompleted = true;
+                return nullptr;
+            }
+        }
+
         uint32_t deviceDataTypeMask = ep->GetSupportedDeviceDataTypeMask(); // Each bit corresponds to each DML_TENSOR_DATA_TYPE.
 
         std::vector<const OrtNode*> tentativeNodes;
