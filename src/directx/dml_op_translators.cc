@@ -3407,11 +3407,35 @@ static std::optional<TranslatedOp> TranslateBatchNorm(
     OrtNodeAdapter adapter(node, ort_api);
     float epsilon = adapter.GetAttributeFloat("epsilon", 1e-5f);
 
-    auto x_tensor   = MakeTensorInfo(x_info->sizes, x_info->data_type);
-    auto out_tensor = MakeTensorInfo(x_info->sizes, x_info->data_type);
+    // DML BATCH_NORMALIZATION normalizes DML axis 1 (the NCHW channel), with the
+    // mean/var/scale/bias tensors placed at axis 1. The framework left-pads low-rank ONNX
+    // shapes to 4D BEFORE we see them (e.g. 2D [N,C] -> [1,1,N,C]), which moves the ONNX
+    // channel (axis 1) to a trailing axis. Using sizes[1] then reads a size-1 padding dim as
+    // the channel -> scale/mean collapse to a scalar and mean[0]/var[0] is applied to every
+    // element (wrong for 1D/2D/3D inputs; 4D needs no padding so it worked). Recover the true
+    // ONNX shape via original_rank and rebuild NCHW = [N, C, spatial_product, 1] so the
+    // channel is back at axis 1. Buffer layout is unchanged (row-major, channel-major order).
+    uint32_t orank = x_info->original_rank;
+    std::vector<uint32_t> x_dml;
+    uint32_t C;
+    if (orank >= 2 && orank < 4 && x_info->sizes.size() >= orank) {
+        std::vector<uint32_t> onnx(x_info->sizes.end() - orank, x_info->sizes.end());
+        uint32_t N = onnx[0];
+        C = onnx[1];
+        uint32_t S = 1;
+        for (size_t i = 2; i < onnx.size(); ++i) S *= onnx[i];
+        x_dml = { N, C, S, 1u };
+    } else {
+        // rank>=4 (or unknown): the ONNX channel is already at DML axis 1.
+        x_dml.assign(x_info->sizes.begin(), x_info->sizes.end());
+        C = x_info->sizes.size() > 1 ? x_info->sizes[1] : 1u;
+    }
+
+    auto x_tensor   = MakeTensorInfo(x_dml, x_info->data_type);
+    auto out_tensor = MakeTensorInfo(x_dml, x_info->data_type);
 
     uint32_t dim_count = static_cast<uint32_t>(x_tensor.sizes.size());
-    std::vector<uint32_t> c_shape = {x_info->sizes[1]};
+    std::vector<uint32_t> c_shape = {C};
     auto scale_tensor = MakeTensorInfoAtAxis(c_shape, scale_info->data_type, 1, dim_count);
     auto b_tensor     = MakeTensorInfoAtAxis(c_shape, b_info->data_type,     1, dim_count);
     auto mean_tensor  = MakeTensorInfoAtAxis(c_shape, mean_info->data_type,  1, dim_count);
