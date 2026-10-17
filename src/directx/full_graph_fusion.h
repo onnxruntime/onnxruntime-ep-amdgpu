@@ -347,6 +347,16 @@ public:
         const std::vector<std::string>&                          shape_prep_roots = {},
         const std::unordered_map<std::string, std::vector<int64_t>>& shape_prep_inits = {});
 
+    // EPContext reload (consume): rebuild a compute kernel directly from the serialized
+    // DML graph embedded in an EPContext node, without ONNX translation. The blob is
+    // self-contained (weights inline), so I/O metadata comes from the EPContext node.
+    // Returns nullptr on failure (caller returns ORT_EP_FAIL).
+    static OrtNodeComputeInfo* CompileEpContext(
+        const OrtApi&                    ort_api,
+        const std::string&               serialized_graph,
+        const OrtNode*                   fused_node,
+        PluginDmlExecutionProviderImpl*  provider);
+
     // Lightweight feasibility check — runs translation + CreateOperator +
     // CompileGraph against the main graph. Returns true if CompileGraph
     // succeeds, false if it fails (E_INVALIDARG etc.). No GPU memory is

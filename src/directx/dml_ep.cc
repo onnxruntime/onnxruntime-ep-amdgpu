@@ -1,6 +1,7 @@
 // Copyright (c) Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
+#include <cstdio>
 #include "dml_ep.h"
 #include "dml_plugin_OperatorRegistration.h"
 #include "dml_bucketized_buffer_allocator.h"
@@ -848,16 +849,20 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         ep->ort_api.Graph_GetNodes(graph, nodesInTopologicalOrder.data(), numNodes);
 
         // EPContext reload: a precompiled EPContext model carries "EPContext" nodes instead
-        // of the original ops. Claim them directly (one single-node partition each) so ORT
-        // routes them to this EP; CompileImpl's consume path deserializes the embedded DML
-        // graph rather than re-translating from ONNX. Skip the normal Tier-0/1/2 analysis.
+        // of the original ops. Claim each as a single-node FUSION group (AddNodesToFuse, not
+        // AddSingleNode) so ORT compiles it via CompileImpl's consume path instead of looking
+        // up a static kernel (which the memcpy transformer would fail to find). Skip the
+        // normal Tier-0/1/2 analysis.
         {
             bool claimed_epctx = false;
             for (const OrtNode* node : nodesInTopologicalOrder) {
                 const char* op_type = nullptr;
                 ep->ort_api.Node_GetOperatorType(node, &op_type);
                 if (op_type != nullptr && std::string_view(op_type) == "EPContext") {
-                    ep->ep_api.EpGraphSupportInfo_AddSingleNode(graph_support_info, node);
+                    const OrtNode* one[1] = { node };
+                    OrtStatus* st = ep->ep_api.EpGraphSupportInfo_AddNodesToFuse(
+                        graph_support_info, one, 1, nullptr);
+                    if (st) { ep->ort_api.ReleaseStatus(st); continue; }
                     claimed_epctx = true;
                 }
             }
@@ -2005,6 +2010,24 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
         for (size_t i = 0; i < count; ++i) {
             node_compute_infos[i] = nullptr;
             ep_context_nodes[i]   = nullptr;
+
+            // EPContext reload (consume): if this subgraph is a precompiled EPContext node,
+            // deserialize the embedded DML graph and build the compute kernel directly,
+            // skipping ONNX translation. ep_context_nodes stays null on reload (no re-dump).
+            try {
+                Ort::ConstGraph cg{graphs[i]};
+                if (EpContextNodeReader::GraphHasContextNode(cg)) {
+                    EpContextNodeReader reader{*ep, cg};
+                    node_compute_infos[i] = FullGraphFusion::CompileEpContext(
+                        ep->ort_api, reader.GetSerializedGraph(), fused_nodes[i],
+                        ep->m_executionProvider.get());
+                    if (node_compute_infos[i]) continue;
+                    return ep->ort_api.CreateStatus(ORT_EP_FAIL,
+                        "EPContext consume: failed to rebuild DML graph from serialized blob");
+                }
+            } catch (const std::exception& e) {
+                return ep->ort_api.CreateStatus(ORT_EP_FAIL, e.what());
+            }
 
             // Tier-0 route: if GetCapabilityImpl claimed one or more fused partitions,
             // check if this subgraph's hash matches any of them and compile via
