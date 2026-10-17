@@ -26,6 +26,18 @@
 #include <unordered_set>
 #include "dml_perf_timer.h"
 
+// DirectML helpers for EPContext graph serialization (SchemaHelpers::ConvertOperatorDesc,
+// DmlSerializedGraphDesc, SerializeDmlGraph). Include order mirrors DmlExecutionProvider/precomp.h.
+#include "external/DirectMLHelpers/ApiTraits.h"
+#include "external/DirectMLHelpers/ApiHelpers.h"
+#include "external/DirectMLHelpers/DirectMLSchema.h"
+#include "external/DirectMLHelpers/AbstractOperatorDesc.h"
+#include "external/DirectMLHelpers/GeneratedSchemaTypes.h"
+#include "external/DirectMLHelpers/SchemaHelpers.h"
+#include "external/DirectMLHelpers/GeneratedSchemaHelpers.h"
+#include "external/DirectMLHelpers/DmlSerializedGraphDesc.h"
+#include "external/DirectMLHelpers/DmlGraphSerialization.h"
+
 namespace dml_ep {
 
 static void DiagLog([[maybe_unused]] std::string_view msg) noexcept {
@@ -1694,7 +1706,8 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     const OrtGraph*                                          fused_subgraph,
     const std::unordered_map<std::string, const OrtValue*>&  initializers,
     PluginDmlExecutionProviderImpl*                          provider,
-    const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes)
+    const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes,
+    std::string*                                            out_serialized_graph)
 {
     // -----------------------------------------------------------------------
     // Step 1–3: Enumerate subgraph I/O, merge initializers, pre-seed shapes.
@@ -2322,6 +2335,52 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     graph_desc.OutputEdges = output_edges.data();
     graph_desc.IntermediateEdgeCount = static_cast<UINT>(intermediate_edges.size());
     graph_desc.IntermediateEdges = intermediate_edges.data();
+
+    // EPContext generation: serialize this DML graph so a later session can reload it
+    // (DeserializeDmlGraph + TryCreateCompiledOperator) without re-translating from ONNX.
+    // Mirrors the in-tree DmlGraphFusionHelper serialization, adapted to FullGraphFusion's
+    // node/edge storage: operator nodes (base + sub_nodes) in op_node_descs order, then
+    // constant nodes; edges are copied from the already-wired storage.
+    if (out_serialized_graph) {
+        try {
+            DmlSerializedGraphDesc sdesc;
+            sdesc.InputCount = graph_desc.InputCount;
+            sdesc.OutputCount = graph_desc.OutputCount;
+            for (size_t i = 0; i < compiled_nodes.size(); ++i) {
+                if (!node_is_live[i]) continue;
+                sdesc.Nodes.push_back(DmlSerializedGraphNode{
+                    SchemaHelpers::ConvertOperatorDesc(compiled_nodes[i].translated->op_desc),
+                    "n" + std::to_string(sdesc.Nodes.size())});
+                for (const auto& sn : compiled_nodes[i].translated->sub_nodes) {
+                    sdesc.Nodes.push_back(DmlSerializedGraphNode{
+                        SchemaHelpers::ConvertOperatorDesc(sn.op_desc),
+                        "n" + std::to_string(sdesc.Nodes.size())});
+                }
+            }
+            for (size_t c = 0; c < input_map.constant_nodes.size(); ++c) {
+                ConstantData cdata{
+                    const_cast<std::byte*>(reinterpret_cast<const std::byte*>(const_node_descs[c].Data)),
+                    static_cast<uint64_t>(const_node_descs[c].DataSize)};
+                sdesc.Nodes.push_back(DmlSerializedGraphNode{
+                    DmlSerializedGraphNodeConstantVariant{cdata},
+                    "c" + std::to_string(c)});
+            }
+            for (const auto& e : input_edge_storage)
+                sdesc.InputEdges.push_back(DmlInputSerializedGraphEdge{
+                    e.GraphInputIndex, e.ToNodeIndex, e.ToNodeInputIndex, {}});
+            for (const auto& e : intermediate_edge_storage)
+                sdesc.IntermediateEdges.push_back(DmlIntermediateSerializedGraphEdge{
+                    e.FromNodeIndex, e.FromNodeOutputIndex, e.ToNodeIndex, e.ToNodeInputIndex, {}});
+            for (const auto& e : output_edge_storage)
+                sdesc.OutputEdges.push_back(DmlOutputSerializedGraphEdge{
+                    e.FromNodeIndex, e.FromNodeOutputIndex, e.GraphOutputIndex, {}});
+
+            auto buffer = SerializeDmlGraph(sdesc);
+            out_serialized_graph->assign(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+        } catch (const std::exception&) {
+            out_serialized_graph->clear();  // serialization failed -> caller skips EPContext node
+        }
+    }
 
     ComPtr<IDMLCompiledOperator> compiled_op;
     static constexpr size_t kMinNodeCountForDescriptorsVolatile = 5;

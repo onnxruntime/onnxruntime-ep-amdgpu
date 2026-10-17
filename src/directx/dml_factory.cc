@@ -319,6 +319,10 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
         // path; the plugin is). Default off -> static fusion. The [GraphCapture] log below reports the
         // value received.
         bool enable_graph_capture = false;
+        // ep.context_enable (set by ORT's EPContext/compile-and-dump pass, forwarded verbatim by the
+        // umbrella) tells the DX backend to emit EPContext nodes in CompileImpl so a reloaded model skips
+        // recompilation (the WebNN no-recompile path).
+        bool enable_ep_context = false;
         {
             OrtKeyValuePairs* config_entries = nullptr;
             if (factory->ort_api.GetSessionOptionsConfigEntries(session_options, &config_entries) == nullptr
@@ -329,6 +333,8 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
                         enable_host_accessible = (value == "1" || value == "true");
                     else if (key == "ep.directml.enable_graph_capture")
                         enable_graph_capture = (value == "1" || value == "true");
+                    else if (key == "ep.context_enable")
+                        enable_ep_context = (value == "1" || value == "true");
                 }
             }
         }
@@ -389,7 +395,8 @@ OrtStatus* ORT_API_CALL ProviderFactory::CreateEpImpl(OrtEpFactory* this_ptr,
             context,
             &factory->host_accessible_allocator_,  // shared across EP instances (fixes 2-session MISS)
             enable_host_accessible,                // opt-in from ep.directml.enable_host_accessible
-            enable_graph_capture);                 // opt-in from ep.directml.enable_graph_capture (runtime fusion)
+            enable_graph_capture,                  // opt-in from ep.directml.enable_graph_capture (runtime fusion)
+            enable_ep_context);                    // opt-in from ep.context_enable (EPContext generate)
 
         // keep a non-owning raw pointer to the EP for use in the data transfer implementation
         factory->m_ep_raw = factory->m_ep.get();

@@ -8,6 +8,7 @@
 #include "core/common/inlined_containers_fwd.h"
 #include "dml_abi_kernel.h"
 #include "fusion_utils.h"  // DML_EP_RELEASE_IGNORED_STATUS
+#include "dml_ep_ctx.h"
 #include "ep_fusion_manager.h"
 #include "full_graph_fusion.h"
 #include "quick_gelu_ep_fusion.h"
@@ -390,13 +391,15 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     Microsoft::WRL::ComPtr<ExecutionContext> executionContext,
     std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder,
     bool enableHostAccessible,
-    bool enableGraphCapture)
+    bool enableGraphCapture,
+    bool enableEpContext)
     : OrtEp{NegotiatedOrtApiVersion()}
     , ApiPtrs{api_ptrs}
     , name_{name}
     , d3d12_device{d3d12_device_}
     , m_dmlDevice{dml_device_}
     , m_context{executionContext}
+    , m_epContextEnable{enableEpContext}
 {
     // Runtime (deferred, dynamic-shape) graph fusion opt-in, from ep.directml.enable_graph_capture.
     // Selects the ORT-style runtime fusion path (GetCapabilityImpl gates Phase-3 vs Phase-4 on
@@ -2003,14 +2006,38 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
 
                 if (ep->m_tier0GroupHashes.count(sg_hash)) {
                     DML_PERF_LOG("[CompileImpl] Tier0 compile: subgraph hash match, nodes=", num_nodes, "\n");
+                    // EPContext generate: when ep.context_enable=1, capture the serialized DML graph so we
+                    // can emit an EPContext node that reloads without recompiling (WebNN no-recompile path).
+                    std::string serialized_graph;
                     node_compute_infos[i] = FullGraphFusion::Compile(
                         ep->ort_api,
                         graphs[i],
                         ep->m_graphInitializerMap,
                         ep->m_executionProvider.get(),
-                        ep->m_resolvedShapes);
+                        ep->m_resolvedShapes,
+                        ep->m_epContextEnable ? &serialized_graph : nullptr);
                     if (node_compute_infos[i]) {
                         DML_PERF_LOG("[CompileImpl] Tier0 compile: SUCCESS\n");
+                        if (ep->m_epContextEnable) {
+                            if (!serialized_graph.empty()) {
+                                EpContextNodeHelper ep_ctx_helper{
+                                    *ep, Ort::ConstGraph{graphs[i]}, Ort::ConstNode{fused_nodes[i]}};
+                                OrtNode* ep_context_node = nullptr;
+                                const Ort::Status st = ep_ctx_helper.CreateEpContextNode(
+                                    serialized_graph, /*embed_mode*/ 1, /*compute_capability*/ {},
+                                    /*model_path*/ {}, /*node_name_prefix*/ {}, ep_context_node);
+                                if (st.IsOK() && ep_context_node != nullptr) {
+                                    ep_context_nodes[i] = ep_context_node;
+                                    DML_PERF_LOG("[CompileImpl] EPContext node emitted (blob bytes=",
+                                        serialized_graph.size(), ")\n");
+                                } else {
+                                    DML_PERF_LOG("[CompileImpl] EPContext node creation FAILED\n");
+                                }
+                            } else {
+                                DML_PERF_LOG("[CompileImpl] EPContext requested but serialized DML graph "
+                                    "was empty — no EPContext node emitted\n");
+                            }
+                        }
                         continue;
                     }
                     DML_PERF_LOG("[CompileImpl] Tier0 compile: FAILED (nullptr) — falling through to Tier-2\n");
