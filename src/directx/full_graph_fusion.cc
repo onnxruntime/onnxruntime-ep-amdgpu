@@ -2365,20 +2365,40 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
                     DmlSerializedGraphNodeConstantVariant{cdata},
                     "c" + std::to_string(c)});
             }
-            for (const auto& e : input_edge_storage)
+            // SerializeDmlGraph requires input/output graph edges to carry the graph
+            // input/output tensor name. Invert the name->index maps to recover them.
+            std::unordered_map<uint32_t, std::string> in_name_by_idx, out_name_by_idx;
+            for (const auto& [n, idx] : input_map.dml_input_map)
+                in_name_by_idx[static_cast<uint32_t>(idx)] = n;
+            for (const auto& [n, idx] : subgraph.graph_output_map)
+                out_name_by_idx[static_cast<uint32_t>(idx)] = n;
+
+            for (const auto& e : input_edge_storage) {
+                auto it = in_name_by_idx.find(e.GraphInputIndex);
+                std::string nm = (it != in_name_by_idx.end()) ? it->second
+                    : ("graph_input_" + std::to_string(e.GraphInputIndex));
                 sdesc.InputEdges.push_back(DmlInputSerializedGraphEdge{
-                    e.GraphInputIndex, e.ToNodeIndex, e.ToNodeInputIndex, {}});
+                    e.GraphInputIndex, e.ToNodeIndex, e.ToNodeInputIndex, std::move(nm)});
+            }
             for (const auto& e : intermediate_edge_storage)
                 sdesc.IntermediateEdges.push_back(DmlIntermediateSerializedGraphEdge{
-                    e.FromNodeIndex, e.FromNodeOutputIndex, e.ToNodeIndex, e.ToNodeInputIndex, {}});
-            for (const auto& e : output_edge_storage)
+                    e.FromNodeIndex, e.FromNodeOutputIndex, e.ToNodeIndex, e.ToNodeInputIndex,
+                    "intermediate_" + std::to_string(e.FromNodeIndex) + "_" +
+                        std::to_string(e.FromNodeOutputIndex)});
+            for (const auto& e : output_edge_storage) {
+                auto it = out_name_by_idx.find(e.GraphOutputIndex);
+                std::string nm = (it != out_name_by_idx.end()) ? it->second
+                    : ("graph_output_" + std::to_string(e.GraphOutputIndex));
                 sdesc.OutputEdges.push_back(DmlOutputSerializedGraphEdge{
-                    e.FromNodeIndex, e.FromNodeOutputIndex, e.GraphOutputIndex, {}});
+                    e.FromNodeIndex, e.FromNodeOutputIndex, e.GraphOutputIndex, std::move(nm)});
+            }
 
             auto buffer = SerializeDmlGraph(sdesc);
             out_serialized_graph->assign(reinterpret_cast<const char*>(buffer.data()), buffer.size());
         } catch (const std::exception&) {
             out_serialized_graph->clear();  // serialization failed -> caller skips EPContext node
+        } catch (...) {
+            out_serialized_graph->clear();
         }
     }
 

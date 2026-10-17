@@ -2020,8 +2020,11 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
                         DML_PERF_LOG("[CompileImpl] Tier0 compile: SUCCESS\n");
                         if (ep->m_epContextEnable) {
                             if (!serialized_graph.empty()) {
-                                EpContextNodeHelper ep_ctx_helper{
-                                    *ep, Ort::ConstGraph{graphs[i]}, Ort::ConstNode{fused_nodes[i]}};
+                                // NB: the helper stores references to these, so they must be
+                                // named locals that outlive it (not temporaries — that dangles).
+                                Ort::ConstGraph ctx_graph{graphs[i]};
+                                Ort::ConstNode ctx_node{fused_nodes[i]};
+                                EpContextNodeHelper ep_ctx_helper{*ep, ctx_graph, ctx_node};
                                 OrtNode* ep_context_node = nullptr;
                                 const Ort::Status st = ep_ctx_helper.CreateEpContextNode(
                                     serialized_graph, /*embed_mode*/ 1, /*compute_capability*/ {},
@@ -2292,7 +2295,12 @@ const char* ORT_API_CALL ExecutionProviderPlugin::GetCompiledModelCompatibilityI
     _In_ OrtEp* this_ptr,
     _In_ const OrtGraph* graph) noexcept
 {
-    return nullptr;
+    // Stamped into the EPContext model and checked on reload. ORT calls strlen() on
+    // this, so it MUST be a non-null, null-terminated, static-lifetime string.
+    // The serialized DML graph format is self-describing and version-stable, so a
+    // single constant identifies compatibility for this backend.
+    static constexpr char kCompatInfo[] = "amdgpu-directml-epctx-v1";
+    return kCompatInfo;
 }
 
 OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetKernelRegistryImpl(
