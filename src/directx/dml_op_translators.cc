@@ -1843,11 +1843,12 @@ static std::optional<TranslatedOp> TranslateAveragePool(
     uint32_t spatial = static_cast<uint32_t>(in_sizes.size()) - 2;
     if (spatial < 1) spatial = 1;
 
-    std::vector<uint32_t> window_size, strides, start_pad, end_pad;
+    std::vector<uint32_t> window_size, strides, start_pad, end_pad, dilations;
     if (global) {
         // Pool over entire spatial extent.
         for (uint32_t i = 0; i < spatial; ++i) window_size.push_back(in_sizes[2 + i]);
         strides.assign(spatial, 1u);
+        dilations.assign(spatial, 1u);
         start_pad.assign(spatial, 0u);
         end_pad.assign(spatial, 0u);
     } else {
@@ -1888,7 +1889,14 @@ static std::optional<TranslatedOp> TranslateAveragePool(
     storage->strides     = strides;
     storage->start_pad   = start_pad;
     storage->end_pad     = end_pad;
-    storage->dilations.assign(spatial, 1u);
+    // Honor the dilations attribute (WebNN averagePool2d / ONNX AveragePool opset-19)
+    // instead of hardcoding 1 — otherwise dilated windows average the wrong elements.
+    if (!global) {
+        auto di = adapter.GetAttributeInts("dilations");
+        for (int64_t v : di) dilations.push_back(static_cast<uint32_t>(v));
+        while (dilations.size() < spatial) dilations.push_back(1u);
+    }
+    storage->dilations = dilations;
     storage->desc.DimensionCount = spatial;
     storage->desc.WindowSize     = storage->window_size.data();
     storage->desc.Strides        = storage->strides.data();
@@ -3425,6 +3433,11 @@ static std::optional<TranslatedOp> TranslateBatchNorm(
     result.input_tensor_descs.resize(5);
     result.output_buffer_descs = { out_tensor.ToBufferDesc() };
     result.output_tensor_descs.resize(1);
+    // DML slots are [Input, Mean, Variance, Scale, Bias] but ONNX inputs are
+    // [X(0), scale(1), B(2), input_mean(3), input_var(4)]. Without this map the data
+    // wiring defaults to identity (Mean<-scale, Variance<-B, ...), producing garbage
+    // (e.g. batch-norm const value 104605.46875). Map each DML slot to its ONNX input.
+    result.input_name_reorder = { 0, 3, 4, 1, 2 };
     result.desc_storage = storage;
     result.op_desc = { DML_OPERATOR_BATCH_NORMALIZATION, &storage->desc };
     result.fixup = [storage](TranslatedOp& self) {
