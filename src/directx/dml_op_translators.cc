@@ -4040,8 +4040,29 @@ static std::optional<TranslatedOp> TranslateQuantizeLinear(
     }
 
     auto x_tensor     = MakeTensorInfo(x_info->sizes, x_info->data_type);
-    auto scale_tensor = MakeTensorInfo(scale_info->sizes, scale_info->data_type);
     auto out_tensor   = MakeTensorInfo(x_info->sizes, out_dtype);
+
+    // ONNX QuantizeLinear's `axis` says which input dimension a per-axis (1D) scale/zeroPoint
+    // applies to. DML broadcasts the quantization tensors by shape, so a 1D scale must be placed
+    // at the quant axis — MakeTensorInfo left-pads it to the LAST axis, which is only correct when
+    // axis == last dim (hence axis=1/2 failed, axis=3 worked). Scalar and blocked (multi-dim) scales
+    // broadcast correctly as-is.
+    OrtNodeAdapter qadapter(node, ort_api);
+    int64_t q_axis = qadapter.GetAttributeInt("axis", 1);
+    int64_t q_block = qadapter.GetAttributeInt("block_size", 0);
+    uint32_t q_padded_rank = static_cast<uint32_t>(x_tensor.sizes.size());
+    uint32_t q_orig_rank = x_info->original_rank ? x_info->original_rank : q_padded_rank;
+    int64_t q_norm_axis = q_axis < 0 ? q_axis + static_cast<int64_t>(q_orig_rank) : q_axis;
+    uint32_t q_padded_axis = (q_norm_axis >= 0 && static_cast<uint32_t>(q_norm_axis) < q_orig_rank)
+        ? static_cast<uint32_t>(q_norm_axis) + (q_padded_rank - q_orig_rank) : 1u;
+    auto make_quant_param = [&](const DmlTensorInfo* info) -> DmlTensorInfo {
+        uint32_t total = 1; for (auto s : info->sizes) total *= s;
+        bool per_axis = (info->original_rank <= 1) && (total > 1) && (q_block == 0);
+        if (per_axis)
+            return MakeTensorInfoAtAxis({total}, info->data_type, q_padded_axis, q_padded_rank);
+        return MakeTensorInfo(info->sizes, info->data_type);
+    };
+    auto scale_tensor = make_quant_param(scale_info);
 
     // DML_QUANTIZE_OPERATOR_DESC uses a QuantizationTensors array: [scale] or [scale, zero_point]
     struct QLStorage {
@@ -4056,7 +4077,7 @@ static std::optional<TranslatedOp> TranslateQuantizeLinear(
     TranslatedOp result;
     if (has_zp) {
         auto* zp_info = LookupShape(value_shapes, inputs[2]);
-        auto zp_tensor = MakeTensorInfo(zp_info->sizes, zp_info->data_type);
+        auto zp_tensor = make_quant_param(zp_info);
         result.input_tensors  = { x_tensor, scale_tensor, zp_tensor };
         result.input_buffer_descs = { x_tensor.ToBufferDesc(), scale_tensor.ToBufferDesc(), zp_tensor.ToBufferDesc() };
         result.input_tensor_descs.resize(3);
@@ -4104,8 +4125,25 @@ static std::optional<TranslatedOp> TranslateDequantizeLinear(
 
     // Output shape = input shape. Output dtype = scale dtype (float32 or float16).
     auto x_tensor     = MakeTensorInfo(x_info->sizes, x_info->data_type);
-    auto scale_tensor = MakeTensorInfo(scale_info->sizes, scale_info->data_type);
     auto out_tensor   = MakeTensorInfo(x_info->sizes, scale_info->data_type);
+
+    // Place a per-axis (1D) scale/zeroPoint at the ONNX `axis` (see TranslateQuantizeLinear).
+    OrtNodeAdapter dqadapter(node, ort_api);
+    int64_t dq_axis = dqadapter.GetAttributeInt("axis", 1);
+    int64_t dq_block = dqadapter.GetAttributeInt("block_size", 0);
+    uint32_t dq_padded_rank = static_cast<uint32_t>(x_tensor.sizes.size());
+    uint32_t dq_orig_rank = x_info->original_rank ? x_info->original_rank : dq_padded_rank;
+    int64_t dq_norm_axis = dq_axis < 0 ? dq_axis + static_cast<int64_t>(dq_orig_rank) : dq_axis;
+    uint32_t dq_padded_axis = (dq_norm_axis >= 0 && static_cast<uint32_t>(dq_norm_axis) < dq_orig_rank)
+        ? static_cast<uint32_t>(dq_norm_axis) + (dq_padded_rank - dq_orig_rank) : 1u;
+    auto make_quant_param = [&](const DmlTensorInfo* info) -> DmlTensorInfo {
+        uint32_t total = 1; for (auto s : info->sizes) total *= s;
+        bool per_axis = (info->original_rank <= 1) && (total > 1) && (dq_block == 0);
+        if (per_axis)
+            return MakeTensorInfoAtAxis({total}, info->data_type, dq_padded_axis, dq_padded_rank);
+        return MakeTensorInfo(info->sizes, info->data_type);
+    };
+    auto scale_tensor = make_quant_param(scale_info);
 
     struct DQLStorage {
         DML_DEQUANTIZE_OPERATOR_DESC desc{};
@@ -4119,7 +4157,7 @@ static std::optional<TranslatedOp> TranslateDequantizeLinear(
     TranslatedOp result;
     if (has_zp) {
         auto* zp_info = LookupShape(value_shapes, inputs[2]);
-        auto zp_tensor = MakeTensorInfo(zp_info->sizes, zp_info->data_type);
+        auto zp_tensor = make_quant_param(zp_info);
         result.input_tensors  = { x_tensor, scale_tensor, zp_tensor };
         result.input_buffer_descs = { x_tensor.ToBufferDesc(), scale_tensor.ToBufferDesc(), zp_tensor.ToBufferDesc() };
         result.input_tensor_descs.resize(3);
