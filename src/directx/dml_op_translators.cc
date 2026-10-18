@@ -1892,10 +1892,18 @@ static std::optional<TranslatedOp> TranslateConvImpl(
     // For backward conv, recompute DML padding from the known output shape.
     // Matches ORT's InitializeKernelAndShapesTransposed logic: uses raw windowSize,
     // not dilated kernel size, for the padding derivation.
+    //
+    // ONNX output_padding does NOT append zeros — it enlarges the output by keeping
+    // more of the real transpose convolution, i.e. it REDUCES the end crop. So derive
+    // the base symmetric padding from the output shape MINUS output_padding, then
+    // reduce end padding by output_padding. Any residual that cannot be absorbed by
+    // the end crop (e.g. output_padding with no padding at all) falls through to DML's
+    // OutputPadding field (which does append zeros) — stored back into k.output_padding.
     if (direction == DML_CONVOLUTION_DIRECTION_BACKWARD) {
         for (uint32_t d = 0; d < k.spatial_dim_count; ++d) {
             uint32_t in_d = x_sizes[2 + d];
-            uint32_t out_d = out_sizes[2 + d];
+            uint32_t op_d = d < k.output_padding.size() ? k.output_padding[d] : 0u;
+            uint32_t out_d = out_sizes[2 + d] - op_d;
             uint32_t window_size = k.kernel_shape[d];
             uint32_t st = k.strides[d];
             int32_t paddings = static_cast<int32_t>((in_d - 1) * st + window_size) - static_cast<int32_t>(out_d);
@@ -1906,6 +1914,9 @@ static std::optional<TranslatedOp> TranslateConvImpl(
                 k.start_padding[d] = static_cast<uint32_t>(paddings + 1) / 2;
             }
             k.end_padding[d] = static_cast<uint32_t>(paddings) - k.start_padding[d];
+            uint32_t reduce = std::min(op_d, k.end_padding[d]);
+            k.end_padding[d] -= reduce;
+            if (d < k.output_padding.size()) k.output_padding[d] = op_d - reduce;  // residual → DML OutputPadding
         }
     }
 
@@ -1951,9 +1962,11 @@ static std::optional<TranslatedOp> TranslateConvImpl(
     storage->dilations    = k.dilations;
     storage->start_pad    = k.start_padding;
     storage->end_pad      = k.end_padding;
-    // ORT zeros output_padding before sending to DML — the ONNX output_padding
-    // is only used to compute the output shape, not passed to the DML operator.
+    // Pass ONNX output_padding to DML's OutputPadding (end-side only); the backward
+    // padding recompute above excludes it so start/end padding stays the real ONNX pads.
     storage->out_pad.assign(k.spatial_dim_count, 0u);
+    for (uint32_t d = 0; d < k.spatial_dim_count && d < k.output_padding.size(); ++d)
+        storage->out_pad[d] = k.output_padding[d];
 
     // Parse fused activation (DmlFusedConv/DmlFusedConvTranspose set these attributes).
     std::string fused_act = adapter.GetAttributeString("activation", "");
