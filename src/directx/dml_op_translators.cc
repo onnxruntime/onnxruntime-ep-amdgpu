@@ -394,6 +394,88 @@ static std::optional<TranslatedOp> TranslateUnaryActivation(
     return result;
 }
 
+// High-precision unary wrapper: for fp16 inputs, compute the op in fp32
+// (Cast fp16->fp32 -> Op -> Cast fp32->fp16) via a DML graph. DML's native fp16
+// transcendentals (e.g. Tan) can miss the WebNN ULP budget; doing the math in
+// fp32 and rounding once brings the result within tolerance. fp32/other inputs
+// use the plain single-op path.
+template <typename DescType, DML_OPERATOR_TYPE OpType>
+static std::optional<TranslatedOp> TranslateUnaryActivationHP(
+    const OrtApi& ort_api,
+    const OrtNode* node,
+    const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
+    const std::unordered_map<std::string, const OrtValue*>& initializers) {
+    auto inputs = GetInputNames(ort_api, node);
+    auto outputs = GetOutputNames(ort_api, node);
+    if (inputs.empty() || outputs.empty()) return std::nullopt;
+    auto* in_info = LookupShape(value_shapes, inputs[0]);
+    if (!in_info) return std::nullopt;
+    if (in_info->data_type != DML_TENSOR_DATA_TYPE_FLOAT16)
+        return TranslateUnaryActivation<DescType, OpType>(ort_api, node, value_shapes, initializers);
+
+    DmlTensorInfo t16 = MakeTensorInfo(in_info->sizes, DML_TENSOR_DATA_TYPE_FLOAT16);
+    DmlTensorInfo t32 = MakeTensorInfo(in_info->sizes, DML_TENSOR_DATA_TYPE_FLOAT32);
+
+    // Primary: Cast fp16 -> fp32
+    auto cast_in = std::make_shared<DML_CAST_OPERATOR_DESC>();
+    TranslatedOp result;
+    result.input_tensors  = { t16 };
+    result.output_tensors = { t32 };
+    result.input_buffer_descs  = { t16.ToBufferDesc() };
+    result.input_tensor_descs.resize(1);
+    result.output_buffer_descs = { t32.ToBufferDesc() };
+    result.output_tensor_descs.resize(1);
+    result.desc_storage = cast_in;
+    result.op_desc = { DML_OPERATOR_CAST, cast_in.get() };
+    result.fixup = [cast_in](TranslatedOp& self) {
+        RebuildTensorDescPointers(self);
+        cast_in->InputTensor  = &self.input_tensor_descs[0];
+        cast_in->OutputTensor = &self.output_tensor_descs[0];
+    };
+    result.FixupPointers();
+
+    // Sub 0: Op in fp32
+    auto op_store = std::make_shared<DescType>();
+    SubNode op_node;
+    op_node.input_tensors  = { t32 };
+    op_node.output_tensors = { t32 };
+    op_node.input_buffer_descs  = { t32.ToBufferDesc() };
+    op_node.input_tensor_descs.resize(1);
+    op_node.output_buffer_descs = { t32.ToBufferDesc() };
+    op_node.output_tensor_descs.resize(1);
+    op_node.desc_storage = op_store;
+    op_node.op_desc = { OpType, op_store.get() };
+    op_node.input_from = { {-1, 0} };
+    op_node.fixup = [op_store](SubNode& self) {
+        RebuildSubNodePointers(self);
+        op_store->InputTensor  = &self.input_tensor_descs[0];
+        op_store->OutputTensor = &self.output_tensor_descs[0];
+    };
+    op_node.FixupPointers();
+
+    // Sub 1: Cast fp32 -> fp16
+    auto cast_out = std::make_shared<DML_CAST_OPERATOR_DESC>();
+    SubNode cast_node;
+    cast_node.input_tensors  = { t32 };
+    cast_node.output_tensors = { t16 };
+    cast_node.input_buffer_descs  = { t32.ToBufferDesc() };
+    cast_node.input_tensor_descs.resize(1);
+    cast_node.output_buffer_descs = { t16.ToBufferDesc() };
+    cast_node.output_tensor_descs.resize(1);
+    cast_node.desc_storage = cast_out;
+    cast_node.op_desc = { DML_OPERATOR_CAST, cast_out.get() };
+    cast_node.input_from = { {0, 0} };
+    cast_node.fixup = [cast_out](SubNode& self) {
+        RebuildSubNodePointers(self);
+        cast_out->InputTensor  = &self.input_tensor_descs[0];
+        cast_out->OutputTensor = &self.output_tensor_descs[0];
+    };
+    cast_node.FixupPointers();
+
+    result.sub_nodes = { std::move(op_node), std::move(cast_node) };
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // MatMul → DML_OPERATOR_GEMM
 // ---------------------------------------------------------------------------
@@ -10527,7 +10609,7 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["Sin"]        = TranslateUnaryActivation<DML_ELEMENT_WISE_SIN_OPERATOR_DESC,           DML_OPERATOR_ELEMENT_WISE_SIN>;
     registry["Sinh"]       = TranslateUnaryActivation<DML_ELEMENT_WISE_SINH_OPERATOR_DESC,          DML_OPERATOR_ELEMENT_WISE_SINH>;
     registry["Sqrt"]       = TranslateUnaryActivation<DML_ELEMENT_WISE_SQRT_OPERATOR_DESC,          DML_OPERATOR_ELEMENT_WISE_SQRT>;
-    registry["Tan"]        = TranslateUnaryActivation<DML_ELEMENT_WISE_TAN_OPERATOR_DESC,           DML_OPERATOR_ELEMENT_WISE_TAN>;
+    registry["Tan"]        = TranslateUnaryActivationHP<DML_ELEMENT_WISE_TAN_OPERATOR_DESC,         DML_OPERATOR_ELEMENT_WISE_TAN>;
     registry["Acos"]       = TranslateUnaryActivation<DML_ELEMENT_WISE_ACOS_OPERATOR_DESC,          DML_OPERATOR_ELEMENT_WISE_ACOS>;
     registry["Acosh"]      = TranslateUnaryActivation<DML_ELEMENT_WISE_ACOSH_OPERATOR_DESC,         DML_OPERATOR_ELEMENT_WISE_ACOSH>;
     registry["Asin"]       = TranslateUnaryActivation<DML_ELEMENT_WISE_ASIN_OPERATOR_DESC,          DML_OPERATOR_ELEMENT_WISE_ASIN>;
