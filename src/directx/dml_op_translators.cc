@@ -5252,7 +5252,16 @@ static std::optional<TranslatedOp> TranslateTrilu(
         }
     }
 
-    auto t_info = MakeTensorInfo(in_info->sizes, in_info->data_type);
+    // DML_OPERATOR_DIAGONAL_MATRIX1 is 4D-max. Trilu masks the last two dims (the matrix); the
+    // leading dims are batch. For rank > 4 collapse the batch dims (contiguous — single tensor, no
+    // broadcast) into one so the op fits 4D. Buffer layout is unchanged.
+    auto in_sizes = in_info->sizes;
+    if (in_sizes.size() > 4) {
+        uint32_t batch = 1;
+        for (size_t i = 0; i + 2 < in_sizes.size(); ++i) batch *= in_sizes[i];
+        in_sizes = { batch, in_sizes[in_sizes.size() - 2], in_sizes[in_sizes.size() - 1] };
+    }
+    auto t_info = MakeTensorInfo(in_sizes, in_info->data_type);
 
     struct Storage {
         DML_DIAGONAL_MATRIX1_OPERATOR_DESC desc{};
