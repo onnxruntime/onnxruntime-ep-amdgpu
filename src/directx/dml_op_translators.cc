@@ -445,17 +445,45 @@ static std::optional<TranslatedOp> TranslateMatMul(
         if (b_sizes[d] == 1) { b_sizes[d] = bd; b_strides[d] = 0; }
     }
 
-    // Pad to 4D.
+    // DML GEMM is 4D max (2 batch dims). For rank > 4 (N-D batched matmul) collapse the batch
+    // dims (all but the last 2) down to <= 2 by merging adjacent dims that are mergeable in BOTH
+    // inputs — contiguous (stride[i] == size[i+1]*stride[i+1]) or both broadcast (stride 0). This
+    // handles the broadcast variants (a broadcast dim stays stride-0 across the merge). If no
+    // adjacent pair is mergeable in both, bail out (rare).
+    auto merge_dim = [](std::vector<uint32_t>& sz, std::vector<uint32_t>& st, size_t i) {
+        uint32_t new_stride = (st[i] == 0 && st[i + 1] == 0) ? 0u : st[i + 1];
+        sz[i] = sz[i] * sz[i + 1];
+        st[i] = new_stride;
+        sz.erase(sz.begin() + i + 1);
+        st.erase(st.begin() + i + 1);
+    };
+    while (a_sizes.size() > 4) {
+        size_t nbatch = a_sizes.size() - 2;
+        bool merged = false;
+        for (size_t i = 0; i + 1 < nbatch; ++i) {
+            bool a_ok = (a_strides[i] == a_sizes[i + 1] * a_strides[i + 1]) || (a_strides[i] == 0 && a_strides[i + 1] == 0);
+            bool b_ok = (b_strides[i] == b_sizes[i + 1] * b_strides[i + 1]) || (b_strides[i] == 0 && b_strides[i + 1] == 0);
+            if (a_ok && b_ok) { merge_dim(a_sizes, a_strides, i); merge_dim(b_sizes, b_strides, i); merged = true; break; }
+        }
+        if (!merged) return std::nullopt;
+    }
+
+    // Pad UP to 4D (DML GEMM minimum). The M/K/N and batch handling below is rank-agnostic.
     while (a_sizes.size() < 4) { a_sizes.insert(a_sizes.begin(), 1u); a_strides.insert(a_strides.begin(), 0u); }
     while (b_sizes.size() < 4) { b_sizes.insert(b_sizes.begin(), 1u); b_strides.insert(b_strides.begin(), 0u); }
 
-    uint32_t M = a_sizes[2];
-    uint32_t K_a = a_sizes[3];
-    uint32_t K_b = b_sizes[2];
-    uint32_t N = b_sizes[3];
+    size_t rank = a_sizes.size();  // == b_sizes.size() after rank equalization + padding
+    uint32_t M = a_sizes[rank - 2];
+    uint32_t K_a = a_sizes[rank - 1];
+    uint32_t K_b = b_sizes[rank - 2];
+    uint32_t N = b_sizes[rank - 1];
     if (K_a != K_b) return std::nullopt;
 
-    std::vector<uint32_t> c_sizes = { a_sizes[0], a_sizes[1], M, N };
+    // Output batch dims = broadcast of A/B batch dims; matmul replaces the last two dims.
+    std::vector<uint32_t> c_sizes;
+    for (size_t d = 0; d + 2 < rank; ++d) c_sizes.push_back(std::max(a_sizes[d], b_sizes[d]));
+    c_sizes.push_back(M);
+    c_sizes.push_back(N);
 
     uint64_t a_bytes = ComputeAlignedTotalBytes(a_info->sizes, dtype);
     uint64_t b_bytes = ComputeAlignedTotalBytes(b_info->sizes, dtype);
@@ -469,9 +497,12 @@ static std::optional<TranslatedOp> TranslateMatMul(
     b_tensor.strides = b_strides;
 
     auto* out_edge = LookupShape(value_shapes, outputs[0]);
-    auto c_tensor = out_edge ? MakeTensorInfo(out_edge->sizes, dtype)
-                             : MakeTensorInfo(c_sizes, dtype);
-    if (!out_edge) c_tensor.total_bytes = c_bytes;
+    // For a collapsed N-D matmul the ONNX output edge is >4D; use the collapsed 4D c_sizes for the
+    // DML output desc (same contiguous buffer, row-major order preserved).
+    bool use_collapsed = (out_edge && out_edge->sizes.size() > 4);
+    auto c_tensor = (out_edge && !use_collapsed) ? MakeTensorInfo(out_edge->sizes, dtype)
+                                                 : MakeTensorInfo(c_sizes, dtype);
+    if (!out_edge || use_collapsed) c_tensor.total_bytes = c_bytes;
 
     auto storage = std::make_shared<DML_GEMM_OPERATOR_DESC>();
     storage->CTensor = nullptr;
