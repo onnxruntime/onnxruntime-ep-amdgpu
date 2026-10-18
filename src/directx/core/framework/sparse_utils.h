@@ -13,7 +13,7 @@ class Tensor;
 class SparseTensor;
 class DataTransferManager;
 namespace common {
-class Ort::Status;
+class Status;
 }
 #endif
 
