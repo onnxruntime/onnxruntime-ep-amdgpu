@@ -4056,6 +4056,51 @@ static std::optional<TranslatedOp> TranslateClip(
     return result;
 }
 
+// Integer Relu = Clip to [0, type-max]. DML_OPERATOR_ACTIVATION_RELU is float-only, so integer
+// Relu (e.g. WebNN relu on int64) must route through the integer-capable CLIP op instead.
+static std::optional<TranslatedOp> TranslateReluInt(
+    const OrtApi& ort_api,
+    const OrtNode* node,
+    const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
+    const std::unordered_map<std::string, const OrtValue*>&) {
+    auto inputs  = GetInputNames(ort_api, node);
+    auto outputs = GetOutputNames(ort_api, node);
+    if (inputs.empty() || outputs.empty()) return std::nullopt;
+    auto* in_info = LookupShape(value_shapes, inputs[0]);
+    if (!in_info) return std::nullopt;
+    auto t = MakeTensorInfo(in_info->sizes, in_info->data_type);
+    DML_SCALAR_UNION mn{}, mx{};
+    switch (in_info->data_type) {
+    case DML_TENSOR_DATA_TYPE_INT8:  mn.Int8  = 0; mx.Int8  = INT8_MAX;  break;
+    case DML_TENSOR_DATA_TYPE_INT16: mn.Int16 = 0; mx.Int16 = INT16_MAX; break;
+    case DML_TENSOR_DATA_TYPE_INT32: mn.Int32 = 0; mx.Int32 = INT32_MAX; break;
+    case DML_TENSOR_DATA_TYPE_INT64: mn.Int64 = 0; mx.Int64 = INT64_MAX; break;
+    default: return std::nullopt;
+    }
+    struct S { DML_ELEMENT_WISE_CLIP1_OPERATOR_DESC desc{}; };
+    auto storage = std::make_shared<S>();
+    storage->desc.ScaleBias      = nullptr;
+    storage->desc.MinMaxDataType = in_info->data_type;
+    storage->desc.Min            = mn;
+    storage->desc.Max            = mx;
+    TranslatedOp result;
+    result.input_tensors  = { t };
+    result.output_tensors = { t };
+    result.input_buffer_descs  = { t.ToBufferDesc() };
+    result.input_tensor_descs.resize(1);
+    result.output_buffer_descs = { t.ToBufferDesc() };
+    result.output_tensor_descs.resize(1);
+    result.desc_storage = storage;
+    result.op_desc = { DML_OPERATOR_ELEMENT_WISE_CLIP1, &storage->desc };
+    result.fixup = [storage](TranslatedOp& self) {
+        RebuildTensorDescPointers(self);
+        storage->desc.InputTensor  = &self.input_tensor_descs[0];
+        storage->desc.OutputTensor = &self.output_tensor_descs[0];
+    };
+    result.FixupPointers();
+    return result;
+}
+
 static std::optional<TranslatedOp> TranslateQuantizeLinear(
     const OrtApi& ort_api,
     const NodeView& node,
@@ -10241,7 +10286,19 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["Sub"] = TranslateBinaryElementwise<DML_ELEMENT_WISE_SUBTRACT_OPERATOR_DESC, DML_OPERATOR_ELEMENT_WISE_SUBTRACT>;
     registry["Div"] = TranslateBinaryElementwise<DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC, DML_OPERATOR_ELEMENT_WISE_DIVIDE>;
 
-    registry["Relu"]    = TranslateUnaryActivation<DML_ACTIVATION_RELU_OPERATOR_DESC,    DML_OPERATOR_ACTIVATION_RELU>;
+    registry["Relu"]    = [](const OrtApi& api, const OrtNode* node,
+        const std::unordered_map<std::string, DmlTensorInfo>& vs,
+        const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
+        auto ins = GetInputNames(api, node);
+        const DmlTensorInfo* in = ins.empty() ? nullptr : LookupShape(vs, ins[0]);
+        if (in) {
+            auto dt = in->data_type;
+            if (dt == DML_TENSOR_DATA_TYPE_INT8 || dt == DML_TENSOR_DATA_TYPE_INT16 ||
+                dt == DML_TENSOR_DATA_TYPE_INT32 || dt == DML_TENSOR_DATA_TYPE_INT64)
+                return TranslateReluInt(api, node, vs, init);  // DML activation RELU is float-only
+        }
+        return TranslateUnaryActivation<DML_ACTIVATION_RELU_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_RELU>(api, node, vs, init);
+    };
     registry["Sigmoid"] = TranslateUnaryActivation<DML_ACTIVATION_SIGMOID_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_SIGMOID>;
     registry["Tanh"]    = TranslateUnaryActivation<DML_ACTIVATION_TANH_OPERATOR_DESC,    DML_OPERATOR_ACTIVATION_TANH>;
 
