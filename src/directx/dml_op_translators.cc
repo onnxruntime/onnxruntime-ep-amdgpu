@@ -1596,6 +1596,14 @@ static std::optional<TranslatedOp> TranslateConvImpl(
     }
 
     auto k = ReadConvKernelArgs(adapter, x_sizes);
+    // kernel_shape is optional in ONNX; ReadConvKernelArgs defaults missing dims to 1. For
+    // Conv/ConvTranspose the kernel spatial size IS the filter's spatial dims, so derive it from
+    // the (already layout-normalized NCHW) filter. Without this, a node that omits the attribute
+    // (e.g. WebNN-lowered ConvTranspose) gets kernel_shape=[1,1] -> wrong output size and padding
+    // derivation -> wrong crop (outputs the top-left instead of the cropped region).
+    if (w_sizes.size() >= 2u + k.spatial_dim_count) {
+        k.kernel_shape.assign(w_sizes.begin() + 2, w_sizes.begin() + 2 + k.spatial_dim_count);
+    }
     DML_TENSOR_DATA_TYPE dtype = x_info->data_type;
 
     // Resolve auto_pad for forward convolution (computes padding from input dims).
