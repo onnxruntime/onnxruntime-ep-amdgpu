@@ -1344,6 +1344,193 @@ static std::optional<TranslatedOp> TranslateReduce(
     return result;
 }
 
+// Numerically stable ReduceLogSumExp = max + log(sum(exp(x - max))).
+// DML_REDUCE_FUNCTION_LOG_SUM_EXP on this backend evaluates exp(x) directly and
+// overflows to +/-Inf for large-magnitude inputs, so decompose into a DML graph:
+//   m = ReduceMax(x)         (keepdims, for broadcast)
+//   s = x - m                (<= 0, so exp(s) is in (0,1] and cannot overflow)
+//   l = ReduceLogSumExp(s)   (now stable)
+//   y = l + m
+static std::optional<TranslatedOp> TranslateReduceLogSumExpStable(
+    const OrtApi& ort_api,
+    const OrtNode* node,
+    const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
+    const std::unordered_map<std::string, const OrtValue*>& initializers) {
+    auto inputs = GetInputNames(ort_api, node);
+    auto outputs = GetOutputNames(ort_api, node);
+    if (inputs.empty() || outputs.empty()) return std::nullopt;
+    auto* in_info = LookupShape(value_shapes, inputs[0]);
+    if (!in_info) return std::nullopt;
+
+    OrtNodeAdapter adapter(node, ort_api);
+    int64_t noop_with_empty_axes = adapter.GetAttributeInt("noop_with_empty_axes", 0);
+
+    // Axes resolution mirrors TranslateReduce (opset-13 input vs opset<13 attr).
+    std::vector<int64_t> axes_i64;
+    if (inputs.size() > 1 && !inputs[1].empty()) {
+        auto it = initializers.find(inputs[1]);
+        if (it != initializers.end() && it->second) {
+            OrtTensorTypeAndShapeInfo* tsi = nullptr;
+            ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(it->second), &tsi);
+            if (tsi) {
+                size_t count = 0;
+                ort_api.GetTensorShapeElementCount(tsi, &count);
+                ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
+                void* data = nullptr;
+                OrtStatus* st = ort_api.GetTensorMutableData(const_cast<OrtValue*>(it->second), &data);
+                if (st) { ort_api.ReleaseStatus(st); }
+                else if (data && count > 0) {
+                    auto* vals = static_cast<const int64_t*>(data);
+                    axes_i64.assign(vals, vals + count);
+                }
+            }
+        }
+    } else {
+        axes_i64 = adapter.GetAttributeInts("axes");
+    }
+
+    size_t padded_rank = in_info->sizes.size();
+    size_t orig_rank = in_info->original_rank ? in_info->original_rank : padded_rank;
+    size_t pad_offset = padded_rank - orig_rank;
+    std::vector<uint32_t> axes;
+    if (axes_i64.empty()) {
+        if (noop_with_empty_axes) return std::nullopt;
+        axes.resize(padded_rank);
+        std::iota(axes.begin(), axes.end(), 0u);
+    } else {
+        for (int64_t a : axes_i64) {
+            if (a < 0) a += static_cast<int64_t>(orig_rank);
+            a += static_cast<int64_t>(pad_offset);
+            axes.push_back(static_cast<uint32_t>(a));
+        }
+    }
+
+    // full = input shape; red = reduced shape with keepdims (reduced axes -> 1),
+    // used both as the broadcast source for the subtract and as the final output
+    // buffer (same element layout as the squeezed ONNX output).
+    std::vector<uint32_t> full = in_info->sizes;
+    std::vector<uint32_t> red = full;
+    for (uint32_t ax : axes) if (ax < red.size()) red[ax] = 1u;
+
+    auto dt = in_info->data_type;
+    DmlTensorInfo t_full = MakeTensorInfo(full, dt);
+    DmlTensorInfo t_red  = MakeTensorInfo(red, dt);
+
+    auto bc = BroadcastShapes(t_full, t_red);  // subtract: x (full) - m (red broadcast to full)
+    if (!bc) return std::nullopt;
+
+    // ---- Primary: Identity(x) so sub_nodes can reference the original x via {-1,0}. ----
+    auto id_storage = std::make_shared<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>();
+    TranslatedOp result;
+    result.input_tensors  = { t_full };
+    result.output_tensors = { t_full };
+    result.input_buffer_descs  = { t_full.ToBufferDesc() };
+    result.input_tensor_descs.resize(1);
+    result.output_buffer_descs = { t_full.ToBufferDesc() };
+    result.output_tensor_descs.resize(1);
+    result.desc_storage = id_storage;
+    result.op_desc = { DML_OPERATOR_ELEMENT_WISE_IDENTITY, id_storage.get() };
+    result.fixup = [id_storage](TranslatedOp& self) {
+        RebuildTensorDescPointers(self);
+        id_storage->InputTensor  = &self.input_tensor_descs[0];
+        id_storage->OutputTensor = &self.output_tensor_descs[0];
+    };
+    result.FixupPointers();
+
+    struct ReduceDesc { DML_REDUCE_OPERATOR_DESC desc{}; std::vector<uint32_t> axes_vec; };
+
+    // ---- Sub 0: m = ReduceMax(x) ----
+    auto max_store = std::make_shared<ReduceDesc>();
+    max_store->axes_vec = axes;
+    max_store->desc.Function = DML_REDUCE_FUNCTION_MAX;
+    max_store->desc.AxisCount = static_cast<UINT>(max_store->axes_vec.size());
+    max_store->desc.Axes = max_store->axes_vec.data();
+    SubNode max_node;
+    max_node.input_tensors  = { t_full };
+    max_node.output_tensors = { t_red };
+    max_node.input_buffer_descs  = { t_full.ToBufferDesc() };
+    max_node.input_tensor_descs.resize(1);
+    max_node.output_buffer_descs = { t_red.ToBufferDesc() };
+    max_node.output_tensor_descs.resize(1);
+    max_node.desc_storage = max_store;
+    max_node.op_desc = { DML_OPERATOR_REDUCE, &max_store->desc };
+    max_node.input_from = { {-1, 0} };
+    max_node.fixup = [max_store](SubNode& self) {
+        RebuildSubNodePointers(self);
+        max_store->desc.InputTensor  = &self.input_tensor_descs[0];
+        max_store->desc.OutputTensor = &self.output_tensor_descs[0];
+        max_store->desc.Axes = max_store->axes_vec.data();
+    };
+    max_node.FixupPointers();
+
+    // ---- Sub 1: s = x - m  (m broadcast from red to full) ----
+    auto sub_store = std::make_shared<DML_ELEMENT_WISE_SUBTRACT_OPERATOR_DESC>();
+    SubNode sub_node;
+    sub_node.input_tensors  = { bc->a, bc->b };
+    sub_node.output_tensors = { t_full };
+    sub_node.input_buffer_descs  = { bc->a.ToBufferDesc(), bc->b.ToBufferDesc() };
+    sub_node.input_tensor_descs.resize(2);
+    sub_node.output_buffer_descs = { t_full.ToBufferDesc() };
+    sub_node.output_tensor_descs.resize(1);
+    sub_node.desc_storage = sub_store;
+    sub_node.op_desc = { DML_OPERATOR_ELEMENT_WISE_SUBTRACT, sub_store.get() };
+    sub_node.input_from = { {-1, 0}, {0, 0} };  // A = x (primary), B = m (sub0)
+    sub_node.fixup = [sub_store](SubNode& self) {
+        RebuildSubNodePointers(self);
+        sub_store->ATensor      = &self.input_tensor_descs[0];
+        sub_store->BTensor      = &self.input_tensor_descs[1];
+        sub_store->OutputTensor = &self.output_tensor_descs[0];
+    };
+    sub_node.FixupPointers();
+
+    // ---- Sub 2: l = ReduceLogSumExp(s) ----
+    auto lse_store = std::make_shared<ReduceDesc>();
+    lse_store->axes_vec = axes;
+    lse_store->desc.Function = DML_REDUCE_FUNCTION_LOG_SUM_EXP;
+    lse_store->desc.AxisCount = static_cast<UINT>(lse_store->axes_vec.size());
+    lse_store->desc.Axes = lse_store->axes_vec.data();
+    SubNode lse_node;
+    lse_node.input_tensors  = { t_full };
+    lse_node.output_tensors = { t_red };
+    lse_node.input_buffer_descs  = { t_full.ToBufferDesc() };
+    lse_node.input_tensor_descs.resize(1);
+    lse_node.output_buffer_descs = { t_red.ToBufferDesc() };
+    lse_node.output_tensor_descs.resize(1);
+    lse_node.desc_storage = lse_store;
+    lse_node.op_desc = { DML_OPERATOR_REDUCE, &lse_store->desc };
+    lse_node.input_from = { {1, 0} };  // from sub_node (subtract)
+    lse_node.fixup = [lse_store](SubNode& self) {
+        RebuildSubNodePointers(self);
+        lse_store->desc.InputTensor  = &self.input_tensor_descs[0];
+        lse_store->desc.OutputTensor = &self.output_tensor_descs[0];
+        lse_store->desc.Axes = lse_store->axes_vec.data();
+    };
+    lse_node.FixupPointers();
+
+    // ---- Sub 3: y = l + m  (both red; output buffer == squeezed ONNX output) ----
+    auto add_store = std::make_shared<DML_ELEMENT_WISE_ADD_OPERATOR_DESC>();
+    SubNode add_node;
+    add_node.input_tensors  = { t_red, t_red };
+    add_node.output_tensors = { t_red };
+    add_node.input_buffer_descs  = { t_red.ToBufferDesc(), t_red.ToBufferDesc() };
+    add_node.input_tensor_descs.resize(2);
+    add_node.output_buffer_descs = { t_red.ToBufferDesc() };
+    add_node.output_tensor_descs.resize(1);
+    add_node.desc_storage = add_store;
+    add_node.op_desc = { DML_OPERATOR_ELEMENT_WISE_ADD, add_store.get() };
+    add_node.input_from = { {2, 0}, {0, 0} };  // A = l (sub2), B = m (sub0)
+    add_node.fixup = [add_store](SubNode& self) {
+        RebuildSubNodePointers(self);
+        add_store->ATensor      = &self.input_tensor_descs[0];
+        add_store->BTensor      = &self.input_tensor_descs[1];
+        add_store->OutputTensor = &self.output_tensor_descs[0];
+    };
+    add_node.FixupPointers();
+
+    result.sub_nodes = { std::move(max_node), std::move(sub_node), std::move(lse_node), std::move(add_node) };
+    return result;
+}
+
 // ArgMax / ArgMin share same descriptor layout: AxisCount/Axes array, not a single Axis.
 template <DML_OPERATOR_TYPE OpType, typename DescType>
 static std::optional<TranslatedOp> TranslateArgMaxMin(
@@ -10538,7 +10725,7 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["ReduceL1"]         = TranslateReduce<DML_REDUCE_FUNCTION_L1>;
     registry["ReduceL2"]         = TranslateReduce<DML_REDUCE_FUNCTION_L2>;
     registry["ReduceLogSum"]     = TranslateReduce<DML_REDUCE_FUNCTION_LOG_SUM>;
-    registry["ReduceLogSumExp"]  = TranslateReduce<DML_REDUCE_FUNCTION_LOG_SUM_EXP>;
+    registry["ReduceLogSumExp"]  = TranslateReduceLogSumExpStable;
     registry["ReduceSumSquare"]  = TranslateReduce<DML_REDUCE_FUNCTION_SUM_SQUARE>;
     registry["ArgMax"]    = TranslateArgMaxMin<DML_OPERATOR_ARGMAX, DML_ARGMAX_OPERATOR_DESC>;
     registry["ArgMin"]    = TranslateArgMaxMin<DML_OPERATOR_ARGMIN, DML_ARGMIN_OPERATOR_DESC>;
