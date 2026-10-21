@@ -177,6 +177,17 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     // env-gated, direct-to-stdout, greppable "[amdgpu-routing]" marker with key=value fields.
     const auto route_by_heuristic = [&]() -> Profile {
         const bool trace = ParseEnvironmentVariableWithDefault<bool>("ORT_AMDGPU_TRACE_ROUTING", false);
+        // WebNN always targets the DirectX/DML backend. Short-circuit before the HIP ASIC probe so the
+        // compiler-process / device-less path never initializes the HIP runtime: amdhip64 statically
+        // imports the win32k-locked user32/gdi32, which are unavailable under the Win32k-disable sandbox
+        // mitigation that the WebNN compiler process runs with. (Delay-loading HIP keeps the DLL off the
+        // load-time surface; skipping the call here keeps it off the run-time surface too.)
+        if (is_webnn(info.model_fw) && info.profile == Profile::Auto) {
+            if (trace) {
+                std::cout << "[amdgpu-routing] model_fw=webnn -> DirectX (skip HIP probe)" << std::endl;
+            }
+            return Profile::DirectX;
+        }
         hipDeviceProp_t prop{};
         if (hipGetDeviceProperties(&prop, info.device_id.value_or(0)) != hipSuccess) {
             if (trace) {

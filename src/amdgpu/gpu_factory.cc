@@ -170,6 +170,30 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
 
     size_t factories_created{};
 
+    // When the host registers this EP with a ".virtual" name, ORT sets env config
+    // allow_virtual_devices=1 and we are the WebNN Compiler process: Win32k-locked, GPU-less,
+    // DirectX/DML-only. Load ONLY the DirectML backend. The MIGraphX/HIP backends pull the HIP
+    // runtime (amdhip64 statically imports the win32k-locked user32/gdi32); their eager LoadLibrary
+    // would fail under the Win32k-disable mitigation and abort factory creation (which is exactly
+    // how the compiler-process registration failed before this guard). ORT sets the env config
+    // BEFORE calling CreateEpFactories (Environment::RegisterExecutionProviderLibrary), so it is
+    // readable here, in the factory constructor.
+    bool allow_virtual = false;
+    {
+        OrtKeyValuePairs* env_cfg = nullptr;
+        if (ep_api.GetEnvConfigEntries(&env_cfg) == nullptr && env_cfg != nullptr) {
+            Ort::ConstKeyValuePairs kv{env_cfg};
+            std::vector<const char*> keys, values;
+            kv.GetKeyValuePairs(keys, values);
+            for (size_t idx = 0; idx < keys.size(); ++idx) {
+                if (strcmp(keys[idx], kOrtEnvAllowVirtualDevices) == 0 && strcmp(values[idx], "1") == 0) {
+                    allow_virtual = true;
+                    break;
+                }
+            }
+        }
+    }
+
 #ifdef USE_DML
     THROW_IF_ERROR(LoadDynamicLibrary(directmlBackend, &dml_backend_));
     THROW_IF_ERROR(GetSymbolFromLibrary(dml_backend_,
@@ -229,25 +253,31 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     ::SetEnvironmentVariableA("MIGRAPHX_SHARE_LITERALS", "1");
 #endif
 
-    THROW_IF_ERROR(LoadDynamicLibrary(migraphxBackend, &mgx_backend_));
-    THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
-        "ReleaseEpFactory", reinterpret_cast<void**>(&mgx_release_ep_factory_)));
+    // Skip the MIGraphX backend on the virtual/compiler-process path: migraphx-backend.dll pulls the
+    // HIP runtime (amdhip64 statically imports the win32k-locked user32/gdi32), whose eager load fails
+    // under the Win32k-disable mitigation of the WebNN Compiler process. DirectML-only there.
+    if (!allow_virtual) {
+        THROW_IF_ERROR(LoadDynamicLibrary(migraphxBackend, &mgx_backend_));
+        THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
+            "ReleaseEpFactory", reinterpret_cast<void**>(&mgx_release_ep_factory_)));
 
-    CreateEpFactories_t mgx_create_ep_factories{};
-    THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
-        "CreateEpFactories", reinterpret_cast<void**>(&mgx_create_ep_factories)));
+        CreateEpFactories_t mgx_create_ep_factories{};
+        THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
+            "CreateEpFactories", reinterpret_cast<void**>(&mgx_create_ep_factories)));
 
-    // Optional: a backend may export a telemetry collector. Absence is fine.
-    if (!GetSymbolFromLibrary(mgx_backend_, telemetry::kGetBackendDataSymbol,
-            reinterpret_cast<void**>(&mgx_get_telemetry_)).IsOK()) {
-        mgx_get_telemetry_ = nullptr;
+        // Optional: a backend may export a telemetry collector. Absence is fine.
+        if (!GetSymbolFromLibrary(mgx_backend_, telemetry::kGetBackendDataSymbol,
+                reinterpret_cast<void**>(&mgx_get_telemetry_)).IsOK()) {
+            mgx_get_telemetry_ = nullptr;
+        }
+
+        THROW_IF_ERROR(mgx_create_ep_factories(kMIGraphXBackend, ort_api_base, default_logger,
+            &mgx_ep_factory_, 1, &factories_created));
     }
-
-    THROW_IF_ERROR(mgx_create_ep_factories(kMIGraphXBackend, ort_api_base, default_logger,
-        &mgx_ep_factory_, 1, &factories_created));
 
     // hip (morphizen) backend: optional, only present when built with USE_HIP.
 #ifdef USE_HIP
+    if (!allow_virtual) {
     THROW_IF_ERROR(LoadDynamicLibrary(hipBackend, &hip_backend_));
     THROW_IF_ERROR(GetSymbolFromLibrary(hip_backend_,
         "ReleaseEpFactory", reinterpret_cast<void**>(&hip_release_ep_factory_)));
@@ -259,6 +289,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     THROW_IF_ERROR(hip_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
         &hip_ep_factory_, 1, &factories_created));
     custom_op_backends_.push_back(hip_ep_factory_);
+    }  // if (!allow_virtual)
 #endif
 
     AddLiveFactory(this, ep_name_);
