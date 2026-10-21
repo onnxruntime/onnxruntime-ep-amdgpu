@@ -19,6 +19,7 @@
 #include "gpu_factory.h"
 
 #include "onnxruntime_ep_device_ep_metadata_keys.h"
+#include "onnxruntime_env_config_keys.h"  // kOrtEnvAllowVirtualDevices (Track-2 AOT virtual device)
 
 #define BACKEND_CALL_T(backend, fn, defval, ...)                       \
     do {                                                               \
@@ -358,6 +359,55 @@ Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHar
                 amd::VendorId, device_index, OrtDeviceMemoryType_HOST_ACCESSIBLE, 0, OrtDeviceAllocator, &pinned_memory_info_));
             RETURN_IF_ERROR(ep_api.EpDevice_AddAllocatorInfo(ep_device, pinned_memory_info_));
             ep_devices[num_ep_devices++] = ep_device.release();
+        }
+    }
+
+    // Virtual device (Track-2 AOT / Win32k-locked WebNN Compiler process). When the host
+    // opts into virtual devices (env config allow_virtual_devices=1, auto-set by a ".virtual"
+    // registration name), describe a driver-less virtual GPU from the host-supplied
+    // target_architecture (env key ep_factory.<ep_name>.target_architecture). The DX backend
+    // then compiles device-less (no D3D12/DML device). Mirrors NVIDIA's TRT-RTX EP. We register
+    // it IN ADDITION to any physical device so it is also selectable on a device-ful dev box.
+    if (num_ep_devices < ep_devices.size()) {
+        OrtKeyValuePairs* env_cfg = nullptr;
+        if (ep_api.GetEnvConfigEntries(&env_cfg) == nullptr && env_cfg != nullptr) {
+            bool allow_virtual = false;
+            std::string target_arch;
+            const std::string arch_key = "ep_factory." + ep_name_ + ".target_architecture";
+            {
+                Ort::ConstKeyValuePairs kv{env_cfg};
+                std::vector<const char*> keys, values;
+                kv.GetKeyValuePairs(keys, values);
+                for (size_t idx = 0; idx < keys.size(); ++idx) {
+                    if (strcmp(keys[idx], kOrtEnvAllowVirtualDevices) == 0 && strcmp(values[idx], "1") == 0)
+                        allow_virtual = true;
+                    else if (arch_key == keys[idx])
+                        target_arch = values[idx];
+                }
+            }
+            if (allow_virtual) {
+                OrtKeyValuePairs* md = nullptr;
+                ort_api.CreateKeyValuePairs(&md);
+                ort_api.AddKeyValuePair(md, kOrtHardwareDevice_MetadataKey_IsVirtual, "1");
+                if (!target_arch.empty()) ort_api.AddKeyValuePair(md, "target_architecture", target_arch.c_str());
+                if (virtual_device_) { ep_api.ReleaseHardwareDevice(virtual_device_); virtual_device_ = nullptr; }
+                if (ep_api.CreateHardwareDevice(OrtHardwareDeviceType_GPU, amd::VendorId, 0u, "AMD", md, &virtual_device_) == nullptr
+                        && virtual_device_ != nullptr) {
+                    OrtKeyValuePairs* ep_opts = nullptr;
+                    ort_api.CreateKeyValuePairs(&ep_opts);
+                    if (!target_arch.empty()) ort_api.AddKeyValuePair(ep_opts, "target_architecture", target_arch.c_str());
+                    RETURN_IF_ERROR(ort_api.CreateMemoryInfo_V2("default", OrtMemoryInfoDeviceType_GPU,
+                        amd::VendorId, 0, OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator, &gpu_memory_info_));
+                    OrtEpDevice* vep = nullptr;
+                    if (ep_api.CreateEpDevice(this, virtual_device_, nullptr, ep_opts, &vep) == nullptr && vep != nullptr) {
+                        ep_api.EpDevice_AddAllocatorInfo(vep, gpu_memory_info_);
+                        ep_devices[num_ep_devices++] = vep;
+                    }
+                    ort_api.ReleaseKeyValuePairs(ep_opts);
+                }
+                ort_api.ReleaseKeyValuePairs(md);
+            }
+            ort_api.ReleaseKeyValuePairs(env_cfg);
         }
     }
     return STATUS_OK;
