@@ -377,10 +377,13 @@ ExecutionProviderPlugin::~ExecutionProviderPlugin() {
     // SetEventOnCompletion can still throw. A throw escaping a destructor -> std::terminate (and
     // during stack unwinding it is unconditionally fatal), so swallow any exception here. The device
     // is already dead; there is nothing to recover, we only need teardown to complete cleanly.
-    try {
-        m_context->Close();
-    } catch (...) {
-        // Device removed / teardown failure — nothing actionable; let destruction finish.
+    // (m_context is null in compile-only / virtual-device mode — nothing to close.)
+    if (m_context) {
+        try {
+            m_context->Close();
+        } catch (...) {
+            // Device removed / teardown failure — nothing actionable; let destruction finish.
+        }
     }
 }
 
@@ -393,7 +396,8 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder,
     bool enableHostAccessible,
     bool enableGraphCapture,
-    bool enableEpContext)
+    bool enableEpContext,
+    bool compileOnly)
     : OrtEp{NegotiatedOrtApiVersion()}
     , ApiPtrs{api_ptrs}
     , name_{name}
@@ -401,6 +405,7 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     , m_dmlDevice{dml_device_}
     , m_context{executionContext}
     , m_epContextEnable{enableEpContext}
+    , m_compileOnly{compileOnly}
 {
     // Runtime (deferred, dynamic-shape) graph fusion opt-in, from ep.directml.enable_graph_capture.
     // Selects the ORT-style runtime fusion path (GetCapabilityImpl gates Phase-3 vs Phase-4 on
@@ -430,8 +435,10 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     }
 #endif
 
+    // compile-only / virtual device (AOT path): d3d12_device may be null. Skip the live
+    // feature query; the generate path does not need the real hardware capabilities.
     D3D12_FEATURE_DATA_D3D12_OPTIONS4 featureOptions = {};
-    if (SUCCEEDED(d3d12_device->CheckFeatureSupport(
+    if (d3d12_device && SUCCEEDED(d3d12_device->CheckFeatureSupport(
         D3D12_FEATURE_D3D12_OPTIONS4,
         &featureOptions,
         sizeof(featureOptions))))
@@ -2052,12 +2059,11 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
                     // EPContext generate: when ep.context_enable=1, capture the serialized DML graph so we
                     // can emit an EPContext node that reloads without recompiling (WebNN no-recompile path).
                     std::string serialized_graph;
-                    // POC (Track-2 AOT): AMDGPU_DX_COMPILE_ONLY=1 forces the device-less
+                    // Track-2 AOT: ep.directml.compile_only (m_compileOnly) forces the device-less
                     // serialize-only path — build + serialize the DML graph IR, skip the
                     // device-bound CreateOperator/CompileGraph. Only meaningful with
                     // ep.context_enable (the blob is the product). Returns a stub kernel.
-                    const bool compile_only =
-                        ep->m_epContextEnable && (std::getenv("AMDGPU_DX_COMPILE_ONLY") != nullptr);
+                    const bool compile_only = ep->m_epContextEnable && ep->m_compileOnly;
                     node_compute_infos[i] = FullGraphFusion::Compile(
                         ep->ort_api,
                         graphs[i],
@@ -2406,6 +2412,16 @@ bool ExecutionProviderPlugin::IsGpuAllocator(const OrtMemoryInfo* memory_info)
 }
 
 uint32_t ExecutionProviderPlugin::GetSupportedDeviceDataTypeMask() const {
+    // compile-only / virtual device (AOT path): no live IDMLDevice to query. Serve a
+    // static capability mask (A3). For the POC this is permissive — all real DML tensor
+    // data types (bits 1..INT4) — so GetCapability can claim nodes; any over-claim is
+    // caught at consume-time CompileGraph on the real device. TODO: key this off the
+    // host-supplied target_architecture (GPU family / feature level).
+    if (!m_dmlDevice) {
+        uint32_t mask = 0;
+        for (uint32_t i = 1; i <= DML_TENSOR_DATA_TYPE_INT4; ++i) mask |= (1u << i);
+        return mask;
+    }
     return dml_ep::GetSupportedDeviceDataTypeMask(m_dmlDevice.Get());
 }
 
@@ -3040,7 +3056,7 @@ bool ExecutionProviderPlugin::IsSmallInitializer(const OrtGraph* graph, const Or
 void ExecutionProviderPlugin::Flush() const
 {
     assert(!m_closed);
-    m_context->Flush();
+    if (m_context) m_context->Flush();  // null in compile-only / virtual-device mode
 }
 
 std::shared_ptr<PluginDmlExecutionProviderImpl> ExecutionProviderPlugin::GetInternalExecutionProvider() {
