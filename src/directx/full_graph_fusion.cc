@@ -1713,8 +1713,11 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     const std::unordered_map<std::string, const OrtValue*>&  initializers,
     PluginDmlExecutionProviderImpl*                          provider,
     const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes,
-    std::string*                                            out_serialized_graph)
+    std::string*                                            out_serialized_graph,
+    bool                                                    compile_only)
 {
+    // compile_only requires a serialized-graph sink (the blob is the only product).
+    if (compile_only && out_serialized_graph == nullptr) return nullptr;
     // -----------------------------------------------------------------------
     // Step 1–3: Enumerate subgraph I/O, merge initializers, pre-seed shapes.
     // -----------------------------------------------------------------------
@@ -1993,31 +1996,37 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     // Step 6: Create IDMLOperator for each compiled node.
     // -----------------------------------------------------------------------
 
+    // compile_only (AOT): do NOT touch the device. Skip GetDmlDevice + CreateOperator;
+    // the assembly below only reads translator op_descs + edge indices, and the one
+    // device deref (op_node_descs .Get()) yields harmless nulls since CompileGraph is
+    // also skipped. dml_device/dml_device1 stay null and are unused on this path.
     ComPtr<IDMLDevice> dml_device;
-    if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf()))) return nullptr;
     ComPtr<IDMLDevice1> dml_device1;
-    if (FAILED(dml_device.As(&dml_device1))) return nullptr;
+    if (!compile_only) {
+        if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf()))) return nullptr;
+        if (FAILED(dml_device.As(&dml_device1))) return nullptr;
 
-    for (size_t i = 0; i < compiled_nodes.size(); ++i) {
-        if (!node_is_live[i]) continue;
-        auto& compiled_node = compiled_nodes[i];
-        HRESULT hr = dml_device->CreateOperator(
-            &compiled_node.translated->op_desc, IID_PPV_ARGS(compiled_node.translated->dml_operator.GetAddressOf()));
-        if (FAILED(hr)) {
-            DML_PERF_LOG("[Compile] FAIL: CreateOperator HR=", Hex(static_cast<uint32_t>(hr)),
-                " op=", compiled_node.op_type, "\n");
-            return nullptr;
-        }
-        DML_PERF_LOG("[Compile] CreateOperator OK: op=", compiled_node.op_type, "\n");
-
-        for (size_t s = 0; s < compiled_node.translated->sub_nodes.size(); ++s) {
-            auto& sn = compiled_node.translated->sub_nodes[s];
-            hr = dml_device->CreateOperator(
-                &sn.op_desc, IID_PPV_ARGS(sn.dml_operator.GetAddressOf()));
+        for (size_t i = 0; i < compiled_nodes.size(); ++i) {
+            if (!node_is_live[i]) continue;
+            auto& compiled_node = compiled_nodes[i];
+            HRESULT hr = dml_device->CreateOperator(
+                &compiled_node.translated->op_desc, IID_PPV_ARGS(compiled_node.translated->dml_operator.GetAddressOf()));
             if (FAILED(hr)) {
-                DML_PERF_LOG("[Compile] FAIL: CreateOperator sub_node[", s, "] HR=",
-                    Hex(static_cast<uint32_t>(hr)), " op=", compiled_node.op_type, "\n");
+                DML_PERF_LOG("[Compile] FAIL: CreateOperator HR=", Hex(static_cast<uint32_t>(hr)),
+                    " op=", compiled_node.op_type, "\n");
                 return nullptr;
+            }
+            DML_PERF_LOG("[Compile] CreateOperator OK: op=", compiled_node.op_type, "\n");
+
+            for (size_t s = 0; s < compiled_node.translated->sub_nodes.size(); ++s) {
+                auto& sn = compiled_node.translated->sub_nodes[s];
+                hr = dml_device->CreateOperator(
+                    &sn.op_desc, IID_PPV_ARGS(sn.dml_operator.GetAddressOf()));
+                if (FAILED(hr)) {
+                    DML_PERF_LOG("[Compile] FAIL: CreateOperator sub_node[", s, "] HR=",
+                        Hex(static_cast<uint32_t>(hr)), " op=", compiled_node.op_type, "\n");
+                    return nullptr;
+                }
             }
         }
     }
@@ -2437,6 +2446,21 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         } catch (...) {
             out_serialized_graph->clear();
         }
+    }
+
+    // compile_only (AOT / compiler-process): the serialized blob is the only product.
+    // Skip all device-bound work below (CompileGraph, binding props, init upload, Flush)
+    // and return a stub compute-info so the caller emits the EPContext node. Compute is
+    // never run on this path — the blob is dispatched by a separate device-ful session.
+    if (compile_only) {
+        if (out_serialized_graph->empty()) return nullptr;  // serialize failed -> skip node
+        auto* info = new FullGraphNodeComputeInfo();
+        info->state = nullptr;  // no runtime kernel in compile-only
+        info->Compute = [](OrtNodeComputeInfo*, void*, OrtKernelContext*) noexcept -> OrtStatus* {
+            return OrtGetApiBase()->GetApi(ORT_API_VERSION)->CreateStatus(ORT_EP_FAIL,
+                "compile-only (AOT) EP: Compute is unavailable; dispatch the EPContext blob in a device-ful session");
+        };
+        return info;
     }
 
     ComPtr<IDMLCompiledOperator> compiled_op;

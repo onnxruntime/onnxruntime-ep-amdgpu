@@ -2052,13 +2052,20 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
                     // EPContext generate: when ep.context_enable=1, capture the serialized DML graph so we
                     // can emit an EPContext node that reloads without recompiling (WebNN no-recompile path).
                     std::string serialized_graph;
+                    // POC (Track-2 AOT): AMDGPU_DX_COMPILE_ONLY=1 forces the device-less
+                    // serialize-only path — build + serialize the DML graph IR, skip the
+                    // device-bound CreateOperator/CompileGraph. Only meaningful with
+                    // ep.context_enable (the blob is the product). Returns a stub kernel.
+                    const bool compile_only =
+                        ep->m_epContextEnable && (std::getenv("AMDGPU_DX_COMPILE_ONLY") != nullptr);
                     node_compute_infos[i] = FullGraphFusion::Compile(
                         ep->ort_api,
                         graphs[i],
                         ep->m_graphInitializerMap,
                         ep->m_executionProvider.get(),
                         ep->m_resolvedShapes,
-                        ep->m_epContextEnable ? &serialized_graph : nullptr);
+                        ep->m_epContextEnable ? &serialized_graph : nullptr,
+                        compile_only);
                     if (node_compute_infos[i]) {
                         DML_PERF_LOG("[CompileImpl] Tier0 compile: SUCCESS\n");
                         if (ep->m_epContextEnable) {
