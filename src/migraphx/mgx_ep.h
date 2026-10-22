@@ -492,6 +492,8 @@ struct EpContextComputeState {
     migraphx::program program;
     Map<size_t> input_name_indices;
     Map<size_t> output_name_indices;
+    // #output_N -> ORT fused-node GetOutput index.  Empty means identity (N -> N).
+    std::vector<std::size_t> mgx_output_to_ort{};
 };
 
 struct ExecutionProvider : OrtEp, ApiPtrs {

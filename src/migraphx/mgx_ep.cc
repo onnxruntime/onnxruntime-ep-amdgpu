@@ -578,6 +578,28 @@ void PopulateDirectCaches(DirectBindCache& dbc,
     }
 }
 
+// mgx_output_names lists the program outputs in #output_N order.  An identity result
+// is returned empty so OrtIndexForMgxOutput stays on its fast path.
+Ort::Status BuildMgxOutputToOrt(const std::vector<std::string>& mgx_output_names,
+    const Map<std::size_t>& output_name_indices, std::vector<std::size_t>& mgx_to_ort)
+{
+    mgx_to_ort.assign(mgx_output_names.size(), 0);
+    bool identity{true};
+    for (std::size_t i{0}; i < mgx_output_names.size(); ++i) {
+        const auto it{output_name_indices.find(mgx_output_names[i])};
+        if (it == output_name_indices.end()) {
+            return Ort::Status{MakeString("MIGraphX output has no ORT fused-node slot: ",
+                mgx_output_names[i]).c_str(), ORT_EP_FAIL};
+        }
+        mgx_to_ort[i] = it->second;
+        identity = identity && it->second == i;
+    }
+    if (identity) {
+        mgx_to_ort.clear();
+    }
+    return STATUS_OK;
+}
+
 }  // namespace
 
 #define PARSE_ENV_VAR(__name__, __value__)                                               \
@@ -1559,6 +1581,9 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromCache(const Ort::ConstGr
             throw std::runtime_error{
                 "EPContext contains a non-standard MIGraphX output; regenerate it"};
         }
+        std::vector<std::size_t> mgx_output_to_ort;
+        RETURN_IF_ERROR(BuildMgxOutputToOrt(ep_ctx_reader.OutputNames(), output_name_indices,
+            mgx_output_to_ort));
 
         ep_context_compute_states_.emplace(name,
             EpContextComputeState{
@@ -1568,6 +1593,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromCache(const Ort::ConstGr
                 std::move(program),
                 input_name_indices,
                 output_name_indices,
+                std::move(mgx_output_to_ort),
             });
     } catch (const std::exception& e) {
         return Ort::Status{e.what(), ORT_INVALID_GRAPH};
@@ -2693,7 +2719,9 @@ try {
                     auto output_shape{output_shapes[output_index]};
                     const auto lengths{output_shape.lengths()};
                     std::vector<int64_t> tensor_shape{lengths.begin(), lengths.end()};
-                    auto output_tensor{kernel_context.GetOutput(output_index, tensor_shape.data(), tensor_shape.size())};
+                    auto output_tensor{kernel_context.GetOutput(
+                        OrtIndexForMgxOutput(compute_state.mgx_output_to_ort, output_index),
+                        tensor_shape.data(), tensor_shape.size())};
                     void* output_data{output_tensor.GetTensorMutableRawData()};
                     auto argument_shape{param_shapes[name.c_str()]};
                     compute_params.add(name.c_str(), migraphx::argument{argument_shape, output_data});
@@ -2719,7 +2747,8 @@ try {
                 migraphx::shape resource_shape{gpu_resource.get_shape()};
                 auto resource_lengths{resource_shape.lengths()};
                 std::vector<int64_t> shapes{resource_lengths.begin(), resource_lengths.end()};
-                auto output_tensor{kernel_context.GetOutput(i, shapes)};
+                auto output_tensor{kernel_context.GetOutput(
+                    OrtIndexForMgxOutput(compute_state.mgx_output_to_ort, i), shapes)};
                 void* output_data{output_tensor.GetTensorMutableRawData()};
                 HIP_CALL_THROW(hipMemcpyWithStream(output_data, gpu_resource.data(), resource_shape.bytes(),
                     hipMemcpyDeviceToDevice, hip_stream));
