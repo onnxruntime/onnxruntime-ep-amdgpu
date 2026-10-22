@@ -105,7 +105,8 @@ struct CapturedHipGraph {
     // MIGraphX outputs not bound to a pre-allocated buffer; their device data
     // is stable across replays and is copied out after each launch.
     struct ExtraOutput {
-        std::size_t output_index{};
+        std::size_t output_index{};          // MIGraphX #output_N index
+        std::size_t ort_index{};             // ORT GetOutput slot
         std::vector<std::int64_t> ort_shape{};
         void* gpu_data{nullptr};
         std::size_t bytes{};
@@ -171,7 +172,8 @@ struct CachedDirectInput {
 
 struct CachedDirectOutput {
     std::string name;                    // MIGraphX "#output_N" parameter name
-    std::size_t output_index{};          // ORT output index
+    std::size_t output_index{};          // MIGraphX #output_N index
+    std::size_t ort_index{};             // ORT GetOutput slot
     migraphx::shape mgx_shape{};         // program-side shape to bind with
     std::vector<std::int64_t> ort_shape; // ORT output shape (== program shape; no padding)
 };
@@ -198,7 +200,7 @@ struct DirectBindCache {
     // parameter names for a "scratch" entry on every call.
     bool has_scratch{false};
     migraphx::shape scratch_shape{};
-    // ORT output indices in `outputs` order; constant per shape, built once.
+    // MIGraphX #output_N indices in `outputs` order; constant per shape, built once.
     std::vector<std::size_t> prog_output_indices{};
     // Current device pointers gathered each call (inputs/outputs order).  Reused
     // across calls so the hot path does no per-call heap allocation.  For the pure
@@ -223,7 +225,9 @@ struct DirectBindCache {
 // built once can be replayed unchanged instead of rebuilt every Compute call.
 struct StagingBindResult {
     migraphx::program_parameters params{};
-    std::vector<std::size_t> prog_output_indices{};       // ORT output index per bound output
+    std::vector<std::size_t> prog_output_indices{};       // MIGraphX #output_N index per bound output
+    std::vector<std::size_t> bound_output_ort_index{};    // ORT GetOutput slot per bound output
+    std::vector<int> bound_output_seq_axis{};             // static-pad token axis per bound output, -1 if none
     std::vector<std::string> bound_output_names{};        // staging key per bound output
     std::vector<migraphx::shape> bound_output_shapes{};   // current bucket shape per bound output
     std::vector<std::vector<std::int64_t>> bound_output_ort_shapes{};  // bucket ORT shape (int64) per bound output

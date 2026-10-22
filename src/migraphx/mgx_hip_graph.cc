@@ -94,8 +94,7 @@ std::size_t InferCompiledBatchFromParams(const migraphx::program_parameter_shape
 // Their device pointers are stable across replays because the graph replays the
 // same kernels into the same MIGraphX-managed memory.
 void MaterializeExtraOutputs(const Ort::KernelContext& ctx, hipStream_t stream,
-    const std::vector<CapturedHipGraph::ExtraOutput>& extras, const DynamicBatchContext& dyn,
-    const std::vector<std::size_t>& mgx_to_ort)
+    const std::vector<CapturedHipGraph::ExtraOutput>& extras, const DynamicBatchContext& dyn)
 {
     // Report the cached (bind-time) shape directly in the common no-slice case; only a
     // batched extra output needs a shrunk shape, built on a per-thread reusable buffer so
@@ -117,8 +116,7 @@ void MaterializeExtraOutputs(const Ort::KernelContext& ctx, hipStream_t stream,
             report_shape = &sliced_shape;
         }
 
-        auto output_tensor{ctx.GetOutput(OrtIndexForMgxOutput(mgx_to_ort, extra.output_index),
-            report_shape->data(), report_shape->size())};
+        auto output_tensor{ctx.GetOutput(extra.ort_index, report_shape->data(), report_shape->size())};
         void* dst{output_tensor.GetTensorMutableRawData()};
         if (bytes > 0) {
             // Stream-ordered async D2D, matching CopyStagingOutputsToOrt on this same
@@ -419,8 +417,8 @@ bool WarmupAndCaptureHipGraphCommon(ComputeState& cs, hipStream_t stream,
                 const auto res_lens{res_shape.lengths()};
                 std::vector<std::int64_t> ort_shape{res_lens.begin(), res_lens.end()};
                 entry.extra_outputs.push_back(
-                    CapturedHipGraph::ExtraOutput{i, std::move(ort_shape),
-                        gpu_res.data(), res_shape.bytes()});
+                    CapturedHipGraph::ExtraOutput{i, OrtIndexForMgxOutput(cs.mgx_output_to_ort, i),
+                        std::move(ort_shape), gpu_res.data(), res_shape.bytes()});
             }
         }
         return true;
@@ -1170,9 +1168,18 @@ StagingBindResult BindStagingParams(ComputeState& cs,
             if (stage_it == cs.staging_outputs.end()) {
                 continue;
             }
+            const auto mgx_index{static_cast<std::size_t>(oi)};
+            const auto ort_index{OrtIndexForMgxOutput(cs.mgx_output_to_ort, mgx_index)};
+            int seq_axis{-1};
+            if (const auto axis_it{cs.static_pad_output_axes_by_index.find(ort_index)};
+                axis_it != cs.static_pad_output_axes_by_index.end()) {
+                seq_axis = axis_it->second;
+            }
             const auto out_shape{param_shapes[name]};
             result.params.add(name, migraphx::argument{out_shape, stage_it->second.data});
-            result.prog_output_indices.push_back(static_cast<std::size_t>(oi));
+            result.prog_output_indices.push_back(mgx_index);
+            result.bound_output_ort_index.push_back(ort_index);
+            result.bound_output_seq_axis.push_back(seq_axis);
             result.bound_output_names.push_back(param_name);
             result.bound_output_shapes.push_back(out_shape);
             // Cache the staging source pointer so the per-call output copy needs no
@@ -1190,9 +1197,9 @@ StagingBindResult BindStagingParams(ComputeState& cs,
             // Precompute the total byte count so the per-call copy skips shape.bytes().
             result.bound_output_bytes.push_back(out_shape.bytes());
             result.hybrid.outputs.push_back(CachedDirectOutput{
-                param_name, static_cast<std::size_t>(oi), out_shape,
+                param_name, mgx_index, ort_index, out_shape,
                 std::vector<std::int64_t>{out_lens.begin(), out_lens.end()}});
-            result.hybrid.prog_output_indices.push_back(static_cast<std::size_t>(oi));
+            result.hybrid.prog_output_indices.push_back(mgx_index);
         } else {
             result.hybrid.eligible = false;  // unbound/literal param -> no direct bind
         }
@@ -1206,17 +1213,17 @@ StagingBindResult BindStagingParams(ComputeState& cs,
 void CopyStagingOutputsToOrt(const StagingBindResult& bind,
     const Ort::KernelContext& ctx, hipStream_t stream,
     const DynamicBatchContext& dyn,
-    const StaticSeqContext& seq,
-    const std::vector<std::size_t>& mgx_to_ort)
+    const StaticSeqContext& seq)
 {
     for (std::size_t i{}; i < bind.prog_output_indices.size() &&
+        i < bind.bound_output_ort_index.size() &&
+        i < bind.bound_output_seq_axis.size() &&
         i < bind.bound_output_shapes.size() &&
         i < bind.bound_output_ort_shapes.size() &&
         i < bind.bound_output_bytes.size() &&
         i < bind.bound_output_data.size(); ++i)
     {
-        const auto oi{bind.prog_output_indices[i]};
-        const auto ort_i{OrtIndexForMgxOutput(mgx_to_ort, oi)};
+        const auto ort_i{bind.bound_output_ort_index[i]};
         // Staging source pointer resolved once at bind time (no map lookup here).
         void* const src{bind.bound_output_data[i]};
         // Bucket shapes were precomputed at bind time; reuse the cached ORT (int64)
@@ -1236,14 +1243,11 @@ void CopyStagingOutputsToOrt(const StagingBindResult& bind,
         // Slice a named seq output (e.g. logits) back to real_len on its token axis.
         // Excludes batch-slicing: element_size below uses the un-shrunk `bytes`.
         int seq_axis{-1};
-        if (seq.active && seq.output_axes_by_index != nullptr && seq.target_len > seq.real_len &&
-            !batch_sliced) {
-            if (const auto it{seq.output_axes_by_index->find(ort_i)}; it != seq.output_axes_by_index->end()) {
-                const int axis{it->second};
-                if (axis >= 0 && static_cast<std::size_t>(axis) < cached_ort_shape.size() &&
-                    static_cast<std::size_t>(cached_ort_shape[axis]) == seq.target_len) {
-                    seq_axis = axis;
-                }
+        if (seq.active && seq.target_len > seq.real_len && !batch_sliced) {
+            const int axis{bind.bound_output_seq_axis[i]};
+            if (axis >= 0 && static_cast<std::size_t>(axis) < cached_ort_shape.size() &&
+                static_cast<std::size_t>(cached_ort_shape[axis]) == seq.target_len) {
+                seq_axis = axis;
             }
         }
 
@@ -1445,7 +1449,7 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
             ResetCapturedGraph(*entry);
         } else {
             ReplayHipGraph(stream, *entry, bind.scratch_slot);
-            MaterializeExtraOutputs(ctx, stream, entry->extra_outputs, dyn, cs.mgx_output_to_ort);
+            MaterializeExtraOutputs(ctx, stream, entry->extra_outputs, dyn);
             return;
         }
     }
@@ -1457,7 +1461,7 @@ void RunProgramOrHipGraph(ComputeState& cs, hipStream_t stream,
     // Capture created (or reused) the entry node; (re)cache the pointer so the next
     // call replays without a lookup.
     bind.graph = &cs.hip_graph_cache[shape_key];
-    MaterializeExtraOutputs(ctx, stream, bind.graph->extra_outputs, dyn, cs.mgx_output_to_ort);
+    MaterializeExtraOutputs(ctx, stream, bind.graph->extra_outputs, dyn);
 }
 
 void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
@@ -1533,7 +1537,7 @@ void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
                 }
             }
             HIP_CALL_THROW(hipGraphLaunch(entry->exec, stream));
-            MaterializeExtraOutputs(ctx, stream, entry->extra_outputs, dyn, cs.mgx_output_to_ort);
+            MaterializeExtraOutputs(ctx, stream, entry->extra_outputs, dyn);
             return;
         }
     }
@@ -1546,7 +1550,7 @@ void RunProgramOrHipGraphDirect(ComputeState& cs, hipStream_t stream,
         eager_run_with_extras();
         return;
     }
-    MaterializeExtraOutputs(ctx, stream, dbc.graph->extra_outputs, dyn, cs.mgx_output_to_ort);
+    MaterializeExtraOutputs(ctx, stream, dbc.graph->extra_outputs, dyn);
 }
 
 }  // namespace mgx_ep

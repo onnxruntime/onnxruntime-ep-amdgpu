@@ -549,7 +549,8 @@ void* GetGpuInputData(ComputeState& cs, const Ort::KernelContext& ctx, const std
 // construction, mirroring the built-in EP's populate-once design.
 void PopulateDirectCaches(DirectBindCache& dbc,
     const migraphx::program_parameter_shapes& param_shapes,
-    const Map<std::size_t>& input_name_indices)
+    const Map<std::size_t>& input_name_indices,
+    const std::vector<std::size_t>& mgx_to_ort)
 {
     dbc.inputs.clear();
     dbc.outputs.clear();
@@ -567,11 +568,12 @@ void PopulateDirectCaches(DirectBindCache& dbc,
             dbc.has_scratch = true;
             dbc.scratch_shape = param_shapes[name.c_str()];
         } else if (const auto oi{ComputeOutputIndex(name)}; oi != -1) {
+            const auto mgx_index{static_cast<std::size_t>(oi)};
             const auto prog_shape{param_shapes[name.c_str()]};
             const auto lens{prog_shape.lengths()};
             std::vector<std::int64_t> ort_shape{lens.begin(), lens.end()};
-            dbc.outputs.push_back(CachedDirectOutput{
-                std::move(name), static_cast<std::size_t>(oi), prog_shape, std::move(ort_shape)});
+            dbc.outputs.push_back(CachedDirectOutput{std::move(name), mgx_index,
+                OrtIndexForMgxOutput(mgx_to_ort, mgx_index), prog_shape, std::move(ort_shape)});
         }
     }
 }
@@ -1763,7 +1765,6 @@ StaticSeqContext ResolveSeqPadding(ComputeState& compute_state,
                 seq.real_len = extent;
                 seq.target_len = target;
                 seq.input_axes = &compute_state.static_pad_input_axes;
-                seq.output_axes_by_index = &compute_state.static_pad_output_axes_by_index;
                 break;  // all named inputs share the same token length this call
             }
         }
@@ -2279,8 +2280,9 @@ std::optional<Ort::Status> TryDirectBind(ComputeState& compute_state,
         auto dbc_it{compute_state.direct_bind_cache.find(shape_key)};
         if (dbc_it == compute_state.direct_bind_cache.end()) {
             DirectBindCache dbc;
-            PopulateDirectCaches(dbc, param_shapes, input_name_indices);
-            // ORT output indices are constant per shape -- build once here.
+            PopulateDirectCaches(dbc, param_shapes, input_name_indices,
+                compute_state.mgx_output_to_ort);
+            // MIGraphX #output_N indices are constant per shape -- build once here.
             dbc.prog_output_indices.reserve(dbc.outputs.size());
             for (const auto& out : dbc.outputs) {
                 dbc.prog_output_indices.push_back(out.output_index);
@@ -2308,8 +2310,7 @@ std::optional<Ort::Status> TryDirectBind(ComputeState& compute_state,
         dbc.cur_output_ptrs.resize(dbc.outputs.size());
         for (std::size_t i{0}; i < dbc.outputs.size(); ++i) {
             const auto& out{dbc.outputs[i]};
-            auto output_tensor{kernel_context.GetOutput(
-                OrtIndexForMgxOutput(compute_state.mgx_output_to_ort, out.output_index),
+            auto output_tensor{kernel_context.GetOutput(out.ort_index,
                 out.ort_shape.data(), out.ort_shape.size())};
             dbc.cur_output_ptrs[i] = output_tensor.GetTensorMutableRawData();
         }
@@ -2380,8 +2381,7 @@ std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
                     hip::ArmOutputAlloc(stage_it->second.data, stage_it->second.size_bytes);
                 }
                 OutputHintGuard hint_guard;
-                auto output_tensor{kernel_context.GetOutput(
-                    OrtIndexForMgxOutput(compute_state.mgx_output_to_ort, out.output_index),
+                auto output_tensor{kernel_context.GetOutput(out.ort_index,
                     out.ort_shape.data(), out.ort_shape.size())};
                 hyb.cur_output_ptrs[i] = output_tensor.GetTensorMutableRawData();
             }
@@ -2393,8 +2393,7 @@ std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
         } else {
         RunProgramOrHipGraph(compute_state, hip_stream, kernel_context, program,
                 bind, shape_key, dyn);
-            CopyStagingOutputsToOrt(bind, kernel_context, hip_stream, dyn, seq,
-                compute_state.mgx_output_to_ort);
+            CopyStagingOutputsToOrt(bind, kernel_context, hip_stream, dyn, seq);
         }
         return STATUS_OK;
     }

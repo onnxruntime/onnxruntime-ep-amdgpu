@@ -38,8 +38,8 @@ struct StaticSeqContext {
     std::size_t real_len{0};    // actual prefill token count this call
     std::size_t target_len{0};  // padded token-axis length (== static_pad_seq_len)
     const Map<int>* input_axes{nullptr};   // input param name -> token axis
-    // Outputs matched by ORT output index (program params are "#output_N", not ONNX names).
-    const std::unordered_map<std::size_t, int>* output_axes_by_index{nullptr};
+    // Output token axes are resolved per bound output at bind time
+    // (StagingBindResult::bound_output_seq_axis).
 };
 
 // Parse the output index from a MIGraphX output parameter name ("#output_0").
@@ -148,8 +148,7 @@ StagingBindResult BindStagingParams(ComputeState& cs,
 void CopyStagingOutputsToOrt(const StagingBindResult& bind,
     const Ort::KernelContext& ctx, hipStream_t stream,
     const DynamicBatchContext& dyn,
-    const StaticSeqContext& seq,
-    const std::vector<std::size_t>& mgx_to_ort);
+    const StaticSeqContext& seq);
 
 // Free all staging buffers and reset the allocation flag (used when the program
 // is recompiled for a new shape so buffers are re-sized on next use).  Buffers are
