@@ -97,7 +97,11 @@ void OrtValueInfoAdapter::CacheTypeInfo() const {
             }
         }
     } else {
-        // Internal plugin path: direct field/virtual access is safe within the same DLL.
+        // TODO(abi-safety): internal-layout fallback, reached only when the adapter is
+        // constructed WITHOUT an OrtApi (the InitializeFromPlugin / OrtNodePlugin path,
+        // which has no C-API handle to route through). The C-API branch above is the
+        // preferred path; this remains solely for the plugin-path constructor. Safe only
+        // because the plugin owns the object's layout. See feedback_abi_safe_only.
         onnx_type_ = type_info_->type;
         if (onnx_type_ == ONNX_TYPE_TENSOR && type_info_->tensor_type_info) {
             tensor_elem_type_ = type_info_->tensor_type_info->GetElementType();
@@ -223,6 +227,31 @@ OrtNodeAdapter::OrtNodeAdapter(const OrtNode* node, const OrtApi& ort_api)
 {
     if (!node) {
         throw std::invalid_argument("OrtNode cannot be nullptr");
+    }
+    InitializeFromCApi(node, ort_api);
+}
+
+OrtNodeAdapter::OrtNodeAdapter(const NodeView& view, const OrtApi& ort_api)
+    : id_(0), since_version_(0), parent_graph_(nullptr),
+      api_(&ort_api)
+{
+    if (view.is_snapshot()) {
+        // Runtime-fusion path: back attribute access with the owned snapshot.
+        // We copy identity fields for completeness/diagnostics; GetAttribute*
+        // reads directly from snapshot_->attr_protos (see below). No inputs_/
+        // outputs_ are built — translators read names via the free funnels.
+        snapshot_ = view.snapshot();
+        id_            = snapshot_->id;
+        name_          = snapshot_->name;
+        op_type_       = snapshot_->op_type;
+        domain_        = snapshot_->domain;
+        since_version_ = snapshot_->since_version;
+        return;
+    }
+    // Live path: identical to the (const OrtNode*, const OrtApi&) ctor.
+    const OrtNode* node = view.live_node();
+    if (!node) {
+        throw std::invalid_argument("NodeView has neither a live node nor a snapshot");
     }
     InitializeFromCApi(node, ort_api);
 }
@@ -395,31 +424,68 @@ const OrtOpAttrAdapter* OrtNodeAdapter::GetAttribute(const char* name) const {
     return it != attribute_map_.end() ? attributes_[it->second].get() : nullptr;
 }
 
+// Snapshot-path helper: fetch the owned AttributeProto for `name`, or nullptr.
+const ONNX_NAMESPACE::AttributeProto* OrtNodeAdapter::SnapshotAttrProto(const char* name) const {
+    if (!snapshot_ || !name) return nullptr;
+    auto it = snapshot_->attr_protos.find(name);
+    return (it != snapshot_->attr_protos.end()) ? it->second.get() : nullptr;
+}
+
 float OrtNodeAdapter::GetAttributeFloat(const char* name, float default_value) const {
+    if (snapshot_) {
+        const auto* p = SnapshotAttrProto(name);
+        return (p && p->type() == ONNX_NAMESPACE::AttributeProto::FLOAT) ? p->f() : default_value;
+    }
     const OrtOpAttrAdapter* attr = GetAttribute(name);
   if (!attr) return default_value;
     try { return attr->GetFloat(); } catch (...) { return default_value; }
 }
 
 int64_t OrtNodeAdapter::GetAttributeInt(const char* name, int64_t default_value) const {
+    if (snapshot_) {
+        const auto* p = SnapshotAttrProto(name);
+        return (p && p->type() == ONNX_NAMESPACE::AttributeProto::INT) ? p->i() : default_value;
+    }
     const OrtOpAttrAdapter* attr = GetAttribute(name);
     if (!attr) return default_value;
     try { return attr->GetInt(); } catch (...) { return default_value; }
 }
 
 const char* OrtNodeAdapter::GetAttributeString(const char* name, const char* default_value) const {
+    if (snapshot_) {
+        const auto* p = SnapshotAttrProto(name);
+        return (p && p->type() == ONNX_NAMESPACE::AttributeProto::STRING) ? p->s().c_str() : default_value;
+    }
     const OrtOpAttrAdapter* attr = GetAttribute(name);
     if (!attr) return default_value;
     try { return attr->GetString(); } catch (...) { return default_value; }
 }
 
 std::vector<float> OrtNodeAdapter::GetAttributeFloats(const char* name) const {
+    if (snapshot_) {
+        const auto* p = SnapshotAttrProto(name);
+        std::vector<float> r;
+        if (p && p->type() == ONNX_NAMESPACE::AttributeProto::FLOATS) {
+            r.reserve(p->floats_size());
+            for (int i = 0; i < p->floats_size(); ++i) r.push_back(p->floats(i));
+        }
+        return r;
+    }
     const OrtOpAttrAdapter* attr = GetAttribute(name);
     if (!attr) return {};
     try { return attr->GetFloats(); } catch (...) { return {}; }
 }
 
 std::vector<int64_t> OrtNodeAdapter::GetAttributeInts(const char* name) const {
+    if (snapshot_) {
+        const auto* p = SnapshotAttrProto(name);
+        std::vector<int64_t> r;
+        if (p && p->type() == ONNX_NAMESPACE::AttributeProto::INTS) {
+            r.reserve(p->ints_size());
+            for (int i = 0; i < p->ints_size(); ++i) r.push_back(p->ints(i));
+        }
+        return r;
+    }
     const OrtOpAttrAdapter* attr = GetAttribute(name);
     if (!attr) return {};
     try { return attr->GetInts(); } catch (...) { return {}; }

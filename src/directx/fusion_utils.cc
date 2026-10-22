@@ -74,6 +74,37 @@ std::vector<std::string> GetNodeOutputNames(const OrtApi& api, const OrtNode* no
     return names;
 }
 
+ValueInfoShape GetValueInfoShape(const OrtApi& api, const OrtValueInfo* vi) {
+    ValueInfoShape out;
+    if (!vi) return out;
+
+    const OrtTypeInfo* ti = nullptr;
+    OrtStatus* st = api.GetValueInfoTypeInfo(vi, &ti);
+    if (st) { api.ReleaseStatus(st); return out; }
+    if (!ti) return out;
+
+    const OrtTensorTypeAndShapeInfo* si = nullptr;
+    api.CastTypeInfoToTensorInfo(ti, &si);  // borrowed; nothing to release
+    if (!si) return out;
+    out.has_type_info = true;
+
+    api.GetTensorElementType(si, &out.elem_type);
+
+    // has_shape must be read explicitly: GetDimensionsCount returns 0 for BOTH a
+    // shapeless value AND a true rank-0 scalar, so rank alone cannot distinguish
+    // them. TensorTypeAndShape_HasShape is a v1.24 C-API (kMinOrtApiVersion=24),
+    // so it is always available on any runtime that can load this plugin.
+    out.has_shape = api.TensorTypeAndShape_HasShape(si);
+    if (!out.has_shape) return out;  // rank stays 0, dims empty
+
+    api.GetDimensionsCount(si, &out.rank);
+    if (out.rank > 0) {
+        out.dims.assign(out.rank, -1);
+        api.GetDimensions(si, out.dims.data(), out.rank);
+    }
+    return out;
+}
+
 namespace {
 
 // Returns true if the ValueInfo has a statically-known extent-0 dimension.

@@ -3,7 +3,25 @@
 
 #pragma once
 
+#include <cstdio>
+#include <stdexcept>
+
 #include "common/plugin_ep_utils.h"
+
+// Stable marker embedded in the error message of every GPU device-removal (TDR) failure the EP reports
+// to ORT. A removed device is permanently dead and cannot be recovered in-process, so the host must
+// detect this and restart the process. The host matches on THIS EXACT TOKEN (not on HRESULT text, which
+// is WIL-formatted and may vary), so it must stay stable once hosts depend on it.
+#define DIRECTX_DEVICE_REMOVED_MARKER "[DIRECTX_DEVICE_REMOVED]"
+
+// True when an HRESULT is a GPU device-removal / TDR reason (DXGI_ERROR_DEVICE_*). Ground-truth check
+// used at throw/guard sites instead of pattern-matching message text.
+inline bool IsDeviceRemovedHresult(HRESULT hr) noexcept {
+    return hr == DXGI_ERROR_DEVICE_REMOVED   // 0x887A0005
+        || hr == DXGI_ERROR_DEVICE_HUNG      // 0x887A0006
+        || hr == DXGI_ERROR_DEVICE_RESET     // 0x887A0007
+        || hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR; // 0x887A0020
+}
 
 constexpr HRESULT ErrorCodeToHRESULT(OrtErrorCode error_code) noexcept {
     switch (error_code) {
@@ -115,3 +133,25 @@ constexpr HRESULT ErrorCodeToHRESULT(OrtErrorCode error_code) noexcept {
 #else
 #define ORT_THROW_HR_IF_NULL_MSG(hr, ptr, fmt, ...) THROW_HR_IF_NULL_MSG(hr, ptr, fmt, __VA_ARGS__)
 #endif
+
+// Throw a device-removal (TDR) failure whose message carries DIRECTX_DEVICE_REMOVED_MARKER and the HRESULT,
+// so every noexcept-boundary guard that forwards e.what() propagates the stable marker to the host. Use
+// this in place of ORT_THROW_IF_FAILED for a known device-removed HRESULT. A std::runtime_error is thrown
+// (not ORT_THROW) so this header needs no dependency on common.h; the existing catch(const std::exception&)
+// branches pick it up unchanged.
+[[noreturn]] inline void ThrowDeviceRemoved(HRESULT hr) {
+    char buf[96];
+    std::snprintf(buf, sizeof(buf),
+        DIRECTX_DEVICE_REMOVED_MARKER " GPU device removed (TDR), HRESULT 0x%08X",
+        static_cast<uint32_t>(hr));
+    throw std::runtime_error(buf);
+}
+
+// If hr is a device-removed reason, throw the marked exception; otherwise fall back to the normal
+// HRESULT throw. Drop-in replacement for ORT_THROW_IF_FAILED at device-removed-reason check sites.
+inline void ThrowIfDeviceRemovedOrFailed(HRESULT hr) {
+    if (IsDeviceRemovedHresult(hr)) {
+        ThrowDeviceRemoved(hr);
+    }
+    ORT_THROW_IF_FAILED(hr);
+}

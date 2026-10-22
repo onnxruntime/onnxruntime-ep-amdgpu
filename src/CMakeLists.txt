@@ -15,6 +15,9 @@ file(WRITE "${CMAKE_BINARY_DIR}/onnxruntime_version.txt" "${onnxruntime_VERSION}
 
 include(FetchContent)
 
+# Required to patch the fetched onnx source (see the onnx FetchContent_Declare below).
+find_package(Patch REQUIRED)
+
 set(CACHE{BUILD_SHARED_LIBS} TYPE BOOL FORCE VALUE OFF)
 set(CACHE{ZLIB_USE_STATIC_LIBS} TYPE BOOL FORCE VALUE ON)
 
@@ -86,6 +89,15 @@ FetchContent_Declare(
         onnx
         URL https://github.com/onnx/onnx/archive/refs/tags/v1.21.0.zip
         DOWNLOAD_NO_PROGRESS TRUE
+        # Neutralize onnx's Debug-only static-registration completeness assert, which
+        # otherwise throws (and poisons the schema registry) on first use in Debug
+        # builds. The helper script applies patches/onnx/onnx.patch idempotently, so a
+        # CMake re-configure that re-runs the patch step (without a clean _deps wipe)
+        # does not fail. Release does not compile the assert, so this is a no-op there.
+        PATCH_COMMAND ${CMAKE_COMMAND}
+                      -DPATCH_EXECUTABLE=${Patch_EXECUTABLE}
+                      -DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/../patches/onnx/onnx.patch
+                      -P ${CMAKE_CURRENT_SOURCE_DIR}/../patches/onnx/apply_onnx_patch.cmake
         SYSTEM
         EXCLUDE_FROM_ALL)
 

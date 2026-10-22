@@ -40,13 +40,18 @@ constexpr bool IsMlssArchPrefix(std::string_view value, std::string_view prefix)
     return value.substr(0, prefix.size()) == prefix;
 }
 
-// gfx1200/gfx1201: always on. gfx1150: graph heuristics. All other gfx
-// (gfx1100, gfx1151, ...) stay off until a policy is added.
+constexpr bool IsMlssGfx115x(std::string_view gfx) {
+    return IsMlssArchPrefix(gfx, "gfx1150") || IsMlssArchPrefix(gfx, "gfx1151");
+}
+
+// gfx1200/gfx1201: always on. gfx1150/gfx1151: graph heuristics. All other gfx
+// stay off. gfx1151 ResNet-family graphs that regress are opted out by
+// kMlssGraphExceptions, not by these gates.
 constexpr bool ShouldForceMlssConv(std::string_view gfx, const MlssGraphFeatures& features) {
     if (IsMlssArchPrefix(gfx, "gfx1200") || IsMlssArchPrefix(gfx, "gfx1201")) {
         return true;
     }
-    if (!IsMlssArchPrefix(gfx, "gfx1150") || features.convolution_count == 0) {
+    if (!IsMlssGfx115x(gfx) || features.convolution_count == 0) {
         return false;
     }
     if (features.input_elements_max <= 32) {
@@ -91,8 +96,7 @@ constexpr bool ShouldForceMlssConv(std::string_view gfx, const MlssGraphFeatures
 
 // Applies the rollout gate to the tested policy
 constexpr bool ShouldAutoForceMlssConv(std::string_view gfx, const MlssGraphFeatures& features) {
-    if ((IsMlssArchPrefix(gfx, "gfx1150") || IsMlssArchPrefix(gfx, "gfx1151")) &&
-        !kEnableGfx115xMlssHeuristics) {
+    if (IsMlssGfx115x(gfx) && !kEnableGfx115xMlssHeuristics) {
         return false;
     }
     return ShouldForceMlssConv(gfx, features);
@@ -134,7 +138,8 @@ static_assert(ShouldForceMlssConv("gfx1150", TestFeatures(37, 0, 37, 0, 0, 698, 
 static_assert(!ShouldForceMlssConv("gfx1150", TestFeatures(37, 0, 37, 0, 0, 250, 0)));
 static_assert(ShouldForceMlssConv("gfx1150", TestFeatures(26, 0, 26, 0, 0, 117, 0)));
 static_assert(!ShouldForceMlssConv("gfx1150", TestFeatures(33, 0, 33, 0, 0, 105, 0)));
-static_assert(!ShouldForceMlssConv("gfx1151", TestFeatures(10, 0, 0, 10)));
+static_assert(ShouldForceMlssConv("gfx1151", TestFeatures(10, 4, 0, 10)));
+static_assert(!ShouldForceMlssConv("gfx1151", TestFeatures(1, 0, 0, 1)));
 static_assert(ShouldForceMlssConv("gfx1200", TestFeatures(0, 0, 0, 0)));
 static_assert(ShouldForceMlssConv("gfx1201", TestFeatures(1, 0, 0, 0)));
 static_assert(!ShouldForceMlssConv("gfx1100", TestFeatures(10, 0, 0, 0)));

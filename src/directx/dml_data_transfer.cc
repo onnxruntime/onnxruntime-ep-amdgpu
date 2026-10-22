@@ -104,30 +104,49 @@ bool ORT_API_CALL DMLDataTransfer::CanCopyImpl(const OrtDataTransferImpl* this_p
 // function to copy one or more tensors.
 OrtStatus* ORT_API_CALL DMLDataTransfer::CopyTensorsImpl(OrtDataTransferImpl* this_ptr,
                                                          const OrtValue** src_tensors_ptr, OrtValue** dst_tensors_ptr,
-                                                         OrtSyncStream** streams_ptr, size_t num_tensors) noexcept
-{
-    DMLDataTransfer& impl = *static_cast<DMLDataTransfer*>(this_ptr);
+                                                         OrtSyncStream** streams_ptr, size_t num_tensors) noexcept {
+    try {
+        DMLDataTransfer& impl = *static_cast<DMLDataTransfer*>(this_ptr);
 
-    // Lazy attach: if the EP was not attached at construction time (factory-level transfer
-    // created before the EP instance), resolve it now via the pointer to the factory's m_ep_raw.
-    if (!impl.m_executionProvider && impl.m_ep_raw_ref && *impl.m_ep_raw_ref) {
-        impl.m_executionProvider = (*impl.m_ep_raw_ref)->GetInternalExecutionProvider();
+        // Lazy attach: if the EP was not attached at construction time (factory-level transfer
+        // created before the EP instance), resolve it now via the pointer to the factory's m_ep_raw.
+        if (!impl.m_executionProvider && impl.m_ep_raw_ref && *impl.m_ep_raw_ref) {
+            impl.m_executionProvider = (*impl.m_ep_raw_ref)->GetInternalExecutionProvider();
+        }
+
+        // Route the copy to the EP that owns the tensors, not a single cached provider. A shared
+        // DMLDataTransfer services multiple sessions, each with its own ExecutionContext/queue/fence;
+        // a copy must run on the owning session's context so its readback waits on the fence that
+        // produced the data.
+        std::shared_ptr<PluginDmlExecutionProviderImpl> provider =
+            impl.ResolveOwningProvider(src_tensors_ptr, dst_tensors_ptr, num_tensors);
+
+        if (!provider) {
+            return impl.ort_api.CreateStatus(ORT_FAIL, "DMLDataTransfer: execution provider not attached");
+        }
+
+        // Propagate the copy's status instead of discarding it: a GPU->CPU readback here flushes the
+        // queue and waits on the fence, which is exactly where a device suspend/removal surfaces. If we
+        // swallowed the failure (returning nullptr==success) the caller would proceed on stale/NaN data.
+        return provider->CopyTensorsPlugin(src_tensors_ptr, dst_tensors_ptr, streams_ptr, num_tensors);
+    } catch (const wil::ResultException& e) {
+        // CopyTensorsImpl is a noexcept ORT ABI callback. The readback path throws on device
+        // removal/suspend (fence wait / Map fail via ORT_THROW_IF_FAILED); letting that escape the
+        // noexcept boundary would std::terminate the host. Convert to an OrtStatus so ORT can fail the
+        // Run and the caller can continue (matching the CreateEpImpl / DmlAbiKernel_Compute handling).
+        auto& impl = *static_cast<DMLDataTransfer*>(this_ptr);
+        return impl.ort_api.CreateStatus(ORT_FAIL,
+            MakeString("DMLDataTransfer copy failed (hr=", e.GetErrorCode(), "): ", e.what()).c_str());
+    } catch (const std::exception& e) {
+        // e.what() carries DIRECTX_DEVICE_REMOVED_MARKER when the failure was a TDR (see
+        // ThrowDeviceRemoved); MakeString appends it verbatim, so the host still detects the marker.
+        auto& impl = *static_cast<DMLDataTransfer*>(this_ptr);
+        return impl.ort_api.CreateStatus(ORT_FAIL,
+            MakeString("DMLDataTransfer copy failed: ", e.what()).c_str());
+    } catch (...) {
+        auto& impl = *static_cast<DMLDataTransfer*>(this_ptr);
+        return impl.ort_api.CreateStatus(ORT_FAIL, "DMLDataTransfer copy failed: unknown exception");
     }
-
-    // Route the copy to the EP that owns the tensors, not a single cached provider. A shared
-    // DMLDataTransfer services multiple sessions, each with its own ExecutionContext/queue/fence;
-    // a copy must run on the owning session's context so its readback waits on the fence that
-    // produced the data.
-    std::shared_ptr<PluginDmlExecutionProviderImpl> provider =
-        impl.ResolveOwningProvider(src_tensors_ptr, dst_tensors_ptr, num_tensors);
-
-    if (!provider) {
-        return impl.ort_api.CreateStatus(ORT_FAIL, "DMLDataTransfer: execution provider not attached");
-    }
-
-    provider->CopyTensorsPlugin(src_tensors_ptr, dst_tensors_ptr, streams_ptr, num_tensors);
-
-    return nullptr;
 }
 
 /*static*/

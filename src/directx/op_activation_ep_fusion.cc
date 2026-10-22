@@ -1557,6 +1557,7 @@ static OrtStatus* ORT_API_CALL OpActivation_Compute(
     auto* state = static_cast<OpActivationKernelState*>(compute_state);
     if (!state || !state->provider || !state->ort_api) return nullptr;
     const OrtApi& api = *state->ort_api;
+    try {
 
     // Multi-input op path: Conv, ConvTranspose, BatchNorm, InstanceNorm, MVN.
     // These use dyn_input_indices / static_gpu_resources instead of the 2-input path below.
@@ -2203,6 +2204,14 @@ static OrtStatus* ORT_API_CALL OpActivation_Compute(
 
     state->provider->QueueReference(active->compiled_op.Get());
     return nullptr;
+    }
+    catch (const std::exception& e) {
+        // noexcept ABI boundary: ExecuteOperator/allocations can throw on device removal or bad_alloc.
+        return api.CreateStatus(ORT_FAIL, (std::string("OpActivation_Compute failed: ") + e.what()).c_str());
+    }
+    catch (...) {
+        return api.CreateStatus(ORT_FAIL, "OpActivation_Compute failed: unknown exception");
+    }
 }
 
 // ---------------------------------------------------------------------------

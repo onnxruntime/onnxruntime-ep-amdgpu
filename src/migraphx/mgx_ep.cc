@@ -79,12 +79,25 @@ struct arch_graph_mlss_exception {
     std::string_view arch_prefix;
     std::string_view graph_id;
 };
-constexpr std::array<arch_graph_mlss_exception, 4> kMlssGraphExceptions{{
-    // This ResNet-50 graph id differs across the ORT 1.26 and 1.27 partitioning paths.
+constexpr std::array<arch_graph_mlss_exception, 18> kMlssGraphExceptions{{
+    {"gfx1150", "3a0532e672db5cf"},
+    {"gfx1151", "3a0532e672db5cf"},
+    {"gfx1152", "3a0532e672db5cf"},
+    {"gfx1153", "3a0532e672db5cf"},
     {"gfx1200", "3a0532e672db5cf"},
     {"gfx1201", "3a0532e672db5cf"},
+    {"gfx1150", "c4c5e56652ffbf28"},
+    {"gfx1151", "c4c5e56652ffbf28"},
+    {"gfx1152", "c4c5e56652ffbf28"},
+    {"gfx1153", "c4c5e56652ffbf28"},
     {"gfx1200", "c4c5e56652ffbf28"},
     {"gfx1201", "c4c5e56652ffbf28"},
+    {"gfx1151", "67df030d9ebfa160"},
+    {"gfx1151", "aa9a41a6ddb96490"},
+    {"gfx1151", "978a900bc57a94bc"},
+    {"gfx1151", "bc101f5eec4be31a"},
+    {"gfx1151", "4810903a8d51b9f3"},
+    {"gfx1151", "5a4ab77616ae4199"},
 }};
 
 bool GraphIdListContains(std::string_view list, std::string_view graph_id) {
@@ -644,6 +657,7 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
     enable_fp8_ = info.enable_fp8;
     enable_int8_ = info.enable_int8;
     exhaustive_tune_ = info.exhaustive_tune;
+    hiprtc_disable_processes_ = info.hiprtc_disable_processes;
     mlss_use_specific_ops_ = info.mlss_use_specific_ops;
     model_arch_ = info.model_arch;
     cache_dir_ = info.cache_dir;
@@ -1347,7 +1361,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
             compile_program(program, t_, exhaustive_tune_, effective_mlss_use_specific_ops, compute_mode_,
-                problem_cache_paths_);
+                problem_cache_paths_, hiprtc_disable_processes_);
             // context_enable needs this file on disk even if caching is otherwise disabled.
             if (!disable_compiled_model_caching_ || context_enable_) {
                 save_compiled_program(program, mxr_path);
@@ -1385,6 +1399,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             has_input_shape,
             dump_subgraphs_,
             exhaustive_tune_,
+            hiprtc_disable_processes_,
             effective_mlss_use_specific_ops,
             dynamic_ranges_,
             input_name_indices,
@@ -1463,7 +1478,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             RETURN_IF_ERROR(CompileMissingPrograms(pre_plan, input_name_indices, onnx_string,
                 compute_state.cached_programs, t_, enable_fp16_, enable_bf16_, enable_int8_, enable_fp8_,
                 int8_calibration_cache_available_, dynamic_ranges_, exhaustive_tune_,
-                effective_mlss_use_specific_ops, compute_mode_, problem_cache_paths_,
+                effective_mlss_use_specific_ops, compute_mode_, problem_cache_paths_, hiprtc_disable_processes_,
                 disable_compiled_model_caching_, model_path, external_data_dir_, effective_cache_dir,
                 effective_mxr_prefix));
         }
@@ -1537,13 +1552,18 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromCache(const Ort::ConstGr
     try {
         EpContextNodeReader ep_ctx_reader{*this, graph, logger_, ctx_cache_dir,
             compute_capability_, current_sdk_version};
+        auto program{ep_ctx_reader.GetProgram()};
+        if (!program_outputs_are_standard(program)) {
+            throw std::runtime_error{
+                "EPContext contains a non-standard MIGraphX output; regenerate it"};
+        }
 
         ep_context_compute_states_.emplace(name,
             EpContextComputeState{
                 mutex_,
                 device_id_,
                 t_,
-                ep_ctx_reader.GetProgram(),
+                std::move(program),
                 input_name_indices,
                 output_name_indices,
             });
@@ -2090,7 +2110,7 @@ void ResolveProgram(ComputeState& compute_state, const Ort::KernelContext& kerne
 
             compile_program(program, compute_state.t, compute_state.exhaustive_tune,
                 compute_state.mlss_use_specific_ops, compute_state.compute_mode,
-                compute_state.problem_cache_paths);
+                compute_state.problem_cache_paths, compute_state.hiprtc_disable_processes);
             if (!compute_state.disable_compiled_model_caching) {
                 save_compiled_program(program, mxr_path);
             }

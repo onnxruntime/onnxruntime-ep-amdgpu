@@ -949,6 +949,7 @@ static OrtStatus* ORT_API_CALL FusedMatMul_Compute(
     auto* state = static_cast<FusedMatMulKernelState*>(compute_state);
     if (!state || !state->provider || !state->ort_api) return nullptr;
     const OrtApi& api = *state->ort_api;
+    try {
 
     // Read runtime inputs.  When one side is an initializer (uploaded to GPU at
     // Compile time), read only the non-initializer side from the kernel context.
@@ -1131,6 +1132,14 @@ static OrtStatus* ORT_API_CALL FusedMatMul_Compute(
 
     state->provider->QueueReference(active_kernel->compiled_op.Get());
     return nullptr;
+    }
+    catch (const std::exception& e) {
+        // noexcept ABI boundary: ExecuteOperator/allocations can throw on device removal or bad_alloc.
+        return api.CreateStatus(ORT_FAIL, (std::string("FusedMatMul_Compute failed: ") + e.what()).c_str());
+    }
+    catch (...) {
+        return api.CreateStatus(ORT_FAIL, "FusedMatMul_Compute failed: unknown exception");
+    }
 }
 
 // ---------------------------------------------------------------------------

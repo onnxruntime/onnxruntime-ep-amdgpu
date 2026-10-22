@@ -28,6 +28,33 @@ std::vector<std::string> GetNodeInputNames(const OrtApi& api, const OrtNode* nod
 std::vector<std::string> GetNodeOutputNames(const OrtApi& api, const OrtNode* node);
 
 // ---------------------------------------------------------------------------
+// ValueInfo type/shape accessor (ABI-safe C-API path)
+// ---------------------------------------------------------------------------
+
+// Type/shape metadata for an OrtValueInfo, read entirely through the C-API
+// accessor chain (GetValueInfoTypeInfo -> CastTypeInfoToTensorInfo ->
+// TensorTypeAndShape_HasShape -> GetDimensionsCount/GetDimensions/
+// GetTensorElementType) — never by reaching into OrtTypeInfo/
+// OrtTensorTypeAndShapeInfo internal layout.
+//
+// IMPORTANT: `has_shape` is a distinct signal from `rank`. The C-API
+// GetDimensionsCount returns 0 for BOTH a genuinely shapeless value and a true
+// rank-0 scalar, so `rank == 0` alone is ambiguous. Callers that must tell
+// "no shape info" from "rank-0 scalar" MUST branch on `has_shape`, not `rank`.
+struct ValueInfoShape {
+    bool has_type_info = false;   // GetValueInfoTypeInfo succeeded and cast to tensor info
+    bool has_shape = false;       // TensorTypeAndShape_HasShape() — shape is present
+    size_t rank = 0;              // dimension count (0 when !has_shape OR true scalar)
+    std::vector<int64_t> dims;    // size == rank; populated only when has_shape
+    ONNXTensorElementDataType elem_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+};
+
+// Reads type/shape metadata for a value info via the C-API. All pointers used
+// internally are borrowed (zero allocation, nothing to release). Returns a
+// struct with has_type_info=false if the value info has no tensor type info.
+ValueInfoShape GetValueInfoShape(const OrtApi& api, const OrtValueInfo* vi);
+
+// ---------------------------------------------------------------------------
 // Empty-tensor detection
 // ---------------------------------------------------------------------------
 

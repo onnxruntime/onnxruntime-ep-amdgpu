@@ -28,6 +28,15 @@ class ExecutionProviderPlugin
     , public ApiPtrs
 {
 public:
+    // Owned CPU-preferred shape-math chain feeding a dynamic partition's boundary
+    // inputs (public so the file-scope CaptureShapePrepChain helper can build it).
+    // See the m_dynamicShapePrepChains member.
+    struct ShapePrepChain {
+        std::vector<DeferredNode> nodes;          // owned, topological
+        std::vector<std::string>  root_inputs;    // real graph inputs the chain roots at
+        std::unordered_map<std::string, std::vector<int64_t>> initializers;  // int consts the chain consumes
+    };
+
     ExecutionProviderPlugin(
         const ApiPtrs& api_ptrs,
         std::string_view name,
@@ -37,7 +46,10 @@ public:
         // Factory-owned holder for the shared host-accessible allocator (nullptr = per-EP legacy).
         std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder = nullptr,
         // Opt-in for host-accessible (CUSTOM/L0) decode inputs (ep.directml.enable_host_accessible).
-        bool enableHostAccessible = false);
+        bool enableHostAccessible = false,
+        // Opt-in for runtime (deferred, dynamic-shape) graph fusion (ep.directml.enable_graph_capture).
+        // Selects the ORT-style runtime fusion path over static fusion (see GetCapabilityImpl).
+        bool enableGraphCapture = false);
 
     ~ExecutionProviderPlugin();
 
@@ -249,10 +261,26 @@ private:
     // claimed (all fall through to Tier-2/1).
     std::unordered_set<size_t>   m_tier0GroupHashes;
 
+    // Runtime-fusion (deferred-compile) partitions claimed shape-blind during
+    // GetCapabilityImpl's Phase-4, ONLY when DML_RUNTIME_FUSION=1. Disjoint from
+    // m_tier0GroupHashes (static Tier-0) so the two paths never overlap: a subgraph
+    // hash matching here routes to FullGraphFusion::CompileDeferred (snapshot +
+    // compile-at-first-Compute) instead of the static Compile. Empty when the env
+    // gate is off, in which case only the static path runs.
+    std::unordered_set<size_t>   m_tier0DynamicGroupHashes;
+
     // Shapes resolved during GetCapabilityImpl for tensors ORT left dynamic
     // (e.g. Upsample outputs). Keyed by tensor name. Passed into Compile so
     // BuildSubgraphInfo can seed value_shapes for translators.
     std::unordered_map<std::string, std::vector<int64_t>> m_resolvedShapes;
+
+    // CPU-preferred shape-math nodes (Shape/Concat/Gather/...) that feed a dynamic
+    // partition's BOUNDARY inputs, captured during GetCapabilityImpl (where they
+    // are visible in the full graph) keyed by the partition's node-id hash. At
+    // first Compute they are constant-folded from concrete runtime dims to recover
+    // data-dependent reshape targets (e.g. pos_ids). Retrieved by CompileDeferred
+    // via the same hash. (ShapePrepChain is declared in the public section above.)
+    std::unordered_map<size_t, ShapePrepChain> m_dynamicShapePrepChains;
 
     bool m_native16BitShaderOpsSupported = false;
     bool m_isMcdmDevice = false;

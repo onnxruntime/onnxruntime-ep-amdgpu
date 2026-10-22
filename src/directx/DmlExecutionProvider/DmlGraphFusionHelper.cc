@@ -1072,14 +1072,12 @@ namespace DmlGraphFusionHelper
         uint64_t completionValue;
         HRESULT hr = provider->ExecuteCommandList(commandListState.graphicsCommandList.Get(), fence.GetAddressOf(), &completionValue);
 
-        if (hr == DXGI_ERROR_DEVICE_REMOVED)
-        {
-            Microsoft::WRL::ComPtr<ID3D12Device> device;
-            ORT_THROW_IF_FAILED(provider->GetD3DDevice(&device));
-            ORT_THROW_IF_FAILED(device->GetDeviceRemovedReason());
-        }
-
-        ORT_THROW_IF_FAILED(hr);
+        // Route the HRESULT through the device-removed helper: it stamps the stable
+        // DIRECTX_DEVICE_REMOVED_MARKER for any device-removed reason (incl. DXGI_ERROR_DEVICE_REMOVED
+        // here) so the host can detect the TDR and restart, and falls back to the normal throw
+        // otherwise. Passing hr directly also covers the case where the DML device reports removal
+        // while the D3D device's own GetDeviceRemovedReason() still reads S_OK.
+        ThrowIfDeviceRemovedOrFailed(hr);
         commandListState.fence = fence;
         commandListState.completionValue = completionValue;
 

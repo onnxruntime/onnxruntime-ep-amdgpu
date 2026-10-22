@@ -226,6 +226,7 @@ add_library(directx-ep MODULE
     dml_utils.cc
 
     # ---- Graph fusion (ABI-safe, plugin EP only) ----
+    node_view.h
     fusion_utils.cc
     pattern_matcher.cc
     ep_fusion_manager.cc
@@ -652,6 +653,7 @@ target_link_libraries(directx-ep
         protobuf::libprotobuf
         Eigen3::Eigen
         nuget_d3d12
+        dxgi.lib
         nuget_directxtk12
         nuget_directml
         nuget_wil

@@ -10,6 +10,7 @@
 
 #include "common/plugin_ep_utils.h"
 #include "core/graph/abi_graph_types.h"
+#include "node_view.h"
 
 namespace dml_ep {
 
@@ -119,6 +120,14 @@ public:
     // Construction from opaque ORT C API node + API function table
     explicit OrtNodeAdapter(const OrtNode* node, const OrtApi& ort_api);
 
+    // Construction from a NodeView (runtime-fusion seam). A LIVE view delegates
+    // to the C-API path above (identical behavior). A SNAPSHOT view backs every
+    // GetAttribute* call with the DeferredNode's owned, pre-materialized protos —
+    // no borrowed OrtOpAttr* is ever dereferenced, so it is safe after Compile
+    // returns. Arg order (view, api) mirrors the existing (node, api) ctor so
+    // translator bodies `OrtNodeAdapter adapter(node, ort_api)` compile unchanged.
+    OrtNodeAdapter(const NodeView& view, const OrtApi& ort_api);
+
     // Construction from local plugin node type (uses virtual methods directly)
     explicit OrtNodeAdapter(const OrtNodePlugin* node);
 
@@ -225,6 +234,7 @@ public:
 
     // Attribute existence check
     bool HasAttribute(const char* name) const {
+        if (snapshot_) return SnapshotAttrProto(name) != nullptr;
         return attribute_map_.find(name) != attribute_map_.end();
     }
 
@@ -257,11 +267,20 @@ private:
     // ORT API for ABI-safe attribute access
     const OrtApi* api_;
 
+    // Non-null when this adapter wraps a runtime-fusion snapshot (built via the
+    // NodeView ctor with a snapshot backing). When set, GetAttribute* reads from
+    // snapshot_->attr_protos (owned) instead of attributes_/attribute_map_.
+    const DeferredNode* snapshot_ = nullptr;
+
     // Initialization from OrtNodePlugin* (virtual method calls - used within plugin)
     void InitializeFromPlugin(const OrtNodePlugin* node);
 
     // Initialization from OrtNode* + OrtApi (C API calls - ABI-safe)
     void InitializeFromCApi(const OrtNode* node, const OrtApi& ort_api);
+
+    // Snapshot-path attribute lookup: returns the owned AttributeProto for
+    // `name` from snapshot_->attr_protos, or nullptr. Only valid when snapshot_.
+    const ONNX_NAMESPACE::AttributeProto* SnapshotAttrProto(const char* name) const;
 };
 
 }  // namespace dml_ep
