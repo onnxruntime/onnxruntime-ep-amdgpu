@@ -19,6 +19,7 @@
 #include <wrl/client.h>
 #include <gsl/gsl>
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <numeric>
@@ -101,6 +102,171 @@ struct CompiledNode {
     std::vector<std::string>      output_names;
     std::string                   op_type;
 };
+
+// ---------------------------------------------------------------------------
+// Command-list reuse (replay) — static full-graph path.
+//
+// Mirrors ORT's DmlGraphFusionHelper::BuildReusableCommandList /
+// ExecuteReusableCommandList but is built entirely through the plugin's ABI-safe
+// provider surface (no internal ORT C++ types). See the design/audit in the plan
+// and PluginReusableCommandList in full_graph_fusion.h.
+// ---------------------------------------------------------------------------
+
+// Reuse is ON by default (matching ORT, whose static path reuses for any fused
+// subgraph >= 5 nodes). DIRECTX_REUSE_CMDLIST=0 forces the legacy
+// ExecuteOperator+Flush path within a single build, for A/B and as an escape hatch.
+static bool ReuseCommandListEnabled() {
+    static const bool enabled = []() {
+        const char* v = std::getenv("DIRECTX_REUSE_CMDLIST");
+        return !(v && v[0] == '0' && v[1] == '\0');
+    }();
+    return enabled;
+}
+
+// Build one prebuilt, closed command list that replays the whole-graph dispatch.
+// Returns nullptr on any failure (caller falls back / fails the Run). The temporary
+// resource is allocated ONCE here and owned by the list for its lifetime (audit §T).
+static std::unique_ptr<PluginReusableCommandList> BuildReusableCommandList(
+    PluginDmlExecutionProviderImpl* provider,
+    IDMLCompiledOperator*           compiled_op,
+    ID3D12Resource*                 persistent_resource,
+    IUnknown*                       persistent_allocator,
+    const std::optional<DML_BUFFER_BINDING>& persistent_binding) {
+    auto state = std::make_unique<PluginReusableCommandList>();
+
+    ComPtr<IDMLDevice> dml_device;
+    if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf())) || !dml_device) return nullptr;
+    ComPtr<ID3D12Device> d3d_device;
+    if (FAILED(provider->GetD3DDevice(d3d_device.GetAddressOf())) || !d3d_device) return nullptr;
+
+    DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
+
+    // Descriptor heap sized to the compiled op's requirement (shader-visible).
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
+    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    heap_desc.NumDescriptors = binding_props.RequiredDescriptorCount;
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    if (FAILED(d3d_device->CreateDescriptorHeap(
+            &heap_desc, IID_PPV_ARGS(state->heap.ReleaseAndGetAddressOf()))))
+        return nullptr;
+
+    // Binding table over that heap, dispatchable = the compiled graph op.
+    DML_BINDING_TABLE_DESC bt_desc = {};
+    bt_desc.Dispatchable = compiled_op;
+    bt_desc.CPUDescriptorHandle = state->heap->GetCPUDescriptorHandleForHeapStart();
+    bt_desc.GPUDescriptorHandle = state->heap->GetGPUDescriptorHandleForHeapStart();
+    bt_desc.SizeInDescriptors = binding_props.RequiredDescriptorCount;
+    if (FAILED(dml_device->CreateBindingTable(
+            &bt_desc, IID_PPV_ARGS(state->bindingTable.ReleaseAndGetAddressOf()))))
+        return nullptr;
+
+    const D3D12_COMMAND_LIST_TYPE queue_type = provider->GetCommandListTypeForQueue();
+    if (FAILED(d3d_device->CreateCommandAllocator(
+            queue_type, IID_PPV_ARGS(state->commandAllocator.ReleaseAndGetAddressOf()))))
+        return nullptr;
+    if (FAILED(d3d_device->CreateCommandList(
+            0, queue_type, state->commandAllocator.Get(), nullptr,
+            IID_PPV_ARGS(state->graphicsCommandList.ReleaseAndGetAddressOf()))))
+        return nullptr;
+
+    // Persistent resource binding is baked into the table here (constant per list).
+    if (persistent_binding) {
+        state->persistentResource = persistent_resource;
+        state->persistentAllocator = persistent_allocator;
+        DML_BINDING_DESC persistent_desc = { DML_BINDING_TYPE_BUFFER, &*persistent_binding };
+        state->bindingTable->BindPersistentResource(&persistent_desc);
+    }
+
+    // Temporary resource: allocate ONCE and own it for the list's lifetime (§T).
+    if (binding_props.TemporaryResourceSize > 0) {
+        ComPtr<ID3D12Resource> temp_resource;
+        ComPtr<IUnknown> temp_allocator;
+        if (FAILED(provider->AllocatePooledResource(
+                static_cast<size_t>(binding_props.TemporaryResourceSize),
+                AllocatorRoundingMode::Disabled,
+                temp_resource.GetAddressOf(),
+                temp_allocator.GetAddressOf())) || !temp_resource)
+            return nullptr;
+        DML_BUFFER_BINDING temp_binding = {
+            temp_resource.Get(), 0, binding_props.TemporaryResourceSize };
+        DML_BINDING_DESC temp_desc = { DML_BINDING_TYPE_BUFFER, &temp_binding };
+        state->bindingTable->BindTemporaryResource(&temp_desc);
+        state->temporaryResource = std::move(temp_resource);
+        state->temporaryAllocator = std::move(temp_allocator);
+    }
+
+    ID3D12DescriptorHeap* heaps[] = { state->heap.Get() };
+    state->graphicsCommandList->SetDescriptorHeaps(1, heaps);
+
+    // Record the single whole-graph dispatch once, then close for replay.
+    ComPtr<IDMLCommandRecorder> recorder;
+    if (FAILED(dml_device->CreateCommandRecorder(IID_PPV_ARGS(recorder.GetAddressOf()))))
+        return nullptr;
+    recorder->RecordDispatch(state->graphicsCommandList.Get(), compiled_op, state->bindingTable.Get());
+    if (FAILED(state->graphicsCommandList->Close()))
+        return nullptr;
+
+    return state;
+}
+
+// Replay a prebuilt command list: re-bind only the slots whose pooled allocation ID
+// changed since the last execution, then submit the closed list without re-recording.
+// input_descs/output_descs are the full per-slot binding arrays already built by
+// FullGraph_Compute (NONE for skipped slots); *_alloc_ids are the parallel pooled IDs
+// (0 for NONE/non-pooled). Mirrors ORT ExecuteReusableCommandList (:965-1113).
+static HRESULT ExecuteReusableCommandList(
+    PluginDmlExecutionProviderImpl*          provider,
+    PluginReusableCommandList&               list,
+    gsl::span<const DML_BINDING_DESC>        input_descs,
+    gsl::span<const DML_BINDING_DESC>        output_descs,
+    const std::vector<uint64_t>&             input_alloc_ids,
+    const std::vector<uint64_t>&             output_alloc_ids) {
+    // Inputs: dirty-test only actually-bound (BUFFER) slots. NONE slots are constant
+    // across inferences (owned/inlined/edge-less), so they never force a rebind.
+    list.inputBindingAllocIds.resize(input_descs.size(), 0);
+    bool input_changed = false;
+    for (size_t i = 0; i < input_descs.size(); ++i) {
+        if (input_descs[i].Type != DML_BINDING_TYPE_BUFFER) continue;
+        uint64_t id = input_alloc_ids[i];
+        if (!id || list.inputBindingAllocIds[i] != id) input_changed = true;
+        list.inputBindingAllocIds[i] = id;
+    }
+    if (input_changed)
+        list.bindingTable->BindInputs(
+            gsl::narrow_cast<uint32_t>(input_descs.size()), input_descs.data());
+
+    // Outputs: same dirty-test.
+    list.outputBindingAllocIds.resize(output_descs.size(), 0);
+    bool output_changed = false;
+    for (size_t i = 0; i < output_descs.size(); ++i) {
+        if (output_descs[i].Type != DML_BINDING_TYPE_BUFFER) continue;
+        uint64_t id = output_alloc_ids[i];
+        if (!id || list.outputBindingAllocIds[i] != id) output_changed = true;
+        list.outputBindingAllocIds[i] = id;
+    }
+    if (output_changed)
+        list.bindingTable->BindOutputs(
+            gsl::narrow_cast<uint32_t>(output_descs.size()), output_descs.data());
+
+    // Temp is bound once at build time and owned by the list (§T) — nothing to do here.
+
+    // Submit the prebuilt closed list; capture the fence/value gating its next reuse.
+    ComPtr<ID3D12Fence> fence;
+    uint64_t completion_value = 0;
+    HRESULT hr = provider->ExecuteCommandList(
+        list.graphicsCommandList.Get(), fence.GetAddressOf(), &completion_value);
+    if (FAILED(hr)) return hr;
+    list.fence = fence;
+    list.completionValue = completion_value;
+
+    // Keep objects alive until the submitted GPU work completes.
+    provider->QueueReference(list.graphicsCommandList.Get());
+    provider->QueueReference(list.heap.Get());
+    provider->QueueReference(list.bindingTable.Get());
+    if (list.persistentAllocator) provider->QueueReference(list.persistentAllocator.Get());
+    if (list.temporaryAllocator) provider->QueueReference(list.temporaryAllocator.Get());
+    return S_OK;
+}
 
 // ---------------------------------------------------------------------------
 // FullGraph_Compute — single GPU dispatch for the entire graph
@@ -250,11 +416,32 @@ static OrtStatus* ORT_API_CALL FullGraph_Compute(
     std::vector<DML_BUFFER_BINDING> input_buffer_bindings(total_inputs);
     std::vector<DML_BINDING_DESC> input_descs(total_inputs);
 
-    auto get_resource = [&](const OrtValue* value) -> ID3D12Resource* {
+    // Parallel pooled allocation IDs per binding slot (0 = NONE/non-pooled). Only
+    // populated/used on the reuse path; the dirty-test in ExecuteReusableCommandList
+    // re-binds a slot only when its ID changes.
+    // Reuse requires DESCRIPTORS_VOLATILE (see FullGraphKernelState::descriptors_volatile):
+    // without it DML forbids binding inputs/outputs after RecordDispatch, which is exactly
+    // what replay does. Ops below the >= 5-node volatile threshold stay on the legacy path.
+    const bool use_reuse =
+        ReuseCommandListEnabled() && !state->deferred && state->descriptors_volatile;
+    std::vector<uint64_t> input_alloc_ids(total_inputs, 0);
+    std::vector<uint64_t> output_alloc_ids(state->num_outputs, 0);
+
+    // Resolve an OrtValue to its D3D12 resource, optionally also returning the pooled
+    // allocation ID (for reuse dirty-testing). The handle from GetTensorMutableData is
+    // the same opaque device-allocation pointer both DecodeResource and
+    // TryGetPooledAllocationId consume. On the static path (the only reuse path) inputs
+    // are always device allocations, never host-accessible mapped pointers.
+    auto get_resource_id = [&](const OrtValue* value, uint64_t* out_id) -> ID3D12Resource* {
         void* raw = nullptr;
         OrtStatus* st = api.GetTensorMutableData(const_cast<OrtValue*>(value), &raw);
         if (st || !raw) { if (st) api.ReleaseStatus(st); return nullptr; }
+        if (out_id) *out_id = state->provider->TryGetPooledAllocationId(
+            reinterpret_cast<IUnknown*>(raw), /*isInternalOperator=*/false);
         return state->provider->DecodeResource(raw);
+    };
+    auto get_resource = [&](const OrtValue* value) -> ID3D12Resource* {
+        return get_resource_id(value, nullptr);
     };
 
     // Bind runtime inputs. Iterate subgraph inputs (KernelContext indices) and
@@ -283,12 +470,14 @@ static OrtStatus* ORT_API_CALL FullGraph_Compute(
             if (st) api.ReleaseStatus(st);
             return api.CreateStatus(ORT_FAIL, "Tier0: failed to get runtime input");
         }
-        ID3D12Resource* resource = get_resource(input_value);
+        uint64_t alloc_id = 0;
+        ID3D12Resource* resource = get_resource_id(input_value, use_reuse ? &alloc_id : nullptr);
         if (!resource)
             return api.CreateStatus(ORT_FAIL, "Tier0: null D3D12 resource for input");
 
         input_buffer_bindings[dml_i] = { resource, 0, state->runtime_input_bytes[dml_i] };
         input_descs[dml_i] = { DML_BINDING_TYPE_BUFFER, &input_buffer_bindings[dml_i] };
+        input_alloc_ids[dml_i] = alloc_id;
     }
 
     // Bind the shared initializer WEIGHTS (deferred path). These DML slots were NOT
@@ -326,42 +515,88 @@ static OrtStatus* ORT_API_CALL FullGraph_Compute(
             if (st) api.ReleaseStatus(st);
             return api.CreateStatus(ORT_FAIL, "Tier0: failed to get output");
         }
-        ID3D12Resource* resource = get_resource(output_value);
+        uint64_t alloc_id = 0;
+        ID3D12Resource* resource = get_resource_id(output_value, use_reuse ? &alloc_id : nullptr);
         if (!resource) return api.CreateStatus(ORT_FAIL, "Tier0: null D3D12 resource for output");
 
         output_buffer_bindings[i] = { resource, 0, state->output_bytes[i] };
         output_descs[i] = { DML_BINDING_TYPE_BUFFER, &output_buffer_bindings[i] };
+        output_alloc_ids[i] = alloc_id;
     }
 
 #ifdef DML_PERF_PROFILE
     { uint64_t _t = PerfNowUs(); DML_PERF_LOG("[PERF] INF#", _perf_inf_id, " FullGraph_Compute outputs_bound: ", _t, " us (+", _t - _perf_t_last, ")\n"); _perf_t_last = _t; }
 #endif
 
-    const DML_BUFFER_BINDING* persistent = state->persistent_binding
-        ? &*state->persistent_binding : nullptr;
+    if (use_reuse) {
+        // Replay path (ORT-mirrored). Record the dispatch once per compiled graph,
+        // then re-submit the prebuilt closed list every inference, re-binding only the
+        // input/output slots whose pooled allocation ID changed.
+        //
+        // In-flight gate (FusedGraphKernel.cpp:155): the front list's descriptor heap
+        // is rewritten in place by BindInputs/BindOutputs, so it must not be reused
+        // while its prior submission is still executing on the GPU. If it is, build a
+        // fresh list and push it to the front; the ring grows to the GPU in-flight
+        // depth. The seed case (empty ring) builds the first list here.
+        if (state->reusable_lists.empty() ||
+            (state->reusable_lists.front()->fence &&
+             state->reusable_lists.front()->fence->GetCompletedValue() <
+                 state->reusable_lists.front()->completionValue)) {
+            auto built = BuildReusableCommandList(
+                state->provider, state->compiled_op.Get(),
+                state->persistent_resource.Get(), state->persistent_allocator.Get(),
+                state->persistent_binding);
+            if (!built)
+                return api.CreateStatus(ORT_FAIL, "Tier0: BuildReusableCommandList failed");
+            if (state->compute_call_count == 1)
+                DiagLog("[Reuse] built first reusable command list (static path)\n");
+            state->reusable_lists.push_front(std::move(built));
+        }
 
-    HRESULT hr = state->provider->ExecuteOperator(
-        state->compiled_op.Get(),
-        persistent,
-        gsl::make_span(input_descs),
-        gsl::make_span(output_descs));
+        HRESULT hr = ExecuteReusableCommandList(
+            state->provider, *state->reusable_lists.front(),
+            gsl::make_span(input_descs), gsl::make_span(output_descs),
+            input_alloc_ids, output_alloc_ids);
 
-    if (FAILED(hr))
-        return api.CreateStatus(ORT_FAIL, "Tier0: ExecuteOperator failed");
+        if (hr == DXGI_ERROR_DEVICE_REMOVED) {
+            ComPtr<ID3D12Device> device;
+            if (SUCCEEDED(state->provider->GetD3DDevice(device.GetAddressOf())) && device)
+                hr = device->GetDeviceRemovedReason();
+        }
+        if (FAILED(hr))
+            return api.CreateStatus(ORT_FAIL, "Tier0: ExecuteReusableCommandList failed");
+
+        // Rotate: move the just-executed front to the back so the next call prefers a
+        // list whose prior submission is most likely already complete.
+        state->reusable_lists.push_back(std::move(state->reusable_lists.front()));
+        state->reusable_lists.pop_front();
+    } else {
+        const DML_BUFFER_BINDING* persistent = state->persistent_binding
+            ? &*state->persistent_binding : nullptr;
+
+        HRESULT hr = state->provider->ExecuteOperator(
+            state->compiled_op.Get(),
+            persistent,
+            gsl::make_span(input_descs),
+            gsl::make_span(output_descs));
+
+        if (FAILED(hr))
+            return api.CreateStatus(ORT_FAIL, "Tier0: ExecuteOperator failed");
 
 #ifdef DML_PERF_PROFILE
-    { uint64_t _t = PerfNowUs(); DML_PERF_LOG("[PERF] INF#", _perf_inf_id, " FullGraph_Compute ExecuteOperator_done: ", _t, " us (+", _t - _perf_t_last, ")\n"); _perf_t_last = _t; }
+        { uint64_t _t = PerfNowUs(); DML_PERF_LOG("[PERF] INF#", _perf_inf_id, " FullGraph_Compute ExecuteOperator_done: ", _t, " us (+", _t - _perf_t_last, ")\n"); _perf_t_last = _t; }
 #endif
 
-    state->provider->QueueReference(state->compiled_op.Get());
+        state->provider->QueueReference(state->compiled_op.Get());
 
-    // Submit this partition's command list now instead of batching the whole graph
-    // into one deferred submission, so the GPU can execute it while the CPU records
-    // the next partition. Flush() is non-blocking; per-dispatch UAV barriers and
-    // command-queue fence ordering preserve correctness across the split lists.
-    // Flush() throws on a device removal (TDR); the function-try-block guarding this
-    // callback converts it to a marked ORT_FAIL.
-    state->provider->Flush();
+        // Submit this partition's command list now instead of batching the whole graph
+        // into one deferred submission, so the GPU can execute it while the CPU records
+        // the next partition. Flush() is non-blocking; per-dispatch UAV barriers and
+        // command-queue fence ordering preserve correctness across the split lists.
+        // Flush() throws on a device removal (TDR); the function-try-block guarding this
+        // callback converts it to a marked ORT_FAIL.
+        state->provider->Flush();
+    }
 
 #ifdef DML_PERF_PROFILE
     { uint64_t _t = PerfNowUs(); DML_PERF_LOG("[PERF] INF#", _perf_inf_id, " FullGraph_Compute EXIT: ", _t, " us (+", _t - _perf_t_enter, " total)\n"); }
@@ -2192,6 +2427,12 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     kernel_state->persistent_resource = std::move(persistent_resource);
     kernel_state->persistent_allocator = std::move(persistent_allocator);
     kernel_state->persistent_binding = persistent_binding;
+    // Gate command-list reuse on DESCRIPTORS_VOLATILE: reuse's late (per-replay) input/
+    // output binding is only legal when the op was compiled with this flag (set above
+    // for >= 5-node graphs). A sub-5-node static partition lacks it and must stay on the
+    // bind-before-record legacy path, else its reused list dispatches unbound -> TDR.
+    kernel_state->descriptors_volatile =
+        (exec_flags & DML_EXECUTION_FLAG_DESCRIPTORS_VOLATILE) != 0;
 
     // The Compute path maps ORT KernelContext input indices (subgraph ordering,
     // 0..num_graph_inputs-1) to DML graph input indices (renumbered, excluding
@@ -4134,8 +4375,24 @@ bool FullGraphFusion::TryTranslateNodes(
         if (total_nodes > 0)
             ort_api.Graph_GetNodes(main_graph, all_nodes.data(), total_nodes);
 
-        // Map producer output name → set of consumer input names.
+        // Map producer output name → set of consumer input names, AND collect the set
+        // of tensor names whose LIVE ValueInfo positively reports a dynamic dim (<0).
+        // A translator can compute a fully-static output shape from a stale/trace-time
+        // static input seed even when the tensor is runtime-dynamic (observed on VITS:
+        // TranslatePad fabricated [1,1,9,96] for a tensor whose VI is [-1,-1,-1]).
+        // Exporting that fabricated shape poisons the SHARED resolved_shapes map, which
+        // every later partition's BuildSubgraphInfo / HasDynamicShape consults. Guard the
+        // export: the live VI is authoritative — never export a computed shape for a
+        // tensor the graph says is dynamic.
         std::unordered_map<std::string, std::string> producer_output_name;
+        std::unordered_set<std::string> dynamic_vi_names;
+        auto vi_is_dynamic = [&](const OrtValueInfo* vi) -> bool {
+            if (!vi) return false;
+            fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ort_api, vi);
+            if (!s.has_type_info || !s.has_shape) return false;  // missing != dynamic
+            for (int64_t d : s.dims) if (d < 0) return true;
+            return false;
+        };
         for (const OrtNode* n : all_nodes) {
             if (!n) continue;
             auto onames = fusion_utils::GetNodeOutputNames(ort_api, n);
@@ -4145,7 +4402,12 @@ bool FullGraphFusion::TryTranslateNodes(
             if (nout > 0) ort_api.Node_GetOutputs(n, ovis.data(), nout);
             for (size_t k = 0; k < nout && k < onames.size(); ++k) {
                 if (onames[k].empty() || !ovis[k]) continue;
-                producer_output_name[fusion_utils::GetValueInfoName(ort_api, ovis[k])] = onames[k];
+                auto vi_name = fusion_utils::GetValueInfoName(ort_api, ovis[k]);
+                producer_output_name[vi_name] = onames[k];
+                if (vi_is_dynamic(ovis[k])) {
+                    dynamic_vi_names.insert(onames[k]);
+                    if (!vi_name.empty()) dynamic_vi_names.insert(vi_name);
+                }
             }
         }
 
@@ -4157,6 +4419,11 @@ bool FullGraphFusion::TryTranslateNodes(
         // reported output rank the same way the Squeeze->identity scalar did.
         auto ExportDims = [&](const std::string& name, const DmlTensorInfo& info) {
             if (out_shapes->count(name)) return;
+            if (dynamic_vi_names.count(name)) {
+                DML_PERF_LOG("[TryTranslateNodes] skip-export dynamic '", name,
+                             "' (live VI reports dynamic; not exporting fabricated static shape)\n");
+                return;
+            }
             size_t rank = (info.original_rank && info.original_rank <= info.sizes.size())
                 ? info.original_rank : info.sizes.size();
             size_t skip = info.sizes.size() - rank;  // strip leading padding 1s

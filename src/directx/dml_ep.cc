@@ -881,38 +881,63 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                     for (auto d : s.dims) if (d < 0) { all_static = false; break; }
                     if (all_static) return s.dims;
                 }
-                // Fallback: check resolved_shapes by name.
+                // Fallback: check resolved_shapes by name. Only accept an entry whose dims
+                // are ALL positive — the map can hold a stale/placeholder entry (a <=0 dim,
+                // or a fabricated shape for a tensor whose live VI is dynamic). Returning
+                // such an entry as "static input dims" would let Upsample/Resize compute and
+                // then write-back (SetResolvedDims, which mutates the VI) a corrupted shape —
+                // the same failure mode the boundary check guards against. Mirror that: a
+                // non-authoritative map entry is treated as unresolved (empty), not static.
                 auto name = fusion_utils::GetValueInfoName(ep->ort_api,vi);
                 if (!name.empty()) {
                     auto it = resolved_shapes.find(name);
-                    if (it != resolved_shapes.end()) return it->second;
+                    if (it != resolved_shapes.end() && !it->second.empty()) {
+                        bool all_static = true;
+                        for (int64_t d : it->second) if (d <= 0) { all_static = false; break; }
+                        if (all_static) return it->second;
+                    }
                 }
                 return {};
             };
 
-            // Helper: check if a ValueInfo has missing or dynamic shape.
-            auto HasDynamicShape = [&](const OrtValueInfo* vi) -> bool {
-                // A null ValueInfo is an omitted optional input (e.g. Resize's roi),
-                // not a dynamic shape — an absent value has no shape to be dynamic.
-                // Treating it as dynamic falsely cuts a fusion partition at the node.
-                if (!vi) return false;
-                // A resolved_shapes entry counts as static only if every dim is > 0.
-                // An entry may still hold a placeholder dim (-1 or 0); such an entry is
-                // not authoritative, so fall through to the ValueInfo check below.
-                auto name = fusion_utils::GetValueInfoName(ep->ort_api,vi);
-                if (!name.empty()) {
-                    auto it = resolved_shapes.find(name);
-                    if (it != resolved_shapes.end()) {
-                        bool all_static = !it->second.empty();
-                        for (int64_t d : it->second) if (d <= 0) { all_static = false; break; }
-                        if (all_static) return false;
-                    }
-                }
+            // Is this input/output slot a dynamic-shape partition boundary?
+            // `edge_name` is the slot's ONNX edge name (from GetNodeInput/OutputNames).
+            // Decision order, most authoritative first:
+            //   1. EMPTY edge name -> an absent OPTIONAL input (no producer, no runtime
+            //      data, e.g. Resize's roi). It has no shape to be dynamic and must not cut
+            //      a partition -> NOT dynamic. (In ORT's EP graph API an absent optional is
+            //      always both empty-named AND a null OrtValueInfo; see dml_ep.cc:2456 /
+            //      :2645. a0db215 keyed on `!vi` instead, which also caught real unresolved
+            //      edges and regressed VITS.)
+            //   2. The LIVE ValueInfo is authoritative whenever it carries a shape: a
+            //      negative dim -> dynamic -> boundary; rank 0 -> scalar static; else static.
+            //      This MUST win over the resolved_shapes fallback below — that map can hold
+            //      a STALE or even wrong-rank entry (observed on VITS: VI=[-1,-1,-1] but
+            //      resolved_shapes=[1,1,9,96]). Trusting the map there fused a genuinely-
+            //      dynamic Pad and corrupted the shared shape map -> downstream Reshape
+            //      element-count mismatch (HR=0x80004005).
+            //   3. VI has NO shape: a missing shape does NOT mean dynamic (ORT often fails
+            //      to propagate shape to a consumer-side VI; ValidateTier0 treats missing
+            //      shape as non-dynamic and lets later stages decide). Consult resolved_shapes
+            //      only as a positive static signal; default non-dynamic otherwise.
+            auto HasDynamicShape = [&](const OrtValueInfo* vi, const std::string& edge_name) -> bool {
+                if (edge_name.empty()) return false;  // (1) absent optional slot
+                if (!vi) return true;                 // named but null -> unresolved edge
                 fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ep->ort_api, vi);
-                if (!s.has_type_info || !s.has_shape) return true;
-                if (s.rank == 0) return false;  // true scalar — static
-                for (auto d : s.dims) if (d < 0) return true;
-                return false;
+                if (!s.has_type_info) return true;    // named real edge with no type -> dynamic
+                if (s.has_shape) {                    // (2) live VI is authoritative
+                    if (s.rank == 0) return false;            // true scalar — static
+                    for (auto d : s.dims) if (d < 0) return true;  // positively dynamic
+                    return false;                            // fully static
+                }
+                // (3) VI has no shape — resolved_shapes is only a positive static signal.
+                auto it = resolved_shapes.find(edge_name);
+                if (it != resolved_shapes.end()) {
+                    bool all_static = !it->second.empty();
+                    for (int64_t d : it->second) if (d <= 0) { all_static = false; break; }
+                    if (all_static) return false;
+                }
+                return false;  // missing shape, no contradicting signal -> not dynamic
             };
 
             // Helper: mutate a ValueInfo's shape to resolved static dims.
@@ -1229,7 +1254,8 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                             }
 
                             // Resolve Upsample/Resize output shapes.
-                            if (!HasDynamicShape(out_vis[0])) continue;
+                            if (!HasDynamicShape(out_vis[0],
+                                    output_names.empty() ? std::string() : output_names[0])) continue;
 
                             bool is_upsample = std::strcmp(op_type, "Upsample") == 0;
                             bool is_resize = std::strcmp(op_type, "Resize") == 0;
@@ -1498,11 +1524,16 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                     ep->ort_api.Node_GetNumOutputs(node, &num_outputs);
                     std::vector<const OrtValueInfo*> output_value_infos(num_outputs, nullptr);
                     if (num_outputs > 0) ep->ort_api.Node_GetOutputs(node, output_value_infos.data(), num_outputs);
+                    static const std::string kEmptyName;
+                    auto in_name  = [&](size_t k) -> const std::string& {
+                        return k < input_names.size() ? input_names[k] : kEmptyName; };
+                    auto out_name = [&](size_t k) -> const std::string& {
+                        return k < output_names.size() ? output_names[k] : kEmptyName; };
                     bool any_dynamic = false;
                     for (size_t k = 0; k < num_inputs && !any_dynamic; ++k)
-                        if (HasDynamicShape(input_value_infos[k])) any_dynamic = true;
+                        if (HasDynamicShape(input_value_infos[k], in_name(k))) any_dynamic = true;
                     for (size_t k = 0; k < num_outputs && !any_dynamic; ++k)
-                        if (HasDynamicShape(output_value_infos[k])) any_dynamic = true;
+                        if (HasDynamicShape(output_value_infos[k], out_name(k))) any_dynamic = true;
                     if (any_dynamic) {
                         is_fuseable = false;
                         DML_PERF_LOG("[Tier0] BOUNDARY node=", nid, " reason=dynamic_shape\n");
