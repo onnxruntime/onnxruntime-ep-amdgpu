@@ -578,21 +578,38 @@ void PopulateDirectCaches(DirectBindCache& dbc,
     }
 }
 
-// mgx_output_names lists the program outputs in #output_N order.  An identity result
-// is returned empty so OrtIndexForMgxOutput stays on its fast path.
+// mgx_output_names lists the program outputs in #output_N order.  Equal counts plus
+// no unknown names and no slot claimed twice make the table a bijection, so every ORT
+// output is written exactly once.  An identity result is returned empty so
+// OrtIndexForMgxOutput stays on its fast path.
 Ort::Status BuildMgxOutputToOrt(const std::vector<std::string>& mgx_output_names,
     const Map<std::size_t>& output_name_indices, std::vector<std::size_t>& mgx_to_ort)
 {
-    mgx_to_ort.assign(mgx_output_names.size(), 0);
+    mgx_to_ort.clear();
+    if (mgx_output_names.size() != output_name_indices.size()) {
+        return Ort::Status{MakeString("MIGraphX program has ", mgx_output_names.size(),
+            " outputs but the fused node has ", output_name_indices.size()).c_str(), ORT_EP_FAIL};
+    }
+    mgx_to_ort.resize(mgx_output_names.size());
+    std::vector<bool> taken(mgx_output_names.size());
     bool identity{true};
     for (std::size_t i{0}; i < mgx_output_names.size(); ++i) {
         const auto it{output_name_indices.find(mgx_output_names[i])};
         if (it == output_name_indices.end()) {
+            mgx_to_ort.clear();
             return Ort::Status{MakeString("MIGraphX output has no ORT fused-node slot: ",
                 mgx_output_names[i]).c_str(), ORT_EP_FAIL};
         }
-        mgx_to_ort[i] = it->second;
-        identity = identity && it->second == i;
+        const auto ort_i{it->second};
+        if (ort_i >= taken.size() || taken[ort_i]) {
+            mgx_to_ort.clear();
+            return Ort::Status{MakeString("ORT output slot ", ort_i,
+                " is claimed by more than one MIGraphX output (", mgx_output_names[i], ")").c_str(),
+                ORT_EP_FAIL};
+        }
+        taken[ort_i] = true;
+        mgx_to_ort[i] = ort_i;
+        identity = identity && ort_i == i;
     }
     if (identity) {
         mgx_to_ort.clear();
@@ -1319,17 +1336,13 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     // #output_N follows GraphToProto graph.output order after the Kahn sort; ORT
     // GetOutput(N) follows fused-node order. Map by ONNX name so the compiled
     // tensor is bound to the matching fused-node slot.
-    std::vector<std::size_t> mgx_output_to_ort(
-        static_cast<std::size_t>(model_proto.graph().output_size()));
-    for (int i = 0; i < model_proto.graph().output_size(); ++i) {
-        const auto name{model_proto.graph().output(i).name()};
-        const auto it{output_name_indices.find(name)};
-        if (it == output_name_indices.end()) {
-            return Ort::Status{("MIGraphX output has no ORT fused-node slot: " + name).c_str(),
-                ORT_EP_FAIL};
-        }
-        mgx_output_to_ort[static_cast<std::size_t>(i)] = it->second;
+    std::vector<std::string> mgx_output_names;
+    mgx_output_names.reserve(static_cast<std::size_t>(model_proto.graph().output_size()));
+    for (const auto& out : model_proto.graph().output()) {
+        mgx_output_names.push_back(out.name());
     }
+    std::vector<std::size_t> mgx_output_to_ort;
+    RETURN_IF_ERROR(BuildMgxOutputToOrt(mgx_output_names, output_name_indices, mgx_output_to_ort));
 
     fs::path model_path{graph.GetModelPath()};
 
