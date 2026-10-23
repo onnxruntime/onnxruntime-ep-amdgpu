@@ -161,6 +161,16 @@ DmlTensorInfo MakeTensorInfoAtAxis(
     uint32_t placement,
     uint32_t target_dim_count);
 
+// Output sizes for a rank-reducing op (Reduce*, ArgMax/ArgMin) in DML's required
+// form: input-rank, with each reduced axis set to 1. DML reduction descriptors have
+// no keepdims notion, so the resolved ONNX output shape (which is rank-reduced for
+// keepdims=0) must not be used — left-padding it misplaces the surviving dims and
+// CreateOperator rejects it with E_INVALIDARG. `axes` must already be in the padded
+// index space; out-of-range axes are ignored.
+std::vector<uint32_t> ReducedOutputSizes(
+    const std::vector<uint32_t>& padded_input_sizes,
+    const std::vector<uint32_t>& axes);
+
 // Build a DmlTensorInfo with explicit strides (padded to 4D).
 DmlTensorInfo MakeTensorInfoWithStrides(
     const std::vector<uint32_t>& sizes,
