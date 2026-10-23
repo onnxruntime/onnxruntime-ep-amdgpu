@@ -984,11 +984,16 @@ static SubgraphInfo BuildSubgraphInfo(
                 if (dml_dtype == DML_TENSOR_DATA_TYPE_UNKNOWN) continue;
 
                 std::vector<uint32_t> sizes(rank);
-                for (size_t d = 0; d < rank; ++d)
+                bool init_coerced_zero = false;
+                for (size_t d = 0; d < rank; ++d) {
+                    if (dims[d] == 0) init_coerced_zero = true;
                     sizes[d] = static_cast<uint32_t>(dims[d] > 0 ? dims[d] : 1);
+                }
 
                 auto tensor_info = MakeTensorInfo(sizes, dml_dtype);
                 tensor_info.original_rank = static_cast<uint32_t>(rank);
+                // Preserve the extent-0 signal across the 0→1 coercion above.
+                tensor_info.is_empty = init_coerced_zero;
                 info.value_shapes[name] = tensor_info;
             }
         }
@@ -1095,10 +1100,18 @@ static SubgraphInfo BuildSubgraphInfo(
                                 std::vector<int64_t> cdims(crank, 0);
                                 if (crank > 0) ort_api.GetDimensions(csi, cdims.data(), crank);
                                 std::vector<uint32_t> csizes(crank);
-                                for (size_t d = 0; d < crank; ++d)
+                                bool coerced_zero = false;
+                                for (size_t d = 0; d < crank; ++d) {
+                                    if (cdims[d] == 0) coerced_zero = true;
                                     csizes[d] = static_cast<uint32_t>(cdims[d] > 0 ? cdims[d] : 1);
+                                }
                                 auto cti = MakeTensorInfo(csizes, cdml);
                                 cti.original_rank = static_cast<uint32_t>(crank);
+                                // A genuine extent-0 dim is coerced to 1 above (DML
+                                // descriptors can't hold a 0). Preserve the "empty"
+                                // signal so translators (Concat) can drop this operand
+                                // instead of emitting a bogus non-empty DML input.
+                                cti.is_empty = coerced_zero;
                                 info.value_shapes[in_names[k]] = cti;
                             }
                             ort_api.ReleaseTensorTypeAndShapeInfo(csi);
@@ -1135,11 +1148,17 @@ static SubgraphInfo BuildSubgraphInfo(
             const size_t out_rank = s.rank;
             std::vector<uint32_t> out_sizes;
             bool all_static = true;
+            bool out_empty = false;
             if (out_rank > 0) {
                 std::vector<int64_t>& out_dims = s.dims;
                 out_sizes.resize(out_rank);
                 for (size_t d = 0; d < out_rank; ++d) {
-                    if (out_dims[d] <= 0) { all_static = false; break; }
+                    // An extent-0 dim is STATIC (a known empty tensor), distinct from
+                    // a dynamic dim (< 0, unknown). Coerce the 0 to 1 for the DML
+                    // descriptor but record out_empty so the signal survives; only a
+                    // genuinely dynamic (< 0) dim disqualifies the static seed.
+                    if (out_dims[d] == 0) { out_empty = true; out_sizes[d] = 1u; continue; }
+                    if (out_dims[d] < 0) { all_static = false; break; }
                     out_sizes[d] = static_cast<uint32_t>(out_dims[d]);
                 }
                 if (!all_static) {
@@ -1152,6 +1171,7 @@ static SubgraphInfo BuildSubgraphInfo(
             if (all_static) {
                 auto tensor_info = MakeTensorInfo(out_sizes, dml_dt);
                 tensor_info.original_rank = static_cast<uint32_t>(out_rank);
+                tensor_info.is_empty = out_empty;
                 info.value_shapes[output_names[k]] = tensor_info;
             }
         }
@@ -1180,17 +1200,21 @@ static SubgraphInfo BuildSubgraphInfo(
             const size_t in_rank = s.rank;
             std::vector<uint32_t> in_sizes;
             bool all_static = true;
+            bool in_empty = false;
             if (in_rank > 0) {
                 std::vector<int64_t>& in_dims = s.dims;
                 in_sizes.resize(in_rank);
                 for (size_t d = 0; d < in_rank; ++d) {
-                    if (in_dims[d] <= 0) { all_static = false; break; }
+                    // Extent-0 is static (empty), not dynamic — coerce to 1 and flag.
+                    if (in_dims[d] == 0) { in_empty = true; in_sizes[d] = 1u; continue; }
+                    if (in_dims[d] < 0) { all_static = false; break; }
                     in_sizes[d] = static_cast<uint32_t>(in_dims[d]);
                 }
             }
             if (all_static) {
                 auto tensor_info = MakeTensorInfo(in_sizes, dml_dt);
                 tensor_info.original_rank = static_cast<uint32_t>(in_rank);
+                tensor_info.is_empty = in_empty;
                 info.value_shapes[input_names_scan[k]] = tensor_info;
             }
         }
@@ -4579,7 +4603,9 @@ bool FullGraphFusion::TryCompilePartition(
             char hr_buf[32];
             snprintf(hr_buf, sizeof(hr_buf), "0x%08X", (unsigned)hr_op);
             DiagLog(std::string("[TryCompilePartition] CreateOperator FAILED HR=") + hr_buf +
-                " op=" + compiled_node.op_type + "\n");
+                " op=" + compiled_node.op_type +
+                " out0=" + (compiled_node.output_names.empty() ? "?" : compiled_node.output_names[0]) +
+                " in0=" + (compiled_node.input_names.empty() ? "?" : compiled_node.input_names[0]) + "\n");
             auto dump_tensors = [](const char* tag, const std::vector<DmlTensorInfo>& tensors) {
                 for (size_t ti = 0; ti < tensors.size(); ++ti) {
                     const auto& t = tensors[ti];
@@ -4733,6 +4759,13 @@ bool FullGraphFusion::TryCompilePartition(
     std::vector<DML_INPUT_GRAPH_EDGE_DESC> ie;
     std::vector<DML_INTERMEDIATE_GRAPH_EDGE_DESC> me;
     std::vector<DML_OUTPUT_GRAPH_EDGE_DESC> oe;
+
+    // Map a DML node index (the primary op slot) back to its compiled_nodes entry,
+    // so a CompileGraph edge-mismatch (reported by DML node index) can be resolved
+    // to the op type + output name for diagnosis.
+    std::unordered_map<UINT, size_t> dml_idx_to_compiled;
+    for (size_t i = 0; i < compiled_nodes.size(); ++i)
+        dml_idx_to_compiled[(UINT)dml_node_offset[i]] = i;
 
     for (size_t node_idx = 0; node_idx < compiled_nodes.size(); ++node_idx) {
         const auto& compiled_node = compiled_nodes[node_idx];
@@ -4914,6 +4947,37 @@ bool FullGraphFusion::TryCompilePartition(
             } else {
                 DiagLog("[TryCompilePartition] ID3D12InfoQueue unavailable"
                     " — DML debug layer not active\n");
+            }
+        }
+
+        // Dump every intermediate edge whose producer/consumer byte sizes differ,
+        // resolving DML node indices back to op type + output name. This maps the
+        // debug layer's "IntermediateEdges[N] incompatible" report to real tensors.
+        auto describe_node = [&](UINT dml_idx) -> std::string {
+            auto it = dml_idx_to_compiled.find(dml_idx);
+            if (it == dml_idx_to_compiled.end())
+                return "dml#" + std::to_string(dml_idx) + "(sub/const)";
+            const auto& cn = compiled_nodes[it->second];
+            return cn.op_type + ":" + (cn.output_names.empty() ? "?" : cn.output_names[0]);
+        };
+        for (size_t ei = 0; ei < me.size(); ++ei) {
+            const auto& e = me[ei];
+            auto pit = dml_idx_to_compiled.find(e.FromNodeIndex);
+            auto cit = dml_idx_to_compiled.find(e.ToNodeIndex);
+            // Only report edges where BOTH endpoints are primary ops with known
+            // tensor sizes — sub-node/constant endpoints resolve to 0 bytes here
+            // and would be misleading false positives.
+            if (pit == dml_idx_to_compiled.end() || cit == dml_idx_to_compiled.end()) continue;
+            const auto& ot = compiled_nodes[pit->second].translated->output_tensors;
+            const auto& it2 = compiled_nodes[cit->second].translated->input_tensors;
+            if (e.FromNodeOutputIndex >= ot.size() || e.ToNodeInputIndex >= it2.size()) continue;
+            uint64_t src_bytes = ot[e.FromNodeOutputIndex].total_bytes;
+            uint64_t dst_bytes = it2[e.ToNodeInputIndex].total_bytes;
+            if (src_bytes != dst_bytes) {
+                DiagLog("[EdgeMismatch] me[" + std::to_string(ei) + "] from=" + describe_node(e.FromNodeIndex) +
+                        "[out" + std::to_string(e.FromNodeOutputIndex) + "](" + std::to_string(src_bytes) + "B)" +
+                        " -> to=" + describe_node(e.ToNodeIndex) +
+                        "[in" + std::to_string(e.ToNodeInputIndex) + "](" + std::to_string(dst_bytes) + "B)\n");
             }
         }
 
