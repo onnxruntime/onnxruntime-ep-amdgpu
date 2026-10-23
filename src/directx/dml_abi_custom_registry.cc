@@ -389,119 +389,124 @@ HRESULT STDMETHODCALLTYPE PluginAbiCustomRegistry::RegisterOperatorKernel(
 
         const dml_ep::PluginDmlExecutionProviderImpl* dmlProviderCapture = m_dmlPluginExecutionProvider;
 
+        // KernelCreateInfo requires a KernelCreateFn, but kernels are created exclusively via the
+        // ABI-safe DmlAbiKernel_Create path (driven by regInfo->kernelFactory below), not through
+        // this function, so the body is an inert stub.
+        //
+        // The capture list must be preserved even though the stub body references none of it. The
+        // captures make this a non-trivial closure, which forces the std::function in
+        // create_info.kernel_create_func to heap-allocate its target at a stable address; an empty
+        // capture list lets std::function use inline (small-buffer) storage, so the target is
+        // relocated when create_info is moved into the kernel registry, dangling any pointer taken
+        // into it. Keep the captures.
         auto lotusKernelCreateFn =
             [kernelFactoryCapture, requiresInputShapesAtCreation, requiresOutputShapesAtCreation, isInternalOperator,
              constantCpuInputCapture, shapeInferrerCapture, defaultAttributesCapture,
-             dmlProviderCapture](onnxruntime::FuncManager&, const onnxruntime::OpKernelInfo& info,
-                                       std::unique_ptr<onnxruntime::OpKernel>& out) -> Ort::Status {
-            out = std::make_unique<PluginDmlAbiOpKernel>(
-                kernelFactoryCapture.Get(), info, requiresInputShapesAtCreation, requiresOutputShapesAtCreation,
-                isInternalOperator, constantCpuInputCapture, shapeInferrerCapture.Get(), &defaultAttributesCapture,
-                dmlProviderCapture);
-            return STATUS_OK;
+             dmlProviderCapture](onnxruntime::FuncManager&, const onnxruntime::OpKernelInfo&,
+                                       std::unique_ptr<onnxruntime::OpKernel>&) -> Ort::Status {
+            return ORT_MAKE_STATUS(ORT_NOT_IMPLEMENTED, "ABI-unsafe kernel creation disabled");
         };
 
         onnxruntime::KernelCreateInfo create_info(builder.Build(), lotusKernelCreateFn);
         onnxruntime::KernelDef* kernelDef = create_info.kernel_def.get();
 
+        // External operators (isInternalOperator == false, e.g. the custom-op shaders
+        // DFT/STFT/GridSample) do NOT support DML-graph fusion or kernel aliasing.
+        if (!isInternalOperator && (aliasCount > 0 || supportsGraph || requiredInputCountForGraph)) {
+            ORT_THROW_HR(E_INVALIDARG);
+        }
+
+        // Build the ABI-safe registration info for BOTH internal and external operators. This carries
+        // the IMLOperatorKernelFactory into ConvertKernelRegistryToOrtKernelRegistry so the op runs
+        // via the ABI-safe DmlAbiKernel_Create path. It must cover external ops (the custom-op shaders
+        // DFT/STFT/GridSample) too; otherwise they would have a null kernel_factory and fail creation.
+        auto regInfo = std::make_shared<InternalRegistrationInfo>();
+        regInfo->requiredConstantCpuInputs = constantCpuInputCapture;
+        regInfo->kernelFactory = kernelFactoryCapture.Get();
+        regInfo->shapeInferrer = shapeInferrerCapture.Get();
+        regInfo->defaultAttributes = defaultAttributesCapture;  // Copy by value
+        regInfo->requiresInputShapesAtCreation = requiresInputShapesAtCreation;
+        regInfo->requiresOutputShapesAtCreation = requiresOutputShapesAtCreation;
+        regInfo->isInternalOperator = isInternalOperator;
+
+        // DML-graph fusion is internal-only (the guard above rejects supportsGraph for external ops).
+        // DEAD CODE in plugin EP: this factory lambda is only invoked from GraphDescBuilder and
+        // GraphPartitioner, legacy graph-fusion code never called from plugin EP entry points.
+        if (supportsGraph) {
+            GraphNodeFactoryRegistration graphReg;
+            graphReg.factory = [kernelFactoryCapture, shapeInferrerCapture, defaultAttributesCapture,
+                                constantCpuInputCapture](
+                                   const onnxruntime::Node& node, MLOperatorTensorGetter& constantInputGetter,
+                                   const void* executionHandle, const EdgeShapes* inputShapesOverrides,
+                                   /*out*/ EdgeShapes* outputShapes,
+                                   /*out*/ DmlGraphNodeCreateInfo* graphNodeCreateInfo) {
+                onnxruntime::ProtoHelperNodeContext nodeContext(node);
+                onnxruntime::OpNodeProtoHelper<onnxruntime::ProtoHelperNodeContext> protoHelper(&nodeContext);
+
+                // Use the same list of required constant inputs for the shape inferrer and the kernel.
+                PerformInferAndVerifyOutputSizes(node, &defaultAttributesCapture, shapeInferrerCapture.Get(),
+                                          constantCpuInputCapture, constantInputGetter, inputShapesOverrides,
+                                          *outputShapes);
+
+                // Create the kernel while allowing input shape and output shape queries according to options
+                Microsoft::WRL::ComPtr<DmlGraphOpKernelInfoWrapper> kernelInfoWrapper =
+                    wil::MakeOrThrow<DmlGraphOpKernelInfoWrapper>(&protoHelper, executionHandle, true,
+                                                                  inputShapesOverrides, outputShapes,
+                                                                  &defaultAttributesCapture, graphNodeCreateInfo,
+                                                                  constantCpuInputCapture, constantInputGetter);
+
+                Microsoft::WRL::ComPtr<IMLOperatorKernel> kernel;
+                ORT_THROW_IF_FAILED(
+                    kernelFactoryCapture->CreateKernel(kernelInfoWrapper.Get(), kernel.GetAddressOf()));
+                kernelInfoWrapper->Close();
+            };
+
+            if (requiredInputCountForGraph) {
+                graphReg.requiredInputCount = *requiredInputCountForGraph;
+            }
+
+            regInfo->graphNodeFactoryRegistration = graphReg;
+        }
+
+        if (supportQuery) {
+            Microsoft::WRL::ComPtr<IMLOperatorSupportQueryPrivate> supportQueryCapture = supportQuery;
+
+            regInfo->supportQuery = [supportQueryCapture, defaultAttributesCapture](const OrtNode* node, const OrtApi& ort_api) {
+
+                onnxruntime::AbiSafeProtoHelperNodeContext nodeContext(node, ort_api);
+
+                onnxruntime::OpNodeProtoHelper<onnxruntime::AbiSafeProtoHelperNodeContext> protoHelper(&nodeContext);
+
+                Microsoft::WRL::ComPtr<PluginAbiSafeMLSupportQueryContext> supportContext =
+                    PluginAbiSafeMLSupportQueryContext::Create(&protoHelper, &defaultAttributesCapture);
+
+                BOOL bSupported = FALSE;
+                ORT_THROW_IF_FAILED(supportQueryCapture->QuerySupport(supportContext.Get(), &bSupported));
+                return !!bSupported;
+            };
+        }
+
+        // Internal operators propagate registration errors; external operators historically do not.
         if (isInternalOperator) {
-            auto regInfo = std::make_shared<InternalRegistrationInfo>();
-            regInfo->requiredConstantCpuInputs = constantCpuInputCapture;
-
-            // Store ABI-safe kernel creation information for later use in dml_ep.cc
-            regInfo->kernelFactory = kernelFactoryCapture.Get();
-            regInfo->shapeInferrer = shapeInferrerCapture.Get();
-            regInfo->defaultAttributes = defaultAttributesCapture;  // Copy by value
-            regInfo->requiresInputShapesAtCreation = requiresInputShapesAtCreation;
-            regInfo->requiresOutputShapesAtCreation = requiresOutputShapesAtCreation;
-            regInfo->isInternalOperator = isInternalOperator;
-
-            // Only internal operators support usage in DML graphs
-            // DEAD CODE in plugin EP: This factory lambda is only invoked from
-            // GraphDescBuilder and GraphPartitioner, which are legacy graph fusion code
-            // never called from plugin EP entry points. The ProtoHelperNodeContext(node)
-            // construction below is a protobuf ABI violation that is harmless because
-            // this code path is unreachable from the plugin.
-            if (supportsGraph) {
-                GraphNodeFactoryRegistration graphReg;
-                graphReg.factory = [kernelFactoryCapture, shapeInferrerCapture, defaultAttributesCapture,
-                                    constantCpuInputCapture](
-                                       const onnxruntime::Node& node, MLOperatorTensorGetter& constantInputGetter,
-                                       const void* executionHandle, const EdgeShapes* inputShapesOverrides,
-                                       /*out*/ EdgeShapes* outputShapes,
-                                       /*out*/ DmlGraphNodeCreateInfo* graphNodeCreateInfo) {
-                    onnxruntime::ProtoHelperNodeContext nodeContext(node);
-                    onnxruntime::OpNodeProtoHelper<onnxruntime::ProtoHelperNodeContext> protoHelper(&nodeContext);
-
-                    // Use the same list of required constant inputs for the shape inferrer and the kernel.
-                    PerformInferAndVerifyOutputSizes(node, &defaultAttributesCapture, shapeInferrerCapture.Get(),
-                                              constantCpuInputCapture, constantInputGetter, inputShapesOverrides,
-                                              *outputShapes);
-
-                    // Create the kernel while allowing input shape and output shape queries according to options
-                    Microsoft::WRL::ComPtr<DmlGraphOpKernelInfoWrapper> kernelInfoWrapper =
-                        wil::MakeOrThrow<DmlGraphOpKernelInfoWrapper>(&protoHelper, executionHandle, true,
-                                                                      inputShapesOverrides, outputShapes,
-                                                                      &defaultAttributesCapture, graphNodeCreateInfo,
-                                                                      constantCpuInputCapture, constantInputGetter);
-
-                    Microsoft::WRL::ComPtr<IMLOperatorKernel> kernel;
-                    ORT_THROW_IF_FAILED(
-                        kernelFactoryCapture->CreateKernel(kernelInfoWrapper.Get(), kernel.GetAddressOf()));
-                    kernelInfoWrapper->Close();
-                };
-
-                if (requiredInputCountForGraph) {
-                    graphReg.requiredInputCount = *requiredInputCountForGraph;
-                }
-
-                regInfo->graphNodeFactoryRegistration = graphReg;
-            }
-
-            if (supportQuery) {
-                Microsoft::WRL::ComPtr<IMLOperatorSupportQueryPrivate> supportQueryCapture = supportQuery;
-
-                regInfo->supportQuery = [supportQueryCapture, defaultAttributesCapture](const OrtNode* node, const OrtApi& ort_api) {
-
-                    onnxruntime::AbiSafeProtoHelperNodeContext nodeContext(node, ort_api);
-
-                    onnxruntime::OpNodeProtoHelper<onnxruntime::AbiSafeProtoHelperNodeContext> protoHelper(&nodeContext);
-
-                    Microsoft::WRL::ComPtr<PluginAbiSafeMLSupportQueryContext> supportContext =
-                        PluginAbiSafeMLSupportQueryContext::Create(&protoHelper, &defaultAttributesCapture);
-
-                    BOOL bSupported = FALSE;
-                    ORT_THROW_IF_FAILED(supportQueryCapture->QuerySupport(supportContext.Get(), &bSupported));
-                    return !!bSupported;
-                };
-            }
-
             THROW_IF_NOT_OK(m_kernelRegistry->RegisterCustomKernel(create_info));
-
-            // Versioned key (domain::opname::sinceVersion) ensures ConvertKernelRegistryToOrtKernelRegistry
-            // gets the correct per-version kernelFactory. Ops like Pad, Slice, and Clip change their
-            // interface between versions (e.g., pads moves from attribute to input tensor at v11), so
-            // each version must map to its own factory.
-            int since_ver_start = 0, since_ver_end = 0;
-            kernelDef->SinceVersion(&since_ver_start, &since_ver_end);
-            std::string versionedKey = std::string(kernelDef->Domain()) + "::" +
-                                       std::string(kernelDef->OpName()) + "::" +
-                                       std::to_string(since_ver_start);
-            (*m_internalRegInfoMap)[versionedKey] = regInfo;
-
-            // Unversioned key for IsNodeSupportedByDml (supportQuery only, version-agnostic).
-            std::string regKey = std::string(kernelDef->Domain()) + "::" + std::string(kernelDef->OpName());
-            (*m_internalRegInfoMap)[regKey] = regInfo;
         } else {
-            // Currently unsupported for external operators
-            if (aliasCount > 0 || supportsGraph || requiredInputCountForGraph) {
-                ORT_THROW_HR(E_INVALIDARG);
-            }
-
-            //
-            // For backward compatibility, this does not propagate errors for external operators
             static_cast<void>(m_kernelRegistry->RegisterCustomKernel(create_info)); // ignore result
         }
+
+        // Versioned key (domain::opname::sinceVersion) ensures ConvertKernelRegistryToOrtKernelRegistry
+        // gets the correct per-version kernelFactory. Ops like Pad, Slice, and Clip change their
+        // interface between versions (e.g., pads moves from attribute to input tensor at v11), so
+        // each version must map to its own factory.
+        int since_ver_start = 0, since_ver_end = 0;
+        kernelDef->SinceVersion(&since_ver_start, &since_ver_end);
+        std::string versionedKey = std::string(kernelDef->Domain()) + "::" +
+                                   std::string(kernelDef->OpName()) + "::" +
+                                   std::to_string(since_ver_start);
+        (*m_internalRegInfoMap)[versionedKey] = regInfo;
+
+        // Unversioned key for IsNodeSupportedByDml (supportQuery only, version-agnostic).
+        std::string regKey = std::string(kernelDef->Domain()) + "::" + std::string(kernelDef->OpName());
+        (*m_internalRegInfoMap)[regKey] = regInfo;
 
         return S_OK;
     }
