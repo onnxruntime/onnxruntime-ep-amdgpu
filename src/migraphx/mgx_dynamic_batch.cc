@@ -101,6 +101,20 @@ std::vector<std::size_t> GenerateCompiledBatchSizes(std::size_t max_batch_size,
 {
     if (!compile_batches_spec.empty()) {
         if (auto batch_sizes{ParseCompileBatches(compile_batches_spec)}; !batch_sizes.empty()) {
+            // Drop buckets above the declared ceiling: an explicit list is typically set
+            // globally for several models, and a bucket the frontend can never request
+            // still costs a compiled program and sizes that bucket's input arena.
+            if (max_batch_size > 0) {
+                batch_sizes.erase(
+                    std::remove_if(batch_sizes.begin(), batch_sizes.end(),
+                        [max_batch_size](std::size_t bs) { return bs > max_batch_size; }),
+                    batch_sizes.end());
+                // Keep a bucket at the ceiling so a full-size request still lands on a
+                // compiled bucket rather than compiling a program of its own.
+                if (batch_sizes.empty() || batch_sizes.back() != max_batch_size) {
+                    batch_sizes.push_back(max_batch_size);
+                }
+            }
             return batch_sizes;
         }
     }
@@ -147,6 +161,28 @@ void PadSeqTensor(const void* src_data, void* dst_data,
             HIP_CALL_THROW(hipMemsetAsync(dst + o * dst_slice_bytes + real_bytes, 0,
                 pad_bytes, stream));
         }
+    }
+}
+
+void PadBatchTensor(void* dst_data, std::size_t real_rows, std::size_t target_rows,
+    std::size_t row_bytes, hipStream_t stream)
+{
+    if (real_rows == 0 || target_rows <= real_rows || row_bytes == 0) {
+        return;
+    }
+    char* const dst{static_cast<char*>(dst_data)};
+    const char* const last_row{dst + (real_rows - 1) * row_bytes};
+    char* const pad{dst + real_rows * row_bytes};
+    const std::size_t slots{target_rows - real_rows};
+
+    // Seed one pad row from the last real row, then double the filled region each step
+    // so the launch count is O(log slots) instead of one copy per pad row.
+    HIP_CALL_THROW(hipMemcpyAsync(pad, last_row, row_bytes, hipMemcpyDeviceToDevice, stream));
+    for (std::size_t filled{1}; filled < slots;) {
+        const std::size_t chunk{std::min(filled, slots - filled)};
+        HIP_CALL_THROW(hipMemcpyAsync(pad + filled * row_bytes, pad,
+            chunk * row_bytes, hipMemcpyDeviceToDevice, stream));
+        filled += chunk;
     }
 }
 

@@ -549,7 +549,8 @@ void* GetGpuInputData(ComputeState& cs, const Ort::KernelContext& ctx, const std
 // construction, mirroring the built-in EP's populate-once design.
 void PopulateDirectCaches(DirectBindCache& dbc,
     const migraphx::program_parameter_shapes& param_shapes,
-    const Map<std::size_t>& input_name_indices)
+    const Map<std::size_t>& input_name_indices,
+    const std::vector<std::size_t>& mgx_to_ort)
 {
     dbc.inputs.clear();
     dbc.outputs.clear();
@@ -567,13 +568,53 @@ void PopulateDirectCaches(DirectBindCache& dbc,
             dbc.has_scratch = true;
             dbc.scratch_shape = param_shapes[name.c_str()];
         } else if (const auto oi{ComputeOutputIndex(name)}; oi != -1) {
+            const auto mgx_index{static_cast<std::size_t>(oi)};
             const auto prog_shape{param_shapes[name.c_str()]};
             const auto lens{prog_shape.lengths()};
             std::vector<std::int64_t> ort_shape{lens.begin(), lens.end()};
-            dbc.outputs.push_back(CachedDirectOutput{
-                std::move(name), static_cast<std::size_t>(oi), prog_shape, std::move(ort_shape)});
+            dbc.outputs.push_back(CachedDirectOutput{std::move(name), mgx_index,
+                OrtIndexForMgxOutput(mgx_to_ort, mgx_index), prog_shape, std::move(ort_shape)});
         }
     }
+}
+
+// mgx_output_names lists the program outputs in #output_N order.  Equal counts plus
+// no unknown names and no slot claimed twice make the table a bijection, so every ORT
+// output is written exactly once.  An identity result is returned empty so
+// OrtIndexForMgxOutput stays on its fast path.
+Ort::Status BuildMgxOutputToOrt(const std::vector<std::string>& mgx_output_names,
+    const Map<std::size_t>& output_name_indices, std::vector<std::size_t>& mgx_to_ort)
+{
+    mgx_to_ort.clear();
+    if (mgx_output_names.size() != output_name_indices.size()) {
+        return Ort::Status{MakeString("MIGraphX program has ", mgx_output_names.size(),
+            " outputs but the fused node has ", output_name_indices.size()).c_str(), ORT_EP_FAIL};
+    }
+    mgx_to_ort.resize(mgx_output_names.size());
+    std::vector<bool> taken(mgx_output_names.size());
+    bool identity{true};
+    for (std::size_t i{0}; i < mgx_output_names.size(); ++i) {
+        const auto it{output_name_indices.find(mgx_output_names[i])};
+        if (it == output_name_indices.end()) {
+            mgx_to_ort.clear();
+            return Ort::Status{MakeString("MIGraphX output has no ORT fused-node slot: ",
+                mgx_output_names[i]).c_str(), ORT_EP_FAIL};
+        }
+        const auto ort_i{it->second};
+        if (ort_i >= taken.size() || taken[ort_i]) {
+            mgx_to_ort.clear();
+            return Ort::Status{MakeString("ORT output slot ", ort_i,
+                " is claimed by more than one MIGraphX output (", mgx_output_names[i], ")").c_str(),
+                ORT_EP_FAIL};
+        }
+        taken[ort_i] = true;
+        mgx_to_ort[i] = ort_i;
+        identity = identity && ort_i == i;
+    }
+    if (identity) {
+        mgx_to_ort.clear();
+    }
+    return STATUS_OK;
 }
 
 }  // namespace
@@ -798,12 +839,15 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
            dynamic batching (the staging path) to take effect. */
     }
 
-    // If compile_batches is set, derive max_dynamic_batch from the spec's max value.
-    if (!compile_batches_.empty()) {
+    // If compile_batches is set but the model declared no max_dynamic_batch, derive it
+    // from the spec's max value.  Only in that direction: the bucket list is usually
+    // set once globally (one env var, several models), and letting it raise a
+    // per-model max_dynamic_batch would compile buckets above the batch the frontend
+    // can ever send and size the staging buffers for them.  GenerateCompiledBatchSizes
+    // clamps the list to max_dynamic_batch for the models that do declare one.
+    if (!compile_batches_.empty() && max_dynamic_batch_ == 0) {
         if (const auto explicit_sizes{ParseCompileBatches(compile_batches_)}; !explicit_sizes.empty()) {
-            if (const auto derived_max{explicit_sizes.back()}; max_dynamic_batch_ < derived_max) {
-                max_dynamic_batch_ = derived_max;
-            }
+            max_dynamic_batch_ = explicit_sizes.back();
         }
     }
 
@@ -921,20 +965,22 @@ ExecutionProvider::~ExecutionProvider() {
         }};
         destroy_captured(cs.hip_graph_cache);
         destroy_captured(cs.hip_graph_cache_direct);
-        // Staging inputs/outputs and the coalesce arena come from hipMallocAsync, so
+        // Staging inputs/outputs and the coalesce arenas come from hipMallocAsync, so
         // they are released with hipFreeAsync.  Best-effort teardown: the free is
         // queued on the default stream and reclaimed with the context at exit.
         for (auto& [param_name, buf] : cs.staging_inputs) {
-            // Arena sub-views are not independent allocations; the arena is freed below.
-            if (buf.data != nullptr && !buf.is_arena_view) {
+            if (buf.data != nullptr) {
                 (void)hipFreeAsync(buf.data, nullptr);
             }
             buf.data = nullptr;
         }
-        if (cs.in_arena_dev != nullptr) {
-            (void)hipFreeAsync(cs.in_arena_dev, nullptr);
-            cs.in_arena_dev = nullptr;
+        for (auto& [key, arena] : cs.coalesce_arenas) {
+            if (arena.dev != nullptr) {
+                (void)hipFreeAsync(arena.dev, nullptr);
+                arena.dev = nullptr;
+            }
         }
+        cs.coalesce_arenas.clear();
         if (cs.in_staging_host != nullptr) {
             (void)hipHostFree(cs.in_staging_host);
             cs.in_staging_host = nullptr;
@@ -1176,7 +1222,10 @@ try {
     }};
 
     // Size the staging buffers once, for the largest bucket, so every smaller bucket
-    // binds a prefix (mirrors AllocateStaging's max_dynamic_batch sizing).
+    // binds a prefix (mirrors AllocateStaging's max_dynamic_batch sizing).  Under
+    // coalesce_io this is what sizes the shared pinned gather buffer to the largest
+    // arena up front; the per-bucket arenas themselves are created by the
+    // BindStagingParams loop below, so no bucket has to grow the buffer mid-session.
     // NOTE: "largest" here means largest BATCH, which only orders dynamic-batch buckets.
     // Do not reuse this to pick a max across co-resident LLM programs -- prefill and
     // decode are both batch 1, so the tie is broken by unordered_map order and could
@@ -1283,6 +1332,18 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
 
     std::vector<std::string> input_names, output_names;
     const auto has_input_shape{get_input_output_names(sorted_graph, input_names, output_names)};
+
+    // #output_N follows GraphToProto graph.output order after the Kahn sort; ORT
+    // GetOutput(N) follows fused-node order. Map by ONNX name so the compiled
+    // tensor is bound to the matching fused-node slot.
+    std::vector<std::string> mgx_output_names;
+    mgx_output_names.reserve(static_cast<std::size_t>(model_proto.graph().output_size()));
+    for (const auto& out : model_proto.graph().output()) {
+        mgx_output_names.push_back(out.name());
+    }
+    std::vector<std::size_t> mgx_output_to_ort;
+    RETURN_IF_ERROR(BuildMgxOutputToOrt(mgx_output_names, output_name_indices, mgx_output_to_ort));
+
     fs::path model_path{graph.GetModelPath()};
 
     // If context_enable is set but cache_dir isn't, default to context_file_path's or the
@@ -1393,6 +1454,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
 
     // Propagate hipGraph / dynamic-batch configuration onto the compute state.
     auto& compute_state{state_it->second};
+    compute_state.mgx_output_to_ort = std::move(mgx_output_to_ort);
     compute_state.hip_graph_enable = hip_graph_enable_;
     // Co-residency and dynamic batching both own the program cache's population
     // policy; dynamic batching already retains every compiled bucket, so the flag
@@ -1532,6 +1594,9 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromCache(const Ort::ConstGr
             throw std::runtime_error{
                 "EPContext contains a non-standard MIGraphX output; regenerate it"};
         }
+        std::vector<std::size_t> mgx_output_to_ort;
+        RETURN_IF_ERROR(BuildMgxOutputToOrt(ep_ctx_reader.OutputNames(), output_name_indices,
+            mgx_output_to_ort));
 
         ep_context_compute_states_.emplace(name,
             EpContextComputeState{
@@ -1541,6 +1606,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromCache(const Ort::ConstGr
                 std::move(program),
                 input_name_indices,
                 output_name_indices,
+                std::move(mgx_output_to_ort),
             });
     } catch (const std::exception& e) {
         return Ort::Status{e.what(), ORT_INVALID_GRAPH};
@@ -1738,7 +1804,6 @@ StaticSeqContext ResolveSeqPadding(ComputeState& compute_state,
                 seq.real_len = extent;
                 seq.target_len = target;
                 seq.input_axes = &compute_state.static_pad_input_axes;
-                seq.output_axes_by_index = &compute_state.static_pad_output_axes_by_index;
                 break;  // all named inputs share the same token length this call
             }
         }
@@ -1983,6 +2048,14 @@ void RetainProgram(ComputeState& cs, ShapeKey shape_key, const migraphx::program
                 (void)hipFree(sit->second.data);
             }
             cs.scratch_bufs.erase(sit);
+        }
+        // The coalesce arena is per bucket too, and the bind that pointed into it was
+        // dropped above, so it goes with the program rather than accumulating.
+        if (const auto ait{cs.coalesce_arenas.find(victim)}; ait != cs.coalesce_arenas.end()) {
+            if (ait->second.dev != nullptr) {
+                (void)hipFreeAsync(ait->second.dev, stream);
+            }
+            cs.coalesce_arenas.erase(ait);
         }
         cs.cached_programs.erase(victim);
         ++cs.coresident_evictions;
@@ -2246,8 +2319,9 @@ std::optional<Ort::Status> TryDirectBind(ComputeState& compute_state,
         auto dbc_it{compute_state.direct_bind_cache.find(shape_key)};
         if (dbc_it == compute_state.direct_bind_cache.end()) {
             DirectBindCache dbc;
-            PopulateDirectCaches(dbc, param_shapes, input_name_indices);
-            // ORT output indices are constant per shape -- build once here.
+            PopulateDirectCaches(dbc, param_shapes, input_name_indices,
+                compute_state.mgx_output_to_ort);
+            // MIGraphX #output_N indices are constant per shape -- build once here.
             dbc.prog_output_indices.reserve(dbc.outputs.size());
             for (const auto& out : dbc.outputs) {
                 dbc.prog_output_indices.push_back(out.output_index);
@@ -2275,7 +2349,7 @@ std::optional<Ort::Status> TryDirectBind(ComputeState& compute_state,
         dbc.cur_output_ptrs.resize(dbc.outputs.size());
         for (std::size_t i{0}; i < dbc.outputs.size(); ++i) {
             const auto& out{dbc.outputs[i]};
-            auto output_tensor{kernel_context.GetOutput(out.output_index,
+            auto output_tensor{kernel_context.GetOutput(out.ort_index,
                 out.ort_shape.data(), out.ort_shape.size())};
             dbc.cur_output_ptrs[i] = output_tensor.GetTensorMutableRawData();
         }
@@ -2346,7 +2420,7 @@ std::optional<Ort::Status> TryStaging(ComputeState& compute_state,
                     hip::ArmOutputAlloc(stage_it->second.data, stage_it->second.size_bytes);
                 }
                 OutputHintGuard hint_guard;
-                auto output_tensor{kernel_context.GetOutput(out.output_index,
+                auto output_tensor{kernel_context.GetOutput(out.ort_index,
                     out.ort_shape.data(), out.ort_shape.size())};
                 hyb.cur_output_ptrs[i] = output_tensor.GetTensorMutableRawData();
             }
@@ -2397,15 +2471,16 @@ Ort::Status RunEager(ComputeState& compute_state,
                 void* input_data{GetGpuInputData(compute_state, kernel_context, name, index, prog_shape, hip_stream)};
                 compute_params.add(name.c_str(), migraphx::argument{prog_shape, input_data});
             } else if (const auto oi{ComputeOutputIndex(name)}; oi != -1) {
-                // Output argument (#output_N): reuse the shared parser instead of an
-                // inline find/Trim/ToInteger of the index.
-                const auto output_index{static_cast<size_t>(oi)};
-                    output_indices.emplace_back(output_index);
+                // #output_N indexes the MIGraphX program; GetOutput uses the name remap.
+                const auto mgx_index{static_cast<size_t>(oi)};
+                    output_indices.emplace_back(mgx_index);
 
-                    auto output_shape{output_shapes[output_index]};
+                    auto output_shape{output_shapes[mgx_index]};
                     const auto lengths{output_shape.lengths()};
                     std::vector<int64_t> tensor_shape{lengths.begin(), lengths.end()};
-                    auto output_tensor{kernel_context.GetOutput(output_index, tensor_shape.data(), tensor_shape.size())};
+                    auto output_tensor{kernel_context.GetOutput(
+                        OrtIndexForMgxOutput(compute_state.mgx_output_to_ort, mgx_index),
+                        tensor_shape.data(), tensor_shape.size())};
                     void* output_data{output_tensor.GetTensorMutableRawData()};
                     auto argument_shape{param_shapes[name.c_str()]};
                     compute_params.add(name.c_str(), migraphx::argument{argument_shape, output_data});
@@ -2419,7 +2494,8 @@ Ort::Status RunEager(ComputeState& compute_state,
         std::lock_guard lock{compute_state.mutex};
 
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-        CopyUnboundOutputsToOrt(kernel_context, hip_stream, prog_outputs, output_indices);
+        CopyUnboundOutputsToOrt(kernel_context, hip_stream, prog_outputs, output_indices,
+            compute_state.mgx_output_to_ort);
     }
     return STATUS_OK;
 }
@@ -2656,7 +2732,9 @@ try {
                     auto output_shape{output_shapes[output_index]};
                     const auto lengths{output_shape.lengths()};
                     std::vector<int64_t> tensor_shape{lengths.begin(), lengths.end()};
-                    auto output_tensor{kernel_context.GetOutput(output_index, tensor_shape.data(), tensor_shape.size())};
+                    auto output_tensor{kernel_context.GetOutput(
+                        OrtIndexForMgxOutput(compute_state.mgx_output_to_ort, output_index),
+                        tensor_shape.data(), tensor_shape.size())};
                     void* output_data{output_tensor.GetTensorMutableRawData()};
                     auto argument_shape{param_shapes[name.c_str()]};
                     compute_params.add(name.c_str(), migraphx::argument{argument_shape, output_data});
@@ -2682,7 +2760,8 @@ try {
                 migraphx::shape resource_shape{gpu_resource.get_shape()};
                 auto resource_lengths{resource_shape.lengths()};
                 std::vector<int64_t> shapes{resource_lengths.begin(), resource_lengths.end()};
-                auto output_tensor{kernel_context.GetOutput(i, shapes)};
+                auto output_tensor{kernel_context.GetOutput(
+                    OrtIndexForMgxOutput(compute_state.mgx_output_to_ort, i), shapes)};
                 void* output_data{output_tensor.GetTensorMutableRawData()};
                 HIP_CALL_THROW(hipMemcpyWithStream(output_data, gpu_resource.data(), resource_shape.bytes(),
                     hipMemcpyDeviceToDevice, hip_stream));

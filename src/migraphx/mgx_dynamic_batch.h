@@ -50,4 +50,12 @@ void PadSeqTensor(const void* src_data, void* dst_data,
     std::size_t inner_count, std::size_t element_size_bytes,
     hipStream_t stream);
 
+// Fill rows [real_rows, target_rows) of a batch-padded device buffer by replicating
+// the last real row, so the pad rows the program computes on hold valid data instead
+// of whatever an earlier (larger) call left in the buffer.  dst must already hold
+// real_rows rows and be sized for target_rows.  The filled region is doubled each
+// step, so a bucket pad costs O(log) D2D copies on the supplied stream.
+void PadBatchTensor(void* dst_data, std::size_t real_rows, std::size_t target_rows,
+    std::size_t row_bytes, hipStream_t stream);
+
 }  // namespace mgx_ep
