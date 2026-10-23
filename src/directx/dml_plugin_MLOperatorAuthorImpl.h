@@ -53,10 +53,10 @@ public:
 };
 
 // LEGACY: This class has protobuf ABI violations (TypeProto*, AttributeProto*, ValueInfoProto via
-// NodeArg) through ProtoHelperNodeContext. It is no longer used by PluginDmlAbiOpKernel, which now
-// uses AbiSafeKernelCreationContext instead. This class is retained only because the legacy graph
-// fusion code (GraphPartitioner, GraphDescBuilder, etc.) still references the type, though that
-// code is never called from plugin EP entry points. Scheduled for removal.
+// NodeArg) through ProtoHelperNodeContext. The ABI-safe kernel path uses AbiSafeKernelCreationContext
+// instead. This class is retained only because the legacy graph fusion code (GraphPartitioner,
+// GraphDescBuilder, etc.) still references the type, though that code is never called from plugin EP
+// entry points. Scheduled for removal.
 class PluginOpKernelInfoWrapper
     : public OpNodeInfoWrapper<onnxruntime::ProtoHelperNodeContext,
                                Com<Microsoft::WRL::ChainInterfaces<
@@ -197,85 +197,6 @@ protected:
     // Compute being called on the kernel.  This list is used to maintain their lifetime.
     mutable std::vector<Microsoft::WRL::ComPtr<IUnknown>> m_temporaryAllocations;
     mutable std::vector<Microsoft::WRL::ComPtr<IUnknown>> m_temporaryAbiAllocations;
-};
-
-class PluginDmlAbiOpKernel : public onnxruntime::OpKernel
-{
- public:
-    PluginDmlAbiOpKernel(
-        IMLOperatorKernelFactory* operatorFactory,
-        const onnxruntime::OpKernelInfo& kerneInfo,
-        bool requiresInputShapesAtCreation,
-        bool requiresOutputShapesAtCreation,
-        bool isInternalOperator,
-        gsl::span<const uint32_t> requiredConstantCpuInputs,
-        IMLOperatorShapeInferrer* shapeInferrer,
-        const AttributeMap* defaultAttributes,
-        const dml_ep::PluginDmlExecutionProviderImpl* pluginDmlEp);
-
-    Ort::Status Compute(onnxruntime::OpKernelContext* context) const override;
- protected:
-    static bool IsAllocationInterface(const ::OrtMemoryInfo& info) {
-        return strcmp(info.name.c_str(), onnxruntime::CPU) &&
-            !(info.mem_type == ::OrtMemType::OrtMemTypeCPUOutput || info.mem_type == ::OrtMemType::OrtMemTypeCPUInput);
-    }
-    bool RequiresLazyInitialization() const { return (m_operatorFactory != nullptr) && !m_lazyInitialized; };
-    void SetLazyInitialized() const { m_lazyInitialized = true; };
-
-    EdgeShapes GetInputShapes(onnxruntime::OpKernelContext* context) const;
-
-    bool InputTensorShapesDefined() const;
-    bool InputSizesInferencedFromSchema() const;
-    void InferAndVerifyOutputSizes(gsl::span<const uint32_t> requiredConstantCpuInputs, MLOperatorTensorGetter& constantInputGetter, const EdgeShapes* inputShapes, EdgeShapes& outputShapes, OrtKernelContext* ortContext = nullptr) const;
-    bool m_requiresInputShapesAtCreation = false;
-    bool m_requiresOutputShapesAtCreation = false;
-
-    mutable Microsoft::WRL::ComPtr<IMLOperatorKernel> m_kernel;
-
-    // This is null unless the kernel requires lazy initialization
-    Microsoft::WRL::ComPtr<IMLOperatorKernelFactory> m_operatorFactory;
-    mutable volatile bool m_lazyInitialized = false;
-
-    Microsoft::WRL::ComPtr<IMLOperatorShapeInferrer> m_shapeInferrer;
-
-    // Used to determine whether anything has changed since creation when shapes or
-    // inputs treated as constant by the operator are not inferred / constant.
-    mutable EdgeShapes m_inputShapesOfKernelInference;
-
-    struct TensorContent
-    {
-        bool isValid;
-        std::vector<uint32_t> shape;
-        MLOperatorTensorDataType type;
-        std::vector<std::byte> data;
-    };
-
-    mutable std::vector<std::variant<TensorContent, std::vector<TensorContent>>> m_constantInputTensorContentsOfKernel;
-
-    mutable std::mutex m_mutex;
-    mutable EdgeShapes m_inferredOutputShapes;
-
-    Microsoft::WRL::ComPtr<IWinmlExecutionProvider> m_winmlProvider;
-    bool m_internalOperator = false;
-    std::vector<uint32_t> m_requiredConstantCpuInputs;
-
-    // The execution object returned through the ABI may vary according to kernel
-    // registration options.
-    Microsoft::WRL::ComPtr<IUnknown> m_providerExecutionObject;
-    Microsoft::WRL::ComPtr<IUnknown> m_abiExecutionObject;
-
-    const AttributeMap* m_defaultAttributes = nullptr;
-    const dml_ep::PluginDmlExecutionProviderImpl* m_dmlPluginExecutionProvider = nullptr;
-
-    const OrtKernelInfo* m_ortKernelInfo = nullptr;
-    const OrtApi* m_ortApi = nullptr;
-    std::vector<std::string> m_tensorAttributeNames;  // Tensor-typed ONNX attribute names for FetchAllTensorAttributes
-
-private:
-    bool RequiredCpuInputChanged(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor, uint32_t index) const;
-    bool RequiredCpuInputChanged(const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constantTensorSequence, uint32_t index) const;
-    void FillConstantInputs(const Microsoft::WRL::ComPtr<IMLOperatorTensor>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const;
-    void FillConstantInputs(const std::vector<Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constantTensor, onnxruntime::OpKernelContext* context, uint32_t index) const;
 };
 
 }  // namespace dml_ep
