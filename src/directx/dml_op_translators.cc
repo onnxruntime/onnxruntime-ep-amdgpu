@@ -925,13 +925,36 @@ static std::optional<TranslatedOp> TranslateWhere(
     auto* y_info    = LookupShape(value_shapes, inputs[2]);
     if (!cond_info || !x_info || !y_info) return std::nullopt;
 
-    // Broadcast X and Y together first to get output shape.
+    // Broadcast X and Y together ONLY to derive the fallback output shape (used
+    // when ORT did not seed an output shape for this node).
     auto bc = BroadcastShapes(*x_info, *y_info);
     if (!bc) return std::nullopt;
 
     auto* out_edge = LookupShape(value_shapes, outputs[0]);
+    // NOTE: when out_edge is null this fallback ignores the condition shape; that
+    // is a pre-existing, effectively-unreachable gap (ORT seeds output shapes).
     const auto& out_sizes = out_edge ? out_edge->sizes : bc->output_sizes;
-    auto cond_tensor = MakeTensorInfo(out_sizes, cond_info->data_type);
+
+    // DML's ELEMENT_WISE_IF requires the condition, A, and B to ALL be broadcast
+    // to the SAME output shape via stride-0 — mirroring ORT's DmlOperatorElementwiseIf,
+    // which passes the output shape as the broadcast target for every input.
+    // Broadcasting each input against an out_sizes-shaped tensor keeps its logical
+    // shape at out_sizes but its physical byte count at the input's real size, so:
+    //   (a) each graph edge's TotalTensorSizeInBytes matches its producer (e.g. a
+    //       condition from an Unsqueeze([1,6,1]) elided onto an Equal → 8 bytes,
+    //       NOT the 1536 bytes a naive MakeTensorInfo(out_sizes) would declare), and
+    //   (b) no input axis is left under-broadcast (size-1 where the output is N) —
+    //       the case that arises when out_edge exceeds the X-vs-Y mutual broadcast.
+    DmlTensorInfo cond_target = MakeTensorInfo(out_sizes, cond_info->data_type);
+    DmlTensorInfo x_target    = MakeTensorInfo(out_sizes, x_info->data_type);
+    DmlTensorInfo y_target    = MakeTensorInfo(out_sizes, y_info->data_type);
+    auto cond_bc = BroadcastShapes(*cond_info, cond_target);
+    auto x_bc    = BroadcastShapes(*x_info,    x_target);
+    auto y_bc    = BroadcastShapes(*y_info,    y_target);
+    if (!cond_bc || !x_bc || !y_bc) return std::nullopt;
+    auto cond_tensor = cond_bc->a;
+    auto x_tensor    = x_bc->a;
+    auto y_tensor    = y_bc->a;
     auto out_tensor  = MakeTensorInfo(out_sizes, x_info->data_type);
 
     struct WhereStorage {
@@ -940,9 +963,9 @@ static std::optional<TranslatedOp> TranslateWhere(
     auto storage = std::make_shared<WhereStorage>();
 
     TranslatedOp result;
-    result.input_tensors = { cond_tensor, bc->a, bc->b };
+    result.input_tensors = { cond_tensor, x_tensor, y_tensor };
     result.output_tensors = { out_tensor };
-    result.input_buffer_descs = { cond_tensor.ToBufferDesc(), bc->a.ToBufferDesc(), bc->b.ToBufferDesc() };
+    result.input_buffer_descs = { cond_tensor.ToBufferDesc(), x_tensor.ToBufferDesc(), y_tensor.ToBufferDesc() };
     result.input_tensor_descs.resize(3);
     result.output_buffer_descs = { out_tensor.ToBufferDesc() };
     result.output_tensor_descs.resize(1);
@@ -2019,32 +2042,61 @@ static std::optional<TranslatedOp> TranslateConcat(
     auto* first_info = LookupShape(value_shapes, inputs[0]);
     if (!first_info) return std::nullopt;
 
-    std::vector<DmlTensorInfo> in_tensors;
+    // Look up every input's shape info (keep the raw pointers so we can read the
+    // is_empty flag — MakeTensorInfo does not carry it through).
+    std::vector<const DmlTensorInfo*> in_infos;
     for (auto& name : inputs) {
         auto* info = LookupShape(value_shapes, name);
         if (!info) return std::nullopt;
-        in_tensors.push_back(MakeTensorInfo(info->sizes, info->data_type));
+        in_infos.push_back(info);
     }
 
-    size_t padded_rank = in_tensors[0].sizes.size();
+    size_t padded_rank = first_info->sizes.size();
     size_t orig_rank = first_info->original_rank ? first_info->original_rank : padded_rank;
     size_t pad_offset = padded_rank - orig_rank;
     if (axis < 0) axis += static_cast<int64_t>(orig_rank);
     axis += static_cast<int64_t>(pad_offset);
     UINT dml_axis = static_cast<UINT>(axis);
 
+    // DML's JOIN cannot represent an extent-0 (empty) input. Mirror ORT's
+    // DmlOperatorConcat: drop empty inputs entirely, concat only the non-empty
+    // ones. The empty operand's genuine 0 was coerced to 1 during shape seeding
+    // (DML descriptors have no 0 dim), so we identify it via the preserved
+    // is_empty flag — NOT its (now misleading [..,1,..]) sizes. Example (SAM):
+    // Concat([1,0,256], [1,6,256]) → drop the first → JOIN([1,6,256]) = [1,6,256].
+    std::vector<DmlTensorInfo> kept_tensors;
+    std::vector<size_t>        kept_onnx_index;   // DML slot → ONNX input index
+    uint32_t concat_axis_sum = 0;
+    for (size_t i = 0; i < in_infos.size(); ++i) {
+        if (in_infos[i]->is_empty) continue;      // drop empty operand
+        kept_tensors.push_back(MakeTensorInfo(in_infos[i]->sizes, in_infos[i]->data_type));
+        kept_onnx_index.push_back(i);
+        if (dml_axis < in_infos[i]->sizes.size())
+            concat_axis_sum += in_infos[i]->sizes[dml_axis];
+    }
+
+    const bool dropped_any = kept_tensors.size() != in_infos.size();
+
+    // All inputs empty → the output is itself empty, which DML cannot represent
+    // in a compiled graph. Decline to translate so Tier-0 treats this node as a
+    // partition boundary and it runs per-op (the safe fallback). This mirrors the
+    // existing NodeHasEmptyEdge admission guard for empty-output nodes.
+    if (kept_tensors.empty()) return std::nullopt;
+
+    // Output shape: prefer the seeded out_edge (ORT's authoritative value); else
+    // derive from the first kept input with the concat axis = sum of kept inputs.
     auto* out_edge = LookupShape(value_shapes, outputs[0]);
     std::vector<uint32_t> out_sizes;
     if (out_edge) {
         out_sizes = PadToMinDims(out_edge->sizes);
     } else {
-        out_sizes = in_tensors[0].sizes;
-        uint32_t concat_dim = 0;
-        for (auto& t : in_tensors) concat_dim += t.sizes[dml_axis];
-        out_sizes[dml_axis] = concat_dim;
+        out_sizes = kept_tensors[0].sizes;
+        if (dml_axis < out_sizes.size()) out_sizes[dml_axis] = concat_axis_sum;
     }
 
-    auto out_tensor = MakeTensorInfo(out_sizes, in_tensors[0].data_type);
+    auto out_tensor = MakeTensorInfo(out_sizes, first_info->data_type);
+    if (out_edge && out_edge->original_rank) out_tensor.original_rank = out_edge->original_rank;
+    else if (first_info->original_rank)      out_tensor.original_rank = first_info->original_rank;
 
     struct ConcatStorage {
         DML_JOIN_OPERATOR_DESC desc{};
@@ -2053,11 +2105,16 @@ static std::optional<TranslatedOp> TranslateConcat(
     auto storage = std::make_shared<ConcatStorage>();
     storage->axis_val = dml_axis;
     storage->desc.Axis       = dml_axis;
-    storage->desc.InputCount = static_cast<UINT>(inputs.size());
+    storage->desc.InputCount = static_cast<UINT>(kept_tensors.size());
 
     TranslatedOp result;
-    result.input_tensors = std::move(in_tensors);
+    result.input_tensors = std::move(kept_tensors);
     result.output_tensors = { out_tensor };
+    // When inputs were dropped, the DML input slots no longer map 1:1 to ONNX
+    // input positions. input_name_reorder maps DML slot → ONNX input index so
+    // edge-wiring connects each kept tensor to its correct source (and the
+    // dropped empty input gets no DML edge).
+    if (dropped_any) result.input_name_reorder = kept_onnx_index;
     for (auto& t : result.input_tensors) result.input_buffer_descs.push_back(t.ToBufferDesc());
     result.input_tensor_descs.resize(result.input_tensors.size());
     result.output_buffer_descs = { out_tensor.ToBufferDesc() };
