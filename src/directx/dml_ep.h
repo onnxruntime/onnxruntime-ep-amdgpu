@@ -81,22 +81,7 @@ private:
         const PluginDmlExecutionProviderImpl* dml_execution_provider = nullptr;
         ExecutionProviderPlugin* ep_plugin = nullptr;  // For m_graphInitializerMap access during constant resolution
         std::string ep_name;  // Runtime EP name, propagated to DmlKernelCreationState and DmlAbiKernel
-
-        // FALLBACK: ABI-UNSAFE PATH (when ABI-safe fails, e.g., E_UNEXPECTED)
-        onnxruntime::KernelCreateFn* kernel_create_fn = nullptr;
     };
-
-    // Adapter to wrap onnxruntime::OpKernel as OrtKernelImpl (for unsafe fallback)
-    struct DmlKernelImplAdapter : OrtKernelImpl {
-        std::unique_ptr<onnxruntime::OpKernel> internal_kernel;
-        const OrtApi* ort_api_ptr;
-    };
-
-    static OrtStatus* ORT_API_CALL DmlKernelImplAdapter_Compute(
-        OrtKernelImpl* this_ptr,
-        OrtKernelContext* context) noexcept;
-
-    static void ORT_API_CALL DmlKernelImplAdapter_Release(OrtKernelImpl* this_ptr) noexcept;
 
     struct OrtKernelDefDeleter {
         const OrtEpApi* ep_api = nullptr;

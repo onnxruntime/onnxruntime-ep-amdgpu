@@ -448,7 +448,7 @@ struct DmlKernelCreationState {
 };
 
 // Snapshot of a constant CPU input tensor's content, used to detect value changes between Compute
-// calls. Mirrors the TensorContent struct in PluginDmlAbiOpKernel (MLOperatorAuthorImpl.h:598).
+// calls.
 struct TensorContent {
     bool isValid = false;
     std::vector<uint32_t> shape;
@@ -553,14 +553,13 @@ struct DmlAbiKernel {
     // Names of tensor-typed ONNX attributes (e.g., ConstantOfShape's "value") — for ABI-safe attribute fetch
     std::vector<std::string> tensor_attribute_names;
 
-    // For shape-change detection between Compute calls (mirrors m_inputShapesOfKernelInference in unsafe path)
+    // For shape-change detection between Compute calls.
     EdgeShapes input_shapes_of_kernel_inference;
 
     // Snapshots of required constant CPU input values from the last kernel creation. Indexed by input
     // index (sparse — only indices in required_constant_cpu_inputs are populated). Used to detect value
-    // changes between calls when shapes are unchanged. Mirrors m_constantInputTensorContentsOfKernel
-    // in PluginDmlAbiOpKernel. Only the tensor (non-sequence) case is needed here since sequence-typed
-    // constant CPU inputs do not occur for DML operators.
+    // changes between calls when shapes are unchanged. Only the tensor (non-sequence) case is needed
+    // here since sequence-typed constant CPU inputs do not occur for DML operators.
     std::vector<TensorContent> constant_input_tensor_contents;
 
     // Pre-uploaded GPU resources for required_constant_cpu_inputs (safe path only).

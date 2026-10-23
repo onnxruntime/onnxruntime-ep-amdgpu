@@ -31,9 +31,8 @@ namespace dml_ep {
     class ReadbackHeap;
     class ExecutionContext;
     class BucketizedBufferAllocator;
-    class ExecutionProvider;
 
-    class PluginDmlExecutionProviderImpl 
+    class PluginDmlExecutionProviderImpl
         : public Com<IExecutionProvider, IWinmlExecutionProvider>
         , public ApiPtrs
     {
