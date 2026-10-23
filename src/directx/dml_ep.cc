@@ -802,7 +802,10 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
 
             // Helper: check if a ValueInfo has missing or dynamic shape.
             auto HasDynamicShape = [&](const OrtValueInfo* vi) -> bool {
-                if (!vi) return true;
+                // A null ValueInfo is an omitted optional input (e.g. Resize's roi),
+                // not a dynamic shape — an absent value has no shape to be dynamic.
+                // Treating it as dynamic falsely cuts a fusion partition at the node.
+                if (!vi) return false;
                 // A resolved_shapes entry counts as static only if every dim is > 0.
                 // An entry may still hold a placeholder dim (-1 or 0); such an entry is
                 // not authoritative, so fall through to the ValueInfo check below.
@@ -1399,17 +1402,17 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                 if (is_fuseable) {
                     size_t num_inputs = 0;
                     ep->ort_api.Node_GetNumInputs(node, &num_inputs);
-                    std::vector<const OrtValueInfo*> in_vis(num_inputs, nullptr);
-                    if (num_inputs > 0) ep->ort_api.Node_GetInputs(node, in_vis.data(), num_inputs);
+                    std::vector<const OrtValueInfo*> input_value_infos(num_inputs, nullptr);
+                    if (num_inputs > 0) ep->ort_api.Node_GetInputs(node, input_value_infos.data(), num_inputs);
                     size_t num_outputs = 0;
                     ep->ort_api.Node_GetNumOutputs(node, &num_outputs);
-                    std::vector<const OrtValueInfo*> out_vis(num_outputs, nullptr);
-                    if (num_outputs > 0) ep->ort_api.Node_GetOutputs(node, out_vis.data(), num_outputs);
+                    std::vector<const OrtValueInfo*> output_value_infos(num_outputs, nullptr);
+                    if (num_outputs > 0) ep->ort_api.Node_GetOutputs(node, output_value_infos.data(), num_outputs);
                     bool any_dynamic = false;
                     for (size_t k = 0; k < num_inputs && !any_dynamic; ++k)
-                        if (HasDynamicShape(in_vis[k])) any_dynamic = true;
+                        if (HasDynamicShape(input_value_infos[k])) any_dynamic = true;
                     for (size_t k = 0; k < num_outputs && !any_dynamic; ++k)
-                        if (HasDynamicShape(out_vis[k])) any_dynamic = true;
+                        if (HasDynamicShape(output_value_infos[k])) any_dynamic = true;
                     if (any_dynamic) {
                         is_fuseable = false;
                         DML_PERF_LOG("[Tier0] BOUNDARY node=", nid, " reason=dynamic_shape\n");

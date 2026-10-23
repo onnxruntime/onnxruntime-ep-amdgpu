@@ -100,6 +100,17 @@ DmlTensorInfo MakeTensorInfoAtAxis(
     return MakeTensorInfo(placed, dtype);
 }
 
+// See header for the rationale (DML has no keepdims; the ONNX output shape must not
+// be used for rank-reducing ops). Input-rank output, each reduced axis set to 1.
+std::vector<uint32_t> ReducedOutputSizes(
+    const std::vector<uint32_t>& padded_input_sizes,
+    const std::vector<uint32_t>& axes) {
+    std::vector<uint32_t> out_sizes = padded_input_sizes;
+    for (uint32_t ax : axes)
+        if (ax < out_sizes.size()) out_sizes[ax] = 1u;
+    return out_sizes;
+}
+
 DmlTensorInfo MakeTensorInfoWithStrides(
     const std::vector<uint32_t>& sizes,
     const std::vector<uint32_t>& strides,
@@ -1195,7 +1206,9 @@ static std::optional<TranslatedOp> TranslateReduce(
     if (!in_info) return std::nullopt;
 
     OrtNodeAdapter adapter(node, ort_api);
-    int64_t keepdims = adapter.GetAttributeInt("keepdims", 1);
+    // keepdims is intentionally not read: DML's reduce descriptor always produces an
+    // input-rank output (reduced axes set to 1), independent of ONNX's keepdims. The
+    // ONNX-level rank reduction is carried by the output edge's ValueInfo downstream.
     int64_t noop_with_empty_axes = adapter.GetAttributeInt("noop_with_empty_axes", 0);
 
     std::vector<int64_t> axes_i64;
@@ -1240,20 +1253,10 @@ static std::optional<TranslatedOp> TranslateReduce(
         }
     }
 
-    auto* out_edge = LookupShape(value_shapes, outputs[0]);
-    std::vector<uint32_t> out_sizes;
-    if (out_edge) {
-        out_sizes = out_edge->sizes;
-    } else {
-        out_sizes = in_info->sizes;
-        for (uint32_t ax : axes) {
-            if (ax < out_sizes.size()) out_sizes[ax] = (keepdims ? 1u : 0u);
-        }
-        if (!keepdims) {
-            out_sizes.erase(std::remove(out_sizes.begin(), out_sizes.end(), 0u), out_sizes.end());
-            if (out_sizes.empty()) out_sizes.push_back(1u);
-        }
-    }
+    // DML's reduce descriptor requires an input-rank output with reduced axes set to
+    // 1 (it has no keepdims notion). See ReducedOutputSizes for why the resolved ONNX
+    // output shape must not be used here.
+    std::vector<uint32_t> out_sizes = ReducedOutputSizes(in_info->sizes, axes);
 
     auto in_tensor  = MakeTensorInfo(in_info->sizes, in_info->data_type);
     auto out_tensor = MakeTensorInfo(out_sizes, in_info->data_type);
@@ -1313,15 +1316,10 @@ static std::optional<TranslatedOp> TranslateArgMaxMin(
     UINT dml_axis = static_cast<UINT>(axis);
 
     auto in_tensor  = MakeTensorInfo(in_info->sizes, in_info->data_type);
-    // DML ArgMax/ArgMin require the output tensor desc to have the SAME dimension
-    // count as the input, with the reduced axis set to size 1 — DML has no notion
-    // of ONNX's keepdims. Building the output from the ONNX output shape instead
-    // right-pads the size-1 to the wrong axis (e.g. input [1,1,10,77] reduced on
-    // axis 3 gave output [1,1,1,10] instead of [1,1,10,1]), which CreateOperator
-    // rejects with E_INVALIDARG. Mirror ORT's reducedDims logic (DmlOperatorReduce):
-    // take the padded input shape and set the reduced axis to 1.
-    std::vector<uint32_t> out_sizes = in_info->sizes;
-    out_sizes[dml_axis] = 1u;
+    // DML ArgMax/ArgMin require an input-rank output with the reduced axis set to 1
+    // (no keepdims notion). See ReducedOutputSizes for why the resolved ONNX output
+    // shape must not be used here.
+    std::vector<uint32_t> out_sizes = ReducedOutputSizes(in_info->sizes, { dml_axis });
     // Output is int64 index data (ONNX ArgMax output type), matching ORT which keeps
     // edgeDesc.tensorDataType (INT64) rather than coercing.
     auto out_tensor = MakeTensorInfo(out_sizes, DML_TENSOR_DATA_TYPE_INT64);
