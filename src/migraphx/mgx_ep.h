@@ -84,11 +84,6 @@ struct StagingBuffer {
     void* data{nullptr};
     std::size_t size_bytes{};
     migraphx::shape shape{};
-    // When the input arena is active (coalesce_io), `data` is a sub-view into the
-    // shared device arena rather than an independent allocation, so it must not be
-    // freed individually.  `arena_offset` is its byte offset within the arena.
-    std::size_t arena_offset{};
-    bool is_arena_view{};
 };
 
 // EP-owned scratch buffer bound to a MIGraphX program's "scratch" parameter.
@@ -110,7 +105,8 @@ struct CapturedHipGraph {
     // MIGraphX outputs not bound to a pre-allocated buffer; their device data
     // is stable across replays and is copied out after each launch.
     struct ExtraOutput {
-        std::size_t output_index{};
+        std::size_t output_index{};          // MIGraphX #output_N index
+        std::size_t ort_index{};             // ORT GetOutput slot
         std::vector<std::int64_t> ort_shape{};
         void* gpu_data{nullptr};
         std::size_t bytes{};
@@ -145,13 +141,14 @@ struct CapturedHipGraph {
 // One input's resolved staging-copy plan, built once per compiled shape so the
 // per-call input copy touches no parameter names, std::strings, or map lookups: it
 // just reads the ORT tensor at ort_index and copies into the staging buffer.  For
-// the coalesced arena, staging_data is a sub-view at arena_offset in the pinned
-// host buffer; otherwise it is a standalone device buffer.  prog_lens/element_size
-// are retained for the (non-steady-state) dynamic-batch / seq padding paths.
+// the coalesced arena, staging_data is a sub-view at arena_offset in this bucket's
+// arena (and at the same offset in the shared pinned host buffer); otherwise it is a
+// standalone device buffer.  prog_lens/element_size are retained for the
+// (non-steady-state) dynamic-batch / seq padding paths.
 struct StagingInputBind {
     std::size_t ort_index{};                 // KernelContext input index
     void* staging_data{nullptr};             // staging buffer device ptr (stable until FreeStaging)
-    std::size_t arena_offset{};              // byte offset into the pinned host arena (coalesced)
+    std::size_t arena_offset{};              // byte offset into this bucket's arena (coalesced)
     std::size_t stage_capacity{};            // staging buffer size in bytes (copy clamp)
     std::size_t prog_bytes{};                // full program-shape byte size for this input
     std::size_t row_bytes{};                 // bytes per axis-0 row (prog_bytes / prog_lens[0]); batch-pad math
@@ -175,7 +172,8 @@ struct CachedDirectInput {
 
 struct CachedDirectOutput {
     std::string name;                    // MIGraphX "#output_N" parameter name
-    std::size_t output_index{};          // ORT output index
+    std::size_t output_index{};          // MIGraphX #output_N index
+    std::size_t ort_index{};             // ORT GetOutput slot
     migraphx::shape mgx_shape{};         // program-side shape to bind with
     std::vector<std::int64_t> ort_shape; // ORT output shape (== program shape; no padding)
 };
@@ -202,7 +200,7 @@ struct DirectBindCache {
     // parameter names for a "scratch" entry on every call.
     bool has_scratch{false};
     migraphx::shape scratch_shape{};
-    // ORT output indices in `outputs` order; constant per shape, built once.
+    // MIGraphX #output_N indices in `outputs` order; constant per shape, built once.
     std::vector<std::size_t> prog_output_indices{};
     // Current device pointers gathered each call (inputs/outputs order).  Reused
     // across calls so the hot path does no per-call heap allocation.  For the pure
@@ -227,7 +225,9 @@ struct DirectBindCache {
 // built once can be replayed unchanged instead of rebuilt every Compute call.
 struct StagingBindResult {
     migraphx::program_parameters params{};
-    std::vector<std::size_t> prog_output_indices{};       // ORT output index per bound output
+    std::vector<std::size_t> prog_output_indices{};       // MIGraphX #output_N index per bound output
+    std::vector<std::size_t> bound_output_ort_index{};    // ORT GetOutput slot per bound output
+    std::vector<int> bound_output_seq_axis{};             // static-pad token axis per bound output, -1 if none
     std::vector<std::string> bound_output_names{};        // staging key per bound output
     std::vector<migraphx::shape> bound_output_shapes{};   // current bucket shape per bound output
     std::vector<std::vector<std::int64_t>> bound_output_ort_shapes{};  // bucket ORT shape (int64) per bound output
@@ -235,6 +235,23 @@ struct StagingBindResult {
     std::vector<std::size_t> bound_output_bytes{};        // total bucket byte count per bound output (precomputed)
     std::vector<void*> bound_output_data{};               // staging src ptr per bound output (resolved once)
     std::vector<StagingInputBind> input_copies{};         // flat per-input copy plan (built once)
+
+    // ── Coalesced input arena for this bucket ────────────────────────────────
+    // Each compiled bucket owns an arena sized to its own parameter shapes, so the
+    // per-call H2D moves that bucket's bytes rather than a max_dynamic_batch-sized
+    // block.  Null when coalesce_io is off.
+    void* arena_dev{nullptr};
+    std::size_t arena_bytes{};
+    // Contiguous runs of input_copies, so the gather of one run overlaps the H2D of
+    // the previous one.  Relies on input_copies being in increasing arena_offset
+    // order, which BindStagingParams guarantees.
+    struct GatherChunk {
+        std::size_t first_input{};  // index into input_copies
+        std::size_t input_count{};
+        std::size_t byte_offset{};  // arena / host byte offset the run starts at
+        std::size_t byte_count{};   // bytes the run spans
+    };
+    std::vector<GatherChunk> gather_chunks{};
 
     // Resolved pointers into the ComputeState maps (captured graph in hip_graph_cache,
     // scratch slot) so steady-state replay does no re-search.  Same stability invariant as
@@ -285,6 +302,10 @@ struct ComputeState {
     // Ordered read-only problem-cache paths (app override, then DLL-adjacent shipped),
     // JSON-escaped for backend-option delivery.
     std::vector<std::string> problem_cache_paths{};
+
+    // #output_N (GraphToProto / MIGraphX program order) -> ORT fused-node GetOutput index.
+    // Empty means identity (N -> N), used until Compile fills the table.
+    std::vector<std::size_t> mgx_output_to_ort{};
 
     // ── Configuration (set at Compile time) ──────────────────────────────────
     bool hip_graph_enable{};
@@ -358,23 +379,31 @@ struct ComputeState {
     bool clamp_truncation_logged{};
 
     // ── Coalesced input arena (ORT_MIGRAPHX_COALESCE_IO) ─────────────────────
-    // When coalesce_io is set, every input staging buffer's data points into a
-    // single device arena (in_arena_dev) fed by one pinned host staging buffer
-    // (in_staging_host); copying gathers all inputs host-side then issues one H2D.
+    // When coalesce_io is set, every input parameter of a compiled bucket lives back
+    // to back in one device arena, gathered through a shared pinned host buffer and
+    // flushed with chunked H2Ds.  Arenas are per bucket and sized from that bucket's
+    // own parameter shapes, so a small-batch call transfers its own bytes instead of
+    // the largest bucket's; they are created lazily the first time a bucket binds.
     bool coalesce_io{};
     bool staging_inputs_coalesced{};
-    void* in_arena_dev{nullptr};
+    struct CoalesceArena {
+        void* dev{nullptr};
+        std::size_t bytes{};
+    };
+    std::unordered_map<ShapeKey, CoalesceArena> coalesce_arenas{};
+    // Shared gather buffer: only one call gathers at a time, so a single pinned
+    // allocation grown to the largest arena bound so far serves every bucket.
     void* in_staging_host{nullptr};
-    std::size_t in_arena_bytes{};
+    std::size_t in_staging_host_bytes{};
     // Coalesce input residency, stable for a given deployment (a caller such as Triton
     // binds each input to the same memory kind every call).  Determined once and reused
     // instead of rescanning N inputs per inference; reset by FreeStaging.  Pinned host
     // sources DMA straight into the arena (no CPU copy); pageable sources are gathered
-    // into the pinned host buffer then flushed with one H2D; a device input disqualifies
-    // the coalesced path.
+    // into the pinned host buffer then flushed with chunked H2Ds; a device input
+    // disqualifies the coalesced path.
     // Host-vs-device only, matching the built-in EP: all-host inputs are gathered into
-    // the pinned staging buffer + one whole-arena H2D; any device input falls back to
-    // the per-input staging copy.  (No pinned-vs-pageable split.)
+    // the pinned staging buffer and flushed chunk by chunk; any device input falls back
+    // to the per-input staging copy.  (No pinned-vs-pageable split.)
     enum class CoalesceResidency : std::uint8_t {
         kUnknown, kAllHost, kHasDevice };
     CoalesceResidency coalesce_residency{CoalesceResidency::kUnknown};
@@ -463,6 +492,8 @@ struct EpContextComputeState {
     migraphx::program program;
     Map<size_t> input_name_indices;
     Map<size_t> output_name_indices;
+    // #output_N -> ORT fused-node GetOutput index.  Empty means identity (N -> N).
+    std::vector<std::size_t> mgx_output_to_ort{};
 };
 
 struct ExecutionProvider : OrtEp, ApiPtrs {
