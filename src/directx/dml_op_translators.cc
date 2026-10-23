@@ -2745,7 +2745,8 @@ static std::optional<TranslatedOp> TranslateSlice(
     // Normalize axes and clamp starts/ends to valid ranges.
     // Build per-dimension offsets, sizes, strides (full rank).
     std::vector<uint32_t> offsets(rank, 0u);
-    std::vector<uint32_t> sizes = in_info->sizes;
+    std::vector<uint32_t> sizes = in_info->sizes;   // DML InputWindowSizes (input-space extent)
+    std::vector<uint32_t> out_sizes = in_info->sizes; // strided output counts (fallback output shape)
     std::vector<int32_t>  strides(rank, 1);
 
     for (size_t i = 0; i < slice_count; ++i) {
@@ -2768,22 +2769,29 @@ static std::optional<TranslatedOp> TranslateSlice(
         start = std::clamp<int64_t>(start, 0, dim_size);
         end   = std::clamp<int64_t>(end,   0, dim_size);
 
+        // InputWindowSizes is the input-space extent (end - start); DML derives
+        // the output count as ceil(InputWindowSizes / |stride|). out_sizes tracks
+        // that strided output count for the fallback output shape.
         if (step > 0) {
             if (start >= end) {
                 offsets[axis] = static_cast<uint32_t>(start);
                 sizes[axis] = 0;
+                out_sizes[axis] = 0;
             } else {
                 offsets[axis] = static_cast<uint32_t>(start);
-                sizes[axis] = static_cast<uint32_t>((end - start + step - 1) / step);
+                sizes[axis] = static_cast<uint32_t>(end - start);
+                out_sizes[axis] = static_cast<uint32_t>((end - start + step - 1) / step);
             }
         } else {
             // Negative step: DML SLICE1 supports negative InputWindowStrides.
             if (end >= start) {
                 offsets[axis] = static_cast<uint32_t>(start);
                 sizes[axis] = 0;
+                out_sizes[axis] = 0;
             } else {
                 offsets[axis] = static_cast<uint32_t>(start);
-                sizes[axis] = static_cast<uint32_t>((start - end + (-step) - 1) / (-step));
+                sizes[axis] = static_cast<uint32_t>(start - end);
+                out_sizes[axis] = static_cast<uint32_t>((start - end + (-step) - 1) / (-step));
             }
         }
         strides[axis] = static_cast<int32_t>(step);
@@ -2801,7 +2809,7 @@ static std::optional<TranslatedOp> TranslateSlice(
     auto* out_edge = LookupShape(value_shapes, outputs[0]);
     auto in_tensor  = MakeTensorInfo(in_info->sizes, in_info->data_type);
     auto out_tensor = out_edge ? MakeTensorInfo(out_edge->sizes, in_info->data_type)
-                               : MakeTensorInfo(sizes, in_info->data_type);
+                               : MakeTensorInfo(out_sizes, in_info->data_type);
 
     struct SliceStorage {
         DML_SLICE1_OPERATOR_DESC desc{};
