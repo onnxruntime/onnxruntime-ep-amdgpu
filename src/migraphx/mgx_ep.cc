@@ -20,6 +20,7 @@
 #endif
 
 #include <gsl/span>
+#include <gsl/util>
 
 #include <migraphx/migraphx.hpp>
 #include <migraphx/version.h>
@@ -51,6 +52,18 @@ const char* ExecutionProvider::GetName() const noexcept {
 }
 
 namespace {
+
+fs::path CreateTemporaryDirectory() {
+    static std::atomic_size_t sequence{};
+    const auto timestamp{std::chrono::steady_clock::now().time_since_epoch().count()};
+    for (;;) {
+        const auto path{fs::temp_directory_path() /
+            ("migraphx_ep_" + std::to_string(timestamp) + "_" + std::to_string(sequence++))};
+        if (fs::create_directory(path)) {
+            return path;
+        }
+    }
+}
 
 // HIP's current device is a per-thread setting.  ORT/Triton can run Compile()
 // and the compute functions on pool threads that never hit the constructor's
@@ -1251,6 +1264,17 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     const std::string& mxr_prefix, OrtNodeComputeInfo*& node_compute_info, OrtNode*& ep_context_node)
 {
     bool loaded_from_cache = false;
+    fs::path temporary_cache_dir;
+    fs::path embedded_mxr_path;
+    const auto remove_embedded_mxr = gsl::finally([&] {
+        std::error_code ec;
+        if (!embedded_mxr_path.empty()) {
+            fs::remove(embedded_mxr_path, ec);
+        }
+        if (!temporary_cache_dir.empty()) {
+            fs::remove_all(temporary_cache_dir, ec);
+        }
+    });
     const auto sorted_nodes{GetKahnsVariantTopologicalSortedNodes(graph)};
     Ort::Graph sorted_graph{graph.GetGraphView(sorted_nodes)};
     ONNX_NAMESPACE::ModelProto model_proto{};
@@ -1285,14 +1309,18 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     const auto has_input_shape{get_input_output_names(sorted_graph, input_names, output_names)};
     fs::path model_path{graph.GetModelPath()};
 
-    // If context_enable is set but cache_dir isn't, default to context_file_path's or the
-    // model's directory so the EPContext node references an MXR file that actually gets written.
+    // A non-embedded context retains its MXR in the resolved cache directory. An embedded
+    // context without a filesystem-backed model uses a temporary directory removed on return.
     fs::path effective_cache_dir{cache_dir_};
     if (context_enable_ && effective_cache_dir.empty()) {
         if (!context_file_path_.empty()) {
             effective_cache_dir = context_file_path_.parent_path();
         } else if (!model_path.empty()) {
             effective_cache_dir = model_path.parent_path();
+        }
+        if (context_embed_mode_ == 1 && effective_cache_dir.empty()) {
+            temporary_cache_dir = CreateTemporaryDirectory();
+            effective_cache_dir = temporary_cache_dir;
         }
     }
 
@@ -1353,6 +1381,9 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     if (context_enable_) {
         // input_shapes_hash_hex is non-empty here: the RETURN_IF above requires has_input_shape.
         const fs::path ep_context_mxr_path{effective_mxr_prefix + input_shapes_hash_hex + ".mxr"};
+        if (context_embed_mode_ == 1 && cache_dir_.empty()) {
+            embedded_mxr_path = effective_cache_dir / ep_context_mxr_path;
+        }
 
         EpContextNodeHelper ep_context_helper{*this, sorted_graph, fused_node};
         RETURN_IF_ERROR(ep_context_helper.CreateEpContextNode(ep_context_mxr_path, effective_cache_dir,
