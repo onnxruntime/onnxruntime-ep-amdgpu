@@ -11,6 +11,7 @@
 #include <optional>
 #include <regex>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -56,13 +57,16 @@ namespace {
 fs::path CreateTemporaryDirectory() {
     static std::atomic_size_t sequence{};
     const auto timestamp{std::chrono::steady_clock::now().time_since_epoch().count()};
-    for (;;) {
+    constexpr std::size_t max_attempts{100};
+    for (std::size_t attempt{}; attempt < max_attempts; ++attempt) {
         const auto path{fs::temp_directory_path() /
             ("migraphx_ep_" + std::to_string(timestamp) + "_" + std::to_string(sequence++))};
         if (fs::create_directory(path)) {
             return path;
         }
     }
+    throw std::runtime_error{"failed to create a unique temporary directory after " +
+                             std::to_string(max_attempts) + " attempts"};
 }
 
 // HIP's current device is a per-thread setting.  ORT/Triton can run Compile()
