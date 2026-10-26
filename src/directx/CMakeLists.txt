@@ -192,7 +192,6 @@ add_library(directx-ep MODULE
     dml_execution_context.h
     dml_execution_provider.h
     dml_factory.h
-    dml_info.h
     dml_plugin_command_recorder.h
     dml_plugin_MLOperatorAuthorImpl.h
     dml_plugin_OperatorRegistration.h
@@ -217,7 +216,6 @@ add_library(directx-ep MODULE
     dml_execution_provider.cc
     dml_factory.cc
     dml_host_accessible_allocator.cc
-    dml_info.cc
     dml_plugin_command_recorder.cc
     dml_plugin_MLOperatorAuthorImpl.cc
     dml_plugin_OperatorRegistration.cc
@@ -238,22 +236,11 @@ add_library(directx-ep MODULE
     full_graph_fusion.cc
 
     #---- DirectML EP sources ----
-    DmlExecutionProvider/ApiTraits.cc
     DmlExecutionProvider/CommandQueue.cc
     DmlExecutionProvider/DescriptorPool.cc
     DmlExecutionProvider/DmlCommittedResourceAllocator.cc
-    DmlExecutionProvider/DmlGraphDeserialization.cc
-    DmlExecutionProvider/DmlGraphFusionHelper.cc
-    DmlExecutionProvider/DmlGraphFusionTransformer.cc
-    DmlExecutionProvider/DmlGraphSerialization.cc
-    DmlExecutionProvider/DmlRuntimeGraphFusionTransformer.cc
-    DmlExecutionProvider/FusedGraphKernel.cc
-    DmlExecutionProvider/GraphDescBuilder.cc
-    DmlExecutionProvider/GraphPartitioner.cc
-    DmlExecutionProvider/GraphTransformer.cc
     DmlExecutionProvider/TensorDesc.cc
     DmlExecutionProvider/MLOperatorAuthorImpl.cc
-    DmlExecutionProvider/DmlRuntimeFusedGraphKernel.cc
     OperatorAuthorHelper/OperatorHelper.cc
 
     #---- DirectML Operator sources ----
@@ -340,18 +327,14 @@ add_library(directx-ep MODULE
     core/framework/allocation_planner.cc
     core/framework/allocator.cc
     core/framework/allocator_utils.cc
-    core/framework/copy.cc
     core/framework/bfc_arena.cc
     core/framework/config_options.cc
     core/framework/customregistry.cc
-    core/framework/data_transfer.cc
     core/framework/data_transfer_manager.cc
     core/framework/data_types.cc
     core/framework/endian_utils.cc
-    core/framework/ep_context_options.cc
     core/framework/error_code.cc
     core/framework/execution_frame.cc
-    core/framework/execution_provider.cc
     core/framework/execution_steps.cc
     core/framework/ex_lib_loader.cc
     core/framework/external_data_loader_manager.cc
@@ -359,16 +342,8 @@ add_library(directx-ep MODULE
     core/framework/kernel_def_builder.cc
     core/framework/kernel_registry.cc
     core/framework/kernel_registry_manager.cc
-    core/framework/kernel_type_str_resolver.cc
-    core/framework/library_handles.cc
-    core/framework/memory_info.cc
     core/framework/mldata_type_utils.cc
     core/framework/node_index_info.cc
-    core/framework/node_unit.cc
-    core/framework/onnxruntime_map_type_info.cc
-    core/framework/onnxruntime_optional_type_info.cc
-    core/framework/onnxruntime_sequence_type_info.cc
-    core/framework/onnxruntime_typeinfo.cc
     core/framework/op_kernel.cc
     core/framework/op_kernel_info.cc
     core/framework/op_node_proto_helper.cc
@@ -376,7 +351,6 @@ add_library(directx-ep MODULE
     core/framework/prepacked_weights.cc
     core/framework/prepacked_weights_container.cc
     core/framework/resource_accountant.cc
-    core/framework/run_options.cc
     core/framework/sequential_executor.cc
     core/framework/session_state.cc
     core/framework/session_state_utils.cc
@@ -387,13 +361,10 @@ add_library(directx-ep MODULE
     core/framework/tensor_allocator.cc
     core/framework/tensor_external_data_info.cc
     core/framework/tensor_shape.cc
-    core/framework/tensor_type_and_shape.cc
     core/framework/tensorprotoutils.cc
     core/framework/utils.cc
     core/framework/stream_execution_context.cc
-    core/framework/device_stream_collection.cc
     core/framework/stream_handles.cc
-    core/framework/transpose_helper.cc
 
     #---- Core flatbuffers sources ----
     core/flatbuffers/flatbuffers_utils.cc
@@ -403,7 +374,6 @@ add_library(directx-ep MODULE
     core/providers/cpu/controlflow/utils.cc
     core/providers/cpu/optional/optional_ops.cc
     core/providers/cpu/sequence/sequence_ops.cc
-    core/providers/cpu/tensor/transpose.cc
 
     #---- Core platform sources ----
     core/platform/path_lib.cc
@@ -417,7 +387,6 @@ add_library(directx-ep MODULE
     core/common/denormal.cc
     core/common/cpuid_info.cc
     core/common/cpuid_info_vendor.cc
-    core/common/cpuid_uarch.cc
     core/common/spin_pause.cc
 
     #---- Core graph sources ----
@@ -425,30 +394,23 @@ add_library(directx-ep MODULE
     core/graph/graph_viewer.cc
     core/graph/graph_utils.cc
     core/graph/graph_flatbuffers_utils.cc
-    core/graph/graph_proto_serializer.cc
     core/graph/model.cc
     core/graph/node_attr_utils.cc
-    core/graph/op.cc
     core/graph/op_identifier_utils.cc
     core/graph/schema_registry.cc
     core/graph/function.cc
     core/graph/function_utils.cc
-    core/graph/ep_api_types.cc
     core/graph/runtime_optimization_record_container.cc
     core/graph/contrib_ops/contrib_defs.cc
     core/graph/contrib_ops/bert_defs.cc
-    core/graph/contrib_ops/collective_defs.cc
     core/graph/contrib_ops/diffusion_defs.cc
-    core/graph/contrib_ops/internal_nhwc_onnx_schemas.cc
     core/graph/contrib_ops/nchwc_schema_defs.cc
     core/graph/contrib_ops/nhwc_schema_defs.cc
-    core/graph/contrib_ops/onnx_deprecated_operators.cc
     core/graph/contrib_ops/onnx_function_util.cc
     core/graph/contrib_ops/quantization_defs.cc
     core/graph/contrib_ops/range_schema_defs.cc
     core/graph/contrib_ops/shape_inference_functions.cc
     core/graph/contrib_ops/attn_lstm_schema_defs.cc
-    core/graph/dml_ops/dml_defs.cc
     core/graph/data_propagation/add_op_data_propagation.cc
     core/graph/data_propagation/custom_data_propagation.cc
     core/graph/data_propagation/div_op_data_propagation.cc
@@ -458,105 +420,6 @@ add_library(directx-ep MODULE
     core/graph/data_propagation/squeeze_op_data_propagation.cc
     core/graph/data_propagation/sub_op_data_propagation.cc
     core/graph/data_propagation/unsqueeze_op_data_propagation.cc
-
-    #---- Core optimizer sources ----
-    core/optimizer/graph_optimizer_registry.cc
-    core/optimizer/graph_transformer.cc
-    core/optimizer/graph_transformer_mgr.cc
-    core/optimizer/graph_transformer_utils.cc
-    core/optimizer/rule_based_graph_transformer.cc
-    core/optimizer/utils.cc
-    core/optimizer/initializer.cc
-    core/optimizer/constant_folding.cc
-    core/optimizer/constant_sharing.cc
-    core/optimizer/optimizer_execution_frame.cc
-    core/optimizer/transpose_optimization/onnx_transpose_optimization.cc
-    core/optimizer/transpose_optimization/ort_optimizer_api_impl.cc
-    core/optimizer/transpose_optimization/ort_transpose_optimization.cc
-    core/optimizer/transpose_optimizer.cc
-    core/optimizer/transformer_memcpy.cc
-    core/optimizer/insert_cast_transformer.cc
-    core/optimizer/layout_transformation/layout_transformation.cc
-    core/optimizer/nhwc_transformer.cc
-    core/optimizer/nchwc_transformer.cc
-    core/optimizer/selection_and_optimization_func.cc
-    core/optimizer/selectors_actions/actions.cc
-    core/optimizer/selectors_actions/helpers.cc
-    core/optimizer/selectors_actions/selector_action_transformer.cc
-    core/optimizer/free_dim_override_transformer.cc
-    core/optimizer/fuse_initializers_transformer.cc
-    core/optimizer/identity_elimination.cc
-    core/optimizer/noop_elimination.cc
-    core/optimizer/dropout_elimination.cc
-    core/optimizer/slice_elimination.cc
-    core/optimizer/concat_slice_elimination.cc
-    core/optimizer/unsqueeze_elimination.cc
-    core/optimizer/expand_elimination.cc
-    core/optimizer/pre_shape_node_elimination.cc
-    core/optimizer/reshape_fusion.cc
-    core/optimizer/conv_activation_fusion.cc
-    core/optimizer/conv_add_fusion.cc
-    core/optimizer/conv_add_act_fusion.cc
-    core/optimizer/conv_bn_fusion.cc
-    core/optimizer/conv_mul_fusion.cc
-    core/optimizer/gemm_activation_fusion.cc
-    core/optimizer/gemm_sum_fusion.cc
-    core/optimizer/gemm_transpose_fusion.cc
-    core/optimizer/matmul_activation_fusion.cc
-    core/optimizer/matmul_add_fusion.cc
-    core/optimizer/matmul_bn_fusion.cc
-    core/optimizer/matmul_integer_to_float.cc
-    core/optimizer/matmul_nbits_fusion.cc
-    core/optimizer/matmul_scale_fusion.cc
-    core/optimizer/matmul_transpose_fusion.cc
-    core/optimizer/gelu_fusion.cc
-    core/optimizer/gelu_approximation.cc
-    core/optimizer/fast_gelu_fusion.cc
-    core/optimizer/quick_gelu_fusion.cc
-    core/optimizer/layer_norm_fusion.cc
-    core/optimizer/skip_layer_norm_fusion.cc
-    core/optimizer/embed_layer_norm_fusion.cc
-    core/optimizer/bias_softmax_fusion.cc
-    core/optimizer/attention_fusion.cc
-    core/optimizer/group_query_attention_fusion.cc
-    core/optimizer/relu_clip_fusion.cc
-    core/optimizer/div_mul_fusion.cc
-    core/optimizer/not_where_fusion.cc
-    core/optimizer/gather_fusion.cc
-    core/optimizer/isinf_reducesum_fusion.cc
-    core/optimizer/label_encoder_fusion.cc
-    core/optimizer/pad_fusion.cc
-    core/optimizer/propagate_cast_ops.cc
-    core/optimizer/stft_decomposition.cc
-    core/optimizer/dynamic_quantize_matmul_fusion.cc
-    core/optimizer/identical_children_consolidation.cc
-    core/optimizer/double_qdq_pairs_remover.cc
-    core/optimizer/qdq_transformer/clip_quantizelinear.cc
-    core/optimizer/qdq_transformer/constant_folding_dq_node.cc
-    core/optimizer/qdq_transformer/ensure_unique_dq_for_node_unit.cc
-    core/optimizer/qdq_transformer/qdq_final_cleanup.cc
-    core/optimizer/qdq_transformer/qdq_propagation.cc
-    core/optimizer/qdq_transformer/qdq_s8_to_u8.cc
-    core/optimizer/qdq_transformer/qdq_util.cc
-    core/optimizer/qdq_transformer/relu_quantizelinear.cc
-    core/optimizer/qdq_transformer/s8_to_u8.cc
-    core/optimizer/qdq_transformer/avx2_weight_s8_to_u8.cc
-    core/optimizer/qdq_transformer/selectors_actions/qdq_actions.cc
-    core/optimizer/qdq_transformer/selectors_actions/qdq_selector_action_transformer.cc
-    core/optimizer/qdq_transformer/selectors_actions/qdq_selectors.cc
-    core/optimizer/qdq_transformer/selectors_actions/shared/utils.cc
-    core/optimizer/qdq_transformer/weight_bias_quantization.cc
-    core/optimizer/qdq_transformer/where_dummy_dq.cc
-    core/optimizer/compute_optimizer/upstream_gather.cc
-    core/optimizer/compute_optimizer/upstream_gather_actors.cc
-    core/optimizer/compute_optimizer/upstream_reshape.cc
-    core/optimizer/compute_optimizer/upstream_reshape_actors.cc
-    core/optimizer/compute_optimizer/upstream_transformer_base.cc
-    core/optimizer/cast_elimination.cc
-    core/optimizer/cast_chain_elimination.cc
-    core/optimizer/bias_dropout_fusion.cc
-    core/optimizer/bias_gelu_fusion.cc
-    core/optimizer/common_subexpression_elimination.cc
 
     #---- MLAS sources (inlined) ----
     ${MLAS_SRC_DIR}/platform.cpp
@@ -628,7 +491,6 @@ add_custom_command(TARGET directx-ep POST_BUILD
 target_include_directories(directx-ep PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/External
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/OperatorAuthorHelper
     ${CMAKE_CURRENT_SOURCE_DIR}/core/mlas/inc
     ${CMAKE_CURRENT_SOURCE_DIR}/core/mlas/lib

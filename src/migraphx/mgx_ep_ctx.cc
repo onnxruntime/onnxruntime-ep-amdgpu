@@ -37,8 +37,10 @@ Ort::Status EpContextNodeHelper::CreateEpContextNode(const fs::path& cache_path,
     int64_t embed_mode, std::string_view compute_capability, const fs::path& model_path,
     std::string_view node_name_prefix, OrtNode*& ep_context_node) const
 {
+    // Listed in #output_N order (the sorted graph's GraphToProto order) so a reload can
+    // rebuild the MIGraphX-to-ORT output map by name; the MXR itself keeps no names.
     std::vector<std::string> output_name_strings;
-    for (const auto& info : GetValueInfos(fused_node_.GetOutputs())) {
+    for (const auto& info : GetValueInfos(graph_.GetOutputs())) {
         output_name_strings.emplace_back(info.GetName());
     }
     std::vector<const char*> output_names;
@@ -149,6 +151,9 @@ EpContextNodeReader::EpContextNodeReader(const ApiPtrs& api_ptrs, const Ort::Con
     THROW_IF(ep_context_node == nullptr, "no EPContext node found for MIGraphXExecutionProvider");
 
     const auto& node{*ep_context_node};
+    for (const auto& info : GetValueInfos(node.GetOutputs())) {
+        output_names_.emplace_back(info.GetName());
+    }
 
     Ort::ConstOpAttr attr;
     THROW_IF_ERROR(node.GetAttributeByName("embed_mode", attr));

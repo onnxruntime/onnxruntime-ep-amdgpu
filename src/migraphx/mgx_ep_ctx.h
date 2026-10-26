@@ -36,10 +36,16 @@ struct EpContextNodeReader : ApiPtrs {
         return std::move(program_);
     }
 
+    // EPContext node outputs in #output_N order (as written by CreateEpContextNode).
+    const std::vector<std::string>& OutputNames() const {
+        return output_names_;
+    }
+
     static bool GraphHasContextNode(const Ort::ConstGraph& graph);
 
 private:
     migraphx::program program_;
+    std::vector<std::string> output_names_;
 };
 
 }  // namespace mgx_ep

@@ -6,7 +6,6 @@
 #include "dml_bucketized_buffer_allocator.h"
 #include "core/common/inlined_containers.h"
 #include "core/common/inlined_containers_fwd.h"
-#include "core/framework/fuse_nodes_funcs.h"
 #include "dml_abi_kernel.h"
 #include "ep_fusion_manager.h"
 #include "full_graph_fusion.h"
@@ -360,13 +359,23 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
 
             onnxruntime::KernelDef* def = create_info.kernel_def.get();
 
-            // Skip control flow operators (If, Loop, Scan) in ABI-safe path.
-            // These are CPU kernels registered under DML EP name only to claim nodes during partitioning.
-            // In ABI-safe path, wrapping them in DmlKernelImplAdapter hides the IControlFlowKernel interface,
-            // breaking ORT's control flow setup. Let CPU EP handle them directly instead.
-            // The subgraphs inside control flow nodes can still contain DML operators.
+            // Do not expose CPU-backed ops to the ABI-safe kernel registry; let the CPU EP
+            // handle them directly. Two groups, both registered under the DML EP name by
+            // RegisterCpuOperatorsAsDml purely to influence partitioning:
+            //   - Control flow (If, Loop, Scan): their ORT CPU kernels implement IControlFlowKernel,
+            //     which ORT needs to drive subgraph execution. Subgraphs inside these nodes can still
+            //     contain DML operators. (Loop/Scan aren't registered at all, but are skipped here
+            //     defensively.)
+            //   - Sequence/Optional ops: these have no ABI-safe DmlAbiKernel factory
+            //     (m_internalRegInfoMap has no entry for them), so DmlKernelCreateFuncAdapter cannot
+            //     construct them. They must route to the CPU EP, which runs the identical native kernel.
+            // Keep this list in sync with IsCpuOnDmlOperator().
             const std::string& op_name = def->OpName();
-            if (op_name == "If" || op_name == "Loop" || op_name == "Scan") {
+            if (op_name == "If" || op_name == "Loop" || op_name == "Scan" ||
+                op_name == "SequenceAt" || op_name == "SequenceConstruct" ||
+                op_name == "SequenceEmpty" || op_name == "SequenceLength" ||
+                op_name == "SequenceErase" || op_name == "SequenceInsert" ||
+                op_name == "OptionalGetElement" || op_name == "OptionalHasElement") {
                 continue;
             }
 
@@ -506,11 +515,10 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
                 func_state->default_attributes = &reg_info->defaultAttributes;
                 // Use reg_info->requiredConstantCpuInputs rather than deriving from KernelDef
                 // InputMemoryTypeArgs. The KernelDef conflates device placement flags (e.g.
-                // OrtMemTypeCPUInput on MemcpyFromHost input 0) with required constants, causing
-                // the safe path to incorrectly treat placement-only inputs as required constants.
+                // OrtMemTypeCPUInput on MemcpyFromHost input 0) with required constants, which would
+                // cause placement-only inputs to be incorrectly treated as required constants.
                 // reg_info->requiredConstantCpuInputs is populated only from the explicit
-                // requiredConstantCpuInputs arg in RegisterOperatorKernel, matching the unsafe
-                // path's constantCpuInputCapture exactly.
+                // requiredConstantCpuInputs arg in RegisterOperatorKernel.
                 func_state->required_constant_cpu_inputs = reg_info->requiredConstantCpuInputs;
                 func_state->requires_input_shapes_at_creation = reg_info->requiresInputShapesAtCreation;
                 func_state->requires_output_shapes_at_creation = reg_info->requiresOutputShapesAtCreation;
@@ -531,9 +539,6 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
                 }
             }
 
-            // ALWAYS store the lambda as fallback (in case ABI-safe fails)
-            func_state->kernel_create_fn = const_cast<onnxruntime::KernelCreateFn*>(&create_info.kernel_create_func);
-
             st = ep_api.KernelRegistry_AddKernel(kernel_registry_.get(), ort_kernel_def, DmlKernelCreateFuncAdapter, func_state.get());
 
             if (st != nullptr) {
@@ -548,41 +553,6 @@ OrtStatus* ExecutionProviderPlugin::ConvertKernelRegistryToOrtKernelRegistry()
     return nullptr;
 }
 
-// Adapter functions - Compute using unsafe cast to OpKernelContext
-OrtStatus* ORT_API_CALL ExecutionProviderPlugin::DmlKernelImplAdapter_Compute(
-    OrtKernelImpl* this_ptr,
-    OrtKernelContext* context) noexcept
-{
-    auto* self = static_cast<DmlKernelImplAdapter*>(this_ptr);
-
-    // TODO(abi-safety): ABI-UNSAFE hard break — reinterpret_cast of an
-    // ORT-allocated OrtKernelContext to the internal onnxruntime::OpKernelContext
-    // assumes the plugin was compiled against the exact struct layout of the ORT
-    // runtime that produced it (genuine cross-DLL assumption, unlike the type-info
-    // reads which read plugin-allocated objects). Only reached by the ABI-UNSAFE
-    // kernel fallback (path=unsafe) for ops with no ABI-safe kernel. Remove by
-    // eliminating the fallback (give every op an ABI-safe kernel) or by driving
-    // Compute through OrtApi kernel-context accessors.
-    auto* op_ctx = reinterpret_cast<onnxruntime::OpKernelContext*>(context);
-
-    try {
-        auto status = self->internal_kernel->Compute(op_ctx);
-        if (!status.IsOK()) {
-            return self->ort_api_ptr->CreateStatus(ORT_FAIL, "Kernel compute failed");
-        }
-        return nullptr;
-    } catch (const std::exception& e) {
-        return self->ort_api_ptr->CreateStatus(ORT_FAIL, e.what());
-    } catch (...) {
-        return self->ort_api_ptr->CreateStatus(ORT_FAIL, "Unknown error during kernel compute");
-    }
-}
-
-void ORT_API_CALL ExecutionProviderPlugin::DmlKernelImplAdapter_Release(OrtKernelImpl* this_ptr) noexcept
-{
-    delete static_cast<DmlKernelImplAdapter*>(this_ptr);
-}
-
 OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_create_func_state,
                                                                             const OrtKernelInfo* info,
                                                                OrtKernelImpl** kernel_out) noexcept {
@@ -594,7 +564,9 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
         *kernel_out = nullptr;
         auto* state = static_cast<KernelCreateFuncState*>(kernel_create_func_state);
 
-        // TRY ABI-SAFE PATH FIRST
+        // Every DML-claimed op is created through the ABI-safe DmlAbiKernel path, which requires a
+        // kernel_factory. Ops without one (e.g. control-flow / sequence ops) are excluded from this
+        // registry in ConvertKernelRegistryToOrtKernelRegistry and never reach here.
         if (state->kernel_factory)
         {
             try {
@@ -685,7 +657,7 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
                 }
 
                 DML_PERF_LOG("[ABI_SAFE] FAILED: op=", state->operator_name,
-                    "  status=", (void*)abi_safe_status, "  kernel=", (void*)*kernel_out, "  -> falling to unsafe\n");
+                    "  status=", (void*)abi_safe_status, "  kernel=", (void*)*kernel_out, "\n");
                 if (abi_safe_status) {
                     state->ort_api_ptr->ReleaseStatus(abi_safe_status);
                 }
@@ -696,73 +668,11 @@ OrtStatus* ExecutionProviderPlugin::DmlKernelCreateFuncAdapter(void* kernel_crea
             }
         }
 
-        // FALLBACK: ABI-UNSAFE PATH (when ABI-safe fails or isn't available)
-        DML_PERF_LOG("[DML_PERF] path=unsafe op=", state->operator_name,
-            "  (safe path absent or failed)\n[ABI_UNSAFE] entry: op=", state->operator_name, "\n");
-
-        if (!state->kernel_create_fn) {
-            std::string error_msg = "Kernel registration missing both kernel_factory and kernel_create_fn - cannot create kernel";
-            return state->ort_api_ptr->CreateStatus(ORT_FAIL, error_msg.c_str());
-        }
-
-        // TODO(abi-safety): ABI-UNSAFE hard break — reinterpret_cast of an
-        // ORT-allocated OrtKernelInfo to the internal onnxruntime::OpKernelInfo
-        // assumes the plugin's compiled struct layout matches the ORT runtime that
-        // produced it (genuine cross-DLL assumption). Only reached by this
-        // ABI-UNSAFE kernel fallback (path=unsafe). Remove by eliminating the
-        // fallback (ABI-safe kernel for every op) or via OrtApi accessors.
-        const auto& kernel_info = *reinterpret_cast<const onnxruntime::OpKernelInfo*>(info);
-
-        // Call the lambda - creates PluginDmlAbiOpKernel which can access constant inputs
-        // Note: kernel_create_fn expects (FuncManager&, OpKernelInfo&, unique_ptr<OpKernel>&)
-        std::unique_ptr<onnxruntime::OpKernel> op_kernel;
-        onnxruntime::FuncManager func_manager;
-
-        try {
-            auto status = (*state->kernel_create_fn)(func_manager, kernel_info, op_kernel);
-            if (!status.IsOK()) {
-                return state->ort_api_ptr->CreateStatus(ORT_FAIL, "Kernel creation failed");
-            }
-        } catch (const std::exception& e) {
-            return state->ort_api_ptr->CreateStatus(ORT_FAIL, e.what());
-        } catch (...) {
-            return state->ort_api_ptr->CreateStatus(ORT_FAIL, "Unknown error during kernel creation");
-        }
-
-        if (!op_kernel) {
-            return state->ort_api_ptr->CreateStatus(ORT_FAIL, "Kernel creation returned null");
-        }
-
-        // Control flow operators (If, Loop, Scan) must NOT be wrapped in adapter
-        // They implement IControlFlowKernel which ORT needs to call SetupSubgraphExecutionInfo on
-        // Wrapping them hides this interface and causes "not created via OrtEpApi" error
-        // These should never reach this point in ABI-safe path (filtered in ConvertKernelRegistryToOrtKernelRegistry)
-        // but can reach here in unsafe fallback path
-        if (state->operator_name == "If" || state->operator_name == "Loop" || state->operator_name == "Scan") {
-            // ERROR: Control flow operators should not be going through EP plugin in the first place
-            // They should be handled by CPU EP. This indicates a registration or partitioning issue.
-            std::string error_msg = "Control flow operator " + state->operator_name +
-                                  " should not be created by DirectML EP - this is a registration error";
-            return state->ort_api_ptr->CreateStatus(ORT_FAIL, error_msg.c_str());
-        }
-
-        // Wrap the OpKernel in an adapter
-        auto* adapter = new (std::nothrow) DmlKernelImplAdapter();
-        if (!adapter) {
-            return state->ort_api_ptr->CreateStatus(ORT_FAIL, "Failed to allocate kernel adapter");
-        }
-
-        adapter->internal_kernel = std::move(op_kernel);
-        adapter->ort_api_ptr = state->ort_api_ptr;
-        adapter->ort_version_supported = NegotiatedOrtApiVersion();
-        adapter->flags = 0;
-        adapter->Compute = DmlKernelImplAdapter_Compute;
-        adapter->Release = DmlKernelImplAdapter_Release;
-        adapter->PrePackWeight = nullptr;
-        adapter->SetSharedPrePackedWeight = nullptr;
-
-        *kernel_out = adapter;
-        return nullptr;  // SUCCESS - unsafe fallback worked
+        // The ABI-safe path above is the only kernel-creation path, so reaching here means the op
+        // was claimed but has no ABI-safe kernel — a registration/partitioning invariant violation.
+        DML_PERF_LOG("[DML_PERF] op=", state->operator_name, "  ABI-safe kernel creation failed\n");
+        return state->ort_api_ptr->CreateStatus(ORT_FAIL,
+            "ABI-safe kernel creation failed and no fallback is available");
 
     } catch (const std::exception& e) {
         auto* state = static_cast<KernelCreateFuncState*>(kernel_create_func_state);
@@ -881,35 +791,63 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                     for (auto d : s.dims) if (d < 0) { all_static = false; break; }
                     if (all_static) return s.dims;
                 }
-                // Fallback: check resolved_shapes by name.
+                // Fallback: check resolved_shapes by name. Only accept an entry whose dims
+                // are ALL positive — the map can hold a stale/placeholder entry (a <=0 dim,
+                // or a fabricated shape for a tensor whose live VI is dynamic). Returning
+                // such an entry as "static input dims" would let Upsample/Resize compute and
+                // then write-back (SetResolvedDims, which mutates the VI) a corrupted shape —
+                // the same failure mode the boundary check guards against. Mirror that: a
+                // non-authoritative map entry is treated as unresolved (empty), not static.
                 auto name = fusion_utils::GetValueInfoName(ep->ort_api,vi);
                 if (!name.empty()) {
                     auto it = resolved_shapes.find(name);
-                    if (it != resolved_shapes.end()) return it->second;
+                    if (it != resolved_shapes.end() && !it->second.empty()) {
+                        bool all_static = true;
+                        for (int64_t d : it->second) if (d <= 0) { all_static = false; break; }
+                        if (all_static) return it->second;
+                    }
                 }
                 return {};
             };
 
-            // Helper: check if a ValueInfo has missing or dynamic shape.
-            auto HasDynamicShape = [&](const OrtValueInfo* vi) -> bool {
-                if (!vi) return true;
-                // A resolved_shapes entry counts as static only if every dim is > 0.
-                // An entry may still hold a placeholder dim (-1 or 0); such an entry is
-                // not authoritative, so fall through to the ValueInfo check below.
-                auto name = fusion_utils::GetValueInfoName(ep->ort_api,vi);
-                if (!name.empty()) {
-                    auto it = resolved_shapes.find(name);
-                    if (it != resolved_shapes.end()) {
-                        bool all_static = !it->second.empty();
-                        for (int64_t d : it->second) if (d <= 0) { all_static = false; break; }
-                        if (all_static) return false;
-                    }
-                }
+            // Is this input/output slot a dynamic-shape partition boundary?
+            // `edge_name` is the slot's ONNX edge name (from GetNodeInput/OutputNames).
+            // Decision order, most authoritative first:
+            //   1. EMPTY edge name -> an absent OPTIONAL input (no producer, no runtime
+            //      data, e.g. Resize's roi). It has no shape to be dynamic and must not cut
+            //      a partition -> NOT dynamic. (In ORT's EP graph API an absent optional is
+            //      always both empty-named AND a null OrtValueInfo; see dml_ep.cc:2456 /
+            //      :2645. a0db215 keyed on `!vi` instead, which also caught real unresolved
+            //      edges and regressed VITS.)
+            //   2. The LIVE ValueInfo is authoritative whenever it carries a shape: a
+            //      negative dim -> dynamic -> boundary; rank 0 -> scalar static; else static.
+            //      This MUST win over the resolved_shapes fallback below — that map can hold
+            //      a STALE or even wrong-rank entry (observed on VITS: VI=[-1,-1,-1] but
+            //      resolved_shapes=[1,1,9,96]). Trusting the map there fused a genuinely-
+            //      dynamic Pad and corrupted the shared shape map -> downstream Reshape
+            //      element-count mismatch (HR=0x80004005).
+            //   3. VI has NO shape: a missing shape does NOT mean dynamic (ORT often fails
+            //      to propagate shape to a consumer-side VI; ValidateTier0 treats missing
+            //      shape as non-dynamic and lets later stages decide). Consult resolved_shapes
+            //      only as a positive static signal; default non-dynamic otherwise.
+            auto HasDynamicShape = [&](const OrtValueInfo* vi, const std::string& edge_name) -> bool {
+                if (edge_name.empty()) return false;  // (1) absent optional slot
+                if (!vi) return true;                 // named but null -> unresolved edge
                 fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ep->ort_api, vi);
-                if (!s.has_type_info || !s.has_shape) return true;
-                if (s.rank == 0) return false;  // true scalar — static
-                for (auto d : s.dims) if (d < 0) return true;
-                return false;
+                if (!s.has_type_info) return true;    // named real edge with no type -> dynamic
+                if (s.has_shape) {                    // (2) live VI is authoritative
+                    if (s.rank == 0) return false;            // true scalar — static
+                    for (auto d : s.dims) if (d < 0) return true;  // positively dynamic
+                    return false;                            // fully static
+                }
+                // (3) VI has no shape — resolved_shapes is only a positive static signal.
+                auto it = resolved_shapes.find(edge_name);
+                if (it != resolved_shapes.end()) {
+                    bool all_static = !it->second.empty();
+                    for (int64_t d : it->second) if (d <= 0) { all_static = false; break; }
+                    if (all_static) return false;
+                }
+                return false;  // missing shape, no contradicting signal -> not dynamic
             };
 
             // Helper: mutate a ValueInfo's shape to resolved static dims.
@@ -1226,7 +1164,8 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                             }
 
                             // Resolve Upsample/Resize output shapes.
-                            if (!HasDynamicShape(out_vis[0])) continue;
+                            if (!HasDynamicShape(out_vis[0],
+                                    output_names.empty() ? std::string() : output_names[0])) continue;
 
                             bool is_upsample = std::strcmp(op_type, "Upsample") == 0;
                             bool is_resize = std::strcmp(op_type, "Resize") == 0;
@@ -1489,17 +1428,22 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                 if (is_fuseable) {
                     size_t num_inputs = 0;
                     ep->ort_api.Node_GetNumInputs(node, &num_inputs);
-                    std::vector<const OrtValueInfo*> in_vis(num_inputs, nullptr);
-                    if (num_inputs > 0) ep->ort_api.Node_GetInputs(node, in_vis.data(), num_inputs);
+                    std::vector<const OrtValueInfo*> input_value_infos(num_inputs, nullptr);
+                    if (num_inputs > 0) ep->ort_api.Node_GetInputs(node, input_value_infos.data(), num_inputs);
                     size_t num_outputs = 0;
                     ep->ort_api.Node_GetNumOutputs(node, &num_outputs);
-                    std::vector<const OrtValueInfo*> out_vis(num_outputs, nullptr);
-                    if (num_outputs > 0) ep->ort_api.Node_GetOutputs(node, out_vis.data(), num_outputs);
+                    std::vector<const OrtValueInfo*> output_value_infos(num_outputs, nullptr);
+                    if (num_outputs > 0) ep->ort_api.Node_GetOutputs(node, output_value_infos.data(), num_outputs);
+                    static const std::string kEmptyName;
+                    auto in_name  = [&](size_t k) -> const std::string& {
+                        return k < input_names.size() ? input_names[k] : kEmptyName; };
+                    auto out_name = [&](size_t k) -> const std::string& {
+                        return k < output_names.size() ? output_names[k] : kEmptyName; };
                     bool any_dynamic = false;
                     for (size_t k = 0; k < num_inputs && !any_dynamic; ++k)
-                        if (HasDynamicShape(in_vis[k])) any_dynamic = true;
+                        if (HasDynamicShape(input_value_infos[k], in_name(k))) any_dynamic = true;
                     for (size_t k = 0; k < num_outputs && !any_dynamic; ++k)
-                        if (HasDynamicShape(out_vis[k])) any_dynamic = true;
+                        if (HasDynamicShape(output_value_infos[k], out_name(k))) any_dynamic = true;
                     if (any_dynamic) {
                         is_fuseable = false;
                         DML_PERF_LOG("[Tier0] BOUNDARY node=", nid, " reason=dynamic_shape\n");

@@ -25,6 +25,11 @@ struct DmlTensorInfo {
     std::vector<uint32_t> strides;
     uint64_t              total_bytes = 0;
     uint32_t              original_rank = 0;  // rank before 4D padding (0 = unknown)
+    // True when the ONNX tensor has a genuine extent-0 dimension (empty tensor).
+    // DML descriptors can't represent a 0 dim, so `sizes` coerces it to 1; this
+    // flag preserves the "empty" signal so ops like Concat can drop the input
+    // (mirrors ORT's DmlOperatorConcat, which ignores empty-dimension inputs).
+    bool                  is_empty = false;
 
     DML_BUFFER_TENSOR_DESC ToBufferDesc() const;
 };
@@ -160,6 +165,16 @@ DmlTensorInfo MakeTensorInfoAtAxis(
     DML_TENSOR_DATA_TYPE dtype,
     uint32_t placement,
     uint32_t target_dim_count);
+
+// Output sizes for a rank-reducing op (Reduce*, ArgMax/ArgMin) in DML's required
+// form: input-rank, with each reduced axis set to 1. DML reduction descriptors have
+// no keepdims notion, so the resolved ONNX output shape (which is rank-reduced for
+// keepdims=0) must not be used — left-padding it misplaces the surviving dims and
+// CreateOperator rejects it with E_INVALIDARG. `axes` must already be in the padded
+// index space; out-of-range axes are ignored.
+std::vector<uint32_t> ReducedOutputSizes(
+    const std::vector<uint32_t>& padded_input_sizes,
+    const std::vector<uint32_t>& axes);
 
 // Build a DmlTensorInfo with explicit strides (padded to 4D).
 DmlTensorInfo MakeTensorInfoWithStrides(
