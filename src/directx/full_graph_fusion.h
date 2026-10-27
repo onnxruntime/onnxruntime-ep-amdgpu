@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
@@ -10,6 +11,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include <d3d12.h>
 #include <DirectML.h>
 #include <onnxruntime_c_api.h>
 #include <wrl/client.h>
@@ -114,6 +116,47 @@ bool AllNodesHaveTranslators(
 // executes the entire inference graph in one GPU dispatch.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// PluginReusableCommandList — one prebuilt, closed command list that replays the
+// whole-graph DML dispatch without re-recording. Mirrors ORT's
+// DmlReusedCommandListState (DmlExecutionProvider/src/DmlReusedCommandListState.h)
+// but is built entirely through the plugin's ABI-safe provider surface.
+//
+// Each entry owns its descriptor heap + binding table + command list and is the
+// unit of the in-flight ring (see FullGraphKernelState::reusable_lists). The
+// descriptor heap is rewritten in place by BindInputs/BindOutputs, so a list must
+// NOT be re-executed until its prior GPU submission completes — the ring's fence
+// gate enforces this (FullGraph_Compute).
+//
+// Temp ownership (correctness §T): the plugin's AllocatePooledResource frees
+// synchronously (resource returns to the bucket on ComPtr release, NOT gated on GPU
+// completion), unlike ORT's completion-gated AllocateTemporaryData. So the temporary
+// resource is allocated ONCE at build time and held here for the list's whole
+// lifetime; it is never returned to the pool while a replay may still read it.
+struct PluginReusableCommandList {
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList>   graphicsCommandList;
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator>      commandAllocator;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>        heap;
+    Microsoft::WRL::ComPtr<IDMLBindingTable>            bindingTable;
+
+    // Persistent resource keep-alives (binding baked into the table at build time).
+    Microsoft::WRL::ComPtr<ID3D12Resource>              persistentResource;
+    Microsoft::WRL::ComPtr<IUnknown>                    persistentAllocator;
+
+    // Per-list owned temporary resource (bound once at build; see §T above).
+    Microsoft::WRL::ComPtr<ID3D12Resource>              temporaryResource;
+    Microsoft::WRL::ComPtr<IUnknown>                    temporaryAllocator;
+
+    // Pooled allocation IDs from the previous replay, per binding slot. A slot is
+    // re-bound only when its ID changes (0 = unknown/non-pooled -> always rebind).
+    std::vector<uint64_t>                               inputBindingAllocIds;
+    std::vector<uint64_t>                               outputBindingAllocIds;
+
+    // Fence + value of this list's last submission: the gate for safe reuse.
+    Microsoft::WRL::ComPtr<ID3D12Fence>                 fence;
+    uint64_t                                            completionValue = 0;
+};
+
 // One compiled DML variant: everything produced by a single CompileGraph +
 // binding-metadata build. The STATIC path fills the mirror fields directly on
 // FullGraphKernelState below (a single implicit variant), keeping that path
@@ -173,6 +216,23 @@ struct FullGraphKernelState {
     std::vector<uint64_t>                                output_bytes;
 
     uint64_t                                             compute_call_count = 0;
+
+    // True iff the active compiled op was built with DML_EXECUTION_FLAG_DESCRIPTORS_VOLATILE.
+    // Command-list reuse records the dispatch ONCE with inputs/outputs unbound and binds
+    // them later per replay; DML only permits that late binding when this flag is set.
+    // Without it, a reused list dispatches against an unbound binding table -> device
+    // removed (0x887A0005). The plugin only sets the flag for graphs with >= 5 nodes
+    // (matching ORT), so this gates reuse to exactly the compiled ops where it is legal.
+    bool                                                 descriptors_volatile = false;
+
+    // --- STATIC-path command-list reuse (replay). ---
+    // Prebuilt, closed command lists that replay the single whole-graph dispatch
+    // without re-recording. Seeded lazily on first Compute and rotated like ORT's
+    // ring (FusedGraphKernel.cpp): the front is executed, then moved to the back;
+    // if the front is still in-flight on the GPU a fresh list is built and pushed to
+    // the front so an in-flight descriptor heap is never overwritten. Only used on
+    // the non-deferred static path; empty (and unused) on the deferred path.
+    std::deque<std::unique_ptr<PluginReusableCommandList>> reusable_lists;
 
     // --- DEFERRED (runtime-fusion) path. Only set when `deferred` is true. ---
     bool                                                 deferred = false;

@@ -198,7 +198,7 @@ inline bool ReadRuntimeShape(
     if (!shape_info) return false;
 
     size_t elem_count = 0;
-    api.GetTensorShapeElementCount(shape_info, &elem_count);
+    if (OrtStatus* ec_st = api.GetTensorShapeElementCount(shape_info, &elem_count)) api.ReleaseStatus(ec_st);
     ONNXTensorElementDataType dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
     api.GetTensorElementType(shape_info, &dtype);
     size_t rank = 0;

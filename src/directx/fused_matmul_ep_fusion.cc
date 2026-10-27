@@ -909,7 +909,7 @@ static bool ReadRuntimeShape(
     api.GetTensorTypeAndShape(const_cast<OrtValue*>(value), &shape_info);
     if (!shape_info) return false;
 
-    size_t elem_count = 0; api.GetTensorShapeElementCount(shape_info, &elem_count);
+    size_t elem_count = 0; if (OrtStatus* ec_st = api.GetTensorShapeElementCount(shape_info, &elem_count)) api.ReleaseStatus(ec_st);
     ONNXTensorElementDataType dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
     api.GetTensorElementType(shape_info, &dtype);
     size_t rank = 0; api.GetDimensionsCount(shape_info, &rank);
@@ -1399,6 +1399,28 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
     size_t a_rank = get_dims(input_vis[resolved_a_idx], a_dims);
     size_t b_rank = get_dims(input_vis[resolved_b_idx], b_dims);
 
+    // When one side is a constant initializer it has no graph-input slot, so
+    // resolved_*_idx kept its default (0/1) and the get_dims() above read the
+    // WRONG tensor — the other operand's shape. Override that side's dims from
+    // the initializer's own OrtValue. Without this, K from A and B disagree and
+    // PrepareGemmShapes rejects the GEMM (e.g. A=[1,6,2] misread as B=[1,6,2]).
+    if (initializer_side >= 0) {
+        const std::string& init_name = (initializer_side == 0) ? matmul_a_name : matmul_b_name;
+        auto init_it = initializers.find(init_name);
+        if (init_it != initializers.end() && init_it->second) {
+            OrtTensorTypeAndShapeInfo* ishape = nullptr;
+            ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(init_it->second), &ishape);
+            if (ishape) {
+                size_t irank = 0; ort_api.GetDimensionsCount(ishape, &irank);
+                std::vector<int64_t> idims(irank);
+                if (irank > 0) ort_api.GetDimensions(ishape, idims.data(), irank);
+                ort_api.ReleaseTensorTypeAndShapeInfo(ishape);
+                if (initializer_side == 0) { a_dims = idims; a_rank = irank; }
+                else                       { b_dims = idims; b_rank = irank; }
+            }
+        }
+    }
+
     if (trans_batch_a || trans_batch_b) {
         if (a_rank < 3 || a_rank != b_rank) {
             DML_PERF_LOG("[FusedMatMul] Compile: transBatch needs same rank >= 3, "
@@ -1447,7 +1469,7 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
         size_t init_elem_count = 0;
         size_t init_rank = 0;
         if (init_shape) {
-            ort_api.GetTensorShapeElementCount(init_shape, &init_elem_count);
+            if (OrtStatus* ec_st = ort_api.GetTensorShapeElementCount(init_shape, &init_elem_count)) ort_api.ReleaseStatus(ec_st);
             ort_api.GetDimensionsCount(init_shape, &init_rank);
             std::vector<int64_t> init_dims(init_rank);
             if (init_rank > 0) ort_api.GetDimensions(init_shape, init_dims.data(), init_rank);

@@ -349,7 +349,7 @@ static OrtStatus* ORT_API_CALL BiasGelu_Compute(
 
     OrtTensorTypeAndShapeInfo* shape0 = nullptr;
     api.GetTensorTypeAndShape(const_cast<OrtValue*>(input0), &shape0);
-    size_t elem_count0 = 0; api.GetTensorShapeElementCount(shape0, &elem_count0);
+    size_t elem_count0 = 0; if (OrtStatus* ec_st = api.GetTensorShapeElementCount(shape0, &elem_count0)) api.ReleaseStatus(ec_st);
     ONNXTensorElementDataType dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
     api.GetTensorElementType(shape0, &dtype);
     size_t main_rank = 0; api.GetDimensionsCount(shape0, &main_rank);

@@ -228,7 +228,7 @@ TryFetchTensorAttribute(const OrtKernelInfo* kernel_info, const OrtApi* ort_api,
     for (int64_t d : dims) result.shape.push_back(static_cast<uint32_t>(d));
 
     size_t elem_count = 0;
-    ort_api->GetTensorShapeElementCount(type_shape_info, &elem_count);
+    if (OrtStatus* ec_st = ort_api->GetTensorShapeElementCount(type_shape_info, &elem_count)) ort_api->ReleaseStatus(ec_st);
     ort_api->ReleaseTensorTypeAndShapeInfo(type_shape_info);
 
     const void* raw_data = nullptr;
