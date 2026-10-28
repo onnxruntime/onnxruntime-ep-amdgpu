@@ -54,6 +54,11 @@ const char* ExecutionProvider::GetName() const noexcept {
 
 namespace {
 
+enum class EpContextEmbedMode : std::int64_t {
+    File = 0,
+    Embedded = 1,
+};
+
 fs::path CreateTemporaryDirectory() {
     static std::atomic_size_t sequence{};
     const auto timestamp{std::chrono::steady_clock::now().time_since_epoch().count()};
@@ -1383,7 +1388,8 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         } else if (!model_path.empty()) {
             effective_cache_dir = model_path.parent_path();
         }
-        if (context_embed_mode_ == 1 && effective_cache_dir.empty()) {
+        if (context_embed_mode_ == static_cast<std::int64_t>(EpContextEmbedMode::Embedded)
+            && effective_cache_dir.empty()) {
             temporary_cache_dir = CreateTemporaryDirectory();
             effective_cache_dir = temporary_cache_dir;
         }
@@ -1446,7 +1452,8 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     if (context_enable_) {
         // input_shapes_hash_hex is non-empty here: the RETURN_IF above requires has_input_shape.
         const fs::path ep_context_mxr_path{effective_mxr_prefix + input_shapes_hash_hex + ".mxr"};
-        if (context_embed_mode_ == 1 && cache_dir_.empty()) {
+        if (context_embed_mode_ == static_cast<std::int64_t>(EpContextEmbedMode::Embedded)
+            && cache_dir_.empty()) {
             embedded_mxr_path = effective_cache_dir / ep_context_mxr_path;
         }
 
