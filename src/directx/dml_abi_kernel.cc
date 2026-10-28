@@ -17,82 +17,8 @@
 namespace dml_ep {
 
 // Forward declarations for file-local helpers defined later in this file.
-// UploadConstantTensorsToGpu is defined before its call sites and needs no forward declaration.
 static TensorContent SnapshotConstantInput(IMLOperatorTensor* tensor);
 static bool ConstantInputChanged(const TensorContent& last, IMLOperatorTensor* current_tensor);
-
-// Uploads CPU-resident entries from constant_tensors to D3D12_HEAP_TYPE_DEFAULT GPU buffers.
-// gpu_resources is resized to hold one slot per input index (sparse — GPU-resident or missing
-// entries remain null). Callers must QueueReference each non-null resource after this returns.
-static void UploadConstantTensorsToGpu(
-    const std::unordered_map<uint32_t, Microsoft::WRL::ComPtr<IMLOperatorTensor>>& constant_tensors,
-    const PluginDmlExecutionProviderImpl* provider,
-    std::vector<ConstantGpuResource>& gpu_resources)
-{
-    // Find the max input index so we can size the sparse vector exactly once.
-    uint32_t max_index = 0;
-    for (const auto& kv : constant_tensors) {
-        if (kv.second) max_index = std::max(max_index, kv.first);
-    }
-    gpu_resources.resize(static_cast<size_t>(max_index) + 1);
-
-    Microsoft::WRL::ComPtr<ID3D12Device> d3d_device;
-    ORT_THROW_IF_FAILED(provider->GetD3DDevice(d3d_device.GetAddressOf()));
-
-    for (const auto& kv : constant_tensors) {
-        IMLOperatorTensor* ml_tensor = kv.second.Get();
-        if (!ml_tensor || !ml_tensor->IsCpuData()) {
-            // Null or already GPU-resident — skip (GPU-resident initializers are already in VRAM).
-            continue;
-        }
-
-        const void* cpu_data = ml_tensor->GetData();
-        if (!cpu_data) continue;
-
-        // Compute byte size, shape, dtype via MLOperatorTensor helper.
-        MLOperatorTensor wrapper(ml_tensor);
-        size_t byte_size = wrapper.GetUnalignedTensorByteSize();
-        if (byte_size == 0) continue;
-
-        // Allocate a GPU-exclusive (D3D12_HEAP_TYPE_DEFAULT) buffer.
-        // Size is 4-byte aligned — required by D3D12 for UAV buffer resources.
-        const uint64_t aligned_size = (static_cast<uint64_t>(byte_size) + 3u) & ~3ull;
-
-        D3D12_HEAP_PROPERTIES heap_props = {};
-        heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-        D3D12_RESOURCE_DESC res_desc = {};
-        res_desc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
-        res_desc.Width             = aligned_size;
-        res_desc.Height            = 1;
-        res_desc.DepthOrArraySize  = 1;
-        res_desc.MipLevels         = 1;
-        res_desc.SampleDesc.Count  = 1;
-        res_desc.Layout            = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        res_desc.Flags             = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-
-        Microsoft::WRL::ComPtr<ID3D12Resource> gpu_buf;
-        HRESULT hr = d3d_device->CreateCommittedResource(
-            &heap_props,
-            D3D12_HEAP_FLAG_NONE,
-            &res_desc,
-            D3D12_RESOURCE_STATE_COMMON,
-            nullptr,
-            IID_PPV_ARGS(gpu_buf.GetAddressOf()));
-        if (FAILED(hr) || !gpu_buf) continue;
-
-        // Copy CPU data into the buffer via the provider's pooled upload heap.
-        hr = provider->UploadToResource(gpu_buf.Get(), cpu_data, byte_size);
-        if (FAILED(hr)) {
-            continue;
-        }
-
-        ConstantGpuResource& slot = gpu_resources[kv.first];
-        slot.resource = std::move(gpu_buf);
-        slot.shape    = wrapper.GetShape();
-        slot.dtype    = wrapper.GetTensorDataType();
-    }
-}
 
 // ============================================================================
 // Profiling - compiled in only when /DDML_PERF_PROFILE is defined.
@@ -534,17 +460,6 @@ HRESULT AbiSafeKernelContext::GetInputTensor(uint32_t inputIndex, IMLOperatorTen
     *tensor = nullptr;
 
     if (!kernel_context_ || !ort_api_) return E_FAIL;
-
-    // Fast path: return a pre-uploaded GPU buffer if one was cached for this input index.
-    if (constant_gpu_resources_ &&
-        inputIndex < constant_gpu_resources_->size() &&
-        (*constant_gpu_resources_)[inputIndex].resource) {
-        const ConstantGpuResource& cached = (*constant_gpu_resources_)[inputIndex];
-        auto gpu_tensor = Microsoft::WRL::Make<AbiSafeD3D12Tensor>(
-            cached.resource.Get(), cached.shape, cached.dtype);
-        *tensor = gpu_tensor.Detach();
-        return S_OK;
-    }
 
     // Indexed cache: return cached tensor if already created for this input index.
     // Mirrors ORT's OpKernelContextWrapper::GetInputTensor which caches in m_inputTensors[inputIndex][0].
@@ -3269,29 +3184,12 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
             }
         }
 
-        // Pre-upload CPU-resident constant inputs to a D3D12_HEAP_TYPE_DEFAULT GPU buffer.
-        // After this point, AbiSafeKernelContext::GetInputTensor() will return an
-        // AbiSafeD3D12Tensor backed by constant_gpu_resources[inputIndex] instead of
-        // re-fetching and re-uploading from the ORT execution context on every Compute() call.
-        if (!needs_lazy_init && !constant_tensors.empty() && state->dml_execution_provider) {
-            UploadConstantTensorsToGpu(
-                constant_tensors,
-                state->dml_execution_provider,
-                abi_kernel->constant_gpu_resources);
-
-            uint32_t cached_count = 0;
-            for (auto& entry : abi_kernel->constant_gpu_resources) {
-                if (entry.resource) {
-                    ++cached_count;
-                    // QueueReference so the GPU has finished with in-flight upload work before
-                    // the resource could be freed (e.g. if the kernel is destroyed early).
-                    if (abi_kernel->winml_provider) {
-                        abi_kernel->winml_provider->QueueReference(entry.resource.Get());
-                    }
-                }
-            }
-
-        }
+        // Note: required-constant-cpu-inputs are consumed as CPU VALUES at kernel construction
+        // (via GetConstantInputTensor, mirroring ORT's OnnxTensorWrapper) and are excluded from
+        // DML binding by each operator's kernelInputIndices. They are never bound as GPU tensors
+        // at dispatch — verified: ORT's per-op path never uploads them (no CreateCommittedResource
+        // in its Operators/ path) and the plugin shares ORT's operator registry and kernelInputIndices.
+        // So no GPU upload is needed here; doing it created committed resources that were never bound.
 
         *kernel_out = impl;
         return nullptr;
@@ -3493,26 +3391,11 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                 }
             }
 
-            // Pre-upload constant inputs to GPU while the tensors are still available
-            // (before std::move(lazy_constant_tensors) below). Future Compute() calls then hit
-            // the cached D3D12Resource in GetInputTensor() instead of re-uploading.
-            if (kernel->dml_execution_provider && !lazy_constant_tensors.empty()) {
-                UploadConstantTensorsToGpu(
-                    lazy_constant_tensors,
-                    kernel->dml_execution_provider,
-                    kernel->constant_gpu_resources);
-
-                uint32_t cached_count = 0;
-                for (auto& entry : kernel->constant_gpu_resources) {
-                    if (entry.resource) {
-                        ++cached_count;
-                        if (kernel->winml_provider) {
-                            kernel->winml_provider->QueueReference(entry.resource.Get());
-                        }
-                    }
-                }
-
-            }
+            // Required-constant-cpu-inputs are consumed as CPU VALUES at kernel construction and
+            // excluded from DML binding via each operator's kernelInputIndices — they are never
+            // bound as GPU tensors at dispatch. ORT's per-op path never uploads them and the plugin
+            // shares ORT's operator registry, so no GPU upload is needed here. (See the matching
+            // note on the eager path.)
 
             // Create context with runtime shapes from actual input tensors.
             // NOTE: lazy_constant_tensors is moved here — snapshot must happen before this line.
