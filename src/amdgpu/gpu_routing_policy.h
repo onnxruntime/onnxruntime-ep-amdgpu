@@ -59,8 +59,9 @@ inline bool is_webnn(const std::optional<std::string>& model_fw) {
 // or Optimized) is honored/dispatched as-is. In Auto mode, in priority order:
 //   1. WebNN caller                   -> DirectML (browser/WebNN compatibility carve-out, all ASICs)
 //   2. kArchModelBackend (arch prefix + model_arch) override, if any row matches
-//   3. HIP-enabled gfx115x / gfx117x + present model_arch -> Hip
-//      (gfx115* and gfx117*. OGA gen/LLM hint; any non-empty value. Not a kLlmModelArch scan.)
+//   3. HIP-enabled gfx115x / gfx1170 (MDS1) + present model_arch -> Hip
+//      (gfx115* and gfx1170 only. OGA gen/LLM hint; any non-empty value. Not a kLlmModelArch scan.
+//       gfx1171 (MDS2) is EXCLUDED: HIP in the 11D release only supports MDS1/gfx1170.)
 //   4. gfx11 and newer                -> MIGraphX
 //   5. everything below gfx11 (gfx9/gfx10) -> DirectML
 inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_hash, bool is_webnn,
@@ -76,14 +77,16 @@ inline Profile select_backend(std::string_view gfx, std::uint64_t arch_model_has
         }
     }
 #ifdef USE_HIP
-    // 3. gfx115x and gfx117x: a present model_arch is an OGA gen/LLM session hint → HIP.
-    //    Do not use prefix gfx11.
-    if ((starts_with(gfx, "gfx115") || starts_with(gfx, "gfx117")) &&
+    // 3. gfx115x and gfx1170 (MDS1): a present model_arch is an OGA gen/LLM session hint → HIP.
+    //    gfx1171 (MDS2) is EXCLUDED — HIP in the 11D release only supports MDS1/gfx1170, so an MDS2
+    //    LLM session must NOT take the (broken) HIP route; it falls through to gfx11 → MIGraphX below.
+    //    Match gfx1170 exactly; do NOT use prefix gfx11 or gfx117 (gfx117 would also catch gfx1171/gfx1172).
+    if ((starts_with(gfx, "gfx115") || starts_with(gfx, "gfx1170")) &&
         arch_model_hash != kNoModelArch) {
         return Profile::Hip;
     }
 #endif
-    // 4-5. Prefix buckets. gfx117 without model_arch still matches gfx11 → MIGraphX.
+    // 4-5. Prefix buckets. gfx1171/gfx1172 (MDS2, and any gfx117 without model_arch) match gfx11 → MIGraphX.
     if (starts_with(gfx, "gfx11")) return Profile::MIGraphX;   // RDNA3 / RDNA3.5
     if (starts_with(gfx, "gfx12")) return Profile::MIGraphX;   // RDNA4
     return Profile::DirectX;                                   // pre-gfx11 (gfx9/gfx10)
