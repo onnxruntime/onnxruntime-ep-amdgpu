@@ -2538,7 +2538,7 @@ OrtNodeComputeInfo* OpActivationFusionRule::Compile(
                     ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(pads_it->second), &psi);
                     if (psi) {
                         size_t pads_count = 0;
-                        if (OrtStatus* ec_st = ort_api.GetTensorShapeElementCount(psi, &pads_count)) ort_api.ReleaseStatus(ec_st);
+                        DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(psi, &pads_count));
                         ort_api.ReleaseTensorTypeAndShapeInfo(psi);
                         const int64_t* pads_data = static_cast<const int64_t*>(pads_ptr);
                         conv_pads.resize(pads_count);
@@ -2619,7 +2619,7 @@ OrtNodeComputeInfo* OpActivationFusionRule::Compile(
                     return nullptr;
                 }
                 size_t elem_count = 0, rank = 0;
-                if (OrtStatus* ec_st = ort_api.GetTensorShapeElementCount(si, &elem_count)) ort_api.ReleaseStatus(ec_st);
+                DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(si, &elem_count));
                 ort_api.GetDimensionsCount(si, &rank);
                 std::vector<int64_t> dims(rank);
                 if (rank > 0) ort_api.GetDimensions(si, dims.data(), rank);
@@ -2689,7 +2689,7 @@ OrtNodeComputeInfo* OpActivationFusionRule::Compile(
         size_t init_elem_count = 0;
         size_t init_rank = 0;
         if (init_shape) {
-            if (OrtStatus* ec_st = ort_api.GetTensorShapeElementCount(init_shape, &init_elem_count)) ort_api.ReleaseStatus(ec_st);
+            DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(init_shape, &init_elem_count));
             ort_api.GetDimensionsCount(init_shape, &init_rank);
             std::vector<int64_t> init_dims(init_rank);
             if (init_rank > 0) ort_api.GetDimensions(init_shape, init_dims.data(), init_rank);

@@ -1348,7 +1348,7 @@ static DmlInputMapResult BuildDmlInputMap(
             size_t elem_count = 0;
             ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
             if (tsi) {
-                if (OrtStatus* ec_st = ort_api.GetTensorShapeElementCount(tsi, &elem_count)) ort_api.ReleaseStatus(ec_st);
+                DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &elem_count));
                 ort_api.GetTensorElementType(tsi, &dt);
                 ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
             }
@@ -1433,7 +1433,7 @@ static DmlInputMapResult BuildDmlInputMapByNames(
             size_t elem_count = 0;
             ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
             if (tsi) {
-                if (OrtStatus* ec_st = ort_api.GetTensorShapeElementCount(tsi, &elem_count)) ort_api.ReleaseStatus(ec_st);
+                DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &elem_count));
                 ort_api.GetTensorElementType(tsi, &dt);
                 ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
             }
@@ -1513,7 +1513,7 @@ static bool UploadInitializers(
         size_t elem_count = 0;
         ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
         if (tsi) {
-            if (OrtStatus* ec_st = ort_api.GetTensorShapeElementCount(tsi, &elem_count)) ort_api.ReleaseStatus(ec_st);
+            DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &elem_count));
             ort_api.GetTensorElementType(tsi, &dt);
             ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
         }
@@ -1585,7 +1585,7 @@ static bool UploadInitializersByNames(
         size_t elem_count = 0;
         ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
         if (tsi) {
-            if (OrtStatus* ec_st = ort_api.GetTensorShapeElementCount(tsi, &elem_count)) ort_api.ReleaseStatus(ec_st);
+            DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &elem_count));
             ort_api.GetTensorElementType(tsi, &dt);
             ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
         }
@@ -2573,7 +2573,7 @@ OrtValue* CloneInitializerValue(const OrtApi& ort_api, const OrtValue* src) {
     std::vector<int64_t> dims(rank, 0);
     if (rank > 0) ort_api.GetDimensions(tsi, dims.data(), rank);
     size_t elem_count = 0;
-    if (OrtStatus* ec_st = ort_api.GetTensorShapeElementCount(tsi, &elem_count)) ort_api.ReleaseStatus(ec_st);
+    DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &elem_count));
     ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
 
     // Source CPU bytes.
@@ -2765,7 +2765,7 @@ static std::unique_ptr<DeferredSubgraph> BuildDeferredSnapshot(
         std::vector<int64_t> dims(rank, 0);
         if (rank > 0) ort_api.GetDimensions(tsi, dims.data(), rank);
         size_t elem_count = 0;
-        if (OrtStatus* ec_st = ort_api.GetTensorShapeElementCount(tsi, &elem_count)) ort_api.ReleaseStatus(ec_st);
+        DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &elem_count));
         ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
         uint64_t bytes = static_cast<uint64_t>(elem_count) * DmlDataTypeSize(OnnxDtypeToDml(dt));
 
@@ -4097,7 +4097,7 @@ static bool CompileFromSnapshot(
             size_t elem_count = 0;
             ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
             if (tsi) {
-                if (OrtStatus* ec_st = ort_api.GetTensorShapeElementCount(tsi, &elem_count)) ort_api.ReleaseStatus(ec_st);
+                DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &elem_count));
                 ort_api.GetTensorElementType(tsi, &dt);
                 ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
             }
@@ -4696,7 +4696,7 @@ bool FullGraphFusion::TryCompilePartition(
             size_t elem_count = 0;
             ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
             if (tsi) {
-                if (OrtStatus* ec_st = ort_api.GetTensorShapeElementCount(tsi, &elem_count)) ort_api.ReleaseStatus(ec_st);
+                DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &elem_count));
                 ort_api.GetTensorElementType(tsi, &dt);
                 ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
             }
