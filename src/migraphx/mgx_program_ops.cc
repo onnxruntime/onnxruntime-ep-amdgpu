@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -34,12 +35,27 @@ try {
     return false;
 }
 
-void save_compiled_program(const migraphx::program& prog, const fs::path& path) {
-    if (!path.empty()) {
-        migraphx::file_options options;
-        options.set_file_format("msgpack");
-        migraphx::save(prog, path.string().c_str(), options);
+// Best-effort, like load_compiled_program: the .mxr is only a cache, so failing to
+// write it (unwritable dir, disk full, or bad_alloc -- migraphx::save materialises
+// the whole program, weights included, in host memory twice) must not fail a
+// session whose program compiled fine. A partial file is removed so it is never
+// loaded later.
+bool save_compiled_program(const migraphx::program& prog, const fs::path& path, std::string* error)
+try {
+    if (path.empty()) {
+        return false;
     }
+    migraphx::file_options options;
+    options.set_file_format("msgpack");
+    migraphx::save(prog, path.string().c_str(), options);
+    return true;
+} catch (const std::exception& e) {
+    std::error_code ec;
+    fs::remove(path, ec);
+    if (error != nullptr) {
+        *error = e.what();
+    }
+    return false;
 }
 
 void calibrate_and_quantize(const migraphx::program& prog, const migraphx::target& target,
