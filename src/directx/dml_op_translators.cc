@@ -1243,7 +1243,7 @@ static std::optional<TranslatedOp> TranslateReduce(
             ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(it->second), &tsi);
             if (tsi) {
                 size_t count = 0;
-                ort_api.GetTensorShapeElementCount(tsi, &count);
+                DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &count));
                 ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
                 void* data = nullptr;
                 OrtStatus* st = ort_api.GetTensorMutableData(const_cast<OrtValue*>(it->second), &data);
@@ -2756,7 +2756,7 @@ static std::optional<TranslatedOp> TranslateSlice(
         ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(it->second), &tsi);
         if (!tsi) return result;
         size_t count = 0;
-        ort_api.GetTensorShapeElementCount(tsi, &count);
+        DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &count));
         ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
         ort_api.GetTensorElementType(tsi, &dt);
         ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
@@ -2972,7 +2972,7 @@ static std::optional<TranslatedOp> TranslateResize(
                 ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(it->second), &tsi);
                 if (tsi) {
                     size_t count = 0;
-                    ort_api.GetTensorShapeElementCount(tsi, &count);
+                    DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &count));
                     ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
                     void* data = nullptr;
                     OrtStatus* st = ort_api.GetTensorMutableData(const_cast<OrtValue*>(it->second), &data);
@@ -3606,7 +3606,7 @@ static std::optional<TranslatedOp> TranslateTile(
         ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(it->second), &tsi);
         if (!tsi) return std::nullopt;
         size_t count = 0;
-        ort_api.GetTensorShapeElementCount(tsi, &count);
+        DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &count));
         ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
         void* data = nullptr;
         OrtStatus* st = ort_api.GetTensorMutableData(const_cast<OrtValue*>(it->second), &data);
@@ -3771,7 +3771,7 @@ static std::optional<TranslatedOp> TranslateRange(
         ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(it->second), &tsi);
         if (!tsi) return false;
         size_t count = 0;
-        ort_api.GetTensorShapeElementCount(tsi, &count);
+        DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &count));
         ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
         ort_api.GetTensorElementType(tsi, &dt);
         ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
@@ -8739,12 +8739,12 @@ static std::optional<TranslatedOp> TranslateCol2Im(
         auto it = initializers.find(inputs[idx]);
         if (it == initializers.end() || !it->second) return result;
         void* data = nullptr;
-        ort_api.GetTensorMutableData(const_cast<OrtValue*>(it->second), &data);
+        DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorMutableData(const_cast<OrtValue*>(it->second), &data));
         if (!data) return result;
         OrtTensorTypeAndShapeInfo* tsi = nullptr;
         ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(it->second), &tsi);
         size_t cnt = 0;
-        ort_api.GetTensorShapeElementCount(tsi, &cnt);
+        DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &cnt));
         ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
         auto* vals = static_cast<const int64_t*>(data);
         for (size_t i = 0; i < cnt; ++i)
@@ -10444,12 +10444,12 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
             auto it = init.find(inputs[1]);
             if (it != init.end() && it->second) {
                 void* data = nullptr;
-                api.GetTensorMutableData(const_cast<OrtValue*>(it->second), &data);
+                DML_EP_RELEASE_IGNORED_STATUS(api, api.GetTensorMutableData(const_cast<OrtValue*>(it->second), &data));
                 if (data) {
                     OrtTensorTypeAndShapeInfo* tsi = nullptr;
                     api.GetTensorTypeAndShape(const_cast<OrtValue*>(it->second), &tsi);
                     size_t cnt = 0;
-                    api.GetTensorShapeElementCount(tsi, &cnt);
+                    DML_EP_RELEASE_IGNORED_STATUS(api, api.GetTensorShapeElementCount(tsi, &cnt));
                     api.ReleaseTensorTypeAndShapeInfo(tsi);
                     auto* vals = static_cast<const int64_t*>(data);
                     for (size_t d = 0; d < cnt; ++d)

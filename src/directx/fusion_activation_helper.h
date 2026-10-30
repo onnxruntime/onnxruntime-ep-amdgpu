@@ -17,6 +17,8 @@
 
 #include <onnxruntime_c_api.h>
 
+#include "fusion_utils.h"  // DML_EP_RELEASE_IGNORED_STATUS
+
 namespace dml_ep {
 
 // ---------------------------------------------------------------------------
@@ -198,7 +200,7 @@ inline bool ReadRuntimeShape(
     if (!shape_info) return false;
 
     size_t elem_count = 0;
-    api.GetTensorShapeElementCount(shape_info, &elem_count);
+    DML_EP_RELEASE_IGNORED_STATUS(api, api.GetTensorShapeElementCount(shape_info, &elem_count));
     ONNXTensorElementDataType dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
     api.GetTensorElementType(shape_info, &dtype);
     size_t rank = 0;

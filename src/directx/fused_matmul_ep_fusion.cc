@@ -909,7 +909,8 @@ static bool ReadRuntimeShape(
     api.GetTensorTypeAndShape(const_cast<OrtValue*>(value), &shape_info);
     if (!shape_info) return false;
 
-    size_t elem_count = 0; api.GetTensorShapeElementCount(shape_info, &elem_count);
+    size_t elem_count = 0;
+    DML_EP_RELEASE_IGNORED_STATUS(api, api.GetTensorShapeElementCount(shape_info, &elem_count));
     ONNXTensorElementDataType dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
     api.GetTensorElementType(shape_info, &dtype);
     size_t rank = 0; api.GetDimensionsCount(shape_info, &rank);
@@ -1469,7 +1470,7 @@ OrtNodeComputeInfo* FusedMatMulFusionRule::Compile(
         size_t init_elem_count = 0;
         size_t init_rank = 0;
         if (init_shape) {
-            ort_api.GetTensorShapeElementCount(init_shape, &init_elem_count);
+            DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(init_shape, &init_elem_count));
             ort_api.GetDimensionsCount(init_shape, &init_rank);
             std::vector<int64_t> init_dims(init_rank);
             if (init_rank > 0) ort_api.GetDimensions(init_shape, init_dims.data(), init_rank);
