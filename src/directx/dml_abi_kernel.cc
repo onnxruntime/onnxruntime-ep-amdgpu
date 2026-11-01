@@ -7,12 +7,15 @@
 // is parsed by the compiler.
 
 #include <filesystem>
+#include <algorithm>
+#include <cstring>
 #include "common/plugin_ep_utils.h"
 
 #include "dml_execution_provider.h"
 #include "dml_abi_kernel.h"
 #include "dml_plugin_MLOperatorAuthorImpl.h"
 #include "dml_perf_timer.h"
+#include "ort_node_adapter.h"  // plan-time attribute source for AbiSafeShapeInferenceContext
 
 namespace dml_ep {
 
@@ -1208,12 +1211,82 @@ AbiSafeShapeInferenceContext::AbiSafeShapeInferenceContext(
 {
 }
 
+// Plan-time attribute helpers: serve the shape inferrer's attribute reads from the
+// injected OrtNodeAdapter (ABI-safe, C-API backed) when there is no OrtKernelInfo.
+bool AbiSafeShapeInferenceContext::AdapterGetAttributeElementCount(
+    const char* name,
+    MLOperatorAttributeType type,
+    uint32_t* elementCount) const noexcept {
+    if (!injected_node_adapter_ || !name || !elementCount) return false;
+    if (injected_node_adapter_->GetAttribute(name) == nullptr) return false;  // absent
+    switch (type) {
+        case MLOperatorAttributeType::Int:
+        case MLOperatorAttributeType::Float:
+        case MLOperatorAttributeType::String:
+            *elementCount = 1;
+            return true;
+        case MLOperatorAttributeType::IntArray:
+            *elementCount = static_cast<uint32_t>(injected_node_adapter_->GetAttributeInts(name).size());
+            return true;
+        case MLOperatorAttributeType::FloatArray:
+            *elementCount = static_cast<uint32_t>(injected_node_adapter_->GetAttributeFloats(name).size());
+            return true;
+        default:
+            return false;
+    }
+}
+
+HRESULT AbiSafeShapeInferenceContext::AdapterGetAttribute(
+    const char* name,
+    MLOperatorAttributeType type,
+    uint32_t elementCount,
+    size_t elementByteSize,
+    void* value) const noexcept {
+    if (!injected_node_adapter_ || !name || !value) return E_INVALIDARG;
+    if (injected_node_adapter_->GetAttribute(name) == nullptr) return E_INVALIDARG;  // absent
+    switch (type) {
+        case MLOperatorAttributeType::Int:
+            if (elementCount != 1 || elementByteSize != sizeof(int64_t)) return E_INVALIDARG;
+            *static_cast<int64_t*>(value) = injected_node_adapter_->GetAttributeInt(name);
+            return S_OK;
+        case MLOperatorAttributeType::Float:
+            if (elementCount != 1 || elementByteSize != sizeof(float)) return E_INVALIDARG;
+            *static_cast<float*>(value) = injected_node_adapter_->GetAttributeFloat(name);
+            return S_OK;
+        case MLOperatorAttributeType::IntArray: {
+            auto v = injected_node_adapter_->GetAttributeInts(name);
+            if (elementCount != v.size() || elementByteSize != sizeof(int64_t)) return E_INVALIDARG;
+            std::copy(v.begin(), v.end(), static_cast<int64_t*>(value));
+            return S_OK;
+        }
+        case MLOperatorAttributeType::FloatArray: {
+            auto v = injected_node_adapter_->GetAttributeFloats(name);
+            if (elementCount != v.size() || elementByteSize != sizeof(float)) return E_INVALIDARG;
+            std::copy(v.begin(), v.end(), static_cast<float*>(value));
+            return S_OK;
+        }
+        default:
+            return E_INVALIDARG;  // String handled via GetStringAttributeElement* path
+    }
+}
+
 HRESULT AbiSafeShapeInferenceContext::GetAttributeElementCount(
     const char* name,
     MLOperatorAttributeType type,
     uint32_t* elementCount) const noexcept {
     if (!name || !elementCount) {
         return E_POINTER;
+    }
+
+    // Plan-time path: serve attribute element counts from the injected OrtNodeAdapter
+    // (there is no OrtKernelInfo at GetCapability time). ABI-safe, C-API backed.
+    if (injected_node_adapter_ != nullptr) {
+        if (AdapterGetAttributeElementCount(name, type, elementCount)) {
+            return S_OK;
+        }
+        // Attribute absent on the node — valid, means not set.
+        *elementCount = 0;
+        return S_OK;
     }
 
     // If kernel_info_ is available, get actual attributes from the ONNX node
@@ -1330,6 +1403,11 @@ HRESULT AbiSafeShapeInferenceContext::GetAttribute(
         return E_POINTER;
     }
 
+    // Plan-time path: serve attribute values from the injected OrtNodeAdapter.
+    if (injected_node_adapter_ != nullptr) {
+        return AdapterGetAttribute(name, type, elementCount, elementByteSize, value);
+    }
+
     // If kernel_info_ is available, get actual attributes from the ONNX node
     if (kernel_info_ && ort_api_) {
         OrtStatus* status = nullptr;
@@ -1419,6 +1497,16 @@ HRESULT AbiSafeShapeInferenceContext::GetStringAttributeElementLength(
         return E_POINTER;
     }
 
+    // Plan-time path: serve string attribute length from the injected OrtNodeAdapter.
+    if (injected_node_adapter_ != nullptr && elementIndex == 0) {
+        if (injected_node_adapter_->GetAttribute(name) != nullptr) {
+            const char* s = injected_node_adapter_->GetAttributeString(name);
+            *attributeElementByteLength = static_cast<uint32_t>((s ? std::strlen(s) : 0) + 1);
+            return S_OK;
+        }
+        return E_INVALIDARG;
+    }
+
     // Try to get from kernel_info_ first if available
     if (kernel_info_ && ort_api_ && ort_api_->KernelInfoGetAttribute_string && elementIndex == 0) {
         size_t size = 0;
@@ -1468,6 +1556,17 @@ HRESULT AbiSafeShapeInferenceContext::GetStringAttributeElement(
         return E_POINTER;
     }
 
+    // Plan-time path: serve string attribute value from the injected OrtNodeAdapter.
+    if (injected_node_adapter_ != nullptr && elementIndex == 0) {
+        if (injected_node_adapter_->GetAttribute(name) != nullptr) {
+            const char* s = injected_node_adapter_->GetAttributeString(name);
+            if (!s) s = "";
+            strcpy_s(attributeElement, attributeElementByteLength, s);
+            return S_OK;
+        }
+        return E_INVALIDARG;
+    }
+
     // Try to get from kernel_info_ first if available
     if (kernel_info_ && ort_api_ && ort_api_->KernelInfoGetAttribute_string && elementIndex == 0) {
         size_t size = attributeElementByteLength;
@@ -1515,6 +1614,11 @@ HRESULT AbiSafeShapeInferenceContext::GetStringAttributeElement(
 uint32_t AbiSafeShapeInferenceContext::GetInputCount() const noexcept {
     if (ort_api_ == nullptr) return 0;
 
+    // Plan-time injection: the caller sizes the vector to the node's input slot count.
+    if (injected_input_shapes_ != nullptr) {
+        return static_cast<uint32_t>(injected_input_shapes_->size());
+    }
+
     size_t count = 0;
 
     // Try runtime context first (if available)
@@ -1537,6 +1641,11 @@ uint32_t AbiSafeShapeInferenceContext::GetInputCount() const noexcept {
 uint32_t AbiSafeShapeInferenceContext::GetOutputCount() const noexcept {
     if (ort_api_ == nullptr) return 0;
 
+    // Plan-time injection.
+    if (injected_output_count_ >= 0) {
+        return static_cast<uint32_t>(injected_output_count_);
+    }
+
     size_t count = 0;
 
     // Try runtime context first (if available)
@@ -1558,6 +1667,20 @@ uint32_t AbiSafeShapeInferenceContext::GetOutputCount() const noexcept {
 
 bool AbiSafeShapeInferenceContext::IsInputValid(uint32_t inputIndex) const noexcept {
     if (ort_api_ == nullptr) return false;
+
+    // Plan-time injection: a slot is valid if it has an injected shape or constant. An
+    // injected shape slot that is nullopt represents an absent optional input -> invalid.
+    if (injected_input_shapes_ != nullptr) {
+        if (inputIndex < injected_input_shapes_->size() &&
+            (*injected_input_shapes_)[inputIndex].has_value()) {
+            return true;
+        }
+        if (injected_constants_ != nullptr) {
+            auto cit = injected_constants_->find(inputIndex);
+            if (cit != injected_constants_->end() && cit->second != nullptr) return true;
+        }
+        return false;
+    }
 
     // Mirror OpNodeInfoWrapper::IsInputValid: index in range AND type/value is non-null.
     if (kernel_context_ != nullptr) {
@@ -1582,7 +1705,14 @@ bool AbiSafeShapeInferenceContext::IsInputValid(uint32_t inputIndex) const noexc
 }
 
 bool AbiSafeShapeInferenceContext::IsOutputValid(uint32_t outputIndex) const noexcept {
-    if (ort_api_ == nullptr || kernel_info_ == nullptr) return false;
+    if (ort_api_ == nullptr) return false;
+
+    // Plan-time injection: valid iff within the node's output slot count.
+    if (injected_output_count_ >= 0) {
+        return outputIndex < static_cast<uint32_t>(injected_output_count_);
+    }
+
+    if (kernel_info_ == nullptr) return false;
     OrtTypeInfo* type_info = nullptr;
     if (Ort::Status status{ort_api_->KernelInfo_GetOutputTypeInfo(kernel_info_, outputIndex, &type_info)}; !status.IsOK()) {
         return false;
@@ -1657,6 +1787,16 @@ HRESULT AbiSafeShapeInferenceContext::GetInputTensorDimensionCount(
     if (ort_api_ == nullptr) {
         return E_FAIL;
     }
+
+    // Plan-time injection: fixpoint-resolved shape wins over the stale declared VI.
+    if (injected_input_shapes_ != nullptr && inputIndex < injected_input_shapes_->size()) {
+        const auto& slot = (*injected_input_shapes_)[inputIndex];
+        if (slot.has_value()) {
+            *dimensionCount = static_cast<uint32_t>(slot->size());
+            return S_OK;
+        }
+    }
+
     // Note: kernel_context_ can be nullptr at session init - we'll fall back to kernel_info_ below
 
     // Try to get runtime tensor first (only if kernel_context_ is available)
@@ -1713,6 +1853,18 @@ HRESULT AbiSafeShapeInferenceContext::GetInputTensorShape(
     }
     if (ort_api_ == nullptr) {
         return E_FAIL;
+    }
+
+    // Plan-time injection: fixpoint-resolved shape wins over the stale declared VI.
+    if (injected_input_shapes_ != nullptr && inputIndex < injected_input_shapes_->size()) {
+        const auto& slot = (*injected_input_shapes_)[inputIndex];
+        if (slot.has_value()) {
+            if (dimensionCount != static_cast<uint32_t>(slot->size())) return E_INVALIDARG;
+            for (size_t i = 0; i < slot->size(); ++i) {
+                dimensions[i] = static_cast<uint32_t>((*slot)[i]);
+            }
+            return S_OK;
+        }
     }
 
     // Prefer runtime shape when available (mirrors GetInputTensorDimensionCount behavior)
@@ -1801,6 +1953,22 @@ HRESULT AbiSafeShapeInferenceContext::GetConstantInputTensor(
         *tensor = it->second.Get();
         (*tensor)->AddRef();
 
+        return S_OK;
+    }
+
+    // Plan-time path: serve constant inputs from the injected initializer map (slot ->
+    // OrtValue from m_graphInitializerMap). A slot not present means the input is not a
+    // known constant here — return S_OK/nullptr (the inferrer falls back to attributes).
+    if (injected_constants_ != nullptr) {
+        auto cit = injected_constants_->find(inputIndex);
+        if (cit == injected_constants_->end() || cit->second == nullptr) {
+            *tensor = nullptr;
+            return S_OK;
+        }
+        auto abi_tensor = Microsoft::WRL::Make<AbiSafeTensor>(cit->second, ort_api_, execution_provider_, false);
+        constant_tensor_cache_[inputIndex] = abi_tensor;
+        *tensor = abi_tensor.Get();
+        (*tensor)->AddRef();
         return S_OK;
     }
 

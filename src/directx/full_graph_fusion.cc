@@ -1136,13 +1136,34 @@ static SubgraphInfo BuildSubgraphInfo(
                 DML_PERF_LOG("[BuildSubgraphInfo] SKIP '", output_names[k], "' op=", (node_op ? node_op : "?"), " reason=no_typeinfo\n");
                 continue;
             }
-            if (!s.has_shape) {
-                DML_PERF_LOG("[BuildSubgraphInfo] SKIP '", output_names[k], "' op=", (node_op ? node_op : "?"), " reason=no_shape\n");
-                continue;
-            }
             DML_TENSOR_DATA_TYPE dml_dt = OnnxDtypeToDml(s.elem_type);
             if (dml_dt == DML_TENSOR_DATA_TYPE_UNKNOWN) {
                 DML_PERF_LOG("[BuildSubgraphInfo] SKIP '", output_names[k], "' op=", (node_op ? node_op : "?"), " reason=unsupported_dtype\n");
+                continue;
+            }
+            // AUTHORITATIVE OVERRIDE: a resolved_shapes entry is produced by the node's own
+            // registered shape inferrer (InferNodeOutputShapes), guaranteed == the kernel's
+            // output shape. It therefore wins over the declared ValueInfo, which may be
+            // exporter-stale (e.g. DeepLab Transpose declared 513 vs computed 512). Seed
+            // from it directly; dtype still comes from the VI above.
+            {
+                auto rit = resolved_shapes.find(output_names[k]);
+                if (rit != resolved_shapes.end() && !rit->second.empty()) {
+                    bool rs_static = true;
+                    for (int64_t d : rit->second) if (d <= 0) { rs_static = false; break; }
+                    if (rs_static) {
+                        std::vector<uint32_t> rs_sizes(rit->second.size());
+                        for (size_t d = 0; d < rit->second.size(); ++d)
+                            rs_sizes[d] = static_cast<uint32_t>(rit->second[d]);
+                        auto tensor_info = MakeTensorInfo(rs_sizes, dml_dt);
+                        tensor_info.original_rank = static_cast<uint32_t>(rit->second.size());
+                        info.value_shapes[output_names[k]] = tensor_info;
+                        continue;
+                    }
+                }
+            }
+            if (!s.has_shape) {
+                DML_PERF_LOG("[BuildSubgraphInfo] SKIP '", output_names[k], "' op=", (node_op ? node_op : "?"), " reason=no_shape\n");
                 continue;
             }
             const size_t out_rank = s.rank;
@@ -4399,24 +4420,12 @@ bool FullGraphFusion::TryTranslateNodes(
         if (total_nodes > 0)
             ort_api.Graph_GetNodes(main_graph, all_nodes.data(), total_nodes);
 
-        // Map producer output name → set of consumer input names, AND collect the set
-        // of tensor names whose LIVE ValueInfo positively reports a dynamic dim (<0).
-        // A translator can compute a fully-static output shape from a stale/trace-time
-        // static input seed even when the tensor is runtime-dynamic (observed on VITS:
-        // TranslatePad fabricated [1,1,9,96] for a tensor whose VI is [-1,-1,-1]).
-        // Exporting that fabricated shape poisons the SHARED resolved_shapes map, which
-        // every later partition's BuildSubgraphInfo / HasDynamicShape consults. Guard the
-        // export: the live VI is authoritative — never export a computed shape for a
-        // tensor the graph says is dynamic.
+        // Map producer output name → consumer output name, AND map every tensor name to
+        // its LIVE ValueInfo, so the export below can validate a computed shape against the
+        // graph's authoritative shape (mirrors ORT's Graph::Resolve -> mergeInShapeInfo,
+        // which refuses to publish an inferred shape that conflicts with the existing one).
         std::unordered_map<std::string, std::string> producer_output_name;
-        std::unordered_set<std::string> dynamic_vi_names;
-        auto vi_is_dynamic = [&](const OrtValueInfo* vi) -> bool {
-            if (!vi) return false;
-            fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ort_api, vi);
-            if (!s.has_type_info || !s.has_shape) return false;  // missing != dynamic
-            for (int64_t d : s.dims) if (d < 0) return true;
-            return false;
-        };
+        std::unordered_map<std::string, const OrtValueInfo*> vi_by_name;
         for (const OrtNode* n : all_nodes) {
             if (!n) continue;
             auto onames = fusion_utils::GetNodeOutputNames(ort_api, n);
@@ -4428,25 +4437,56 @@ bool FullGraphFusion::TryTranslateNodes(
                 if (onames[k].empty() || !ovis[k]) continue;
                 auto vi_name = fusion_utils::GetValueInfoName(ort_api, ovis[k]);
                 producer_output_name[vi_name] = onames[k];
-                if (vi_is_dynamic(ovis[k])) {
-                    dynamic_vi_names.insert(onames[k]);
-                    if (!vi_name.empty()) dynamic_vi_names.insert(vi_name);
-                }
+                vi_by_name[onames[k]] = ovis[k];
+                if (!vi_name.empty()) vi_by_name[vi_name] = ovis[k];
             }
         }
 
-        // Export value_shapes under both producer and consumer names.
-        // Export the UNPADDED dims: info.sizes is padded to 4D, but original_rank
-        // records the true rank. Exporting the padded [1,1,1,1] for a scalar/low-
-        // rank tensor would round-trip through resolved_shapes and be re-seeded
-        // (SeedFromVi) with original_rank = 4, corrupting a downstream partition's
-        // reported output rank the same way the Squeeze->identity scalar did.
+        // A computed shape is consistent with the live VI iff, where the VI carries a shape,
+        // their ranks match and no concrete (>0) VI dim contradicts the computed dim. A
+        // negative VI dim is symbolic/unknown and matches anything (the fixpoint is refining
+        // it); a shapeless VI has nothing to contradict. This is the plugin's analogue of
+        // ONNX mergeInShapeInfo: a translator that computes a static output from a stale
+        // trace-time seed for a runtime-dynamic tensor (observed on VITS: TranslatePad
+        // produced [1,1,9,96] for a VI of [-1,-1,-1]) yields a rank/dim-inconsistent shape
+        // and is rejected here, so the fabrication never reaches the shared resolved_shapes.
+        auto consistent_with_vi = [&](const std::string& name,
+                                      const std::vector<int64_t>& dims) -> bool {
+            auto vit = vi_by_name.find(name);
+            if (vit == vi_by_name.end() || !vit->second) return true;  // no VI to contradict
+            fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ort_api, vit->second);
+            if (!s.has_type_info || !s.has_shape) return true;         // shapeless -> nothing to check
+            if (s.rank != dims.size()) return false;                  // rank conflict
+            for (size_t d = 0; d < dims.size(); ++d)
+                if (s.dims[d] > 0 && s.dims[d] != dims[d]) return false;  // concrete dim conflict
+            return true;
+        };
+
+        // Export value_shapes under both producer and consumer names at the tensor's true
+        // (unpadded) rank. info.sizes is padded to 4D; exporting the padded [1,1,1,1] for a
+        // scalar corrupts a downstream partition's rank and, when fed to a broadcasting
+        // shape inferrer, injects a spurious leading dim.
+        //
+        // Two rank sources, used for DIFFERENT cases and NOT interchangeable:
+        //   - rank-0 scalar: only the live ValueInfo can say "genuine scalar" (has_shape
+        //     && rank==0); original_rank==0 can't distinguish scalar from unknown. Export
+        //     [] so the scalar doesn't broadcast a padded dim into consumers.
+        //   - rank >= 1: use the translator's original_rank, NOT the VI rank. A translator
+        //     can fabricate a wrong-rank static shape for a runtime-dynamic VI (a stale
+        //     trace-time seed), and the rank mismatch is exactly how consistent_with_vi
+        //     (below) rejects it. Substituting the VI rank here would mask that mismatch
+        //     and let the fabrication poison resolved_shapes.
         auto ExportDims = [&](const std::string& name, const DmlTensorInfo& info) {
             if (out_shapes->count(name)) return;
-            if (dynamic_vi_names.count(name)) {
-                DML_PERF_LOG("[TryTranslateNodes] skip-export dynamic '", name,
-                             "' (live VI reports dynamic; not exporting fabricated static shape)\n");
-                return;
+            {
+                auto vit = vi_by_name.find(name);
+                if (vit != vi_by_name.end() && vit->second) {
+                    fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ort_api, vit->second);
+                    if (s.has_type_info && s.has_shape && s.rank == 0) {
+                        (*out_shapes)[name] = std::vector<int64_t>{};  // genuine rank-0 scalar
+                        return;
+                    }
+                }
             }
             size_t rank = (info.original_rank && info.original_rank <= info.sizes.size())
                 ? info.original_rank : info.sizes.size();
@@ -4454,6 +4494,11 @@ bool FullGraphFusion::TryTranslateNodes(
             std::vector<int64_t> dims(rank);
             for (size_t d = 0; d < rank; ++d)
                 dims[d] = static_cast<int64_t>(info.sizes[skip + d]);
+            if (!consistent_with_vi(name, dims)) {
+                DML_PERF_LOG("[TryTranslateNodes] skip-export inconsistent '", name,
+                             "' (computed shape conflicts with live VI; not poisoning cache)\n");
+                return;
+            }
             (*out_shapes)[name] = std::move(dims);
         };
 
@@ -4474,6 +4519,10 @@ bool FullGraphFusion::TryTranslateNodes(
                 if (in_names[k].empty() || out_shapes->count(in_names[k])) continue;
                 if (!ivis[k]) continue;
                 auto vi_name = fusion_utils::GetValueInfoName(ort_api, ivis[k]);
+                // Index the consumer-side VI so consistent_with_vi can validate the export
+                // under the consumer edge name (ORT edge renaming makes it differ from the
+                // producer output name).
+                vi_by_name.emplace(in_names[k], ivis[k]);
                 // Try: consumer input name is directly in value_shapes.
                 auto vs_it = subgraph.value_shapes.find(in_names[k]);
                 if (vs_it != subgraph.value_shapes.end()) {

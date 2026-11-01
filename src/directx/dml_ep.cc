@@ -15,6 +15,138 @@
 namespace dml_ep {
 
 // ---------------------------------------------------------------------------
+// InferNodeOutputShapes — run a node's OWN registered IMLOperatorShapeInferrer at
+// graph-partition time, fed from fixpoint-resolved inputs. The computed shape is
+// GUARANTEED == what the kernel will allocate, because it is the SAME inferrer the
+// kernel uses (not a reimplementation). Returns the per-output concrete dims, or
+// nullopt ("could not compute") so the caller keeps existing declared-VI/boundary
+// behavior. GUARD-FIRST: never feeds the inferrer stale/partial inputs.
+//
+//   resolved_shapes : fixpoint map name -> concrete positive dims (authoritative).
+// The context is built ABI-safe with kernel_context=kernel_info=nullptr; its inputs
+// come from injected resolved shapes, its attributes from an OrtNodeAdapter, and its
+// constant inputs from the plugin's initializer map. See AbiSafeShapeInferenceContext
+// Set*Injected* setters.
+// ---------------------------------------------------------------------------
+std::optional<std::vector<std::vector<int64_t>>> ExecutionProviderPlugin::InferNodeOutputShapes(
+    ExecutionProviderPlugin* ep,
+    const OrtNode* node,
+    const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes) {
+    const OrtApi& api = ep->ort_api;
+
+    // (1) Look up the node's registered shape inferrer via regKey = domain::op::sinceVer.
+    const char* op_type = nullptr; api.Node_GetOperatorType(node, &op_type);
+    const char* domain  = nullptr; api.Node_GetDomain(node, &domain);
+    int since_ver = 0; api.Node_GetSinceVersion(node, &since_ver);
+    if (!op_type) return std::nullopt;
+    std::string regKey = std::string(domain ? domain : "") + "::" + op_type + "::" +
+                         std::to_string(since_ver);
+    auto reg_it = ep->m_internalRegInfoMap->find(regKey);
+    if (reg_it == ep->m_internalRegInfoMap->end() || !reg_it->second ||
+        !reg_it->second->shapeInferrer) {
+        return std::nullopt;  // no inferrer -> cannot compute
+    }
+    const auto& reg_info = reg_it->second;
+
+    // (2) Build the slot-indexed injected input shapes from resolved_shapes. A required
+    // (non-optional, named) input that is unresolved -> nullopt (retry next iteration).
+    auto input_names = fusion_utils::GetNodeInputNames(api, node);
+    size_t num_inputs = input_names.size();
+    std::vector<std::optional<std::vector<int64_t>>> injected_shapes(num_inputs);
+    std::unordered_map<uint32_t, const OrtValue*> injected_constants;
+    for (size_t i = 0; i < num_inputs; ++i) {
+        if (input_names[i].empty()) continue;  // absent optional slot -> leave nullopt
+        auto cit = ep->m_graphInitializerMap.find(input_names[i]);
+        const bool is_initializer = (cit != ep->m_graphInitializerMap.end());
+        // Expose any constant initializer by slot so the inferrer can read its VALUE
+        // (e.g. Resize scales, Reshape target shape).
+        if (is_initializer) injected_constants[static_cast<uint32_t>(i)] = cit->second;
+
+        if (is_initializer) {
+            // For a constant initializer, take the shape from the OrtValue — the ground
+            // truth for its rank, available even when the initializer never flows through
+            // ExportDims into resolved_shapes. (ExportDims now emits true rank for tensors
+            // it does export; this covers the rest uniformly.)
+            OrtTensorTypeAndShapeInfo* tsi = nullptr;
+            if (api.GetTensorTypeAndShape(cit->second, &tsi) == nullptr && tsi) {
+                size_t rank = 0;
+                api.GetDimensionsCount(tsi, &rank);
+                std::vector<int64_t> dims(rank);
+                if (rank > 0) api.GetDimensions(tsi, dims.data(), rank);
+                api.ReleaseTensorTypeAndShapeInfo(tsi);
+                injected_shapes[i] = std::move(dims);  // rank-0 scalar -> empty vector (valid)
+            }
+            continue;
+        }
+
+        // Non-constant input: use the fixpoint-resolved shape if available. Presence in
+        // the map means "resolved" — an EMPTY dims vector is a genuine rank-0 scalar, not
+        // "absent", so key on find() != end(), never on !empty().
+        auto rit = resolved_shapes.find(input_names[i]);
+        if (rit != resolved_shapes.end()) {
+            injected_shapes[i] = rit->second;  // may be [] for a rank-0 scalar (valid)
+        } else {
+            // A named, non-constant input with no resolved shape: we cannot guarantee the
+            // inferrer's inputs -> bail ("could not compute"), retry next fixpoint iteration.
+            return std::nullopt;
+        }
+    }
+
+    // (2b) CRITICAL GUARD: some inferrers read the VALUES of a required constant input
+    // (e.g. Expand/Reshape read their shape tensor via GetData<int64>()). If the op
+    // declares requiredConstantCpuInputs and we cannot supply one as a real constant
+    // tensor, the inferrer would dereference a null tensor -> segfault. Bail instead.
+    // This mirrors ORT's own precondition (it only runs the inferrer when the required
+    // constant inputs are statically available). resolved_shapes gives us the SHAPE of a
+    // tensor, never its VALUES, so a computed (non-initializer) shape-driving input is
+    // insufficient here.
+    for (uint32_t cpu_idx : reg_info->requiredConstantCpuInputs) {
+        if (cpu_idx >= num_inputs) continue;            // out of range -> not present
+        if (input_names[cpu_idx].empty()) continue;     // absent optional -> inferrer tolerates
+        if (injected_constants.find(cpu_idx) == injected_constants.end()) {
+            return std::nullopt;  // required constant VALUE unavailable -> cannot infer safely
+        }
+    }
+
+    size_t num_outputs = fusion_utils::GetNodeOutputNames(api, node).size();
+    if (num_outputs == 0) return std::nullopt;
+
+    // (3) Build the ABI-safe context with NO kernel_context / kernel_info — all answers
+    // come from the injected plan-time sources.
+    OrtNodeAdapter adapter(node, api);
+    auto ctx = Microsoft::WRL::Make<AbiSafeShapeInferenceContext>(
+        /*kernel_context*/ nullptr, &api, &reg_info->defaultAttributes,
+        ep->m_executionProvider.get(), /*kernel_info*/ nullptr);
+    ctx->SetInjectedInputShapes(&injected_shapes);
+    ctx->SetInjectedNodeAdapter(&adapter);
+    ctx->SetInjectedConstants(&injected_constants);
+    ctx->SetInjectedOutputCount(static_cast<uint32_t>(num_outputs));
+
+    // (4) Run the inferrer. Shapes known requirement: InputTensorShapesDefinedOnNode is
+    // bypassed here because WE supply the shapes; the inferrer reads them via the context.
+    if (FAILED(reg_info->shapeInferrer->InferOutputShapes(ctx.Get()))) return std::nullopt;
+
+    // (5) Collect fully-concrete outputs; any missing/non-concrete -> nullopt.
+    const auto& inferred = ctx->GetInferredOutputShapes();
+    if (inferred.size() < num_outputs) return std::nullopt;
+    std::vector<std::vector<int64_t>> result(num_outputs);
+    for (size_t o = 0; o < num_outputs; ++o) {
+        if (!inferred[o].has_value()) return std::nullopt;
+        const auto& dims = *inferred[o];  // dims are uint32_t (DML DimensionType)
+        std::vector<int64_t> out(dims.size());
+        for (size_t d = 0; d < dims.size(); ++d) {
+            // A 0 dim is an extent-0 (empty) tensor or an unresolved/unknown dim; either way
+            // we don't treat it as a guaranteed-concrete shape here -> bail to nullopt.
+            // (uint32_t, so there is no negative case to mishandle.)
+            if (dims[d] == 0u) return std::nullopt;
+            out[d] = static_cast<int64_t>(dims[d]);
+        }
+        result[o] = std::move(out);
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // CaptureShapePrepChain — walk UPSTREAM from a dynamic partition's boundary
 // inputs, collecting the CPU-preferred shape-math producer nodes (Shape/Concat/
 // Gather/Slice/Cast/Mul/Div/Unsqueeze/Reshape/...) that compute data-dependent
@@ -779,9 +911,22 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         std::unordered_set<size_t> tier0ClaimedNodeIds;
         {
 
+            // A resolved_shapes entry is trustworthy only if it exists, is non-empty, and
+            // every dim is > 0 (the map can hold a <= 0 placeholder). Returns the dims if
+            // so, else nullptr. Consistency with the live VI (rank, concrete dims) is
+            // enforced at the WRITE side (see PublishResolvedShape / ExportDims), so readers
+            // can trust any all-positive entry without re-checking.
+            auto CachedStaticDims = [&](const std::string& name) -> const std::vector<int64_t>* {
+                if (name.empty()) return nullptr;
+                auto it = resolved_shapes.find(name);
+                if (it == resolved_shapes.end() || it->second.empty()) return nullptr;
+                for (int64_t d : it->second) if (d <= 0) return nullptr;
+                return &it->second;
+            };
+
             // Helper: get static dims from a node's input/output ValueInfo.
             // Returns empty vector if shape is missing or has any dynamic dim.
-            // Falls back to resolved_shapes map.
+            // Falls back to resolved_shapes map (via CachedStaticDims).
             auto GetStaticDims = [&](const OrtValueInfo* vi) -> std::vector<int64_t> {
                 if (!vi) return {};
                 // Check ORT metadata first.
@@ -791,63 +936,54 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                     for (auto d : s.dims) if (d < 0) { all_static = false; break; }
                     if (all_static) return s.dims;
                 }
-                // Fallback: check resolved_shapes by name. Only accept an entry whose dims
-                // are ALL positive — the map can hold a stale/placeholder entry (a <=0 dim,
-                // or a fabricated shape for a tensor whose live VI is dynamic). Returning
-                // such an entry as "static input dims" would let Upsample/Resize compute and
-                // then write-back (SetResolvedDims, which mutates the VI) a corrupted shape —
-                // the same failure mode the boundary check guards against. Mirror that: a
-                // non-authoritative map entry is treated as unresolved (empty), not static.
-                auto name = fusion_utils::GetValueInfoName(ep->ort_api,vi);
-                if (!name.empty()) {
-                    auto it = resolved_shapes.find(name);
-                    if (it != resolved_shapes.end() && !it->second.empty()) {
-                        bool all_static = true;
-                        for (int64_t d : it->second) if (d <= 0) { all_static = false; break; }
-                        if (all_static) return it->second;
-                    }
-                }
+                // Fallback: trust an authoritative (all-positive) resolved_shapes entry.
+                if (auto* dims = CachedStaticDims(fusion_utils::GetValueInfoName(ep->ort_api, vi)))
+                    return *dims;
                 return {};
             };
 
             // Is this input/output slot a dynamic-shape partition boundary?
             // `edge_name` is the slot's ONNX edge name (from GetNodeInput/OutputNames).
-            // Decision order, most authoritative first:
-            //   1. EMPTY edge name -> an absent OPTIONAL input (no producer, no runtime
-            //      data, e.g. Resize's roi). It has no shape to be dynamic and must not cut
-            //      a partition -> NOT dynamic. (In ORT's EP graph API an absent optional is
-            //      always both empty-named AND a null OrtValueInfo; see dml_ep.cc:2456 /
-            //      :2645. a0db215 keyed on `!vi` instead, which also caught real unresolved
-            //      edges and regressed VITS.)
-            //   2. The LIVE ValueInfo is authoritative whenever it carries a shape: a
-            //      negative dim -> dynamic -> boundary; rank 0 -> scalar static; else static.
-            //      This MUST win over the resolved_shapes fallback below — that map can hold
-            //      a STALE or even wrong-rank entry (observed on VITS: VI=[-1,-1,-1] but
-            //      resolved_shapes=[1,1,9,96]). Trusting the map there fused a genuinely-
-            //      dynamic Pad and corrupted the shared shape map -> downstream Reshape
-            //      element-count mismatch (HR=0x80004005).
-            //   3. VI has NO shape: a missing shape does NOT mean dynamic (ORT often fails
-            //      to propagate shape to a consumer-side VI; ValidateTier0 treats missing
-            //      shape as non-dynamic and lets later stages decide). Consult resolved_shapes
-            //      only as a positive static signal; default non-dynamic otherwise.
+            //   1. Empty edge name -> absent optional input (e.g. Resize's roi): no shape
+            //      to be dynamic -> NOT a boundary.
+            //   2. Live VI carries a fully-static shape (incl. rank-0 scalar) -> NOT dynamic.
+            //   3. VI reports a negative dim: dynamic, UNLESS the shape fixpoint has computed
+            //      a concrete shape into resolved_shapes (the plugin's VIs arrive with -1
+            //      dims; resolved_shapes is where its fixpoint stores the real shapes).
+            //      Fabricated/inconsistent shapes are rejected at the WRITE side, so a cache
+            //      hit here is trustworthy.
+            //   4. VI has no shape yet: not treated as dynamic (ORT often fails to propagate
+            //      shape to a consumer-side VI); default NOT dynamic.
             auto HasDynamicShape = [&](const OrtValueInfo* vi, const std::string& edge_name) -> bool {
                 if (edge_name.empty()) return false;  // (1) absent optional slot
                 if (!vi) return true;                 // named but null -> unresolved edge
                 fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ep->ort_api, vi);
                 if (!s.has_type_info) return true;    // named real edge with no type -> dynamic
-                if (s.has_shape) {                    // (2) live VI is authoritative
-                    if (s.rank == 0) return false;            // true scalar — static
-                    for (auto d : s.dims) if (d < 0) return true;  // positively dynamic
-                    return false;                            // fully static
+                if (s.has_shape) {                    // (2) live VI carries a shape
+                    if (s.rank == 0) return false;            // scalar — static
+                    bool vi_dynamic = false;
+                    for (auto d : s.dims) if (d < 0) { vi_dynamic = true; break; }
+                    if (!vi_dynamic) return false;            // fully static
+                    return CachedStaticDims(edge_name) == nullptr;  // (3) dynamic unless resolved
                 }
-                // (3) VI has no shape — resolved_shapes is only a positive static signal.
-                auto it = resolved_shapes.find(edge_name);
-                if (it != resolved_shapes.end()) {
-                    bool all_static = !it->second.empty();
-                    for (int64_t d : it->second) if (d <= 0) { all_static = false; break; }
-                    if (all_static) return false;
-                }
-                return false;  // missing shape, no contradicting signal -> not dynamic
+                return false;                         // (4) no shape -> not dynamic
+            };
+
+            // Resolver gate — distinct from the boundary HasDynamicShape above. The
+            // Upsample/Resize resolver must run on any output not already fully static
+            // (missing shape OR a negative dim) so the fixpoint can propagate shapes
+            // forward one node per iteration. HasDynamicShape must NOT be reused here: it
+            // treats a missing shape as "not dynamic", which would make the resolver skip
+            // every not-yet-resolved node and stall the fixpoint. Writes are still guarded
+            // by GetStaticDims(in_vis[0]) (static input required), so a genuinely dynamic
+            // node cannot fabricate a shape.
+            auto NeedsShapeResolution = [&](const OrtValueInfo* vi) -> bool {
+                if (!vi) return true;
+                fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ep->ort_api, vi);
+                if (!s.has_type_info || !s.has_shape) return true;  // unresolved -> try to resolve
+                if (s.rank == 0) return false;                      // true scalar — static
+                for (auto d : s.dims) if (d < 0) return true;       // positively dynamic -> resolve
+                return false;                                       // already fully static -> skip
             };
 
             // Helper: mutate a ValueInfo's shape to resolved static dims.
@@ -989,6 +1125,10 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
             // Phase 3), so running it graph-wide is side-effect-free besides shape
             // export.
             // ===================================================================
+            // Stage C dirty-tracking: once a node's outputs are authoritatively inferred,
+            // never re-run its (allocation-heavy) inferrer again. Bounds Stage C cost to
+            // ~O(nodes) total instead of O(nodes * iterations) on large graphs.
+            std::unordered_set<size_t> shape_infer_done;
             for (int iter = 0; iter < 10; ++iter) {
                 size_t prev_resolved = resolved_shapes.size();
                 size_t prev_resolved_values = resolved_values.size();
@@ -1164,8 +1304,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                             }
 
                             // Resolve Upsample/Resize output shapes.
-                            if (!HasDynamicShape(out_vis[0],
-                                    output_names.empty() ? std::string() : output_names[0])) continue;
+                            if (!NeedsShapeResolution(out_vis[0])) continue;
 
                             bool is_upsample = std::strcmp(op_type, "Upsample") == 0;
                             bool is_resize = std::strcmp(op_type, "Resize") == 0;
@@ -1367,6 +1506,40 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                     if (!translatable.empty()) {
                         FullGraphFusion::TryTranslateNodes(ep->ort_api, graph,
                             ep->m_graphInitializerMap, translatable, resolved_shapes, &resolved_shapes);
+                    }
+
+                    // Stage C — authoritative shape inference. For each node, run its OWN
+                    // registered IMLOperatorShapeInferrer fed from resolved inputs; the
+                    // result is guaranteed == the kernel's output shape, so it OVERRIDES any
+                    // stale declared-VI-derived entry. This corrects exporter-stale shapes
+                    // (e.g. DeepLab's Transpose output declared 513 vs computed 512) so
+                    // whole-graph fusion is not aborted by an in/out shape contradiction.
+                    for (const OrtNode* node : translatable) {
+                        size_t nid = 0; ep->ort_api.Node_GetId(node, &nid);
+                        // Dirty-tracking: skip only nodes we have ALREADY authoritatively
+                        // inferred (success below). We must NOT skip merely because the outputs
+                        // are present in resolved_shapes — those entries may be the stale
+                        // declared-VI seeds this pass exists to OVERRIDE (e.g. DeepLab's 513).
+                        if (shape_infer_done.count(nid)) continue;
+                        auto out_names = fusion_utils::GetNodeOutputNames(ep->ort_api, node);
+                        if (out_names.empty()) { shape_infer_done.insert(nid); continue; }
+
+                        auto inferred = ExecutionProviderPlugin::InferNodeOutputShapes(ep, node, resolved_shapes);
+                        if (!inferred) continue;  // inputs not ready yet -> retry next iteration
+                        for (size_t o = 0; o < out_names.size() && o < inferred->size(); ++o) {
+                            if (out_names[o].empty()) continue;
+                            auto& dims = (*inferred)[o];
+                            auto existing = resolved_shapes.find(out_names[o]);
+                            if (existing == resolved_shapes.end() || existing->second != dims) {
+                                DML_PERF_LOG("[ShapeInfer] authoritative '", out_names[o], "' op=",
+                                    [&]{ const char* o2=nullptr; ep->ort_api.Node_GetOperatorType(node,&o2); return o2?o2:"?"; }(),
+                                    " dims=[");
+                                for (size_t d = 0; d < dims.size(); ++d) DML_PERF_LOG(d?",":"", dims[d]);
+                                DML_PERF_LOG("]\n");
+                                resolved_shapes[out_names[o]] = std::move(dims);
+                            }
+                        }
+                        shape_infer_done.insert(nid);  // succeeded -> never re-run this node
                     }
                 }
 

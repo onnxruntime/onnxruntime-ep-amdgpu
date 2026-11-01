@@ -175,6 +175,15 @@ private:
     static OrtStatus* DmlKernelCreateFuncAdapter(void* kernel_create_func_state, const OrtKernelInfo* info,
                                                               OrtKernelImpl** kernel_out) noexcept;
 
+    // Run a node's own registered shape inferrer at partition time, fed from fixpoint-
+    // resolved input shapes (ABI-safe, no OrtKernelInfo). Returns per-output concrete
+    // dims, or nullopt ("could not compute"). The result is guaranteed == the kernel's
+    // own output shape because it uses the SAME inferrer.
+    static std::optional<std::vector<std::vector<int64_t>>> InferNodeOutputShapes(
+        ExecutionProviderPlugin* ep,
+        const OrtNode* node,
+        const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes);
+
     uint32_t GetSupportedDeviceDataTypeMask() const;
     std::unordered_set<size_t> GetCpuPreferredNodes(const OrtGraph* graph, OrtEpGraphSupportInfo* graph_support_info, gsl::span<const OrtNode*> tentative_nodes);
 
