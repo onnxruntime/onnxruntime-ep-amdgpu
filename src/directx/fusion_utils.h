@@ -12,6 +12,27 @@
 
 #include <onnxruntime_c_api.h>
 
+// ---------------------------------------------------------------------------
+// Best-effort OrtApi call whose returned OrtStatus is intentionally ignored.
+//
+// Some C-API calls (e.g. GetTensorShapeElementCount on a dynamic/symbolic
+// shape) return a heap-allocated OrtStatus on failure. When the caller treats
+// failure as "leave the out-param at its safe default" it must still release
+// that status or it leaks. This macro performs the call on its own line and
+// releases any status inside a self-contained scope, so no logic lives inside
+// an if condition.
+//
+//   api_ref : an OrtApi reference exposing ReleaseStatus (pass *ptr if you
+//             hold a pointer).
+//   call    : the full OrtApi call expression, returning OrtStatus*.
+#define DML_EP_RELEASE_IGNORED_STATUS(api_ref, call)              \
+    do {                                                          \
+        OrtStatus* dml_ep_ignored_status = (call);                \
+        if (dml_ep_ignored_status != nullptr) {                   \
+            (api_ref).ReleaseStatus(dml_ep_ignored_status);       \
+        }                                                         \
+    } while (0)
+
 namespace dml_ep {
 namespace fusion_utils {
 
