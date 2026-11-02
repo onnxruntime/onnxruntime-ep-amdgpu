@@ -7,6 +7,7 @@
 #include "core/common/inlined_containers.h"
 #include "core/common/inlined_containers_fwd.h"
 #include "dml_abi_kernel.h"
+#include "fusion_utils.h"  // DML_EP_RELEASE_IGNORED_STATUS
 #include "ep_fusion_manager.h"
 #include "full_graph_fusion.h"
 #include "quick_gelu_ep_fusion.h"
@@ -278,7 +279,7 @@ static ExecutionProviderPlugin::ShapePrepChain CaptureShapePrepChain(
                     ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
                     api.GetTensorElementType(tsi, &dt);
                     size_t cnt = 0;
-                    api.GetTensorShapeElementCount(tsi, &cnt);
+                    DML_EP_RELEASE_IGNORED_STATUS(api, api.GetTensorShapeElementCount(tsi, &cnt));
                     api.ReleaseTensorTypeAndShapeInfo(tsi);
                     if (cnt > 0 && cnt <= 64 &&
                         (dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
@@ -1018,7 +1019,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                 ep->ort_api.GetTensorTypeAndShape(it->second, &info);
                 if (!info) return {};
                 size_t count = 0;
-                ep->ort_api.GetTensorShapeElementCount(info, &count);
+                DML_EP_RELEASE_IGNORED_STATUS(ep->ort_api, ep->ort_api.GetTensorShapeElementCount(info, &count));
                 ep->ort_api.ReleaseTensorTypeAndShapeInfo(info);
                 if (count != expected_count) return {};
                 void* raw = nullptr;
@@ -1043,7 +1044,7 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                 ep->ort_api.GetTensorTypeAndShape(val, &info);
                 if (!info) continue;
                 size_t count = 0;
-                ep->ort_api.GetTensorShapeElementCount(info, &count);
+                DML_EP_RELEASE_IGNORED_STATUS(ep->ort_api, ep->ort_api.GetTensorShapeElementCount(info, &count));
                 ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
                 ep->ort_api.GetTensorElementType(info, &dt);
                 ep->ort_api.ReleaseTensorTypeAndShapeInfo(info);
