@@ -11,6 +11,7 @@
 
 #include "dml_execution_provider.h"
 #include "dml_abi_kernel.h"
+#include "fusion_utils.h"  // DML_EP_RELEASE_IGNORED_STATUS
 #include "dml_plugin_MLOperatorAuthorImpl.h"
 #include "dml_perf_timer.h"
 
@@ -228,7 +229,7 @@ TryFetchTensorAttribute(const OrtKernelInfo* kernel_info, const OrtApi* ort_api,
     for (int64_t d : dims) result.shape.push_back(static_cast<uint32_t>(d));
 
     size_t elem_count = 0;
-    ort_api->GetTensorShapeElementCount(type_shape_info, &elem_count);
+    DML_EP_RELEASE_IGNORED_STATUS(*ort_api, ort_api->GetTensorShapeElementCount(type_shape_info, &elem_count));
     ort_api->ReleaseTensorTypeAndShapeInfo(type_shape_info);
 
     const void* raw_data = nullptr;

@@ -284,7 +284,8 @@ static OrtStatus* ORT_API_CALL QuickGelu_Compute(
 
     OrtTensorTypeAndShapeInfo* shape_info = nullptr;
     api.GetTensorTypeAndShape(const_cast<OrtValue*>(input_value), &shape_info);
-    size_t elem_count = 0; api.GetTensorShapeElementCount(shape_info, &elem_count);
+    size_t elem_count = 0;
+    DML_EP_RELEASE_IGNORED_STATUS(api, api.GetTensorShapeElementCount(shape_info, &elem_count));
     ONNXTensorElementDataType dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
     api.GetTensorElementType(shape_info, &dtype);
     size_t rank = 0; api.GetDimensionsCount(shape_info, &rank);
@@ -499,7 +500,7 @@ OrtNodeComputeInfo* QuickGeluFusionRule::Compile(
     // rank=0 with unknown element count means shape is unavailable from the EP
     // C API (not a true scalar) — defer to compute time when real shapes arrive.
     size_t static_elem_count = 0;
-    ort_api.GetTensorShapeElementCount(shape_info, &static_elem_count);
+    DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(shape_info, &static_elem_count));
     bool has_dynamic_dims = (rank == 0 && static_elem_count == 0);
     for (size_t i = 0; i < rank; ++i) {
         if (dims[i] <= 0) { has_dynamic_dims = true; break; }
