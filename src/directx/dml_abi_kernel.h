@@ -28,6 +28,9 @@ namespace dml_ep {
 
 // Forward declarations
 class PluginDmlExecutionProviderImpl;
+// Plan-time attribute source for AbiSafeShapeInferenceContext. Defined in
+// ort_node_adapter.h; only a pointer is held, so the full type is not needed here.
+class OrtNodeAdapter;
 
 // Bundles a pre-uploaded D3D12_HEAP_TYPE_DEFAULT GPU buffer with the shape and dtype of the
 // constant tensor it holds. Used by the safe path to serve constant/initializer inputs without
@@ -267,12 +270,63 @@ public:
     // or an optional<vector> (possibly empty for scalars) if it was explicitly set.
     const std::vector<std::optional<std::vector<uint32_t>>>& GetInferredOutputShapes() const { return inferred_output_shapes_; }
 
+    // Plan-time shape injection: supply fixpoint-resolved input shapes so the shape
+    // inferrer computes from them instead of the node's stale declared ValueInfo.
+    // Indexed by input slot; a nullopt slot falls through to the runtime/kernel_info
+    // sources. Borrowed pointer — caller owns the vector for this context's lifetime.
+    // See GetInputCount/GetInputTensorDimensionCount/GetInputTensorShape, which consult
+    // this first.
+    void SetInjectedInputShapes(const std::vector<std::optional<std::vector<int64_t>>>* shapes) {
+        injected_input_shapes_ = shapes;
+    }
+
+    // Plan-time attribute source: at GetCapability time there is no OrtKernelInfo, so the
+    // inferrer's attribute reads are served from an OrtNodeAdapter (ABI-safe, C-API backed).
+    // Consulted before kernel_info_ in the GetAttribute* methods. Borrowed pointer.
+    void SetInjectedNodeAdapter(const OrtNodeAdapter* adapter) {
+        injected_node_adapter_ = adapter;
+    }
+
+    // Plan-time constant-input source: maps an input slot index to the initializer OrtValue
+    // (from the plugin's m_graphInitializerMap). Served by GetConstantInputTensor /
+    // TryGetConstantInputTensor before the kernel_info_ path. Borrowed pointers.
+    void SetInjectedConstants(const std::unordered_map<uint32_t, const OrtValue*>* constants) {
+        injected_constants_ = constants;
+    }
+
+    // Plan-time output count: the node's output slot count. -1 = not injected. Served by
+    // GetOutputCount/IsOutputValid when there is no OrtKernelInfo.
+    void SetInjectedOutputCount(uint32_t count) { injected_output_count_ = static_cast<int64_t>(count); }
+
 private:
     OrtKernelContext* kernel_context_;
     const OrtApi* ort_api_;
     const AttributeMap* default_attributes_;
     const PluginDmlExecutionProviderImpl* execution_provider_;
     const OrtKernelInfo* kernel_info_;  // For accessing actual node attributes
+
+    // Plan-time injected input shapes (slot-indexed), or nullptr. Consulted before
+    // kernel_context_ (runtime) and kernel_info_ (declared VI).
+    const std::vector<std::optional<std::vector<int64_t>>>* injected_input_shapes_ = nullptr;
+
+    // Plan-time injected attribute source (OrtNodeAdapter), or nullptr. Consulted before
+    // kernel_info_ in GetAttribute*.
+    const OrtNodeAdapter* injected_node_adapter_ = nullptr;
+
+    // Plan-time injected constant inputs (slot -> initializer OrtValue), or nullptr.
+    // Consulted before kernel_info_ in GetConstantInputTensor/TryGetConstantInputTensor.
+    const std::unordered_map<uint32_t, const OrtValue*>* injected_constants_ = nullptr;
+
+    // Plan-time node output slot count; -1 = not injected.
+    int64_t injected_output_count_ = -1;
+
+    // Helpers serving attributes from injected_node_adapter_ (plan-time). Return true/
+    // S_OK when the adapter supplies the attribute; false/E_INVALIDARG when absent.
+    bool AdapterGetAttributeElementCount(const char* name, MLOperatorAttributeType type,
+                                         uint32_t* elementCount) const noexcept;
+    HRESULT AdapterGetAttribute(const char* name, MLOperatorAttributeType type,
+                                uint32_t elementCount, size_t elementByteSize,
+                                void* value) const noexcept;
 
     // Stores output shapes set by the shape inferrer.
     // nullopt = never set; optional<vector>{} = explicitly set as scalar (0-dim).
