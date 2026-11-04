@@ -371,7 +371,6 @@ OrtStatus* CreateEpFactories(const char* registration_name, const OrtApiBase* or
     }
     try {
 #ifdef _WIN32
-        ::SetEnvironmentVariable("MIGRAPHX_MLIR_USE_SPECIFIC_OPS", "dot,convolution,fused,attention");
         HMODULE module = nullptr;
         if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
