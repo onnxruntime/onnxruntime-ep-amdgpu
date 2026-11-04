@@ -226,6 +226,20 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     //
     // Requires a MIGraphX that implements the flag; older ones ignore it.
     ::SetEnvironmentVariableA("MIGRAPHX_SHARE_LITERALS", "1");
+
+    // Default MLIR op selection for MIGraphX: compile dot, convolution, fused ops and
+    // attention through MLIR. mgx_program_ops.cc also passes this list as the
+    // mlir_use_specific_ops backend option, but a MIGraphX that doesn't implement that option
+    // ignores it (none in the release pipeline does yet), and attention then compiles unfused
+    // on gfx11/gfx12: MIGraphX requests a single ~64 GiB scratch buffer, hipErrorOutOfMemory,
+    // or bugcheck 0x119 (VIDEO_SCHEDULER_INTERNAL_ERROR) on drivers that accept the
+    // over-commit. Same constraint as above: the variable must be in the environment before
+    // the backend loads. Where MIGraphX implements the option, both name the same list.
+    //
+    // Only set when absent, so an explicit MIGRAPHX_MLIR_USE_SPECIFIC_OPS still wins.
+    if (::GetEnvironmentVariableA("MIGRAPHX_MLIR_USE_SPECIFIC_OPS", nullptr, 0) == 0) {
+        ::SetEnvironmentVariableA("MIGRAPHX_MLIR_USE_SPECIFIC_OPS", "dot,convolution,fused,attention");
+    }
 #endif
 
     THROW_IF_ERROR(LoadDynamicLibrary(migraphxBackend, &mgx_backend_));
