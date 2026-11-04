@@ -146,6 +146,26 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
         &dml_ep_factory_, 1, &factories_created));
 #endif
 
+#ifdef _WIN32
+    // Default MLIR op selection for MIGraphX: compile dot, convolution, fused ops and
+    // attention through MLIR.
+    //
+    // This must be set HERE, before the backend is loaded, and not from inside
+    // migraphx-backend.dll. MIGraphX reads the variable with std::getenv from src/env.cpp,
+    // which lives in migraphx.dll -- a static import of migraphx_c.dll, itself a static
+    // import of migraphx-backend.dll. Every static import is resolved before any code in
+    // migraphx-backend.dll runs, so by the time that dll's own CreateEpFactories executes,
+    // migraphx.dll's static CRT has already seeded its environment copy and no later write
+    // can reach it. Set from there, attention compiles unfused on gfx11/gfx12 and MIGraphX
+    // requests a single ~64 GiB scratch buffer: hipErrorOutOfMemory, or bugcheck 0x119
+    // (VIDEO_SCHEDULER_INTERNAL_ERROR) on drivers that accept the over-commit.
+    //
+    // Only set when absent, so an explicit MIGRAPHX_MLIR_USE_SPECIFIC_OPS still wins.
+    if (::GetEnvironmentVariableA("MIGRAPHX_MLIR_USE_SPECIFIC_OPS", nullptr, 0) == 0) {
+        ::SetEnvironmentVariableA("MIGRAPHX_MLIR_USE_SPECIFIC_OPS", "dot,convolution,fused,attention");
+    }
+#endif
+
     THROW_IF_ERROR(LoadDynamicLibrary(migraphxBackend, &mgx_backend_));
     THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
         "ReleaseEpFactory", reinterpret_cast<void**>(&mgx_release_ep_factory_)));
