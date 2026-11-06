@@ -1439,7 +1439,16 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
                 problem_cache_paths_, hiprtc_disable_processes_);
             // context_enable needs this file on disk even if caching is otherwise disabled.
             if (!disable_compiled_model_caching_ || context_enable_) {
-                save_compiled_program(program, mxr_path);
+                if (std::string error; !save_compiled_program(program, mxr_path, &error) && !mxr_path.empty()) {
+                    if (context_enable_) {
+                        // The EPContext node will reference this file, so here it is not optional.
+                        return Ort::Status{("Writing " + mxr_path.string() + " failed: " + error).c_str(),
+                            ORT_EP_FAIL};
+                    }
+                    ORT_CXX_LOGF_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_WARNING,
+                        "[mgx-cache] could not write %s (%s); continuing without the compiled-model cache",
+                        mxr_path.string().c_str(), error.c_str());
+                }
             }
         }
         const auto output_shapes{program.get_output_shapes()};
