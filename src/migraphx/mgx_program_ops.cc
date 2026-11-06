@@ -40,22 +40,23 @@ try {
 // the whole program, weights included, in host memory twice) must not fail a
 // session whose program compiled fine. A partial file is removed so it is never
 // loaded later.
-bool save_compiled_program(const migraphx::program& prog, const fs::path& path, std::string* error)
-try {
+bool save_compiled_program(const migraphx::program& prog, const fs::path& path, std::string* error) {
     if (path.empty()) {
         return false;
     }
-    migraphx::file_options options;
-    options.set_file_format("msgpack");
-    migraphx::save(prog, path.string().c_str(), options);
-    return true;
-} catch (const std::exception& e) {
-    std::error_code ec;
-    fs::remove(path, ec);
-    if (error != nullptr) {
-        *error = e.what();
+    try {
+        migraphx::file_options options;
+        options.set_file_format("msgpack");
+        migraphx::save(prog, path.string().c_str(), options);
+        return true;
+    } catch (const std::exception& e) {
+        std::error_code ec;
+        fs::remove(path, ec);
+        if (error != nullptr) {
+            *error = e.what();
+        }
+        return false;
     }
-    return false;
 }
 
 void calibrate_and_quantize(const migraphx::program& prog, const migraphx::target& target,
