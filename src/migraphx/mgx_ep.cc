@@ -1352,6 +1352,9 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     }
     const std::string effective_mxr_prefix{
         mxr_prefix + hash::ToHex(std::string_view{effective_mlss_use_specific_ops}) + "-"};
+    ORT_CXX_LOGF_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_INFO,
+        "[mgx-cache] graph=%s mlss_ops='%s' prefix=%s",
+        graph_id.c_str(), effective_mlss_use_specific_ops.c_str(), effective_mxr_prefix.c_str());
     std::string onnx_string;
     if (!model_proto.SerializeToString(&onnx_string) || onnx_string.empty()) {
         return Ort::Status{"Serializing a model proto to string failed!", ORT_EP_FAIL};
@@ -1686,14 +1689,6 @@ try {
             RETURN_IF_ERROR(CreateNodeComputeInfoFromCache(graph, fused_node, input_name_indices,
                 output_name_indices, node_compute_info));
         } else {
-<<<<<<< HEAD
-            // The compute mode is part of the key: two modes produce different
-            // binaries from the same graph, and without this an A/B between
-            // modes silently replays the other mode's cached program.
-            const auto mxr_prefix{hash::ToHex(MIGraphX_Version) + "-" + GenerateGraphId(graph) + "-" +
-                hash::ToHex(std::string_view{device_prop_.gcnArchName}) + "-" +
-                hash::ToHex(static_cast<std::uint64_t>(compute_mode_)) + "-"};
-=======
             // The .mxr filename must encode every option that changes the compiled
             // program.  Precision/quantization and tuning are applied only on the
             // compile path (calibrate_and_quantize / compile_program); the load path
@@ -1701,14 +1696,17 @@ try {
             // the cache key, an fp16 and an fp32 build of the same graph hash to the
             // same filename, so a later run loads the first program and silently
             // ignores the requested precision.  Fold a canonical option key into the
-            // prefix so each distinct build gets its own .mxr.
+            // prefix so each distinct build gets its own .mxr.  The AMDMLSS op list is
+            // not part of this key: CreateNodeComputeInfoFromGraph appends the
+            // effective (heuristic-resolved) list as its own filename component.
             std::string options_key;
             options_key += enable_fp16_ ? "fp16;" : "";
             options_key += enable_bf16_ ? "bf16;" : "";
             options_key += enable_int8_ ? "int8;" : "";
             options_key += enable_fp8_ ? "fp8;" : "";
             options_key += exhaustive_tune_ ? "tune;" : "";
-            options_key += "ops=" + mlss_use_specific_ops_ + ";";
+            // Two compute modes produce different binaries from the same graph.
+            options_key += "mode=" + std::to_string(static_cast<int>(compute_mode_)) + ";";
             if ((enable_int8_ ^ enable_fp8_) && int8_calibration_cache_available_) {
                 // Calibration data changes the quantized program, so different tables
                 // must key to different caches.  dynamic_ranges_ is unordered; sort the
@@ -1724,10 +1722,13 @@ try {
                 }
             }
 
-            const auto mxr_prefix{hash::ToHex(MIGraphX_Version) + "-" + GenerateGraphId(graph) + "-" +
+            const auto graph_id{GenerateGraphId(graph)};
+            const auto mxr_prefix{hash::ToHex(MIGraphX_Version) + "-" + graph_id + "-" +
                 hash::ToHex(std::string_view{device_prop_.gcnArchName}) + "-" +
                 hash::ToHex(std::string_view{options_key}) + "-"};
->>>>>>> 04a1911 (Fix hash collision due to unhashed feature flags and add migraphx_hash_compile.py script for offline compile)
+            ORT_CXX_LOGF_NOEXCEPT(logger_, ORT_LOGGING_LEVEL_INFO,
+                "[mgx-cache] graph=%s arch=%s options_key='%s' prefix=%s",
+                graph_id.c_str(), device_prop_.gcnArchName, options_key.c_str(), mxr_prefix.c_str());
 
             RETURN_IF_ERROR(CreateNodeComputeInfoFromGraph(graph, fused_node, input_name_indices,
                 output_name_indices, mxr_prefix, node_compute_info, ep_context_node));
