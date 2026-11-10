@@ -1366,6 +1366,60 @@ void DestroyHipGraphsFor(ComputeState& cs, ShapeKey shape_key) {
     }
 }
 
+// Packs `src` into the dense buffer `dst`.  A dynamic output's runtime result can be
+// strided (e.g. a transposed slice), so it is copied as coalesced rows/pitched blocks.
+static void CopyArgumentPacked(void* dst, const migraphx::argument& src, hipStream_t stream) {
+    const auto shape{src.get_shape()};
+    const auto lengths{shape.lengths()};
+    const auto bytes{migraphx::shape{shape.type(), lengths}.bytes()};
+    if (bytes == 0) {
+        return;
+    }
+    if (shape.standard()) {
+        HIP_CALL_THROW(hipMemcpyWithStream(dst, src.data(), bytes, hipMemcpyDeviceToDevice, stream));
+        return;
+    }
+
+    const auto strides{shape.strides()};
+    const auto element_bytes{migraphx::shape{shape.type()}.bytes()};
+    std::size_t row_elements{1};
+    auto axis{lengths.size()};
+    while (axis > 0 && (lengths[axis - 1] == 1 || strides[axis - 1] == row_elements)) {
+        row_elements *= lengths[--axis];
+    }
+    if (axis == 0) {
+        HIP_CALL_THROW(hipMemcpyWithStream(dst, src.data(), bytes, hipMemcpyDeviceToDevice, stream));
+        return;
+    }
+
+    const auto row_bytes{row_elements * element_bytes};
+    std::size_t rows{1};
+    std::size_t src_pitch{row_bytes};
+    if (const auto row_stride{strides[axis - 1]}; row_stride >= row_elements) {
+        rows = lengths[--axis];
+        src_pitch = row_stride * element_bytes;
+        while (axis > 0 && (lengths[axis - 1] == 1 || strides[axis - 1] == row_stride * rows)) {
+            rows *= lengths[--axis];
+        }
+    }
+
+    const auto block_elements{row_elements * rows};
+    const auto elements{shape.elements()};
+    for (std::size_t offset{0}; offset < elements; offset += block_elements) {
+        auto* block_dst{static_cast<char*>(dst) + offset * element_bytes};
+        const auto* block_src{src.data() + shape.index(offset) * element_bytes};
+        if (rows == 1) {
+            HIP_CALL_THROW(hipMemcpyAsync(block_dst, block_src, row_bytes,
+                hipMemcpyDeviceToDevice, stream));
+        } else {
+            HIP_CALL_THROW(hipMemcpy2DAsync(block_dst, row_bytes, block_src, src_pitch,
+                row_bytes, rows, hipMemcpyDeviceToDevice, stream));
+        }
+    }
+    // Same completion guarantee as the hipMemcpyWithStream fast path.
+    HIP_CALL_THROW(hipStreamSynchronize(stream));
+}
+
 // Copy every program output not pre-bound (its index absent from prog_output_indices)
 // to the matching ORT output tensor, device-to-device.  Shared by the staging,
 // direct, and no-graph eager paths.
@@ -1380,15 +1434,11 @@ void CopyUnboundOutputsToOrt(const Ort::KernelContext& ctx, hipStream_t stream,
             continue;
         }
         const auto out{outputs[i]};
-        const auto shape{out.get_shape()};
-        const auto lens{shape.lengths()};
+        const auto lens{out.get_shape().lengths()};
         std::vector<std::int64_t> ort_shape{lens.begin(), lens.end()};
         auto dst{ctx.GetOutput(OrtIndexForMgxOutput(mgx_to_ort, i),
             ort_shape.data(), ort_shape.size())};
-        if (shape.bytes() > 0) {
-            HIP_CALL_THROW(hipMemcpyWithStream(dst.GetTensorMutableRawData(), out.data(),
-                shape.bytes(), hipMemcpyDeviceToDevice, stream));
-        }
+        CopyArgumentPacked(dst.GetTensorMutableRawData(), out, stream);
     }
 }
 

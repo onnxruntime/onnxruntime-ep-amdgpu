@@ -97,6 +97,29 @@ struct HipDeviceGuard {
     HipDeviceGuard(const HipDeviceGuard&) = delete;
     HipDeviceGuard& operator=(const HipDeviceGuard&) = delete;
 };
+
+// Stream-ordered device storage for outputs whose extent is only known after the run.
+struct DynamicOutputScratch {
+    hipStream_t stream{};
+    std::vector<void*> buffers{};
+
+    void* Allocate(std::size_t bytes) {
+        if (bytes == 0) {
+            return nullptr;
+        }
+        buffers.reserve(buffers.size() + 1);
+        void* buffer{nullptr};
+        HIP_CALL_THROW(hipMallocAsync(&buffer, bytes, stream));
+        buffers.push_back(buffer);
+        return buffer;
+    }
+
+    ~DynamicOutputScratch() {
+        for (auto* buffer : buffers) {
+            (void)hipFreeAsync(buffer, stream);
+        }
+    }
+};
 struct arch_graph_mlss_exception {
     std::string_view arch_prefix;
     std::string_view graph_id;
@@ -293,6 +316,31 @@ bool GetMIGraphXType(ONNXTensorElementDataType type, migraphx_shape_datatype_t& 
     return true;
 }
 
+bool IsAllOnesInitializer(const Ort::ConstValueInfo& value_info) {
+    if (!value_info.IsConstantInitializer()) {
+        return false;
+    }
+    Ort::ConstValue value;
+    if (!value_info.GetInitializer(value).IsOK()) {
+        return false;
+    }
+    const auto info{value.GetTensorTypeAndShapeInfo()};
+    const auto count{info.GetElementCount()};
+    const auto is_one{[](auto v) { return v == 1; }};
+    switch (info.GetElementType()) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
+        const auto* data{value.GetTensorData<int64_t>()};
+        return std::all_of(data, data + count, is_one);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: {
+        const auto* data{value.GetTensorData<int32_t>()};
+        return std::all_of(data, data + count, is_one);
+    }
+    default:
+        return false;
+    }
+}
+
 bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& node) {
     const auto op_type{node.GetOperatorType()};
     const auto inputs{GetValueInfos(node.GetInputs())};
@@ -411,11 +459,18 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
             return !CanEvalNodeArgument(graph, node, {1});
         }
     } else if (op_type == "Slice") {
-        std::vector<std::size_t> v(inputs.size());
-        std::iota(v.begin(), v.end(), 0);
-        v.erase(v.begin());
-        if (!CanEvalNodeArgument(graph, node, v)) {
-            return true;
+        // MIGraphX takes runtime starts/ends/axes only when steps are absent or all ones;
+        // GetInputs() keeps omitted optional inputs as null, so index 4 is always steps.
+        const auto raw_inputs{node.GetInputs()};
+        const bool unit_steps{raw_inputs.size() < 5 || raw_inputs[4] == nullptr ||
+            IsAllOnesInitializer(raw_inputs[4])};
+        if (!unit_steps) {
+            std::vector<std::size_t> v(inputs.size());
+            std::iota(v.begin(), v.end(), 0);
+            v.erase(v.begin());
+            if (!CanEvalNodeArgument(graph, node, v)) {
+                return true;
+            }
         }
         Ort::ConstOpAttr s_attr;
         Ort::Status s_status{node.GetAttributeByName("starts", s_attr)};
@@ -450,8 +505,17 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
             return true;
         }
     } else if (op_type == "TopK") {
+        // Runtime K needs ROCm/AMDMIGraphX#4880, first in MIGraphX 2.17. Since #5150 the
+        // parser also rejects runtime K over a dynamic (non-symbolic) data shape.
+        constexpr bool runtime_k_supported{MIGRAPHX_VERSION_MAJOR > 2 ||
+            (MIGRAPHX_VERSION_MAJOR == 2 && MIGRAPHX_VERSION_MINOR >= 17)};
         if (!CanEvalNodeArgument(graph, node, {1})) {
-            return true;
+            const auto data_shape{GetTensorShape(inputs[0])};
+            const bool static_data{data_shape.has_value() && !data_shape->empty() &&
+                ranges::all_of(*data_shape, [](int64_t dim) { return dim >= 0; })};
+            if (!runtime_k_supported || !static_data) {
+                return true;
+            }
         }
     } else if (op_type == "Unsqueeze" || op_type == "Squeeze") {
         if (inputs.size() == 2) {
@@ -1277,6 +1341,9 @@ try {
     // shapes and staging bind so the hot path reuses them (no per-call rebuild/rebind).
     std::size_t prewarmed{0};
     for (auto& [shape_key, prog] : cs.cached_programs) {
+        if (program_has_dynamic_outputs(prog)) {
+            continue;
+        }
         auto ps_it{cs.cached_param_shapes.find(shape_key)};
         if (ps_it == cs.cached_param_shapes.end()) {
             ps_it = cs.cached_param_shapes.emplace(shape_key, prog.get_parameter_shapes()).first;
@@ -1453,7 +1520,9 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         }
         const auto output_shapes{program.get_output_shapes()};
         for (const auto& [n, s] : zip(output_names, output_shapes)) {
-            onnx_options.set_input_parameter_shape(n, s.lengths());
+            if (!s.dynamic()) {
+                onnx_options.set_input_parameter_shape(n, s.lengths());
+            }
         }
         }
     }
@@ -1580,7 +1649,9 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
                 compute_state.has_input_shapes = true;
                 const auto output_shapes{compute_state.program.get_output_shapes()};
                 for (const auto& [n, s] : zip(output_names, output_shapes)) {
-                    compute_state.onnx_options.set_input_parameter_shape(n, s.lengths());
+                    if (!s.dynamic()) {
+                        compute_state.onnx_options.set_input_parameter_shape(n, s.lengths());
+                    }
                 }
             }
             backend_telemetry_.loaded_from_cache = true;
@@ -2224,6 +2295,7 @@ void ResolveProgram(ComputeState& compute_state, const Ort::KernelContext& kerne
     // Program now matches this call's shapes; record its key for the next compare.
     compute_state.active_program_shape_key = shape_key;
     compute_state.has_active_program_shape_key = true;
+    compute_state.program_has_dynamic_outputs = program_has_dynamic_outputs(program);
 }
 
 // Cache-tier stage (orchestrator): resolve padding, gather input shapes once, hash +
@@ -2535,6 +2607,7 @@ Ort::Status RunEager(ComputeState& compute_state,
     auto output_shapes{program.get_output_shapes()};
     std::vector<size_t> output_indices;
     const auto hip_stream{io.hip_stream};
+    DynamicOutputScratch output_scratch{hip_stream};
     if (param_shapes.size() > 0) {
         for (std::string name : param_shapes.names()) {
             if (input_name_indices.count(name) > 0) {
@@ -2555,9 +2628,15 @@ Ort::Status RunEager(ComputeState& compute_state,
             } else if (const auto oi{ComputeOutputIndex(name)}; oi != -1) {
                 // #output_N indexes the MIGraphX program; GetOutput uses the name remap.
                 const auto mgx_index{static_cast<size_t>(oi)};
+                    auto output_shape{output_shapes[mgx_index]};
+                    if (output_shape.dynamic()) {
+                        const auto scratch_shape{param_shapes[name.c_str()]};
+                        compute_params.add(name.c_str(), migraphx::argument{scratch_shape,
+                            output_scratch.Allocate(scratch_shape.bytes())});
+                        continue;
+                    }
                     output_indices.emplace_back(mgx_index);
 
-                    auto output_shape{output_shapes[mgx_index]};
                     const auto lengths{output_shape.lengths()};
                     std::vector<int64_t> tensor_shape{lengths.begin(), lengths.end()};
                     auto output_tensor{kernel_context.GetOutput(
@@ -2715,7 +2794,12 @@ try {
     // short-circuits the sync in FinalizeCompute, matching the per-path behavior.
     MechKind mech{MechKind::kEager};
     Ort::Status status{};
-    if (auto s{TryDirectBind(compute_state, kernel_context, io)}) {
+    if (compute_state.program_has_dynamic_outputs) {
+        // hipGraph capture and staging bind fixed-size outputs, so dynamic ones run eagerly.
+        RETURN_IF(io.needs_padding,
+            "MIGraphX programs with dynamic outputs do not support batch or sequence padding");
+        status = RunEager(compute_state, kernel_context, io);
+    } else if (auto s{TryDirectBind(compute_state, kernel_context, io)}) {
         mech = MechKind::kDirectBind;
         status = std::move(*s);
     } else if (auto s{TryStaging(compute_state, kernel_context, io)}) {
@@ -2787,6 +2871,8 @@ try {
 
     migraphx::program_parameters compute_params;
     std::vector<size_t> output_indices;
+    auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
+    DynamicOutputScratch output_scratch{hip_stream};
 
     if (param_shapes.size() > 0) {
         for (std::string name : param_shapes.names()) {
@@ -2809,9 +2895,15 @@ try {
                 if (const auto pos{name.find(name_prefix)}; pos != std::string_view::npos) {
                     const auto sub{name.substr(pos + name_prefix.length())};
                     auto output_index{ToInteger<size_t>(Trim(sub, std::isdigit))};
+                    auto output_shape{output_shapes[output_index]};
+                    if (output_shape.dynamic()) {
+                        const auto scratch_shape{param_shapes[name.c_str()]};
+                        compute_params.add(name.c_str(), migraphx::argument{scratch_shape,
+                            output_scratch.Allocate(scratch_shape.bytes())});
+                        continue;
+                    }
                     output_indices.emplace_back(output_index);
 
-                    auto output_shape{output_shapes[output_index]};
                     const auto lengths{output_shape.lengths()};
                     std::vector<int64_t> tensor_shape{lengths.begin(), lengths.end()};
                     auto output_tensor{kernel_context.GetOutput(
@@ -2830,25 +2922,9 @@ try {
     {
         std::lock_guard lock{compute_state.mutex};
 
-        auto hip_stream{static_cast<hipStream_t>(kernel_context.GetGPUComputeStream())};
         auto prog_outputs{program.run_async(compute_params, hip_stream)};
-
-        if (auto output_size{prog_outputs.size()}; output_indices.size() < output_size) {
-            for (size_t i{}; i < output_size; ++i) {
-                if (ranges::find(output_indices, i) != output_indices.end()) {
-                    continue;
-                }
-                auto gpu_resource{prog_outputs[i]};
-                migraphx::shape resource_shape{gpu_resource.get_shape()};
-                auto resource_lengths{resource_shape.lengths()};
-                std::vector<int64_t> shapes{resource_lengths.begin(), resource_lengths.end()};
-                auto output_tensor{kernel_context.GetOutput(
-                    OrtIndexForMgxOutput(compute_state.mgx_output_to_ort, i), shapes)};
-                void* output_data{output_tensor.GetTensorMutableRawData()};
-                HIP_CALL_THROW(hipMemcpyWithStream(output_data, gpu_resource.data(), resource_shape.bytes(),
-                    hipMemcpyDeviceToDevice, hip_stream));
-            }
-        }
+        CopyUnboundOutputsToOrt(kernel_context, hip_stream, prog_outputs, output_indices,
+            compute_state.mgx_output_to_ort);
         // Async by default: the stream-ordered D2H fetch plus the per-Run
         // OnSessionRunEnd sync order the read. Legacy full-drain is gated (see
         // FinishComputeStream / env_var::kLegacyComputeSync).
