@@ -1338,6 +1338,11 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     ONNX_NAMESPACE::ModelProto model_proto{};
     InMemoryInitializers in_memory_initializers;
     RETURN_IF_ERROR(GraphToProto(sorted_graph, model_proto, in_memory_initializers.Collector()));
+    if (!in_memory_initializers.TooLargeToInline()) {
+        in_memory_initializers = {};
+        model_proto.Clear();
+        RETURN_IF_ERROR(GraphToProto(sorted_graph, model_proto));
+    }
     const auto mlss_graph_features{AnalyzeMlssGraph(model_proto)};
     const auto graph_id{GenerateGraphId(graph)};
     std::string effective_mlss_use_specific_ops{

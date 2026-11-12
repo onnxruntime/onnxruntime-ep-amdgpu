@@ -4,12 +4,15 @@
 #include "mgx_in_memory_initializers.h"
 
 #include <algorithm>
+#include <numeric>
 
 namespace mgx_ep {
 
 namespace {
 // Only informational (e.g. in dumped subgraphs): MIGraphX resolves the data by tensor name.
 constexpr const char* kInMemoryLocation{"*/_MIGRAPHX_EP_IN_MEMORY_/*"};
+// Half of protobuf's 2 GB limit, leaving the rest for the graph itself.
+constexpr std::size_t kMaxInlineBytes{std::size_t{1} << 30};
 }  // namespace
 
 HandleInitializerDataFunc InMemoryInitializers::Collector()
@@ -24,6 +27,13 @@ HandleInitializerDataFunc InMemoryInitializers::Collector()
         }
         return STATUS_OK;
     };
+}
+
+bool InMemoryInitializers::TooLargeToInline() const
+{
+    const auto total{std::accumulate(entries_.begin(), entries_.end(), std::size_t{0},
+        [](std::size_t sum, const Entry& entry) { return sum + entry.data.size(); })};
+    return total >= kMaxInlineBytes;
 }
 
 void InMemoryInitializers::Retain()
