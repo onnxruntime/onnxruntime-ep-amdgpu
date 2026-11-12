@@ -11,7 +11,10 @@
 #include "gpu_routing_policy.h"  // select_backend, model_arch_hash, is_webnn
 #include "hip/utils.h"           // hipGetDeviceProperties for ASIC-based backend routing
 #include "common/env_var.h"      // ParseEnvironmentVariableWithDefault (routing trace)
+#include "onnxruntime_env_config_keys.h"  // kOrtEnvAllowVirtualDevices (skip HIP probe on the virtual/compiler path)
 
+#include <cstring>
+#include <vector>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -149,6 +152,41 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
 
     const ProviderInfo info{provider_options};
 
+    // Virtual-device / compiler-process context: the host sets env config allow_virtual_devices=1 for the WebNN
+    // compiler process. On that path we MUST route to DirectX and never probe HIP — amdhip64 is delay-loaded and
+    // statically imports the win32k-locked user32/gdi32, so calling hipGetDeviceProperties under the compiler-process
+    // Win32k lockdown raises a delay-load failure (0xC06D007E) and crashes the process. (Browsers that register us as
+    // MIGraphXExecutionProvider do not inject model_fw=webnn, so the model_fw check alone is insufficient.)
+    bool allow_virtual = false;
+    {
+        OrtKeyValuePairs* env_cfg = nullptr;
+        if (ep_api.GetEnvConfigEntries(&env_cfg) == nullptr && env_cfg != nullptr) {
+            Ort::ConstKeyValuePairs kv{env_cfg};
+            std::vector<const char*> keys, values;
+            kv.GetKeyValuePairs(keys, values);
+            for (size_t i = 0; i < keys.size(); ++i) {
+                if (strcmp(keys[i], kOrtEnvAllowVirtualDevices) == 0 && strcmp(values[i], "1") == 0) {
+                    allow_virtual = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Dispatch half of the WebNN compile/dispatch separation. The host loads the precompiled EPContext
+    // blob with session.disable_model_compile=1; that blob was produced by the DirectX/DML backend in the
+    // compiler process, so the dispatch session MUST route to DirectX to consume it. The browser does not
+    // inject model_fw=webnn and the WebNN model carries no model_arch, so without this signal the gfx1151
+    // Auto heuristic falls through to the gfx11 -> MIGraphX bucket and the MIGraphX backend fails to load
+    // the DML blob ("EP_FAIL: Failed to call function"). Scoped to the Auto profile so explicit backends win.
+    bool dispatch_precompiled = false;
+    for (const auto& [key, value] : config_entries) {
+        if (key == "session.disable_model_compile" && value == "1") {
+            dispatch_precompiled = true;
+            break;
+        }
+    }
+
     // Telemetry is an internal EP facility. It is enabled by default and uses the
     // platform default directory (LocalLow on Windows).
     telemetry::Config telemetry_config;
@@ -182,9 +220,14 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         // imports the win32k-locked user32/gdi32, which are unavailable under the Win32k-disable sandbox
         // mitigation that the WebNN compiler process runs with. (Delay-loading HIP keeps the DLL off the
         // load-time surface; skipping the call here keeps it off the run-time surface too.)
-        if (is_webnn(info.model_fw) && info.profile == Profile::Auto) {
+        if (allow_virtual || (dispatch_precompiled && info.profile == Profile::Auto) ||
+            (is_webnn(info.model_fw) && info.profile == Profile::Auto)) {
             if (trace) {
-                std::cout << "[amdgpu-routing] model_fw=webnn -> DirectX (skip HIP probe)" << std::endl;
+                const char* why = allow_virtual ? "virtual-device"
+                                : dispatch_precompiled ? "dispatch-precompiled(disable_model_compile)"
+                                : "model_fw=webnn";
+                std::cout << "[amdgpu-routing] " << why
+                          << " -> DirectX (skip HIP probe)" << std::endl;
             }
             return Profile::DirectX;
         }

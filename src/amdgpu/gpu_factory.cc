@@ -422,7 +422,10 @@ Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHar
                 ort_api.AddKeyValuePair(md, kOrtHardwareDevice_MetadataKey_IsVirtual, "1");
                 if (!target_arch.empty()) ort_api.AddKeyValuePair(md, "target_architecture", target_arch.c_str());
                 if (virtual_device_) { ep_api.ReleaseHardwareDevice(virtual_device_); virtual_device_ = nullptr; }
-                if (ep_api.CreateHardwareDevice(OrtHardwareDeviceType_GPU, amd::VendorId, 0u, "AMD", md, &virtual_device_) == nullptr
+                // Register the virtual device with the physical target device id (gfx1151 = 0x1586) so a single
+                // host device selection matches BOTH the physical GPU/dispatch process and the (driver-less) virtual
+                // compiler process. Test-closure value; production should derive this from the target-device handshake.
+                if (ep_api.CreateHardwareDevice(OrtHardwareDeviceType_GPU, amd::VendorId, 0x1586u, "AMD", md, &virtual_device_) == nullptr
                         && virtual_device_ != nullptr) {
                     OrtKeyValuePairs* ep_opts = nullptr;
                     ort_api.CreateKeyValuePairs(&ep_opts);
