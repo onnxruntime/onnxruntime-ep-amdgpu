@@ -404,7 +404,9 @@ Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHar
         if (ep_api.GetEnvConfigEntries(&env_cfg) == nullptr && env_cfg != nullptr) {
             bool allow_virtual = false;
             std::string target_arch;
-            const std::string arch_key = "ep_factory." + ep_name_ + ".target_architecture";
+            std::string target_device_id_str;
+            const std::string arch_key  = "ep_factory." + ep_name_ + ".target_architecture";
+            const std::string devid_key = "ep_factory." + ep_name_ + ".hardware_device_id";
             {
                 Ort::ConstKeyValuePairs kv{env_cfg};
                 std::vector<const char*> keys, values;
@@ -414,6 +416,8 @@ Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHar
                         allow_virtual = true;
                     else if (arch_key == keys[idx])
                         target_arch = values[idx];
+                    else if (devid_key == keys[idx])
+                        target_device_id_str = values[idx];
                 }
             }
             if (allow_virtual) {
@@ -422,10 +426,23 @@ Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHar
                 ort_api.AddKeyValuePair(md, kOrtHardwareDevice_MetadataKey_IsVirtual, "1");
                 if (!target_arch.empty()) ort_api.AddKeyValuePair(md, "target_architecture", target_arch.c_str());
                 if (virtual_device_) { ep_api.ReleaseHardwareDevice(virtual_device_); virtual_device_ = nullptr; }
-                // Register the virtual device with the physical target device id (gfx1151 = 0x1586) so a single
-                // host device selection matches BOTH the physical GPU/dispatch process and the (driver-less) virtual
-                // compiler process. Test-closure value; production should derive this from the target-device handshake.
-                if (ep_api.CreateHardwareDevice(OrtHardwareDeviceType_GPU, amd::VendorId, 0x1586u, "AMD", md, &virtual_device_) == nullptr
+                // Device id for the virtual (compiler-process) device. The host
+                // (Chromium Environment::CreateForCompilerProcess) forwards the selected target device's id
+                // as env config ep_factory.<ep_name>.hardware_device_id, formatted "%04x" (hex, no 0x prefix)
+                // -- the same compiler-device handshake NVIDIA's TRT-RTX EP uses (nv_hardware_device_id). We
+                // register the virtual device with THAT id so a single host device selection matches BOTH the
+                // physical GPU/dispatch process and the driver-less virtual compiler process.
+                //   Forwarding requires Chromium's kKnownEPs MIGraphXExecutionProvider entry to set
+                //   hardware_device_id_env_config_key (empty upstream today -- see the companion Chromium
+                //   patch in the WebNN diary). Until that lands the host sends nothing and we fall back to the
+                //   gfx1151 dev-default so the prebuilt-browser bring-up test still closes; the default is
+                //   never used once the host supplies the id.
+                uint32_t target_device_id = 0x1586u;  // gfx1151 dev-default fallback (see note above)
+                if (!target_device_id_str.empty()) {
+                    try { target_device_id = static_cast<uint32_t>(std::stoul(target_device_id_str, nullptr, 16)); }
+                    catch (const std::exception&) { /* malformed value -> keep fallback */ }
+                }
+                if (ep_api.CreateHardwareDevice(OrtHardwareDeviceType_GPU, amd::VendorId, target_device_id, "AMD", md, &virtual_device_) == nullptr
                         && virtual_device_ != nullptr) {
                     OrtKeyValuePairs* ep_opts = nullptr;
                     ort_api.CreateKeyValuePairs(&ep_opts);
