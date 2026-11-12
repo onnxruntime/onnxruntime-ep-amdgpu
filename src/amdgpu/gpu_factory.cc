@@ -7,6 +7,7 @@
 #endif
 
 #include <algorithm>
+#include <iostream>
 #include <mutex>
 #include <string_view>
 #include <vector>
@@ -427,22 +428,30 @@ Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHar
                 if (!target_arch.empty()) ort_api.AddKeyValuePair(md, "target_architecture", target_arch.c_str());
                 if (virtual_device_) { ep_api.ReleaseHardwareDevice(virtual_device_); virtual_device_ = nullptr; }
                 // Device id for the virtual (compiler-process) device. The host
-                // (Chromium Environment::CreateForCompilerProcess) forwards the selected target device's id
-                // as env config ep_factory.<ep_name>.hardware_device_id, formatted "%04x" (hex, no 0x prefix)
-                // -- the same compiler-device handshake NVIDIA's TRT-RTX EP uses (nv_hardware_device_id). We
-                // register the virtual device with THAT id so a single host device selection matches BOTH the
-                // physical GPU/dispatch process and the driver-less virtual compiler process.
-                //   Forwarding requires Chromium's kKnownEPs MIGraphXExecutionProvider entry to set
-                //   hardware_device_id_env_config_key (empty upstream today -- see the companion Chromium
-                //   patch in the WebNN diary). Until that lands the host sends nothing and we fall back to the
-                //   gfx1151 dev-default so the prebuilt-browser bring-up test still closes; the default is
-                //   never used once the host supplies the id.
-                uint32_t target_device_id = 0x1586u;  // gfx1151 dev-default fallback (see note above)
+                // (Chromium Environment::CreateForCompilerProcess) forwards the selected target device's id as
+                // env config ep_factory.<ep_name>.hardware_device_id, formatted "%04x" (hex, no 0x prefix) -- the
+                // same compiler-device handshake NVIDIA's TRT-RTX EP uses (nv_hardware_device_id). We register the
+                // virtual device with THAT id so a single host device selection matches BOTH the physical
+                // GPU/dispatch process and the driver-less virtual compiler process.
+                //
+                // The compiler process is driver-less, so this handshake is the ONLY source of the real device id --
+                // there is no local GPU to query. If the host supplies no valid id we cannot know which AMD GPU the
+                // user is running and must NOT guess (a hardcoded id would be wrong on every other ASIC): register
+                // no virtual device and fall out gracefully, so the host fails compiler-device selection cleanly
+                // instead of compiling for the wrong device.
+                uint32_t target_device_id = 0;
+                bool have_device_id = false;
                 if (!target_device_id_str.empty()) {
-                    try { target_device_id = static_cast<uint32_t>(std::stoul(target_device_id_str, nullptr, 16)); }
-                    catch (const std::exception&) { /* malformed value -> keep fallback */ }
+                    try {
+                        target_device_id = static_cast<uint32_t>(std::stoul(target_device_id_str, nullptr, 16));
+                        have_device_id = true;
+                    } catch (const std::exception&) { /* malformed value -> treat as missing */ }
                 }
-                if (ep_api.CreateHardwareDevice(OrtHardwareDeviceType_GPU, amd::VendorId, target_device_id, "AMD", md, &virtual_device_) == nullptr
+                if (!have_device_id) {
+                    std::cerr << "[amdgpu] virtual-device registration skipped: host supplied no valid ep_factory."
+                              << ep_name_ << ".hardware_device_id; cannot determine the target AMD GPU without the "
+                                 "handshake." << std::endl;
+                } else if (ep_api.CreateHardwareDevice(OrtHardwareDeviceType_GPU, amd::VendorId, target_device_id, "AMD", md, &virtual_device_) == nullptr
                         && virtual_device_ != nullptr) {
                     OrtKeyValuePairs* ep_opts = nullptr;
                     ort_api.CreateKeyValuePairs(&ep_opts);
