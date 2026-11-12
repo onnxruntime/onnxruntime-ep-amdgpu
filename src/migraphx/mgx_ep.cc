@@ -1336,7 +1336,8 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     const auto sorted_nodes{GetKahnsVariantTopologicalSortedNodes(graph)};
     Ort::Graph sorted_graph{graph.GetGraphView(sorted_nodes)};
     ONNX_NAMESPACE::ModelProto model_proto{};
-    RETURN_IF_ERROR(GraphToProto(sorted_graph, model_proto));
+    InMemoryInitializers in_memory_initializers;
+    RETURN_IF_ERROR(GraphToProto(sorted_graph, model_proto, in_memory_initializers.Collector()));
     const auto mlss_graph_features{AnalyzeMlssGraph(model_proto)};
     const auto graph_id{GenerateGraphId(graph)};
     std::string effective_mlss_use_specific_ops{
@@ -1431,6 +1432,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             const auto external_data_dir{external_data_dir_.empty() ?
                 model_path.parent_path() : external_data_dir_};
             onnx_options.set_external_data_path(external_data_dir.string());
+            in_memory_initializers.Register(onnx_options);
             program = migraphx::parse_onnx_buffer(onnx_string, onnx_options);
             migraphx::program_parameters params;
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
@@ -1448,6 +1450,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         }
         }
     }
+    in_memory_initializers.Retain();
 
     if (context_enable_) {
         // input_shapes_hash_hex is non-empty here: the RETURN_IF above requires has_input_shape.
@@ -1497,6 +1500,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
     // Propagate hipGraph / dynamic-batch configuration onto the compute state.
     auto& compute_state{state_it->second};
     compute_state.mgx_output_to_ort = std::move(mgx_output_to_ort);
+    compute_state.in_memory_initializers = std::move(in_memory_initializers);
     compute_state.hip_graph_enable = hip_graph_enable_;
     // Co-residency and dynamic batching both own the program cache's population
     // policy; dynamic batching already retains every compiled bucket, so the flag
@@ -1555,7 +1559,8 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             force_recompile_, effective_cache_dir, effective_mxr_prefix));
         if (precompile_at_load_) {
             RETURN_IF_ERROR(CompileMissingPrograms(pre_plan, input_name_indices, onnx_string,
-                compute_state.cached_programs, t_, enable_fp16_, enable_bf16_, enable_int8_, enable_fp8_,
+                compute_state.in_memory_initializers, compute_state.cached_programs, t_,
+                enable_fp16_, enable_bf16_, enable_int8_, enable_fp8_,
                 int8_calibration_cache_available_, dynamic_ranges_, exhaustive_tune_,
                 effective_mlss_use_specific_ops, compute_mode_, problem_cache_paths_, hiprtc_disable_processes_,
                 disable_compiled_model_caching_, model_path, external_data_dir_, effective_cache_dir,
@@ -2154,6 +2159,7 @@ void ResolveProgram(ComputeState& compute_state, const Ort::KernelContext& kerne
             const auto external_data_dir{compute_state.external_data_dir.empty() ?
                 compute_state.model_path.parent_path() : compute_state.external_data_dir};
             onnx_options.set_external_data_path(external_data_dir.string());
+            compute_state.in_memory_initializers.Register(onnx_options);
             // Set input parameter shapes for the parse (onnx_options' only consumer),
             // applying the same effective-shape transform used to hash so the compiled
             // program matches the key it is cached under.

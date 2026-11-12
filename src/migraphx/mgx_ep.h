@@ -23,6 +23,7 @@
 #include "common/murmurhash3.h"
 
 #include "mgx_factory.h"
+#include "mgx_in_memory_initializers.h"
 #include "mgx_info.h"
 #include "mgx_utils.h"
 
@@ -302,6 +303,8 @@ struct ComputeState {
     // Ordered read-only problem-cache paths (app override, then DLL-adjacent shipped),
     // JSON-escaped for backend-option delivery.
     std::vector<std::string> problem_cache_paths{};
+    // Initializer data kept out of onnx_string; registered before every parse of it.
+    InMemoryInitializers in_memory_initializers{};
 
     // #output_N (GraphToProto / MIGraphX program order) -> ORT fused-node GetOutput index.
     // Empty means identity (N -> N), used until Compile fills the table.

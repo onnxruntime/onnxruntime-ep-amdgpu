@@ -217,7 +217,8 @@ Ort::Status PreloadMxrPrograms(const PrecompilePlan& plan, const Map<std::size_t
 }
 
 Ort::Status CompileMissingPrograms(const PrecompilePlan& plan, const Map<std::size_t>& input_name_indices,
-    std::string_view onnx_string, CachedPrograms& cached_programs, const migraphx::target& target,
+    std::string_view onnx_string, const InMemoryInitializers& in_memory_initializers,
+    CachedPrograms& cached_programs, const migraphx::target& target,
     bool fp16_enable, bool bf16_enable, bool int8_enable, bool fp8_enable,
     bool int8_calibration_cache_available, const Map<float>& dynamic_ranges, bool exhaustive_tune,
     const std::string& mlss_use_specific_ops, ComputeMode compute_mode,
@@ -246,6 +247,7 @@ Ort::Status CompileMissingPrograms(const PrecompilePlan& plan, const Map<std::si
 
         migraphx::onnx_options onnx_options;
         onnx_options.set_external_data_path(external_data_dir_resolved.string());
+        in_memory_initializers.Register(onnx_options);
         for (const auto& [name, _] : input_name_indices) {
             const auto shape{bucketed ?
                 effective_shape_for_bucket_batch(shapes_by_name.at(name), plan_target.batch_size) :
