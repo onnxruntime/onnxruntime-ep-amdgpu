@@ -315,12 +315,24 @@ public:
 
     // Compile a Tier-0 fused subgraph.  Returns an OrtNodeComputeInfo on
     // success, or nullptr if compilation fails (caller falls back to Tier-2/1).
+    //
+    // When out_serialized_graph != nullptr and compilation succeeds, it is filled
+    // with the SerializeDmlGraph() flatbuffer blob of the compiled DML graph, so a
+    // later session can reload it (DeserializeDmlGraph) for the EPContext path
+    // without re-translating from ONNX.
     static OrtNodeComputeInfo* Compile(
         const OrtApi&                                            ort_api,
         const OrtGraph*                                          fused_subgraph,
         const std::unordered_map<std::string, const OrtValue*>&  initializers,
         PluginDmlExecutionProviderImpl*                          provider,
-        const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes = {});
+        const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes = {},
+        std::string*                                            out_serialized_graph = nullptr,
+        // compile_only (AOT / compiler-process path): build + serialize the DML graph
+        // IR but SKIP the device-bound steps (CreateOperator / CompileGraph / init /
+        // upload). Requires out_serialized_graph. Returns a stub compute-info whose
+        // Compute errors — the blob is meant for a separate dispatch session. The
+        // produced blob is identical to the normal path (same SerializeDmlGraph bytes).
+        bool                                                    compile_only = false);
 
     // Runtime-fusion (deferred) counterpart of Compile. Instead of compiling DML
     // now, it SNAPSHOTS the dynamic partition into an owned DeferredSubgraph
@@ -340,6 +352,16 @@ public:
         const std::vector<DeferredNode>&                         shape_prep_nodes = {},
         const std::vector<std::string>&                          shape_prep_roots = {},
         const std::unordered_map<std::string, std::vector<int64_t>>& shape_prep_inits = {});
+
+    // EPContext reload (consume): rebuild a compute kernel directly from the serialized
+    // DML graph embedded in an EPContext node, without ONNX translation. The blob is
+    // self-contained (weights inline), so I/O metadata comes from the EPContext node.
+    // Returns nullptr on failure (caller returns ORT_EP_FAIL).
+    static OrtNodeComputeInfo* CompileEpContext(
+        const OrtApi&                    ort_api,
+        const std::string&               serialized_graph,
+        const OrtNode*                   fused_node,
+        PluginDmlExecutionProviderImpl*  provider);
 
     // Lightweight feasibility check — runs translation + CreateOperator +
     // CompileGraph against the main graph. Returns true if CompileGraph

@@ -1,6 +1,7 @@
 // Copyright (c) Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
+#include <cstdio>
 #include "dml_ep.h"
 #include "dml_plugin_OperatorRegistration.h"
 #include "dml_bucketized_buffer_allocator.h"
@@ -8,6 +9,7 @@
 #include "core/common/inlined_containers_fwd.h"
 #include "dml_abi_kernel.h"
 #include "fusion_utils.h"  // DML_EP_RELEASE_IGNORED_STATUS
+#include "dml_ep_ctx.h"
 #include "ep_fusion_manager.h"
 #include "full_graph_fusion.h"
 #include "quick_gelu_ep_fusion.h"
@@ -375,10 +377,13 @@ ExecutionProviderPlugin::~ExecutionProviderPlugin() {
     // SetEventOnCompletion can still throw. A throw escaping a destructor -> std::terminate (and
     // during stack unwinding it is unconditionally fatal), so swallow any exception here. The device
     // is already dead; there is nothing to recover, we only need teardown to complete cleanly.
-    try {
-        m_context->Close();
-    } catch (...) {
-        // Device removed / teardown failure — nothing actionable; let destruction finish.
+    // (m_context is null in compile-only / virtual-device mode — nothing to close.)
+    if (m_context) {
+        try {
+            m_context->Close();
+        } catch (...) {
+            // Device removed / teardown failure — nothing actionable; let destruction finish.
+        }
     }
 }
 
@@ -390,13 +395,17 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     Microsoft::WRL::ComPtr<ExecutionContext> executionContext,
     std::shared_ptr<DmlHostAccessibleAllocator>* factoryHostAllocHolder,
     bool enableHostAccessible,
-    bool enableGraphCapture)
+    bool enableGraphCapture,
+    bool enableEpContext,
+    bool compileOnly)
     : OrtEp{NegotiatedOrtApiVersion()}
     , ApiPtrs{api_ptrs}
     , name_{name}
     , d3d12_device{d3d12_device_}
     , m_dmlDevice{dml_device_}
     , m_context{executionContext}
+    , m_epContextEnable{enableEpContext}
+    , m_compileOnly{compileOnly}
 {
     // Runtime (deferred, dynamic-shape) graph fusion opt-in, from ep.directml.enable_graph_capture.
     // Selects the ORT-style runtime fusion path (GetCapabilityImpl gates Phase-3 vs Phase-4 on
@@ -426,8 +435,10 @@ ExecutionProviderPlugin::ExecutionProviderPlugin(
     }
 #endif
 
+    // compile-only / virtual device (AOT path): d3d12_device may be null. Skip the live
+    // feature query; the generate path does not need the real hardware capabilities.
     D3D12_FEATURE_DATA_D3D12_OPTIONS4 featureOptions = {};
-    if (SUCCEEDED(d3d12_device->CheckFeatureSupport(
+    if (d3d12_device && SUCCEEDED(d3d12_device->CheckFeatureSupport(
         D3D12_FEATURE_D3D12_OPTIONS4,
         &featureOptions,
         sizeof(featureOptions))))
@@ -843,6 +854,30 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         std::vector<const OrtNode*> nodesInTopologicalOrder;
         nodesInTopologicalOrder.resize(numNodes);
         ep->ort_api.Graph_GetNodes(graph, nodesInTopologicalOrder.data(), numNodes);
+
+        // EPContext reload: a precompiled EPContext model carries "EPContext" nodes instead
+        // of the original ops. Claim each as a single-node FUSION group (AddNodesToFuse, not
+        // AddSingleNode) so ORT compiles it via CompileImpl's consume path instead of looking
+        // up a static kernel (which the memcpy transformer would fail to find). Skip the
+        // normal Tier-0/1/2 analysis.
+        {
+            bool claimed_epctx = false;
+            for (const OrtNode* node : nodesInTopologicalOrder) {
+                const char* op_type = nullptr;
+                ep->ort_api.Node_GetOperatorType(node, &op_type);
+                if (op_type != nullptr && std::string_view(op_type) == "EPContext") {
+                    const OrtNode* one[1] = { node };
+                    OrtStatus* st = ep->ep_api.EpGraphSupportInfo_AddNodesToFuse(
+                        graph_support_info, one, 1, nullptr);
+                    if (st) { ep->ort_api.ReleaseStatus(st); continue; }
+                    claimed_epctx = true;
+                }
+            }
+            if (claimed_epctx) {
+                ep->m_isGetCapabilityCompleted = true;
+                return nullptr;
+            }
+        }
 
         uint32_t deviceDataTypeMask = ep->GetSupportedDeviceDataTypeMask(); // Each bit corresponds to each DML_TENSOR_DATA_TYPE.
 
@@ -1694,7 +1729,16 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                     DML_PERF_LOG("[Tier0] SKIP: TryTranslateNodes failed\n");
                     continue;
                 }
-                if (!FullGraphFusion::TryCompilePartition(ep->ort_api, graph,
+                // TryCompilePartition is a DEVICE-BOUND pre-flight (it CreateOperator's each
+                // translated node on the live IDMLDevice to prove the group compiles before we
+                // claim it). In the device-less AOT / compiler-process path (ep.directml.compile_only,
+                // m_dmlDevice == null) there is no device to pre-flight against; GetDmlDevice would
+                // hand back a null device and the subsequent QueryInterface (ComPtr::As<IDMLDevice1>)
+                // dereferences null -> crash. Skip the pre-flight when device-less and claim the group
+                // directly; any over-claim is caught at consume-time CompileGraph on the real device.
+                // (Restores the intent of port commit 6c3ac85, which upstream's Tier-0 refactor dropped.)
+                if (ep->m_dmlDevice &&
+                    !FullGraphFusion::TryCompilePartition(ep->ort_api, graph,
                                                           ep->m_graphInitializerMap,
                                                           ep->m_executionProvider.get(), g.nodes, resolved_shapes)) {
                     DML_PERF_LOG("[Tier0] SKIP: TryCompilePartition failed\n");
@@ -1983,6 +2027,24 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
             node_compute_infos[i] = nullptr;
             ep_context_nodes[i]   = nullptr;
 
+            // EPContext reload (consume): if this subgraph is a precompiled EPContext node,
+            // deserialize the embedded DML graph and build the compute kernel directly,
+            // skipping ONNX translation. ep_context_nodes stays null on reload (no re-dump).
+            try {
+                Ort::ConstGraph cg{graphs[i]};
+                if (EpContextNodeReader::GraphHasContextNode(cg)) {
+                    EpContextNodeReader reader{*ep, cg};
+                    node_compute_infos[i] = FullGraphFusion::CompileEpContext(
+                        ep->ort_api, reader.GetSerializedGraph(), fused_nodes[i],
+                        ep->m_executionProvider.get());
+                    if (node_compute_infos[i]) continue;
+                    return ep->ort_api.CreateStatus(ORT_EP_FAIL,
+                        "EPContext consume: failed to rebuild DML graph from serialized blob");
+                }
+            } catch (const std::exception& e) {
+                return ep->ort_api.CreateStatus(ORT_EP_FAIL, e.what());
+            }
+
             // Tier-0 route: if GetCapabilityImpl claimed one or more fused partitions,
             // check if this subgraph's hash matches any of them and compile via
             // FullGraphFusion.  Multiple partitions are possible when the graph has
@@ -2003,14 +2065,47 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
 
                 if (ep->m_tier0GroupHashes.count(sg_hash)) {
                     DML_PERF_LOG("[CompileImpl] Tier0 compile: subgraph hash match, nodes=", num_nodes, "\n");
+                    // EPContext generate: when ep.context_enable=1, capture the serialized DML graph so we
+                    // can emit an EPContext node that reloads without recompiling (WebNN no-recompile path).
+                    std::string serialized_graph;
+                    // Track-2 AOT: ep.directml.compile_only (m_compileOnly) forces the device-less
+                    // serialize-only path — build + serialize the DML graph IR, skip the
+                    // device-bound CreateOperator/CompileGraph. Only meaningful with
+                    // ep.context_enable (the blob is the product). Returns a stub kernel.
+                    const bool compile_only = ep->m_epContextEnable && ep->m_compileOnly;
                     node_compute_infos[i] = FullGraphFusion::Compile(
                         ep->ort_api,
                         graphs[i],
                         ep->m_graphInitializerMap,
                         ep->m_executionProvider.get(),
-                        ep->m_resolvedShapes);
+                        ep->m_resolvedShapes,
+                        ep->m_epContextEnable ? &serialized_graph : nullptr,
+                        compile_only);
                     if (node_compute_infos[i]) {
                         DML_PERF_LOG("[CompileImpl] Tier0 compile: SUCCESS\n");
+                        if (ep->m_epContextEnable) {
+                            if (!serialized_graph.empty()) {
+                                // NB: the helper stores references to these, so they must be
+                                // named locals that outlive it (not temporaries — that dangles).
+                                Ort::ConstGraph ctx_graph{graphs[i]};
+                                Ort::ConstNode ctx_node{fused_nodes[i]};
+                                EpContextNodeHelper ep_ctx_helper{*ep, ctx_graph, ctx_node};
+                                OrtNode* ep_context_node = nullptr;
+                                const Ort::Status st = ep_ctx_helper.CreateEpContextNode(
+                                    serialized_graph, /*embed_mode*/ 1, /*compute_capability*/ {},
+                                    /*model_path*/ {}, /*node_name_prefix*/ {}, ep_context_node);
+                                if (st.IsOK() && ep_context_node != nullptr) {
+                                    ep_context_nodes[i] = ep_context_node;
+                                    DML_PERF_LOG("[CompileImpl] EPContext node emitted (blob bytes=",
+                                        serialized_graph.size(), ")\n");
+                                } else {
+                                    DML_PERF_LOG("[CompileImpl] EPContext node creation FAILED\n");
+                                }
+                            } else {
+                                DML_PERF_LOG("[CompileImpl] EPContext requested but serialized DML graph "
+                                    "was empty — no EPContext node emitted\n");
+                            }
+                        }
                         continue;
                     }
                     DML_PERF_LOG("[CompileImpl] Tier0 compile: FAILED (nullptr) — falling through to Tier-2\n");
@@ -2265,7 +2360,12 @@ const char* ORT_API_CALL ExecutionProviderPlugin::GetCompiledModelCompatibilityI
     _In_ OrtEp* this_ptr,
     _In_ const OrtGraph* graph) noexcept
 {
-    return nullptr;
+    // Stamped into the EPContext model and checked on reload. ORT calls strlen() on
+    // this, so it MUST be a non-null, null-terminated, static-lifetime string.
+    // The serialized DML graph format is self-describing and version-stable, so a
+    // single constant identifies compatibility for this backend.
+    static constexpr char kCompatInfo[] = "amdgpu-directml-epctx-v1";
+    return kCompatInfo;
 }
 
 OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetKernelRegistryImpl(
@@ -2321,6 +2421,16 @@ bool ExecutionProviderPlugin::IsGpuAllocator(const OrtMemoryInfo* memory_info)
 }
 
 uint32_t ExecutionProviderPlugin::GetSupportedDeviceDataTypeMask() const {
+    // compile-only / virtual device (AOT path): no live IDMLDevice to query. Serve a
+    // static capability mask (A3). For the POC this is permissive — all real DML tensor
+    // data types (bits 1..INT4) — so GetCapability can claim nodes; any over-claim is
+    // caught at consume-time CompileGraph on the real device. TODO: key this off the
+    // host-supplied target_architecture (GPU family / feature level).
+    if (!m_dmlDevice) {
+        uint32_t mask = 0;
+        for (uint32_t i = 1; i <= DML_TENSOR_DATA_TYPE_INT4; ++i) mask |= (1u << i);
+        return mask;
+    }
     return dml_ep::GetSupportedDeviceDataTypeMask(m_dmlDevice.Get());
 }
 
@@ -2955,7 +3065,7 @@ bool ExecutionProviderPlugin::IsSmallInitializer(const OrtGraph* graph, const Or
 void ExecutionProviderPlugin::Flush() const
 {
     assert(!m_closed);
-    m_context->Flush();
+    if (m_context) m_context->Flush();  // null in compile-only / virtual-device mode
 }
 
 std::shared_ptr<PluginDmlExecutionProviderImpl> ExecutionProviderPlugin::GetInternalExecutionProvider() {
