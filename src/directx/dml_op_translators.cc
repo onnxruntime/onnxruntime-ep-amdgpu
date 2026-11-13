@@ -9092,12 +9092,13 @@ static std::optional<TranslatedOp> TranslateLpPool(
     uint32_t spatial = static_cast<uint32_t>(in_sizes.size()) - 2;
     if (spatial < 1) spatial = 1;
 
-    std::vector<uint32_t> window_size, strides, start_pad, end_pad;
+    std::vector<uint32_t> window_size, strides, start_pad, end_pad, dilations;
     if (global) {
         for (uint32_t i = 0; i < spatial; ++i) window_size.push_back(in_sizes[2 + i]);
         strides.assign(spatial, 1u);
         start_pad.assign(spatial, 0u);
         end_pad.assign(spatial, 0u);
+        dilations.assign(spatial, 1u);
     } else {
         auto ks = adapter.GetAttributeInts("kernel_shape");
         for (int64_t v : ks) window_size.push_back(static_cast<uint32_t>(v));
@@ -9113,6 +9114,11 @@ static std::optional<TranslatedOp> TranslateLpPool(
             start_pad.assign(spatial, 0u);
             end_pad.assign(spatial, 0u);
         }
+        // Honor the dilations attribute (WebNN l2Pool2d / ONNX LpPool opset-18) instead of
+        // hardcoding 1 — otherwise dilated windows pool the wrong elements (wrong result).
+        auto di = adapter.GetAttributeInts("dilations");
+        for (int64_t v : di) dilations.push_back(static_cast<uint32_t>(v));
+        while (dilations.size() < spatial) dilations.push_back(1u);
     }
 
     auto* out_edge = LookupShape(value_shapes, outputs[0]);
@@ -9124,23 +9130,112 @@ static std::optional<TranslatedOp> TranslateLpPool(
             out_sizes[2 + d] = (in_sizes[2 + d] + start_pad[d] + end_pad[d] - window_size[d]) / strides[d] + 1;
     }
 
+    // fp16 overflow guard: Lp/L2 pooling sums p-th powers; in fp16 the accumulator
+    // overflows to Inf for larger inputs (e.g. the WebNN l2Pool2d padding cases).
+    // Compute in fp32 via a Cast(fp16->fp32) -> LpPool1(fp32) -> Cast(fp32->fp16) graph.
+    if (in_info->data_type == DML_TENSOR_DATA_TYPE_FLOAT16) {
+        DmlTensorInfo t16_in  = MakeTensorInfo(in_sizes,  DML_TENSOR_DATA_TYPE_FLOAT16);
+        DmlTensorInfo t32_in  = MakeTensorInfo(in_sizes,  DML_TENSOR_DATA_TYPE_FLOAT32);
+        DmlTensorInfo t32_out = MakeTensorInfo(out_sizes, DML_TENSOR_DATA_TYPE_FLOAT32);
+        DmlTensorInfo t16_out = MakeTensorInfo(out_sizes, DML_TENSOR_DATA_TYPE_FLOAT16);
+
+        // Primary: Cast fp16 -> fp32 (input shape)
+        auto cast_in = std::make_shared<DML_CAST_OPERATOR_DESC>();
+        TranslatedOp result;
+        result.input_tensors  = { t16_in };
+        result.output_tensors = { t32_in };
+        result.input_buffer_descs  = { t16_in.ToBufferDesc() };
+        result.input_tensor_descs.resize(1);
+        result.output_buffer_descs = { t32_in.ToBufferDesc() };
+        result.output_tensor_descs.resize(1);
+        result.desc_storage = cast_in;
+        result.op_desc = { DML_OPERATOR_CAST, cast_in.get() };
+        result.fixup = [cast_in](TranslatedOp& self) {
+            RebuildTensorDescPointers(self);
+            cast_in->InputTensor  = &self.input_tensor_descs[0];
+            cast_in->OutputTensor = &self.output_tensor_descs[0];
+        };
+        result.FixupPointers();
+
+        // Sub 0: LP_POOLING1 in fp32 (in_sizes -> out_sizes)
+        struct LpPoolStorageHP {
+            DML_LP_POOLING1_OPERATOR_DESC desc{};
+            std::vector<uint32_t> window_size, strides, start_pad, end_pad, dilations;
+        };
+        auto hp = std::make_shared<LpPoolStorageHP>();
+        hp->window_size = window_size; hp->strides = strides;
+        hp->start_pad = start_pad; hp->end_pad = end_pad; hp->dilations = dilations;
+        hp->desc.DimensionCount = spatial;
+        hp->desc.WindowSize   = hp->window_size.data();
+        hp->desc.Strides      = hp->strides.data();
+        hp->desc.StartPadding = hp->start_pad.data();
+        hp->desc.EndPadding   = hp->end_pad.data();
+        hp->desc.Dilations    = hp->dilations.data();
+        hp->desc.P            = static_cast<UINT>(p_val);
+        SubNode op_node;
+        op_node.input_tensors  = { t32_in };
+        op_node.output_tensors = { t32_out };
+        op_node.input_buffer_descs  = { t32_in.ToBufferDesc() };
+        op_node.input_tensor_descs.resize(1);
+        op_node.output_buffer_descs = { t32_out.ToBufferDesc() };
+        op_node.output_tensor_descs.resize(1);
+        op_node.desc_storage = hp;
+        op_node.op_desc = { DML_OPERATOR_LP_POOLING1, &hp->desc };
+        op_node.input_from = { {-1, 0} };
+        op_node.fixup = [hp](SubNode& self) {
+            RebuildSubNodePointers(self);
+            hp->desc.InputTensor  = &self.input_tensor_descs[0];
+            hp->desc.OutputTensor = &self.output_tensor_descs[0];
+            hp->desc.WindowSize   = hp->window_size.data();
+            hp->desc.Strides      = hp->strides.data();
+            hp->desc.StartPadding = hp->start_pad.data();
+            hp->desc.EndPadding   = hp->end_pad.data();
+            hp->desc.Dilations    = hp->dilations.data();
+        };
+        op_node.FixupPointers();
+
+        // Sub 1: Cast fp32 -> fp16 (output shape)
+        auto cast_out = std::make_shared<DML_CAST_OPERATOR_DESC>();
+        SubNode cast_node;
+        cast_node.input_tensors  = { t32_out };
+        cast_node.output_tensors = { t16_out };
+        cast_node.input_buffer_descs  = { t32_out.ToBufferDesc() };
+        cast_node.input_tensor_descs.resize(1);
+        cast_node.output_buffer_descs = { t16_out.ToBufferDesc() };
+        cast_node.output_tensor_descs.resize(1);
+        cast_node.desc_storage = cast_out;
+        cast_node.op_desc = { DML_OPERATOR_CAST, cast_out.get() };
+        cast_node.input_from = { {0, 0} };
+        cast_node.fixup = [cast_out](SubNode& self) {
+            RebuildSubNodePointers(self);
+            cast_out->InputTensor  = &self.input_tensor_descs[0];
+            cast_out->OutputTensor = &self.output_tensor_descs[0];
+        };
+        cast_node.FixupPointers();
+
+        result.sub_nodes = { std::move(op_node), std::move(cast_node) };
+        return result;
+    }
+
     auto in_tensor  = MakeTensorInfo(in_sizes,  in_info->data_type);
     auto out_tensor = MakeTensorInfo(out_sizes, in_info->data_type);
 
     struct LpPoolStorage {
-        DML_LP_POOLING_OPERATOR_DESC desc{};
-        std::vector<uint32_t> window_size, strides, start_pad, end_pad;
+        DML_LP_POOLING1_OPERATOR_DESC desc{};
+        std::vector<uint32_t> window_size, strides, start_pad, end_pad, dilations;
     };
     auto storage = std::make_shared<LpPoolStorage>();
     storage->window_size = window_size;
     storage->strides     = strides;
     storage->start_pad   = start_pad;
     storage->end_pad     = end_pad;
+    storage->dilations   = dilations;
     storage->desc.DimensionCount = spatial;
     storage->desc.WindowSize     = storage->window_size.data();
     storage->desc.Strides        = storage->strides.data();
     storage->desc.StartPadding   = storage->start_pad.data();
     storage->desc.EndPadding     = storage->end_pad.data();
+    storage->desc.Dilations      = storage->dilations.data();
     storage->desc.P              = static_cast<UINT>(p_val);
 
     TranslatedOp result;
@@ -9151,7 +9246,7 @@ static std::optional<TranslatedOp> TranslateLpPool(
     result.output_buffer_descs = { out_tensor.ToBufferDesc() };
     result.output_tensor_descs.resize(1);
     result.desc_storage = storage;
-    result.op_desc = { DML_OPERATOR_LP_POOLING, &storage->desc };
+    result.op_desc = { DML_OPERATOR_LP_POOLING1, &storage->desc };
     result.fixup = [storage](TranslatedOp& self) {
         RebuildTensorDescPointers(self);
         storage->desc.InputTensor  = &self.input_tensor_descs[0];
@@ -9160,6 +9255,7 @@ static std::optional<TranslatedOp> TranslateLpPool(
         storage->desc.Strides      = storage->strides.data();
         storage->desc.StartPadding = storage->start_pad.data();
         storage->desc.EndPadding   = storage->end_pad.data();
+        storage->desc.Dilations    = storage->dilations.data();
     };
     result.FixupPointers();
     return result;
