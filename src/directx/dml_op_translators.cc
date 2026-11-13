@@ -2315,8 +2315,32 @@ static std::optional<TranslatedOp> TranslateMaxPool(
         }
     }
 
-    auto in_tensor  = MakeTensorInfo(in_sizes,  in_info->data_type);
-    auto out_tensor = MakeTensorInfo(out_sizes, in_info->data_type);
+    // DML MAX_POOLING2 pads with -FLT_MAX, so an output cell whose window lies wholly in
+    // padding (which outputShapeRounding=ceil can create) would emit -FLT_MAX. WebNN defines
+    // such ceil cells as 0. Compute the DML-native (floor) pooling, then zero-pad the result
+    // up to the requested (ceil) output size so the trailing all-padding cells become 0.
+    // Count output cells whose window actually touches real input; trailing cells (which
+    // outputShapeRounding=ceil can create) have an all-padding window that DML fills with
+    // -FLT_MAX but WebNN defines as 0. Pool only the valid cells (adjusting end padding so
+    // DML emits exactly that many), then zero-pad up to the requested output size.
+    std::vector<uint32_t> valid_sizes = out_sizes;
+    std::vector<uint32_t> tail_pad(in_sizes.size(), 0u);
+    bool needs_zero_pad = false;
+    for (uint32_t d = 0; d < spatial; ++d) {
+        uint32_t dk = (window_size[d] - 1) * dilations[d] + 1;
+        // #windows whose start (o*stride - start_pad) is < in_size = ceil((in+start)/stride)
+        uint32_t valid = (in_sizes[2 + d] + start_pad[d] + strides[d] - 1) / strides[d];
+        if (valid > out_sizes[2 + d]) valid = out_sizes[2 + d];
+        if (valid < 1) valid = 1;
+        valid_sizes[2 + d] = valid;
+        if (valid < out_sizes[2 + d]) { tail_pad[2 + d] = out_sizes[2 + d] - valid; needs_zero_pad = true; }
+        int64_t need_end = static_cast<int64_t>(valid - 1) * strides[d] + dk
+                           - static_cast<int64_t>(in_sizes[2 + d]) - static_cast<int64_t>(start_pad[d]);
+        end_pad[d] = need_end > 0 ? static_cast<uint32_t>(need_end) : 0u;
+    }
+
+    auto in_tensor   = MakeTensorInfo(in_sizes,    in_info->data_type);
+    auto pool_tensor = MakeTensorInfo(valid_sizes, in_info->data_type);
 
     struct MaxPoolStorage {
         DML_MAX_POOLING2_OPERATOR_DESC desc{};
@@ -2338,10 +2362,10 @@ static std::optional<TranslatedOp> TranslateMaxPool(
 
     TranslatedOp result;
     result.input_tensors = { in_tensor };
-    result.output_tensors = { out_tensor };
+    result.output_tensors = { pool_tensor };
     result.input_buffer_descs = { in_tensor.ToBufferDesc() };
     result.input_tensor_descs.resize(1);
-    result.output_buffer_descs = { out_tensor.ToBufferDesc() };
+    result.output_buffer_descs = { pool_tensor.ToBufferDesc() };
     result.output_tensor_descs.resize(1);
     result.desc_storage = storage;
     result.op_desc = { DML_OPERATOR_MAX_POOLING2, &storage->desc };
@@ -2356,6 +2380,42 @@ static std::optional<TranslatedOp> TranslateMaxPool(
         storage->desc.EndPadding   = storage->end_pad.data();
     };
     result.FixupPointers();
+
+    if (needs_zero_pad) {
+        // Sub 0: zero-pad the floor-size pooling result up to the ceil output size.
+        auto ceil_tensor = MakeTensorInfo(out_sizes, in_info->data_type);
+        struct PadStorage {
+            DML_PADDING_OPERATOR_DESC desc{};
+            std::vector<uint32_t> start_pad, end_pad;
+        };
+        auto pstore = std::make_shared<PadStorage>();
+        pstore->start_pad.assign(out_sizes.size(), 0u);
+        pstore->end_pad = tail_pad;
+        pstore->desc.PaddingMode    = DML_PADDING_MODE_CONSTANT;
+        pstore->desc.PaddingValue   = 0.0f;
+        pstore->desc.DimensionCount = static_cast<UINT>(out_sizes.size());
+        pstore->desc.StartPadding   = pstore->start_pad.data();
+        pstore->desc.EndPadding     = pstore->end_pad.data();
+        SubNode pad_node;
+        pad_node.input_tensors  = { pool_tensor };
+        pad_node.output_tensors = { ceil_tensor };
+        pad_node.input_buffer_descs  = { pool_tensor.ToBufferDesc() };
+        pad_node.input_tensor_descs.resize(1);
+        pad_node.output_buffer_descs = { ceil_tensor.ToBufferDesc() };
+        pad_node.output_tensor_descs.resize(1);
+        pad_node.desc_storage = pstore;
+        pad_node.op_desc = { DML_OPERATOR_PADDING, &pstore->desc };
+        pad_node.input_from = { {-1, 0} };
+        pad_node.fixup = [pstore](SubNode& self) {
+            RebuildSubNodePointers(self);
+            pstore->desc.InputTensor  = &self.input_tensor_descs[0];
+            pstore->desc.OutputTensor = &self.output_tensor_descs[0];
+            pstore->desc.StartPadding = pstore->start_pad.data();
+            pstore->desc.EndPadding   = pstore->end_pad.data();
+        };
+        pad_node.FixupPointers();
+        result.sub_nodes = { std::move(pad_node) };
+    }
     return result;
 }
 
