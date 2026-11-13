@@ -402,7 +402,7 @@ static std::optional<TranslatedOp> TranslateUnaryActivation(
 template <typename DescType, DML_OPERATOR_TYPE OpType>
 static std::optional<TranslatedOp> TranslateUnaryActivationHP(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& initializers) {
     auto inputs = GetInputNames(ort_api, node);
@@ -1435,7 +1435,7 @@ static std::optional<TranslatedOp> TranslateReduce(
 //   y = l + m
 static std::optional<TranslatedOp> TranslateReduceLogSumExpStable(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>& initializers) {
     auto inputs = GetInputNames(ort_api, node);
@@ -4342,7 +4342,7 @@ static std::optional<TranslatedOp> TranslateClip(
 // Relu (e.g. WebNN relu on int64) must route through the integer-capable CLIP op instead.
 static std::optional<TranslatedOp> TranslateReluInt(
     const OrtApi& ort_api,
-    const OrtNode* node,
+    const NodeView& node,
     const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs  = GetInputNames(ort_api, node);
@@ -10568,7 +10568,7 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["Sub"] = TranslateBinaryElementwise<DML_ELEMENT_WISE_SUBTRACT_OPERATOR_DESC, DML_OPERATOR_ELEMENT_WISE_SUBTRACT>;
     registry["Div"] = TranslateBinaryElementwise<DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC, DML_OPERATOR_ELEMENT_WISE_DIVIDE>;
 
-    registry["Relu"]    = [](const OrtApi& api, const OrtNode* node,
+    registry["Relu"]    = [](const OrtApi& api, const NodeView& node,
         const std::unordered_map<std::string, DmlTensorInfo>& vs,
         const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
         auto ins = GetInputNames(api, node);
