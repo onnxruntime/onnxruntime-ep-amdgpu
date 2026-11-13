@@ -49,6 +49,9 @@ DML_TENSOR_DATA_TYPE OnnxDtypeToDml(ONNXTensorElementDataType onnx_dtype) {
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:  return DML_TENSOR_DATA_TYPE_UINT32;
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:  return DML_TENSOR_DATA_TYPE_UINT64;
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:   return DML_TENSOR_DATA_TYPE_UINT8;
+    // Packed sub-byte quantized types (WebNN int4/uint4 Quantize/DequantizeLinear).
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT4:   return DML_TENSOR_DATA_TYPE_UINT4;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT4:    return DML_TENSOR_DATA_TYPE_INT4;
     default: return DML_TENSOR_DATA_TYPE_UNKNOWN;
     }
 }
@@ -71,11 +74,17 @@ std::vector<uint32_t> ComputePackedStrides(const std::vector<uint32_t>& sizes) {
 }
 
 uint64_t ComputeAlignedTotalBytes(const std::vector<uint32_t>& sizes, DML_TENSOR_DATA_TYPE dtype) {
-    size_t elem_size = DmlDataTypeSize(dtype);
-    if (elem_size == 0) return 0;
     uint64_t elem_count = 1;
     for (uint32_t s : sizes) elem_count *= s;
-    uint64_t bytes = elem_count * elem_size;
+    uint64_t bytes;
+    if (dtype == DML_TENSOR_DATA_TYPE_UINT4 || dtype == DML_TENSOR_DATA_TYPE_INT4) {
+        // Sub-byte: two packed 4-bit values per byte (odd counts round up).
+        bytes = (elem_count + 1) / 2;
+    } else {
+        size_t elem_size = DmlDataTypeSize(dtype);
+        if (elem_size == 0) return 0;
+        bytes = elem_count * elem_size;
+    }
     bytes = std::max<uint64_t>(bytes, 4);
     bytes = (bytes + 3) & ~3ull;
     return bytes;
