@@ -17,6 +17,8 @@ add_library(migraphx-ep MODULE
         mgx_factory.h
         mgx_hip_graph.cc
         mgx_hip_graph.h
+        mgx_in_memory_initializers.cc
+        mgx_in_memory_initializers.h
         mgx_info.cc
         mgx_info.h
         mgx_precompile.cc
