@@ -10945,6 +10945,14 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
         auto* x_info     = LookupShape(vs, inputs[0]);
         auto* slope_info = LookupShape(vs, inputs[1]);
         if (!x_info || !slope_info) return std::nullopt;
+        // DML_OPERATOR_ACTIVATION_PARAMETERIZED_RELU is a float/<=32-bit-int activation and
+        // hard-fails (crashes session creation) on 64-bit integers. Decline so the node is not
+        // claimed rather than crashing. (Full int64 support needs a clip/mul/add decomposition —
+        // see branch wip/prelu-int64-decomposition.)
+        if (x_info->data_type == DML_TENSOR_DATA_TYPE_INT64 ||
+            x_info->data_type == DML_TENSOR_DATA_TYPE_UINT64) {
+            return std::nullopt;
+        }
         auto bc = BroadcastShapes(*x_info, *slope_info);
         if (!bc) return std::nullopt;
         auto* out_edge = LookupShape(vs, outputs[0]);
