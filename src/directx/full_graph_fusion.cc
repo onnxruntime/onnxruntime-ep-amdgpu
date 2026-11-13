@@ -5002,6 +5002,14 @@ bool FullGraphFusion::TryCompilePartition(
         DiagLog("[TryCompilePartition] GetDmlDevice failed\n");
         return false;
     }
+    // Device-less AOT / compiler process: GetDmlDevice returns S_OK with a NULL device.
+    // There is nothing to pre-flight against; report "pass" (the partition is claimed and
+    // validated at consume-time CompileGraph on the real device). Without this guard the
+    // ComPtr::As<IDMLDevice1> below QueryInterfaces a null IDMLDevice and crashes.
+    if (!dml_device) {
+        DiagLog("[TryCompilePartition] no live DML device (device-less); skip pre-flight\n");
+        return true;
+    }
     ComPtr<IDMLDevice1> dml_device1;
     if (FAILED(dml_device.As(&dml_device1))) {
         DiagLog("[TryCompilePartition] IDMLDevice1 QI failed\n");

@@ -1729,7 +1729,16 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                     DML_PERF_LOG("[Tier0] SKIP: TryTranslateNodes failed\n");
                     continue;
                 }
-                if (!FullGraphFusion::TryCompilePartition(ep->ort_api, graph,
+                // TryCompilePartition is a DEVICE-BOUND pre-flight (it CreateOperator's each
+                // translated node on the live IDMLDevice to prove the group compiles before we
+                // claim it). In the device-less AOT / compiler-process path (ep.directml.compile_only,
+                // m_dmlDevice == null) there is no device to pre-flight against; GetDmlDevice would
+                // hand back a null device and the subsequent QueryInterface (ComPtr::As<IDMLDevice1>)
+                // dereferences null -> crash. Skip the pre-flight when device-less and claim the group
+                // directly; any over-claim is caught at consume-time CompileGraph on the real device.
+                // (Restores the intent of port commit 6c3ac85, which upstream's Tier-0 refactor dropped.)
+                if (ep->m_dmlDevice &&
+                    !FullGraphFusion::TryCompilePartition(ep->ort_api, graph,
                                                           ep->m_graphInitializerMap,
                                                           ep->m_executionProvider.get(), g.nodes, resolved_shapes)) {
                     DML_PERF_LOG("[Tier0] SKIP: TryCompilePartition failed\n");
