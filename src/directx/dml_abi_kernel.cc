@@ -24,6 +24,77 @@ namespace dml_ep {
 static TensorContent SnapshotConstantInput(IMLOperatorTensor* tensor);
 static bool ConstantInputChanged(const TensorContent& last, IMLOperatorTensor* current_tensor);
 
+// Read every input tensor's concrete runtime shape from the kernel context into
+// an EdgeShapes. A negative (symbolic/dynamic) dim is clamped to 0 so callers can
+// detect it; inputs that are null or lack shape info are left as empty shapes.
+static EdgeShapes ReadInputShapesIntoEdgeShapes(const OrtApi* ort_api, OrtKernelContext* context) {
+    size_t input_count = 0;
+    ort_api->KernelContext_GetInputCount(context, &input_count);
+
+    EdgeShapes shapes(input_count);
+    for (size_t i = 0; i < input_count; ++i) {
+        const OrtValue* input_value = nullptr;
+        ort_api->KernelContext_GetInput(context, i, &input_value);
+        if (!input_value) continue;
+        OrtTensorTypeAndShapeInfo* shape_info = nullptr;
+        ort_api->GetTensorTypeAndShape(input_value, &shape_info);
+        if (!shape_info) continue;
+        size_t dim_count = 0;
+        ort_api->GetDimensionsCount(shape_info, &dim_count);
+        std::vector<int64_t> dims(dim_count);
+        ort_api->GetDimensions(shape_info, dims.data(), dim_count);
+        ort_api->ReleaseTensorTypeAndShapeInfo(shape_info);
+        auto& shape = shapes.GetMutableShape(i);
+        shape.resize(dim_count);
+        for (size_t d = 0; d < dim_count; ++d) {
+            shape[d] = dims[d] >= 0 ? static_cast<uint32_t>(dims[d]) : 0u;
+        }
+    }
+    return shapes;
+}
+
+// Hot-path variant of the above: refreshes `scratch` in place for the per-Compute shape-change
+// guard, allocating nothing and reading only inputs that can actually change.
+//   - `scratch` must already be seeded with the full per-input baseline (all slots, including
+//     constant inputs). Constant slots (is_constant[i]==true) are left untouched — a graph
+//     initializer's shape is frozen for the session, so its baseline is always current.
+//   - Only non-constant slots are re-read from the kernel context, overwritten in place.
+// After this returns, `scratch` holds the complete current shape set (fresh variable slots +
+// frozen constant slots), so it is both a correct comparison target against the baseline and a
+// complete shape source for the temp-kernel creation path on an actual change.
+static void RefreshVariableInputShapes(const OrtApi* ort_api,
+                                       OrtKernelContext* context,
+                                       const std::vector<bool>& input_is_constant,
+                                       EdgeShapes& scratch) {
+    const size_t input_count = scratch.EdgeCount();
+    for (size_t i = 0; i < input_count; ++i) {
+        if (i < input_is_constant.size() && input_is_constant[i]) continue;  // frozen: skip read
+        const OrtValue* input_value = nullptr;
+        ort_api->KernelContext_GetInput(context, i, &input_value);
+        auto& shape = scratch.GetMutableShape(i);
+        if (!input_value) { shape.clear(); continue; }
+        OrtTensorTypeAndShapeInfo* shape_info = nullptr;
+        ort_api->GetTensorTypeAndShape(input_value, &shape_info);
+        if (!shape_info) { shape.clear(); continue; }
+        size_t dim_count = 0;
+        ort_api->GetDimensionsCount(shape_info, &dim_count);
+        // Read dims into a stack buffer (tensor ranks are tiny) to stay allocation-free, then
+        // copy into the reused slot (resize is a no-op when the rank is unchanged, the common
+        // case). A heap fallback covers the pathological high-rank case without UB.
+        constexpr size_t kStackDims = 8;
+        int64_t stack_dims[kStackDims];
+        std::vector<int64_t> heap_dims;
+        int64_t* dims = stack_dims;
+        if (dim_count > kStackDims) { heap_dims.resize(dim_count); dims = heap_dims.data(); }
+        ort_api->GetDimensions(shape_info, dims, dim_count);
+        ort_api->ReleaseTensorTypeAndShapeInfo(shape_info);
+        shape.resize(dim_count);
+        for (size_t d = 0; d < dim_count; ++d) {
+            shape[d] = dims[d] >= 0 ? static_cast<uint32_t>(dims[d]) : 0u;
+        }
+    }
+}
+
 // ============================================================================
 // Profiling - compiled in only when /DDML_PERF_PROFILE is defined.
 // ============================================================================
@@ -3291,6 +3362,30 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Create(
         abi_kernel->default_attributes = state->default_attributes;
         abi_kernel->tensor_attribute_names = state->tensor_attribute_names;
 
+        // Build the per-input "is a graph constant/initializer" mask so the per-Compute
+        // shape-change guard can skip re-reading inputs whose shape is frozen for the session.
+        // KernelInfoGetConstantInput_tensor reports is_constant=1 for graph initializers (any
+        // model). Query it per input once here; on any API error, default that slot to
+        // non-constant (we re-read it — correct, just not optimized).
+        {
+            const OrtApi* kc_ort_api = state->ort_api;
+            size_t ki_input_count = 0;
+            if (kc_ort_api->KernelInfo_GetInputCount &&
+                kc_ort_api->KernelInfo_GetInputCount(kernel_info, &ki_input_count) == nullptr) {
+                abi_kernel->input_is_constant.assign(ki_input_count, false);
+                if (kc_ort_api->KernelInfoGetConstantInput_tensor) {
+                    for (size_t i = 0; i < ki_input_count; ++i) {
+                        int is_constant = 0;
+                        const OrtValue* cval = nullptr;
+                        OrtStatus* st = kc_ort_api->KernelInfoGetConstantInput_tensor(
+                            kernel_info, i, &is_constant, &cval);
+                        if (st) { kc_ort_api->ReleaseStatus(st); continue; }
+                        abi_kernel->input_is_constant[i] = (is_constant != 0);
+                    }
+                }
+            }
+        }
+
         // Store lazy initialization state
         abi_kernel->needs_lazy_init = needs_lazy_init;
         if (needs_lazy_init) {
@@ -3420,24 +3515,14 @@ static bool ConstantInputChanged(const TensorContent& last, IMLOperatorTensor* c
     return false;
 }
 
-OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
-    OrtKernelImpl* this_ptr,
-    OrtKernelContext* context
-) noexcept {
-    if (!this_ptr || !context) {
-        return nullptr;
-    }
-
-    try {
-        // Get the DmlAbiKernel from memory layout
-        DmlAbiKernel* kernel = GetDmlAbiKernelFromImpl(this_ptr);
-
-        DMLPERF_CTX(kernel);
-        DMLPERF_INC(compute_calls);
-
-        // If lazy initialization is needed, create the kernel now with runtime shapes (ABI-safe)
-        if (kernel->needs_lazy_init && !kernel->ml_operator_kernel) {
-            DMLPERF_INC(lazy_inits);
+// Lazy initialization: on the first Compute call, create the real ML operator kernel
+// from the concrete runtime input shapes, run the shape inferrer if required, and store
+// the created kernel + inferred output shapes + constant snapshot on `kernel`. Returns a
+// non-null OrtStatus* on error (to propagate); nullptr on success, after which the caller
+// continues to the shape-change / execute path with needs_lazy_init cleared.
+static OrtStatus* LazyInitializeKernel(DmlAbiKernel* kernel, OrtKernelContext* context) {
+    DMLPERF_CTX(kernel);
+    DMLPERF_INC(lazy_inits);
 
             if (!kernel->kernel_info) {
                 return kernel->ort_api->CreateStatus(ORT_FAIL,
@@ -3455,25 +3540,7 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
         DML_PERF_LOG("[ABI_SAFE] lazy-init triggered: op=", kernel->operator_name,
             "  ctx_input_count=", lazy_input_count, "\n");
 
-            EdgeShapes runtime_input_shapes(lazy_input_count);
-            for (size_t i = 0; i < lazy_input_count; ++i) {
-                const OrtValue* input_value = nullptr;
-                kernel->ort_api->KernelContext_GetInput(context, i, &input_value);
-                if (!input_value) continue;
-                OrtTensorTypeAndShapeInfo* shape_info = nullptr;
-                kernel->ort_api->GetTensorTypeAndShape(input_value, &shape_info);
-                if (!shape_info) continue;
-                size_t dim_count = 0;
-                kernel->ort_api->GetDimensionsCount(shape_info, &dim_count);
-                std::vector<int64_t> dims(dim_count);
-                kernel->ort_api->GetDimensions(shape_info, dims.data(), dim_count);
-                kernel->ort_api->ReleaseTensorTypeAndShapeInfo(shape_info);
-                auto& shape = runtime_input_shapes.GetMutableShape(i);
-                shape.resize(dim_count);
-                for (size_t d = 0; d < dim_count; ++d) {
-                    shape[d] = dims[d] >= 0 ? static_cast<uint32_t>(dims[d]) : 0u;
-                }
-            }
+            EdgeShapes runtime_input_shapes = ReadInputShapesIntoEdgeShapes(kernel->ort_api, context);
 
             // Fetch required constant CPU inputs via C API (matches the original internal OpKernel lazy-init flow).
             // Without this, operators like Reshape that need constant inputs at creation time will fail.
@@ -3675,6 +3742,9 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
         DML_PERF_LOG("[ABI_SAFE] lazy-init SUCCESS: op=", kernel->operator_name, "  kernel ready\n");
 
             kernel->input_shapes_of_kernel_inference = runtime_input_shapes;  // For shape-change detection
+            // Seed the reused scratch with the full baseline so constant slots are pre-filled; the
+            // hot-path guard then only overwrites non-constant slots in place.
+            kernel->shape_check_scratch = runtime_input_shapes;
 
             // Store the pre-computed constant snapshot for value-change detection on subsequent calls.
             // The snapshot was taken before lazy_constant_tensors was moved into creation_context
@@ -3735,38 +3805,30 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                     "  input[", ii, "]=[", idims_str, "]\n");
             }
 #endif
-        }
+    return nullptr;
+}
 
-        // Detect input shape changes between calls — matches the original internal OpKernel::Compute's
-        // local_input_shapes != m_inputShapesOfKernelInference check. Only applies when kernel
-        // was compiled for specific shapes (requires_input_shapes_at_creation) and lazy init ran.
-        DMLPERF_INC(shape_change_checks);
-        DMLPERF_T0(shp);
+// Shape/constant-change handling: if the kernel was compiled for specific input shapes and
+// the current shapes (or required constant-input values) differ, build and run a temporary
+// kernel for this one call, then discard it. Sets did_handle=true when it fully serviced the
+// Compute via the temporary kernel (caller must return immediately). Returns a non-null
+// OrtStatus* on error (to propagate); nullptr otherwise.
+static OrtStatus* HandleShapeOrConstantChange(DmlAbiKernel* kernel, OrtKernelContext* context, bool& did_handle) {
+    DMLPERF_CTX(kernel);
+    DMLPERF_INC(shape_change_checks);
+    DMLPERF_T0(shp);
+    did_handle = false;
         if (kernel->requires_input_shapes_at_creation &&
             kernel->input_shapes_of_kernel_inference.EdgeCount() > 0 &&
             !kernel->needs_lazy_init) {
 
-            size_t shape_input_count = 0;
-            kernel->ort_api->KernelContext_GetInputCount(context, &shape_input_count);
-            EdgeShapes current_shapes(shape_input_count);
-            for (size_t i = 0; i < shape_input_count; ++i) {
-                const OrtValue* input_value = nullptr;
-                kernel->ort_api->KernelContext_GetInput(context, i, &input_value);
-                if (!input_value) continue;
-                OrtTensorTypeAndShapeInfo* shape_info = nullptr;
-                kernel->ort_api->GetTensorTypeAndShape(input_value, &shape_info);
-                if (!shape_info) continue;
-                size_t dim_count = 0;
-                kernel->ort_api->GetDimensionsCount(shape_info, &dim_count);
-                std::vector<int64_t> dims(dim_count);
-                kernel->ort_api->GetDimensions(shape_info, dims.data(), dim_count);
-                kernel->ort_api->ReleaseTensorTypeAndShapeInfo(shape_info);
-                auto& shape = current_shapes.GetMutableShape(i);
-                shape.resize(dim_count);
-                for (size_t d = 0; d < dim_count; ++d) {
-                    shape[d] = dims[d] >= 0 ? static_cast<uint32_t>(dims[d]) : 0u;
-                }
-            }
+            // Refresh only the non-constant input slots in the reused scratch (zero-alloc; skips
+            // graph-constant inputs whose shape is frozen for the session). Constant slots keep
+            // their seeded baseline value, so `current_shapes` holds the complete current shape
+            // set — a correct comparison target AND a complete source for the temp-kernel path.
+            RefreshVariableInputShapes(kernel->ort_api, context,
+                                       kernel->input_is_constant, kernel->shape_check_scratch);
+            EdgeShapes& current_shapes = kernel->shape_check_scratch;
 
             // Check shapes first (cheap comparison). Only collect constant tensors if shapes
             // changed or constant-change detection is needed. This avoids ~15 C API calls +
@@ -3778,8 +3840,22 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             bool required_cpu_inputs_changed = false;
             std::unordered_map<uint32_t, Microsoft::WRL::ComPtr<IMLOperatorTensor>> tmp_constant_tensors;
 
-            auto collectConstantTensors = [&]() {
+            // True when the input is a genuine graph initializer (value frozen for the session).
+            // KernelInfoGetConstantInput_tensor returns is_constant=0 for computed-constants (shape
+            // params produced by an upstream op), so those are NOT treated as frozen and are still
+            // re-checked every call.
+            auto isFrozenConstant = [&](uint32_t input_index) -> bool {
+                return input_index < kernel->input_is_constant.size() &&
+                       kernel->input_is_constant[input_index];
+            };
+
+            // When skip_frozen is true (the value-change-detection path), frozen-initializer inputs
+            // are skipped — their value cannot change, so collecting + comparing them is pure waste.
+            // When false (the shapes-changed path building the temp kernel), ALL required constants
+            // must be collected.
+            auto collectConstantTensors = [&](bool skip_frozen) {
                 for (uint32_t input_index : kernel->required_constant_cpu_inputs) {
+                    if (skip_frozen && isFrozenConstant(input_index)) continue;
                     int is_constant = 0;
                     const OrtValue* constant_value = nullptr;
                     OrtStatus* get_status = kernel->ort_api->KernelInfoGetConstantInput_tensor(
@@ -3808,9 +3884,11 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             };
 
             if (!shapes_changed && !kernel->constant_input_tensor_contents.empty()) {
-                // Shapes unchanged — only check if constant values changed
-                collectConstantTensors();
+                // Shapes unchanged — only check whether a NON-frozen constant value changed.
+                // Frozen initializers (is_constant=1) can't change, so skip collecting/comparing them.
+                collectConstantTensors(/*skip_frozen=*/true);
                 for (uint32_t input_index : kernel->required_constant_cpu_inputs) {
+                    if (isFrozenConstant(input_index)) continue;
                     if (input_index >= kernel->constant_input_tensor_contents.size()) continue;
                     auto it = tmp_constant_tensors.find(input_index);
                     IMLOperatorTensor* current_tensor = (it != tmp_constant_tensors.end()) ? it->second.Get() : nullptr;
@@ -3822,9 +3900,12 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
             }
 
             if (shapes_changed || required_cpu_inputs_changed) {
-                // Collect constants for the temporary kernel if not already done
-                if (shapes_changed && tmp_constant_tensors.empty() && !kernel->required_constant_cpu_inputs.empty()) {
-                    collectConstantTensors();
+                // The temp kernel needs ALL required constants (including frozen initializers).
+                // The value-change path above may have collected only the non-frozen subset
+                // (skip_frozen=true), so (re)collect everything here. collectConstantTensors fills
+                // the map by input index, so this backfills frozen entries without duplicating work.
+                if (!kernel->required_constant_cpu_inputs.empty()) {
+                    collectConstantTensors(/*skip_frozen=*/false);
                 }
                 auto tensor_attr_cache_tmp = FetchAllTensorAttributes(
                     kernel->kernel_info, kernel->ort_api, kernel->tensor_attribute_names);
@@ -3924,10 +4005,42 @@ OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
                 }
                 DMLPERF_INC(shape_changes_detected);
                 DMLPERF_ADD(ns_shape_change_check, shp);
+                did_handle = true;
                 return nullptr;
             }
 
             DMLPERF_ADD(ns_shape_change_check, shp);
+        }
+    return nullptr;
+}
+
+OrtStatus* ORT_API_CALL DmlAbiKernel_Compute(
+    OrtKernelImpl* this_ptr,
+    OrtKernelContext* context
+) noexcept {
+    if (!this_ptr || !context) {
+        return nullptr;
+    }
+
+    try {
+        // Get the DmlAbiKernel from memory layout
+        DmlAbiKernel* kernel = GetDmlAbiKernelFromImpl(this_ptr);
+
+        DMLPERF_CTX(kernel);
+        DMLPERF_INC(compute_calls);
+
+        // If lazy initialization is needed, create the kernel now with runtime shapes (ABI-safe).
+        if (kernel->needs_lazy_init && !kernel->ml_operator_kernel) {
+            if (OrtStatus* st = LazyInitializeKernel(kernel, context)) return st;
+        }
+
+        // Detect input shape / constant changes between calls. When the current shapes or
+        // required constant values differ from what the kernel was compiled for, this runs a
+        // temporary kernel for the call and signals did_handle so we return immediately.
+        {
+            bool did_handle = false;
+            if (OrtStatus* st = HandleShapeOrConstantChange(kernel, context, did_handle)) return st;
+            if (did_handle) return nullptr;
         }
 
         // Create ABI-safe kernel context

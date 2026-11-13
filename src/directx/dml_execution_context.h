@@ -51,6 +51,13 @@ public:
     void ExecuteCommandList(ID3D12GraphicsCommandList* commandList, _Outptr_ ID3D12Fence** fence,
                             _Out_ uint64_t* completionValue);
 
+    // Reserve a persistent descriptor range from the recorder's shared pool (command-list
+    // reuse). The range shares the recorder's heap, so binding it causes no heap switch.
+    DescriptorRange ReservePersistentDescriptors(uint32_t numDescriptors)
+    {
+        return m_dmlRecorder.ReservePersistentDescriptors(numDescriptors);
+    }
+
     void AddUAVBarrier();
     void ResourceBarrier(gsl::span<const D3D12_RESOURCE_BARRIER> barriers);
 

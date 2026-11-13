@@ -401,14 +401,6 @@ static OrtStatus* ORT_API_CALL QuickGelu_Compute(
     }
 }
 
-static void ORT_API_CALL QuickGelu_ReleaseState(
-    OrtNodeComputeInfo* /*this_ptr*/,
-    void* compute_state) noexcept
-{
-    delete static_cast<QuickGeluKernelState*>(compute_state);
-}
-
-
 // ---------------------------------------------------------------------------
 // OrtNodeComputeInfo wrapper that carries the kernel state
 // ---------------------------------------------------------------------------

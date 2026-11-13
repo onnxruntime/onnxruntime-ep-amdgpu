@@ -834,6 +834,256 @@ static bool HasTranslator(const OpTranslatorRegistry& reg,
     return op_type && reg.find(op_type) != reg.end();
 }
 
+void ExecutionProviderPlugin::ApplyTier2FusionAndPerOpFallback(
+    const OrtGraph* graph,
+    OrtEpGraphSupportInfo* graph_support_info,
+    const std::vector<const OrtNode*>& nodesInTopologicalOrder,
+    const std::unordered_set<size_t>& cpuPreferredNodes,
+    const std::unordered_set<size_t>& excludedNodeIds,
+    uint32_t deviceDataTypeMask) {
+    // Run graph-level fusions in a single greedy pass (largest pattern wins). Each
+    // matched fusion group is submitted to ORT via AddNodesToFuse and routed through
+    // CompileImpl(). fusedNodeIds collects the claimed IDs so the single-node loop
+    // below skips them. Build the anchor index once per session and store it — the
+    // IFusionRule objects it owns are referenced by raw pointer in FusionMatch and
+    // must outlive m_fusionMap. ApplyFusions excludes both CPU-preferred and already-
+    // Tier-0-claimed nodes; excludedNodeIds is empty when no Tier-0 partition was claimed.
+    std::unordered_set<size_t> excluded = cpuPreferredNodes;
+    excluded.insert(excludedNodeIds.begin(), excludedNodeIds.end());
+
+    m_anchorIndex = EpFusionManager::BuildAnchorIndex(m_executionProvider->IsMcdmDevice());
+    m_fusionMap.clear();
+
+    std::unordered_set<size_t> fusedNodeIds;
+    EpFusionManager::ApplyFusions(
+        m_anchorIndex,
+        ort_api,
+        ep_api,
+        graph,
+        graph_support_info,
+        m_graphInitializerMap,
+        [this, graph_support_info](const OrtNode* n, uint32_t mask) {
+            return IsNodeSupportedByDml(n, graph_support_info, mask);
+        },
+        excluded,
+        deviceDataTypeMask,
+        fusedNodeIds,
+        m_fusionMap);
+
+    for (const OrtNode* node : nodesInTopologicalOrder) {
+        size_t nodeID = 0;
+        ort_api.Node_GetId(node, &nodeID);
+        if (excludedNodeIds.count(nodeID)) continue;
+        if (fusedNodeIds.count(nodeID)) continue;
+        if (cpuPreferredNodes.count(nodeID)) continue;
+        if (!IsNodeSupportedByDml(node, graph_support_info, deviceDataTypeMask)) continue;
+        ep_api.EpGraphSupportInfo_AddSingleNode(graph_support_info, node);
+    }
+}
+
+// ===========================================================================
+// TierZeroPartitioner — the shape-resolution + partition-claiming engine behind
+// GetCapabilityImpl. Holds the two shared accumulator maps (resolved_shapes,
+// resolved_values), the Stage-C dirty-tracking set, and the claimed-node set, and
+// exposes the shape helpers (formerly lambdas) as private methods so the four
+// phases can share them without threading state through signatures. All phase
+// bodies are verbatim moves of the original inline code — see the per-phase banners.
+// ===========================================================================
+class TierZeroPartitioner {
+public:
+    TierZeroPartitioner(ExecutionProviderPlugin* ep,
+                        const OrtGraph* graph,
+                        OrtEpGraphSupportInfo* graph_support_info,
+                        const std::vector<const OrtNode*>& nodesInTopologicalOrder,
+                        const std::unordered_set<size_t>& cpuPreferredNodes,
+                        uint32_t deviceDataTypeMask)
+        : ep(ep), graph(graph), graph_support_info(graph_support_info),
+          nodesInTopologicalOrder(nodesInTopologicalOrder),
+          cpuPreferredNodes(cpuPreferredNodes),
+          deviceDataTypeMask(deviceDataTypeMask),
+          tier0_registry(BuildOpTranslatorRegistry()) {}
+
+    std::unordered_map<std::string, std::vector<int64_t>>& resolvedShapes() { return resolved_shapes; }
+    const std::unordered_set<size_t>& claimedNodeIds() const { return tier0ClaimedNodeIds; }
+
+    void SeedResolvedValuesFromInitializers();
+    void ResolveShapesToFixpoint();                       // PHASE 1 (incl. Stage C inference)
+    void GroupAndClaimStaticPartitions(bool useRuntimeFusion);  // PHASE 2 + 3
+    void ClaimDynamicPartitions();                        // PHASE 4
+
+private:
+    struct PartitionGroup {
+        bool finalized = false;
+        bool claimed = false;
+        std::vector<const OrtNode*> nodes;
+    };
+
+    // --- shared shape helpers (formerly lambdas inside GetCapabilityImpl) ---
+    const std::vector<int64_t>* CachedStaticDims(const std::string& name);
+    std::vector<int64_t> GetStaticDims(const OrtValueInfo* vi);
+    bool HasDynamicShape(const OrtValueInfo* vi, const std::string& edge_name);
+    bool NeedsShapeResolution(const OrtValueInfo* vi);
+    void SetResolvedDims(const OrtValueInfo* vi, const std::vector<int64_t>& dims);
+    std::vector<float> GetInitializerFloats(const std::string& name, size_t expected_count);
+    const std::vector<float>* GetResolvedValues(const std::string& name);
+
+    ExecutionProviderPlugin* ep;
+    const OrtGraph* graph;
+    OrtEpGraphSupportInfo* graph_support_info;
+    const std::vector<const OrtNode*>& nodesInTopologicalOrder;
+    const std::unordered_set<size_t>& cpuPreferredNodes;
+    uint32_t deviceDataTypeMask;
+    OpTranslatorRegistry tier0_registry;
+
+    std::unordered_map<std::string, std::vector<int64_t>> resolved_shapes;
+    std::unordered_map<std::string, std::vector<float>> resolved_values;
+    std::unordered_set<size_t> shape_infer_done;   // Stage-C: nodes already authoritatively inferred
+    std::unordered_set<size_t> tier0ClaimedNodeIds;
+};
+
+// --- shape helpers (bodies verbatim from the original inline lambdas) ---
+
+const std::vector<int64_t>* TierZeroPartitioner::CachedStaticDims(const std::string& name) {
+    if (name.empty()) return nullptr;
+    auto it = resolved_shapes.find(name);
+    if (it == resolved_shapes.end() || it->second.empty()) return nullptr;
+    for (int64_t d : it->second) if (d <= 0) return nullptr;
+    return &it->second;
+}
+
+std::vector<int64_t> TierZeroPartitioner::GetStaticDims(const OrtValueInfo* vi) {
+    if (!vi) return {};
+    // Check ORT metadata first.
+    fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ep->ort_api, vi);
+    if (s.has_type_info && s.has_shape && s.rank > 0) {
+        bool all_static = true;
+        for (auto d : s.dims) if (d < 0) { all_static = false; break; }
+        if (all_static) return s.dims;
+    }
+    // Fallback: trust an authoritative (all-positive) resolved_shapes entry.
+    if (auto* dims = CachedStaticDims(fusion_utils::GetValueInfoName(ep->ort_api, vi)))
+        return *dims;
+    return {};
+}
+
+bool TierZeroPartitioner::HasDynamicShape(const OrtValueInfo* vi, const std::string& edge_name) {
+    if (edge_name.empty()) return false;  // (1) absent optional slot
+    if (!vi) return true;                 // named but null -> unresolved edge
+    fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ep->ort_api, vi);
+    if (!s.has_type_info) return true;    // named real edge with no type -> dynamic
+    if (s.has_shape) {                    // (2) live VI carries a shape
+        if (s.rank == 0) return false;            // scalar — static
+        bool vi_dynamic = false;
+        for (auto d : s.dims) if (d < 0) { vi_dynamic = true; break; }
+        if (!vi_dynamic) return false;            // fully static
+        return CachedStaticDims(edge_name) == nullptr;  // (3) dynamic unless resolved
+    }
+    return false;                         // (4) no shape -> not dynamic
+}
+
+bool TierZeroPartitioner::NeedsShapeResolution(const OrtValueInfo* vi) {
+    if (!vi) return true;
+    fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ep->ort_api, vi);
+    if (!s.has_type_info || !s.has_shape) return true;  // unresolved -> try to resolve
+    if (s.rank == 0) return false;                      // true scalar — static
+    for (auto d : s.dims) if (d < 0) return true;       // positively dynamic -> resolve
+    return false;                                       // already fully static -> skip
+}
+
+void TierZeroPartitioner::SetResolvedDims(const OrtValueInfo* vi, const std::vector<int64_t>& dims) {
+    if (!vi || dims.empty()) return;
+    // TODO(abi-safety): this reaches into OrtTypeInfo/OrtTensorTypeAndShapeInfo
+    // internal layout to obtain a MUTABLE shape-info for SetDimensions. Unlike
+    // the read sites, this cannot move to the C-API: GetValueInfoTypeInfo /
+    // CastTypeInfoToTensorInfo return only `const OrtTensorTypeAndShapeInfo*`,
+    // and there is no C-API to set a ValueInfo's shape. Blocked until such an
+    // accessor exists; the internal write is safe only because the plugin owns
+    // the object's layout (embeds ORT's graph code). See feedback_abi_safe_only.
+    auto* ti = vi->GetTypeInfo();
+    if (ti && ti->tensor_type_info) {
+        auto* si = const_cast<OrtTensorTypeAndShapeInfo*>(ti->tensor_type_info.get());
+        ep->ort_api.SetDimensions(si, dims.data(), dims.size());
+    }
+    auto name = fusion_utils::GetValueInfoName(ep->ort_api,vi);
+    if (!name.empty()) {
+        resolved_shapes[name] = dims;
+        DML_PERF_LOG("[ShapeResolve] SetResolvedDims: '", name, "' = [");
+        for (size_t d = 0; d < dims.size(); ++d) DML_PERF_LOG(d>0?",":"", dims[d]);
+        DML_PERF_LOG("]\n");
+    }
+}
+
+std::vector<float> TierZeroPartitioner::GetInitializerFloats(const std::string& name, size_t expected_count) {
+    auto it = ep->m_graphInitializerMap.find(name);
+    if (it == ep->m_graphInitializerMap.end()) return {};
+    OrtTensorTypeAndShapeInfo* info = nullptr;
+    ep->ort_api.GetTensorTypeAndShape(it->second, &info);
+    if (!info) return {};
+    size_t count = 0;
+    DML_EP_RELEASE_IGNORED_STATUS(ep->ort_api, ep->ort_api.GetTensorShapeElementCount(info, &count));
+    ep->ort_api.ReleaseTensorTypeAndShapeInfo(info);
+    if (count != expected_count) return {};
+    void* raw = nullptr;
+    OrtStatus* st = ep->ort_api.GetTensorMutableData(const_cast<OrtValue*>(it->second), &raw);
+    if (st) { ep->ort_api.ReleaseStatus(st); return {}; }
+    if (!raw) return {};
+    auto* data = static_cast<const float*>(raw);
+    return std::vector<float>(data, data + count);
+}
+
+const std::vector<float>* TierZeroPartitioner::GetResolvedValues(const std::string& name) {
+    auto it = resolved_values.find(name);
+    return it != resolved_values.end() ? &it->second : nullptr;
+}
+
+void TierZeroPartitioner::SeedResolvedValuesFromInitializers() {
+    for (auto& [name, val] : ep->m_graphInitializerMap) {
+        OrtTensorTypeAndShapeInfo* info = nullptr;
+        ep->ort_api.GetTensorTypeAndShape(val, &info);
+        if (!info) continue;
+        size_t count = 0;
+        DML_EP_RELEASE_IGNORED_STATUS(ep->ort_api, ep->ort_api.GetTensorShapeElementCount(info, &count));
+        ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+        ep->ort_api.GetTensorElementType(info, &dt);
+        ep->ort_api.ReleaseTensorTypeAndShapeInfo(info);
+        if (count == 0 || count > 64) continue;
+        void* raw = nullptr;
+        OrtStatus* st = ep->ort_api.GetTensorMutableData(const_cast<OrtValue*>(val), &raw);
+        if (st) { ep->ort_api.ReleaseStatus(st); continue; }
+        if (!raw) continue;
+        std::vector<float> fvals(count);
+        if (dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            auto* p = static_cast<const float*>(raw);
+            fvals.assign(p, p + count);
+        } else if (dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+            auto* p = static_cast<const int64_t*>(raw);
+            for (size_t i = 0; i < count; ++i) fvals[i] = static_cast<float>(p[i]);
+        } else if (dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+            auto* p = static_cast<const int32_t*>(raw);
+            for (size_t i = 0; i < count; ++i) fvals[i] = static_cast<float>(p[i]);
+        } else if (dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+            auto* p = static_cast<const uint16_t*>(raw);
+            for (size_t i = 0; i < count; ++i) {
+                uint16_t h = p[i];
+                uint32_t sign = (h >> 15) & 1;
+                uint32_t exp = (h >> 10) & 0x1F;
+                uint32_t man = h & 0x3FF;
+                uint32_t f;
+                if (exp == 0) f = (sign << 31) | (man ? ((man << 13) | 0x38000000) : 0);
+                else if (exp == 31) f = (sign << 31) | 0x7F800000 | (man << 13);
+                else f = (sign << 31) | ((exp + 112) << 23) | (man << 13);
+                memcpy(&fvals[i], &f, 4);
+            }
+        } else if (dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE) {
+            auto* p = static_cast<const double*>(raw);
+            for (size_t i = 0; i < count; ++i) fvals[i] = static_cast<float>(p[i]);
+        } else {
+            continue;
+        }
+        resolved_values[name] = std::move(fvals);
+    }
+}
+
 OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_ptr, const OrtGraph* graph,
                                                                  OrtEpGraphSupportInfo* graph_support_info) noexcept {
     try {
@@ -889,247 +1139,67 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         std::unordered_set<size_t> cpuPreferredNodes = ep->GetCpuPreferredNodes(graph, graph_support_info, tentativeNodes);
 
         // -----------------------------------------------------------------------
-        // Resolve dynamic output shapes for Upsample/Resize nodes and propagate
-        // through downstream ops.  ORT's shape inference gives up when Upsample's
-        // scales input is computed at runtime (via Shape→Gather→Cast→Slice→Mul),
-        // leaving Upsample's output and all downstream nodes with unknown shapes.
-        // Since the scales are constant initializers and input shapes are static,
-        // we can compute the output shapes ourselves and propagate them so that
-        // ValidateTier0 accepts these nodes for Tier-0 graph fusion.
-        //
-        // resolved_shapes is declared outside the block so it remains accessible
-        // when ValidateTier0 is called below (producer/consumer OrtValueInfo*
-        // objects are different instances, so SetDimensions on the producer is not
-        // visible to ValidateTier0 reading the consumer; the map is the bridge).
+        // Tier-0 shape resolution + partition claiming, via TierZeroPartitioner.
+        // It owns the resolved_shapes/resolved_values accumulators + the shape helpers
+        // shared across phases:
+        //   PHASE 1  ResolveShapesToFixpoint       — recover dynamic Upsample/Resize
+        //                                            output shapes + run each node's own
+        //                                            shape inferrer (Stage C).
+        //   PHASE 2+3 GroupAndClaimStaticPartitions — static shape-aware grouping + claim.
+        //   PHASE 4  ClaimDynamicPartitions         — runtime-fusion deferred claim.
+        // Static Phase 2/3 are skipped when runtime fusion is active (the dynamic path
+        // then owns the whole graph).
         // -----------------------------------------------------------------------
-        std::unordered_map<std::string, std::vector<int64_t>> resolved_shapes;
-        bool tier0_claimed = false;
-        // Set true when Phase-4 (runtime-fusion) claims a dynamic partition. Static
-        // Phase-3 sets tier0_claimed; Phase-4 sets this. Either being true routes the
-        // Tier-2/Tier-1 fallback through the exclusion-aware path so already-claimed
-        // nodes are not double-claimed. See the branch at "if (!tier0_claimed ...)".
-        bool dynamic_claimed = false;
-        std::unordered_set<size_t> tier0ClaimedNodeIds;
-        {
-
-            // A resolved_shapes entry is trustworthy only if it exists, is non-empty, and
-            // every dim is > 0 (the map can hold a <= 0 placeholder). Returns the dims if
-            // so, else nullptr. Consistency with the live VI (rank, concrete dims) is
-            // enforced at the WRITE side (see PublishResolvedShape / ExportDims), so readers
-            // can trust any all-positive entry without re-checking.
-            auto CachedStaticDims = [&](const std::string& name) -> const std::vector<int64_t>* {
-                if (name.empty()) return nullptr;
-                auto it = resolved_shapes.find(name);
-                if (it == resolved_shapes.end() || it->second.empty()) return nullptr;
-                for (int64_t d : it->second) if (d <= 0) return nullptr;
-                return &it->second;
-            };
-
-            // Helper: get static dims from a node's input/output ValueInfo.
-            // Returns empty vector if shape is missing or has any dynamic dim.
-            // Falls back to resolved_shapes map (via CachedStaticDims).
-            auto GetStaticDims = [&](const OrtValueInfo* vi) -> std::vector<int64_t> {
-                if (!vi) return {};
-                // Check ORT metadata first.
-                fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ep->ort_api, vi);
-                if (s.has_type_info && s.has_shape && s.rank > 0) {
-                    bool all_static = true;
-                    for (auto d : s.dims) if (d < 0) { all_static = false; break; }
-                    if (all_static) return s.dims;
-                }
-                // Fallback: trust an authoritative (all-positive) resolved_shapes entry.
-                if (auto* dims = CachedStaticDims(fusion_utils::GetValueInfoName(ep->ort_api, vi)))
-                    return *dims;
-                return {};
-            };
-
-            // Is this input/output slot a dynamic-shape partition boundary?
-            // `edge_name` is the slot's ONNX edge name (from GetNodeInput/OutputNames).
-            //   1. Empty edge name -> absent optional input (e.g. Resize's roi): no shape
-            //      to be dynamic -> NOT a boundary.
-            //   2. Live VI carries a fully-static shape (incl. rank-0 scalar) -> NOT dynamic.
-            //   3. VI reports a negative dim: dynamic, UNLESS the shape fixpoint has computed
-            //      a concrete shape into resolved_shapes (the plugin's VIs arrive with -1
-            //      dims; resolved_shapes is where its fixpoint stores the real shapes).
-            //      Fabricated/inconsistent shapes are rejected at the WRITE side, so a cache
-            //      hit here is trustworthy.
-            //   4. VI has no shape yet: not treated as dynamic (ORT often fails to propagate
-            //      shape to a consumer-side VI); default NOT dynamic.
-            auto HasDynamicShape = [&](const OrtValueInfo* vi, const std::string& edge_name) -> bool {
-                if (edge_name.empty()) return false;  // (1) absent optional slot
-                if (!vi) return true;                 // named but null -> unresolved edge
-                fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ep->ort_api, vi);
-                if (!s.has_type_info) return true;    // named real edge with no type -> dynamic
-                if (s.has_shape) {                    // (2) live VI carries a shape
-                    if (s.rank == 0) return false;            // scalar — static
-                    bool vi_dynamic = false;
-                    for (auto d : s.dims) if (d < 0) { vi_dynamic = true; break; }
-                    if (!vi_dynamic) return false;            // fully static
-                    return CachedStaticDims(edge_name) == nullptr;  // (3) dynamic unless resolved
-                }
-                return false;                         // (4) no shape -> not dynamic
-            };
-
-            // Resolver gate — distinct from the boundary HasDynamicShape above. The
-            // Upsample/Resize resolver must run on any output not already fully static
-            // (missing shape OR a negative dim) so the fixpoint can propagate shapes
-            // forward one node per iteration. HasDynamicShape must NOT be reused here: it
-            // treats a missing shape as "not dynamic", which would make the resolver skip
-            // every not-yet-resolved node and stall the fixpoint. Writes are still guarded
-            // by GetStaticDims(in_vis[0]) (static input required), so a genuinely dynamic
-            // node cannot fabricate a shape.
-            auto NeedsShapeResolution = [&](const OrtValueInfo* vi) -> bool {
-                if (!vi) return true;
-                fusion_utils::ValueInfoShape s = fusion_utils::GetValueInfoShape(ep->ort_api, vi);
-                if (!s.has_type_info || !s.has_shape) return true;  // unresolved -> try to resolve
-                if (s.rank == 0) return false;                      // true scalar — static
-                for (auto d : s.dims) if (d < 0) return true;       // positively dynamic -> resolve
-                return false;                                       // already fully static -> skip
-            };
-
-            // Helper: mutate a ValueInfo's shape to resolved static dims.
-            auto SetResolvedDims = [&](const OrtValueInfo* vi, const std::vector<int64_t>& dims) {
-                if (!vi || dims.empty()) return;
-                // TODO(abi-safety): this reaches into OrtTypeInfo/OrtTensorTypeAndShapeInfo
-                // internal layout to obtain a MUTABLE shape-info for SetDimensions. Unlike
-                // the read sites, this cannot move to the C-API: GetValueInfoTypeInfo /
-                // CastTypeInfoToTensorInfo return only `const OrtTensorTypeAndShapeInfo*`,
-                // and there is no C-API to set a ValueInfo's shape. Blocked until such an
-                // accessor exists; the internal write is safe only because the plugin owns
-                // the object's layout (embeds ORT's graph code). See feedback_abi_safe_only.
-                auto* ti = vi->GetTypeInfo();
-                if (ti && ti->tensor_type_info) {
-                    auto* si = const_cast<OrtTensorTypeAndShapeInfo*>(ti->tensor_type_info.get());
-                    ep->ort_api.SetDimensions(si, dims.data(), dims.size());
-                }
-                auto name = fusion_utils::GetValueInfoName(ep->ort_api,vi);
-                if (!name.empty()) {
-                    resolved_shapes[name] = dims;
-                    DML_PERF_LOG("[ShapeResolve] SetResolvedDims: '", name, "' = [");
-                    for (size_t d = 0; d < dims.size(); ++d) DML_PERF_LOG(d>0?",":"", dims[d]);
-                    DML_PERF_LOG("]\n");
-                }
-            };
-
-            // Helper: read float data from a constant initializer.
-            auto GetInitializerFloats = [&](const std::string& name, size_t expected_count) -> std::vector<float> {
-                auto it = ep->m_graphInitializerMap.find(name);
-                if (it == ep->m_graphInitializerMap.end()) return {};
-                OrtTensorTypeAndShapeInfo* info = nullptr;
-                ep->ort_api.GetTensorTypeAndShape(it->second, &info);
-                if (!info) return {};
-                size_t count = 0;
-                DML_EP_RELEASE_IGNORED_STATUS(ep->ort_api, ep->ort_api.GetTensorShapeElementCount(info, &count));
-                ep->ort_api.ReleaseTensorTypeAndShapeInfo(info);
-                if (count != expected_count) return {};
-                void* raw = nullptr;
-                OrtStatus* st = ep->ort_api.GetTensorMutableData(const_cast<OrtValue*>(it->second), &raw);
-                if (st) { ep->ort_api.ReleaseStatus(st); return {}; }
-                if (!raw) return {};
-                auto* data = static_cast<const float*>(raw);
-                return std::vector<float>(data, data + count);
-            };
-
-            // Statically evaluate cpuPreferred chain nodes (Shape→Gather→Cast→
-            // Slice→Mul→Cast) to compute Upsample/Resize scales, then resolve
-            // output shapes and propagate downstream.
-            //
-            // resolved_values: tensor name → float values (small tensors, typically 4 elements).
-            // Stores computed results for cpuPreferred chain nodes.
-            std::unordered_map<std::string, std::vector<float>> resolved_values;
-
-            // Seed resolved_values from graph initializers.
-            for (auto& [name, val] : ep->m_graphInitializerMap) {
-                OrtTensorTypeAndShapeInfo* info = nullptr;
-                ep->ort_api.GetTensorTypeAndShape(val, &info);
-                if (!info) continue;
-                size_t count = 0;
-                DML_EP_RELEASE_IGNORED_STATUS(ep->ort_api, ep->ort_api.GetTensorShapeElementCount(info, &count));
-                ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-                ep->ort_api.GetTensorElementType(info, &dt);
-                ep->ort_api.ReleaseTensorTypeAndShapeInfo(info);
-                if (count == 0 || count > 64) continue;
-                void* raw = nullptr;
-                OrtStatus* st = ep->ort_api.GetTensorMutableData(const_cast<OrtValue*>(val), &raw);
-                if (st) { ep->ort_api.ReleaseStatus(st); continue; }
-                if (!raw) continue;
-                std::vector<float> fvals(count);
-                if (dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-                    auto* p = static_cast<const float*>(raw);
-                    fvals.assign(p, p + count);
-                } else if (dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-                    auto* p = static_cast<const int64_t*>(raw);
-                    for (size_t i = 0; i < count; ++i) fvals[i] = static_cast<float>(p[i]);
-                } else if (dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
-                    auto* p = static_cast<const int32_t*>(raw);
-                    for (size_t i = 0; i < count; ++i) fvals[i] = static_cast<float>(p[i]);
-                } else if (dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-                    auto* p = static_cast<const uint16_t*>(raw);
-                    for (size_t i = 0; i < count; ++i) {
-                        uint16_t h = p[i];
-                        uint32_t sign = (h >> 15) & 1;
-                        uint32_t exp = (h >> 10) & 0x1F;
-                        uint32_t man = h & 0x3FF;
-                        uint32_t f;
-                        if (exp == 0) f = (sign << 31) | (man ? ((man << 13) | 0x38000000) : 0);
-                        else if (exp == 31) f = (sign << 31) | 0x7F800000 | (man << 13);
-                        else f = (sign << 31) | ((exp + 112) << 23) | (man << 13);
-                        memcpy(&fvals[i], &f, 4);
-                    }
-                } else if (dt == ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE) {
-                    auto* p = static_cast<const double*>(raw);
-                    for (size_t i = 0; i < count; ++i) fvals[i] = static_cast<float>(p[i]);
-                } else {
-                    continue;
-                }
-                resolved_values[name] = std::move(fvals);
-            }
-
-            // Helper: look up resolved values for a tensor name.
-            auto GetResolvedValues = [&](const std::string& name) -> const std::vector<float>* {
-                auto it = resolved_values.find(name);
-                return it != resolved_values.end() ? &it->second : nullptr;
-            };
-
-            // Initial Upsample resolution pass is inside the iterative loop below.
-
-        // -----------------------------------------------------------------------
-        // Tier-0 multi-partition graph fusion: walk nodes in topological order and
-        // build DML partitions using a merge-based algorithm (mirrors ORT's
-        // BuildPartitions). Nodes with no translator or that are CPU-preferred are
-        // "boundary" nodes: they finalize upstream open partitions. DML-fuseable
-        // nodes extend or start partitions, merging any open upstream partitions
-        // their inputs come from.  Each resulting partition is claimed via a
-        // separate AddNodesToFuse call, enabling BERT/LLM models that contain
-        // Shape/Size/GRU/LSTM/RNN boundary ops to still fuse the rest.
-        // -----------------------------------------------------------------------
-
         ep->m_tier0GroupHashes.clear();
 
-        // Tier-0 fusion runs for all models, including those with dynamic input dims.
-        // Eligibility is decided per-group: Phase 1 resolves shapes to a fixpoint, Phase 2
-        // cuts partitions at dynamic-shape boundaries, and Phase 3 skips any group that
-        // fails ValidateTier0 — so a whole-route static-input gate is unnecessary.
-        {
-            OpTranslatorRegistry tier0_registry = BuildOpTranslatorRegistry();
+        const bool useRuntimeFusion = ep->GraphCaptureEnabled() || RuntimeFusionEnabled();
 
-            // ===================================================================
-            // PHASE 1 — Resolve shapes to a fixpoint. NO claiming happens here.
-            //
-            // The grouper (Phase 2) treats dynamic shape as a partition boundary,
-            // so it needs shapes resolved BEFORE it runs. Each iteration runs the
-            // Upsample/Resize value+shape resolution pass, then a graph-wide
-            // TryTranslateNodes forward-propagation whose write-back seeds output
-            // shapes for the remaining ops. Loop until resolved_shapes /
-            // resolved_values stop growing (bounded at 10). TryTranslateNodes only
-            // COMPUTES shapes here — it does not fuse (fusion is AddNodesToFuse in
-            // Phase 3), so running it graph-wide is side-effect-free besides shape
-            // export.
-            // ===================================================================
-            // Stage C dirty-tracking: once a node's outputs are authoritatively inferred,
-            // never re-run its (allocation-heavy) inferrer again. Bounds Stage C cost to
-            // ~O(nodes) total instead of O(nodes * iterations) on large graphs.
-            std::unordered_set<size_t> shape_infer_done;
+        TierZeroPartitioner partitioner(ep, graph, graph_support_info,
+                                        nodesInTopologicalOrder, cpuPreferredNodes, deviceDataTypeMask);
+        partitioner.SeedResolvedValuesFromInitializers();
+        partitioner.ResolveShapesToFixpoint();
+        partitioner.GroupAndClaimStaticPartitions(useRuntimeFusion);
+        if (useRuntimeFusion)
+            partitioner.ClaimDynamicPartitions();
+
+        const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes = partitioner.resolvedShapes();
+        const std::unordered_set<size_t>& tier0ClaimedNodeIds = partitioner.claimedNodeIds();
+
+        // Update m_resolvedShapes with shapes accumulated from successful
+        // TryTranslateNodes calls so CompileImpl can seed BuildSubgraphInfo.
+        ep->m_resolvedShapes = resolved_shapes;
+
+        // Claim any node not already in a Tier-0 partition via Tier-2 pattern fusions,
+        // then per-op (Tier-1) single-node. tier0ClaimedNodeIds holds every node claimed by
+        // static Phase-3 and dynamic Phase-4 (empty when neither claimed anything, so this one
+        // call covers both cases). The exclusion matters because Tier-2 ApplyFusions scans ALL
+        // graph nodes, not just unclaimed ones; without it it would match patterns (e.g.
+        // QuickGelu) on nodes already inside a Tier-0 partition, creating overlapping fused
+        // groups that crash at inference time.
+        ep->ApplyTier2FusionAndPerOpFallback(graph, graph_support_info, nodesInTopologicalOrder,
+                                             cpuPreferredNodes, tier0ClaimedNodeIds, deviceDataTypeMask);
+
+        ep->m_isGetCapabilityCompleted = true;
+        return nullptr;
+    } catch (const std::exception& e) {
+        // noexcept ABI boundary (session-init): node enumeration / fusion grouping allocate and can
+        // throw bad_alloc or a helper exception. Convert to OrtStatus so session creation fails
+        // gracefully instead of terminating the host.
+        auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+        return ep->ort_api.CreateStatus(ORT_FAIL, MakeString("GetCapability failed: ", e.what()).c_str());
+    } catch (...) {
+        auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
+        return ep->ort_api.CreateStatus(ORT_FAIL, "GetCapability failed: unknown exception");
+    }
+}
+
+// ===================================================================
+// PHASE 1 — Resolve shapes to a fixpoint. NO claiming happens here. Each iteration
+// runs the Upsample/Resize value+shape resolution pass, then a graph-wide
+// TryTranslateNodes forward-propagation + Stage-C per-node authoritative shape
+// inference, until resolved_shapes / resolved_values stop growing (bounded at 10).
+// ===================================================================
+void TierZeroPartitioner::ResolveShapesToFixpoint() {
             for (int iter = 0; iter < 10; ++iter) {
                 size_t prev_resolved = resolved_shapes.size();
                 size_t prev_resolved_values = resolved_values.size();
@@ -1551,22 +1621,16 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                     " resolved_values=", resolved_values.size(), " progress=", made_progress, "\n");
                 if (!made_progress) break;
             }
+}
 
-            // ===================================================================
-            // PHASE 2 — Shape-aware grouping (single pass).
-            //
-            // Merge-based partitioning: a node is a boundary if it is CPU-preferred,
-            // not DML-supported, has no translator, OR has any dynamic-shaped input
-            // or output ValueInfo (HasDynamicShape consults the resolved_shapes
-            // fixpoint from Phase 1, so recovered static islands are NOT over-cut).
-            // Boundary nodes finalize open upstream partitions; fuseable nodes
-            // extend/merge partitions their inputs come from.
-            // ===================================================================
-            struct PartitionGroup {
-                bool finalized = false;
-                bool claimed = false;
-                std::vector<const OrtNode*> nodes;
-            };
+// ===================================================================
+// PHASE 2 — Shape-aware grouping (single pass): a node is a boundary if it is
+// CPU-preferred, not DML-supported, has no translator, OR has any dynamic-shaped
+// input/output. Boundary nodes finalize open upstream partitions; fuseable nodes
+// extend/merge partitions. PHASE 3 then claims each group once. Both are skipped
+// when useRuntimeFusion (the dynamic path in PHASE 4 owns the whole graph).
+// ===================================================================
+void TierZeroPartitioner::GroupAndClaimStaticPartitions(bool useRuntimeFusion) {
             std::vector<PartitionGroup> groups;
             std::unordered_map<std::string, size_t> output_to_group;
 
@@ -1574,15 +1638,6 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                 groups.push_back(PartitionGroup{});
                 return groups.size() - 1;
             };
-
-            // ORT-parity path selection (inference_session.cc:2388 if/else): when runtime fusion is
-            // active, the DYNAMIC path (Phase 4) claims the WHOLE fuseable graph — static-shape
-            // partitions included (they resolve to one shape signature). So SKIP static Phase-2
-            // grouping + Phase-3 claiming; leave `groups` empty so Phase-3 is a no-op. When OFF,
-            // static Phase 2/3 run exactly as before (byte-identical). Primary trigger is the real
-            // ep.directml.enable_graph_capture flag (GraphCaptureEnabled); DML_RUNTIME_FUSION is a
-            // test-only override to force the dynamic path on a non-OGA harness.
-            const bool useRuntimeFusion = ep->GraphCaptureEnabled() || RuntimeFusionEnabled();
 
             for (const OrtNode* node : nodesInTopologicalOrder) {
                 if (useRuntimeFusion) break;  // static grouping skipped — Phase 4 owns the graph
@@ -1719,22 +1774,22 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                     }
                     std::sort(node_ids.begin(), node_ids.end());
                     ep->m_tier0GroupHashes.insert(HashNodeIds(node_ids));
-                    tier0_claimed = true;
                     g.claimed = true;
                 }
                 if (st) ep->ort_api.ReleaseStatus(st);
             }
+}
 
-            // ===================================================================
-            // PHASE 4 — Runtime-fusion (deferred) claim. ON when useRuntimeFusion
-            // (ep.directml.enable_graph_capture, or the DML_RUNTIME_FUSION test override).
-            // When active, static Phase 2/3 were skipped, so this re-groups the WHOLE
-            // fuseable graph WITHOUT the dynamic-shape boundary (all other boundaries
-            // kept), and claims each structurally-admissible group into
-            // m_tier0DynamicGroupHashes. These partitions snapshot in CompileImpl and
-            // compile lazily at first Compute.
-            // ===================================================================
-            if (useRuntimeFusion) {
+// ===================================================================
+// PHASE 4 — Runtime-fusion (deferred) claim. Called only when useRuntimeFusion
+// (ep.directml.enable_graph_capture, or the DML_RUNTIME_FUSION test override).
+// Static Phase 2/3 were skipped, so this re-groups the WHOLE fuseable graph WITHOUT
+// the dynamic-shape boundary (all other boundaries kept), and claims each
+// structurally-admissible group into m_tier0DynamicGroupHashes. These partitions
+// snapshot in CompileImpl and compile lazily at first Compute.
+// ===================================================================
+void TierZeroPartitioner::ClaimDynamicPartitions() {
+            {
                 std::vector<PartitionGroup> dgroups;
                 std::unordered_map<std::string, size_t> doutput_to_group;
                 auto dnew_group = [&]() -> size_t {
@@ -1832,7 +1887,6 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                         size_t part_hash = HashNodeIds(node_ids);
                         ep->m_tier0DynamicGroupHashes.insert(part_hash);
                         g.claimed = true;
-                        dynamic_claimed = true;
                         DML_PERF_LOG("[RuntimeFusion] Phase-4 CLAIM: dynamic partition (",
                                      g.nodes.size(), " nodes)\n");
 
@@ -1850,122 +1904,6 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                     }
                 }
             }
-
-        } // end Tier-0 route
-        } // end scope for helpers (GetStaticDims, HasDynamicShape, etc.)
-
-        // Update m_resolvedShapes with shapes accumulated from successful
-        // TryTranslateNodes calls so CompileImpl can seed BuildSubgraphInfo.
-        ep->m_resolvedShapes = resolved_shapes;
-
-        if (!tier0_claimed && !dynamic_claimed) {
-            // NOTHING was claimed by either static Phase-3 or dynamic Phase-4. Safe to
-            // run Tier-2 pattern fusion + Tier-1 single-node with no exclusion set,
-            // since no node is already in a Tier-0 partition.
-
-            // Run graph-level fusions in a single greedy pass (largest pattern wins).
-            // Each matched fusion group is submitted to ORT via AddNodesToFuse and
-            // routed through CompileImpl().  Claimed node IDs are collected so that
-            // the single-node loop below can skip them.
-            // Build the anchor index once per session and store it — the IFusionRule
-            // objects it owns are referenced by raw pointer in FusionMatch and must
-            // outlive m_fusionMap.
-            ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex(ep->m_executionProvider->IsMcdmDevice());
-            ep->m_fusionMap.clear();
-
-            std::unordered_set<size_t> fusedNodeIds;
-            EpFusionManager::ApplyFusions(
-                ep->m_anchorIndex,
-                ep->ort_api,
-                ep->ep_api,
-                graph,
-                graph_support_info,
-                ep->m_graphInitializerMap,
-                [ep, graph_support_info](const OrtNode* n, uint32_t mask) {
-                    return ep->IsNodeSupportedByDml(n, graph_support_info, mask);
-                },
-                cpuPreferredNodes,
-                deviceDataTypeMask,
-                fusedNodeIds,
-                ep->m_fusionMap);
-
-            std::vector<const OrtNode*> supportedNodes;
-            for (const OrtNode* node : nodesInTopologicalOrder) {
-                size_t nodeID = 0;
-                ep->ort_api.Node_GetId(node, &nodeID);
-
-                // Skip nodes already claimed by a fusion group.
-                if (fusedNodeIds.count(nodeID)) continue;
-
-                const char* op_type = nullptr;
-                ep->ort_api.Node_GetOperatorType(node, &op_type);
-
-                bool isSupported = ep->IsNodeSupportedByDml(node, graph_support_info, deviceDataTypeMask);
-                bool notCpuPreferred = cpuPreferredNodes.find(nodeID) == cpuPreferredNodes.end();
-
-                if (isSupported && notCpuPreferred)
-                {
-                    ep->ep_api.EpGraphSupportInfo_AddSingleNode(graph_support_info, node);
-                    supportedNodes.push_back(node);
-                }
-            }
-        } else {
-            // Tier-0 claimed at least one partition — STATIC (Phase-3) and/or DYNAMIC
-            // (Phase-4 runtime fusion). Claim any remaining unclaimed nodes via Tier-2
-            // pattern fusions, then Tier-1 single-node.
-            //
-            // Tier-2 ApplyFusions scans ALL graph nodes, not just unclaimed ones.
-            // Without an exclusion set it will match patterns (e.g. QuickGelu) on
-            // nodes already inside a Tier-0 partition, creating overlapping fused
-            // groups that crash at inference time. Exclude Tier-0 claimed nodes
-            // (tier0ClaimedNodeIds now includes Phase-4's dynamic-partition nodes)
-            // so ApplyFusions only considers genuinely unclaimed nodes.
-            std::unordered_set<size_t> tier0AndCpuExcluded = cpuPreferredNodes;
-            tier0AndCpuExcluded.insert(tier0ClaimedNodeIds.begin(),
-                                       tier0ClaimedNodeIds.end());
-
-            ep->m_anchorIndex = EpFusionManager::BuildAnchorIndex(ep->m_executionProvider->IsMcdmDevice());
-            ep->m_fusionMap.clear();
-
-            std::unordered_set<size_t> fusedNodeIds;
-            EpFusionManager::ApplyFusions(
-                ep->m_anchorIndex,
-                ep->ort_api,
-                ep->ep_api,
-                graph,
-                graph_support_info,
-                ep->m_graphInitializerMap,
-                [ep, graph_support_info](const OrtNode* n, uint32_t mask) {
-                    return ep->IsNodeSupportedByDml(n, graph_support_info, mask);
-                },
-                tier0AndCpuExcluded,
-                deviceDataTypeMask,
-                fusedNodeIds,
-                ep->m_fusionMap);
-
-            for (const OrtNode* node : nodesInTopologicalOrder) {
-                size_t nodeID = 0;
-                ep->ort_api.Node_GetId(node, &nodeID);
-                if (tier0ClaimedNodeIds.count(nodeID)) continue;
-                if (fusedNodeIds.count(nodeID)) continue;
-                if (cpuPreferredNodes.count(nodeID)) continue;
-                if (!ep->IsNodeSupportedByDml(node, graph_support_info, deviceDataTypeMask)) continue;
-                ep->ep_api.EpGraphSupportInfo_AddSingleNode(graph_support_info, node);
-            }
-        }
-
-        ep->m_isGetCapabilityCompleted = true;
-        return nullptr;
-    } catch (const std::exception& e) {
-        // noexcept ABI boundary (session-init): node enumeration / fusion grouping allocate and can
-        // throw bad_alloc or a helper exception. Convert to OrtStatus so session creation fails
-        // gracefully instead of terminating the host.
-        auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
-        return ep->ort_api.CreateStatus(ORT_FAIL, MakeString("GetCapability failed: ", e.what()).c_str());
-    } catch (...) {
-        auto* ep = static_cast<ExecutionProviderPlugin*>(this_ptr);
-        return ep->ort_api.CreateStatus(ORT_FAIL, "GetCapability failed: unknown exception");
-    }
 }
 
 OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_ptr, _In_ const OrtGraph** graphs,
