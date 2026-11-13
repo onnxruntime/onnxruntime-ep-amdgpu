@@ -41,8 +41,7 @@
 #include "external/DirectMLHelpers/DmlSerializedGraphDesc.h"
 #include "external/DirectMLHelpers/DmlGraphSerialization.h"
 #include "external/DirectMLHelpers/DmlGraphDeserialization.h"
-#include "DmlExecutionProvider/GraphDescBuilder.h"
-#include "DmlExecutionProvider/DmlGraphFusionHelper.h"
+#include "external/DirectMLHelpers/DmlGraphDescConverter.h"  // GraphDescBuilder::GraphDesc + DmlGraphFusionHelper::ConvertGraphDesc (lifted from #144-trimmed helpers)
 
 namespace dml_ep {
 

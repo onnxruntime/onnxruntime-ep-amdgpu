@@ -235,6 +235,11 @@ add_library(directx-ep MODULE
     dml_op_translators.cc
     full_graph_fusion.cc
     dml_ep_ctx.cc
+    # DML graph (de)serialization for the WebNN EPContext path (restored post-#144; sole callers
+    # are FullGraphFusion::Compile generate + CompileEpContext consume).
+    external/DirectMLHelpers/DmlGraphSerialization.cc
+    external/DirectMLHelpers/DmlGraphDeserialization.cc
+    external/DirectMLHelpers/ApiTraits.cc  # FromString specializations (restored post-#144; consume path)
 
     #---- DirectML EP sources ----
     DmlExecutionProvider/CommandQueue.cc
