@@ -18,7 +18,12 @@ PluginDmlCommandRecorder::PluginDmlCommandRecorder(
     : m_queue(std::move(commandQueue)),
       m_d3dDevice(d3dDevice),
       m_dmlDevice(dmlDevice),
-      m_descriptorPool(d3dDevice, 2048),
+      // Sized to host transient per-op scratch AND persistent command-list-reuse
+      // reservations in ONE heap, so reuse lists never force a descriptor-heap switch
+      // against the recorder's per-op work. ~32 B/descriptor, so 65536 ~= 2 MB. On
+      // overflow the pool spawns extra heaps (correct, but a reuse list landing there
+      // reintroduces a switch), so this is set well above any realistic graph's need.
+      m_descriptorPool(d3dDevice, 65536),
       m_commandAllocatorRing(d3dDevice, m_queue->GetType(), m_queue->GetCurrentCompletionEvent())
 {
     ORT_THROW_IF_FAILED(dmlDevice->CreateOperatorInitializer(0, nullptr, IID_PPV_ARGS(&m_initializer)));

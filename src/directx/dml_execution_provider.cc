@@ -64,6 +64,28 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
         ORT_CATCH_RETURN
     }
 
+    bool PluginDmlExecutionProviderImpl::ReservePersistentDescriptors(
+        uint32_t numDescriptors,
+        ID3D12DescriptorHeap** heap,
+        D3D12_CPU_DESCRIPTOR_HANDLE* cpuHandle,
+        D3D12_GPU_DESCRIPTOR_HANDLE* gpuHandle) const noexcept
+    {
+        ORT_TRY
+        {
+            if (!m_context || !heap || !cpuHandle || !gpuHandle) return false;
+            DescriptorRange range = m_context->ReservePersistentDescriptors(numDescriptors);
+            if (!range.heap) return false;
+            *heap = range.heap;
+            *cpuHandle = range.cpuHandle;
+            *gpuHandle = range.gpuHandle;
+            return true;
+        }
+        ORT_CATCH_GENERIC
+        {
+            return false;
+        }
+    }
+
     ID3D12Resource* __stdcall PluginDmlExecutionProviderImpl::DecodeResource(void* allocation) const noexcept
     {
         ORT_TRY

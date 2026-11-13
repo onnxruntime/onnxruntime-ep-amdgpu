@@ -164,6 +164,17 @@ namespace dml_ep {
 
         STDMETHOD_(ID3D12Resource*, DecodeResource)(void* allocation) const noexcept final;
 
+        // Reserve a persistent (never-recycled) descriptor range from the recorder's
+        // shared descriptor pool, for command-list reuse. Returns the shared heap plus the
+        // range's CPU/GPU handle starts. Because the range lives in the heap the recorder's
+        // per-op work also binds, a reuse list that binds this heap causes no descriptor-
+        // heap switch. Returns false on failure.
+        bool ReservePersistentDescriptors(
+            uint32_t numDescriptors,
+            ID3D12DescriptorHeap** heap,
+            D3D12_CPU_DESCRIPTOR_HANDLE* cpuHandle,
+            D3D12_GPU_DESCRIPTOR_HANDLE* gpuHandle) const noexcept;
+
         // The bucketized GPU allocator that owns this EP's device tensors. Lets a shared
         // DMLDataTransfer identify which EP owns a tensor so a copy runs on that EP's own
         // ExecutionContext/queue/fence.

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "dml_op_translators.h"
+#include "dml_common.h"
 #include "fusion_utils.h"
 #include "ort_node_adapter.h"
 
@@ -9,7 +10,9 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <numeric>
+#include <set>
 
 namespace dml_ep {
 
@@ -392,6 +395,577 @@ static std::optional<TranslatedOp> TranslateUnaryActivation(
     result.FixupPointers();
 
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Einsum → DML (GEMM / Multiply / Reduce / Identity / Multiply+Reduce)
+//
+// Ports ORT's DmlOperatorEinSum decomposition (equation parser + classifier +
+// product-tensor reprojection) into the ABI-safe Tier-0 translator path. The
+// equation is decomposed to an internal "product tensor" over the union of all
+// unique labels; each input/output is reprojected onto that tensor via strides
+// (missing axis -> stride 0 broadcast; repeated label -> summed strides for the
+// diagonal case), then a single DML op (or a 2-node mul+reduce subgraph) computes
+// the result. Any equation DML does not recognize returns std::nullopt, matching
+// QueryEinSum so the node cleanly falls back to per-op execution.
+// ORT ref: DmlOperatorEinSum.cpp, OperatorHelper.cc (EinSumHelper).
+// ---------------------------------------------------------------------------
+
+enum class EinsumOpType {  // order mirrors OperatorHelper.h EinSumHelper::RecognizedOperatorType
+    None,
+    Transpose,          // 1 input: rearrangement or diagonal slice, no reduction
+    ReduceSum,          // 1 input: sum reduction
+    Multiply,           // 2 inputs: elementwise multiply, no reduction
+    MatMul,             // 2 inputs: elementwise multiply + reduction on 1 axis
+    MultiplyReduceSum,  // 2 inputs: elementwise multiply + reduction on multiple axes
+};
+
+struct EinsumComponent {
+    uint32_t label_begin = 0;
+    uint32_t label_end = 0;
+    uint32_t DimensionCount() const { return label_end - label_begin; }
+};
+
+struct EinsumEquation {
+    std::vector<uint32_t>       label_indices;   // all labels as rebased indices ("ij,ai" -> 0,1,2,0)
+    std::vector<EinsumComponent> components;      // inputs then output (last)
+    size_t                      unique_label_count = 0;
+    bool                        valid = false;    // false on parse error / ellipsis / malformed
+
+    std::vector<uint32_t> ComponentLabels(const EinsumComponent& c) const {
+        return std::vector<uint32_t>(label_indices.begin() + c.label_begin,
+                                     label_indices.begin() + c.label_end);
+    }
+};
+
+static uint32_t EinsumBitMaskFromIndices(const std::vector<uint32_t>& indices) {
+    uint32_t mask = 0;
+    for (uint32_t i : indices) if (i < 32) mask |= (1u << i);
+    return mask;
+}
+
+// Port of EinSumHelper::ParseEquationComponents (OperatorHelper.cc). Parses
+// "ij,jk->ik" into components {ij, jk, ik} with letters rebased to indices. The
+// last component is the output (synthesized in alphabetical order if no "->").
+static EinsumEquation ParseEinsumEquation(const std::string& equation) {
+    EinsumEquation eq;
+    std::map<char, uint32_t> label_map;
+    std::set<char> repeated_labels;
+    uint32_t current_label_index = 0;
+    EinsumComponent current{};
+    bool found_output = false;
+
+    for (size_t pos = 0; pos <= equation.size(); ++pos) {
+        char ch = (pos < equation.size()) ? equation[pos] : '\0';
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
+            auto [it, inserted] = label_map.insert({ch, current_label_index});
+            if (inserted) {
+                if (found_output) return eq;  // output label not seen in any input -> invalid
+                ++current_label_index;
+            } else if (!found_output) {
+                repeated_labels.insert(ch);
+            }
+            eq.label_indices.push_back(it->second);
+        } else if (ch == ' ') {
+            // ignore
+        } else {
+            current.label_end = static_cast<uint32_t>(eq.label_indices.size());
+            eq.components.push_back(current);
+            current.label_begin = current.label_end;
+            switch (ch) {
+            case ',':
+                break;
+            case '-':
+                ++pos;  // consume '>'
+                if (pos >= equation.size() || equation[pos] != '>') return eq;  // malformed
+                if (found_output) return eq;                                    // multiple '->'
+                found_output = true;
+                break;
+            case '.':
+                // Ellipsis unsupported — leave invalid so caller returns nullopt (CPU fallback).
+                eq.components.clear();
+                return eq;
+            case '\0':
+                goto done;
+            default:
+                return eq;  // unsupported character
+            }
+        }
+    }
+done:
+    if (!found_output) {
+        // Implicit output: all non-repeated labels in ASCII order (numpy convention).
+        for (auto& kv : label_map)
+            if (repeated_labels.count(kv.first) == 0)
+                eq.label_indices.push_back(kv.second);
+        current.label_end = static_cast<uint32_t>(eq.label_indices.size());
+        eq.components.push_back(current);
+    }
+    eq.unique_label_count = label_map.size();
+    eq.valid = !eq.components.empty();
+    return eq;
+}
+
+// Port of EinSumHelper::DetermineRecognizedOperatorType (OperatorHelper.cc).
+static EinsumOpType DetermineEinsumOpType(const EinsumEquation& eq) {
+    if (!eq.valid || eq.components.empty()) return EinsumOpType::None;
+
+    constexpr size_t kMaxComponents = 3;  // 2 inputs + 1 output
+    if (eq.components.size() > kMaxComponents) return EinsumOpType::None;
+
+    if (eq.components.size() == 2) {  // 1 input, 1 output
+        auto output_labels = eq.ComponentLabels(eq.components.back());
+        if (output_labels.size() <= eq.unique_label_count)
+            return EinsumOpType::ReduceSum;   // "ij->i", "iji->", ...
+        return EinsumOpType::Transpose;       // "ij->ji", "ii->i" (diagonal), identity
+    }
+    if (eq.components.size() == 3) {  // 2 inputs, 1 output
+        auto in0 = eq.ComponentLabels(eq.components[0]);
+        auto in1 = eq.ComponentLabels(eq.components[1]);
+        auto out = eq.ComponentLabels(eq.components[2]);
+        if (out.size() == eq.unique_label_count)
+            return EinsumOpType::Multiply;    // no reduction
+        if (out.size() + 1 == eq.unique_label_count
+            && out.size() <= 4
+            && EinsumBitMaskFromIndices(in0) != EinsumBitMaskFromIndices(in1))
+            return EinsumOpType::MatMul;      // exactly 1 reduced axis, distinct input axes
+        return EinsumOpType::MultiplyReduceSum;
+    }
+    return EinsumOpType::None;
+}
+
+// Size of each unique label, gathered from the input components' shapes.
+// value_shapes stores sizes 4D-padded (MakeTensorInfo -> PadToMinDims) with the true
+// ONNX rank in original_rank. Einsum correlates sizes with equation labels, so it must
+// use the UN-padded sizes (the trailing original_rank dims). original_rank==0 means
+// unknown -> treat sizes as-is.
+static std::vector<uint32_t> EinsumOriginalSizes(const DmlTensorInfo& info) {
+    size_t orig = info.original_rank;
+    if (orig == 0 || orig >= info.sizes.size()) return info.sizes;
+    return std::vector<uint32_t>(info.sizes.end() - orig, info.sizes.end());
+}
+
+// Returns false if any input label's size is inconsistent or a shape is missing.
+static bool ComputeEinsumProductDimensions(
+    const EinsumEquation& eq,
+    const std::vector<const DmlTensorInfo*>& input_infos,
+    std::vector<uint32_t>& product_dims) {
+    product_dims.assign(eq.unique_label_count, 0u);
+    std::vector<bool> seen(eq.unique_label_count, false);
+    for (size_t ci = 0; ci + 1 < eq.components.size(); ++ci) {
+        if (ci >= input_infos.size() || !input_infos[ci]) return false;
+        auto labels = eq.ComponentLabels(eq.components[ci]);
+        auto sizes = EinsumOriginalSizes(*input_infos[ci]);  // un-padded ONNX sizes
+        if (labels.size() != sizes.size()) return false;
+        for (size_t i = 0; i < labels.size(); ++i) {
+            uint32_t lbl = labels[i];
+            if (lbl >= product_dims.size()) return false;
+            if (seen[lbl] && product_dims[lbl] != sizes[i]) return false;
+            product_dims[lbl] = sizes[i];
+            seen[lbl] = true;
+        }
+    }
+    for (bool s : seen) if (!s) return false;
+    return true;
+}
+
+// Port of ReprojectTensorDescToProductTensor (DmlOperatorEinSum.cpp). Scatters the
+// input's packed strides into product-tensor axis slots by label. Missing axes get
+// stride 0 (broadcast); repeated labels sum strides (diagonal). When is_reduced,
+// missing axes get size 1 (for the output of a reduction); else they take the full
+// product size and broadcast via the 0 stride. Returns {sizes, strides} of rank
+// unique_label_count.
+static void ProjectToProductTensor(
+    const std::vector<uint32_t>& input_sizes,
+    const std::vector<uint32_t>& input_labels,
+    const std::vector<uint32_t>& product_dims,
+    bool is_reduced,
+    std::vector<uint32_t>& out_sizes,
+    std::vector<uint32_t>& out_strides) {
+    const size_t rank = product_dims.size();
+    auto packed = ComputePackedStrides(input_sizes);
+    out_strides.assign(rank, 0u);
+    out_sizes = is_reduced ? std::vector<uint32_t>(rank, 1u) : product_dims;
+    for (size_t i = 0; i < input_labels.size(); ++i) {
+        uint32_t axis = input_labels[i];
+        if (axis < rank) {
+            out_sizes[axis] = input_sizes[i];
+            out_strides[axis] += packed[i];  // += combines diagonal labels (iji->i)
+        }
+    }
+}
+
+// Gather product-tensor sizes/strides into an arbitrary target-axis order (the
+// GEMM {batch,channel,height,width}/{...,reduction} projections). An axis index
+// >= product rank is an "inserted" axis -> size 1, stride 0. Port of
+// ReprojectTensorDescToGivenAxes' PermuteDimensions step.
+static void GatherEinsumAxes(
+    const std::vector<uint32_t>& product_sizes,
+    const std::vector<uint32_t>& product_strides,
+    const std::vector<uint32_t>& target_axes,
+    std::vector<uint32_t>& out_sizes,
+    std::vector<uint32_t>& out_strides) {
+    out_sizes.resize(target_axes.size());
+    out_strides.resize(target_axes.size());
+    for (size_t i = 0; i < target_axes.size(); ++i) {
+        uint32_t a = target_axes[i];
+        if (a < product_sizes.size()) {
+            out_sizes[i] = product_sizes[a];
+            out_strides[i] = product_strides[a];
+        } else {
+            out_sizes[i] = 1u;
+            out_strides[i] = 0u;
+        }
+    }
+}
+
+// Build a DmlTensorInfo with explicit sizes+strides already at (or below) 4D,
+// padding both to 4D with leading 1-size / 0-stride entries.
+static DmlTensorInfo MakeEinsumTensor(
+    std::vector<uint32_t> sizes,
+    std::vector<uint32_t> strides,
+    DML_TENSOR_DATA_TYPE dtype,
+    uint64_t total_bytes) {
+    auto info = MakeTensorInfoWithStrides(sizes, strides, dtype, total_bytes);
+    // MakeTensorInfoWithStrides pads sizes to 4D but keeps `sizes` as given for
+    // strides shorter than padded; mirror BroadcastShapes/TranslateMatMul which set
+    // the padded sizes/strides back explicitly so ToBufferDesc sees matched lengths.
+    info.sizes = PadToMinDims(sizes);
+    if (strides.size() < info.sizes.size()) {
+        std::vector<uint32_t> padded(info.sizes.size() - strides.size(), 0u);
+        padded.insert(padded.end(), strides.begin(), strides.end());
+        info.strides = std::move(padded);
+    } else {
+        info.strides = std::move(strides);
+    }
+    return info;
+}
+
+static std::optional<TranslatedOp> TranslateEinsum(
+    const OrtApi& ort_api,
+    const NodeView& node,
+    const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
+    const std::unordered_map<std::string, const OrtValue*>&) {
+    auto inputs = GetInputNames(ort_api, node);
+    auto outputs = GetOutputNames(ort_api, node);
+    if (inputs.empty() || outputs.empty()) return std::nullopt;
+
+    OrtNodeAdapter adapter(node, ort_api);
+    std::string equation = adapter.GetAttributeString("equation", "");
+    if (equation.empty()) return std::nullopt;
+
+    EinsumEquation eq = ParseEinsumEquation(equation);
+    EinsumOpType type = DetermineEinsumOpType(eq);
+    if (type == EinsumOpType::None) return std::nullopt;  // lockstep with QueryEinSum
+
+    // Component count must match actual tensor count (N inputs + 1 output).
+    if (eq.components.size() != inputs.size() + 1) return std::nullopt;
+
+    std::vector<const DmlTensorInfo*> in_infos(inputs.size(), nullptr);
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        in_infos[i] = LookupShape(value_shapes, inputs[i]);
+        if (!in_infos[i]) return std::nullopt;
+    }
+    auto* out_edge = LookupShape(value_shapes, outputs[0]);
+    DML_TENSOR_DATA_TYPE dtype = in_infos[0]->data_type;
+
+    std::vector<uint32_t> product_dims;
+    if (!ComputeEinsumProductDimensions(eq, in_infos, product_dims)) return std::nullopt;
+
+    auto out_labels = eq.ComponentLabels(eq.components.back());
+
+    // Un-padded (original-rank) sizes correlated with equation labels. value_shapes
+    // stores 4D-padded sizes; all label-indexed size reads below must use these.
+    std::vector<std::vector<uint32_t>> in_sizes(in_infos.size());
+    for (size_t i = 0; i < in_infos.size(); ++i) in_sizes[i] = EinsumOriginalSizes(*in_infos[i]);
+    // Output source sizes in output-label order: the ONNX output shape (un-padded) if
+    // present, else derived from the product dims per output label.
+    std::vector<uint32_t> out_src_sizes;
+    if (out_edge) out_src_sizes = EinsumOriginalSizes(*out_edge);
+    if (out_src_sizes.size() != out_labels.size()) {
+        out_src_sizes.clear();
+        for (uint32_t lbl : out_labels) out_src_sizes.push_back(product_dims[lbl]);
+    }
+
+    if (type == EinsumOpType::MatMul) {
+        // Axis roles via ORT's bitmask selection (DmlOperatorEinSum.cpp:124-157).
+        auto in0 = eq.ComponentLabels(eq.components[0]);
+        auto in1 = eq.ComponentLabels(eq.components[1]);
+        uint32_t in0_mask = EinsumBitMaskFromIndices(in0);
+        uint32_t in1_mask = EinsumBitMaskFromIndices(in1);
+        uint32_t out_mask = EinsumBitMaskFromIndices(out_labels);
+
+        auto find_and_clear = [](uint32_t& current, uint32_t constraint) -> uint32_t {
+            // Lowest set bit of (current & ~constraint); 32 if none (matches ORT).
+            uint32_t axis = CountLeastSignificantZeros(current & ~constraint);
+            if (axis < 32) current &= ~(1u << axis);
+            return axis;
+        };
+        uint32_t remaining = ~0u;
+        uint32_t reduction_axis = find_and_clear(remaining, out_mask);
+        uint32_t height_axis    = find_and_clear(remaining, in1_mask);
+        uint32_t width_axis     = find_and_clear(remaining, in0_mask);
+        uint32_t batch_axis     = find_and_clear(remaining, 0u);
+        uint32_t channel_axis   = find_and_clear(remaining, 0u);
+
+        auto project = [&](const std::vector<uint32_t>& sizes,
+                           const std::vector<uint32_t>& labels,
+                           const std::vector<uint32_t>& target,
+                           bool reduced_out) -> DmlTensorInfo {
+            std::vector<uint32_t> ps, pst;
+            ProjectToProductTensor(sizes, labels, product_dims, reduced_out, ps, pst);
+            std::vector<uint32_t> gs, gst;
+            GatherEinsumAxes(ps, pst, target, gs, gst);
+            return MakeEinsumTensor(gs, gst, dtype,
+                ComputeAlignedTotalBytes(sizes, dtype));
+        };
+
+        std::vector<uint32_t> a_target = { batch_axis, channel_axis, height_axis, reduction_axis };
+        std::vector<uint32_t> b_target = { batch_axis, channel_axis, width_axis, reduction_axis };
+        std::vector<uint32_t> o_target = { batch_axis, channel_axis, height_axis, width_axis };
+
+        auto a_tensor = project(in_sizes[0], in0, a_target, /*reduced_out*/ false);
+        auto b_tensor = project(in_sizes[1], in1, b_target, /*reduced_out*/ false);
+        // Output: scatter the ONNX output's packed strides (in output-label order) into
+        // product-tensor axes, then gather to the GEMM {batch,channel,height,width} axes
+        // (mirrors ORT's ReprojectTensorDescToGivenAxes, isReduced=false). The GEMM writes
+        // its result through these strides into the physical ONNX output buffer.
+        std::vector<uint32_t> ops, opst;
+        ProjectToProductTensor(out_src_sizes, out_labels, product_dims,
+                               /*is_reduced*/ false, ops, opst);
+        std::vector<uint32_t> ogs, ogst;
+        GatherEinsumAxes(ops, opst, o_target, ogs, ogst);
+        uint64_t out_bytes = ComputeAlignedTotalBytes(out_src_sizes, dtype);
+        auto out_tensor = MakeEinsumTensor(ogs, ogst, dtype, out_bytes);
+
+        auto storage = std::make_shared<DML_GEMM_OPERATOR_DESC>();
+        storage->CTensor = nullptr;
+        storage->TransA = DML_MATRIX_TRANSFORM_NONE;
+        storage->TransB = DML_MATRIX_TRANSFORM_TRANSPOSE;
+        storage->Alpha = 1.0f;
+        storage->Beta = 0.0f;
+        storage->FusedActivation = nullptr;
+
+        TranslatedOp result;
+        result.input_tensors = { a_tensor, b_tensor };
+        result.output_tensors = { out_tensor };
+        result.input_buffer_descs = { a_tensor.ToBufferDesc(), b_tensor.ToBufferDesc() };
+        result.input_tensor_descs.resize(2);
+        result.output_buffer_descs = { out_tensor.ToBufferDesc() };
+        result.output_tensor_descs.resize(1);
+        result.desc_storage = storage;
+        result.op_desc = { DML_OPERATOR_GEMM, storage.get() };
+        result.fixup = [storage](TranslatedOp& self) {
+            RebuildTensorDescPointers(self);
+            storage->ATensor = &self.input_tensor_descs[0];
+            storage->BTensor = &self.input_tensor_descs[1];
+            storage->OutputTensor = &self.output_tensor_descs[0];
+        };
+        result.FixupPointers();
+        return result;
+    }
+
+    if (type == EinsumOpType::Multiply) {
+        // A,B projected to product tensor; output is the product tensor (contiguous).
+        auto in0 = eq.ComponentLabels(eq.components[0]);
+        auto in1 = eq.ComponentLabels(eq.components[1]);
+        std::vector<uint32_t> as, ast, bs, bst;
+        ProjectToProductTensor(in_sizes[0], in0, product_dims, false, as, ast);
+        ProjectToProductTensor(in_sizes[1], in1, product_dims, false, bs, bst);
+        auto a_tensor = MakeEinsumTensor(as, ast, dtype, ComputeAlignedTotalBytes(in_sizes[0], dtype));
+        auto b_tensor = MakeEinsumTensor(bs, bst, dtype, ComputeAlignedTotalBytes(in_sizes[1], dtype));
+        // Output reprojected (not reduced): strides scatter into the ONNX output buffer
+        // order via the output labels.
+        std::vector<uint32_t> os, ost;
+        ProjectToProductTensor(out_src_sizes, out_labels, product_dims,
+                               /*is_reduced*/ false, os, ost);
+        auto out_tensor = MakeEinsumTensor(os, ost, dtype,
+            ComputeAlignedTotalBytes(out_src_sizes, dtype));
+
+        auto storage = std::make_shared<DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC>();
+        TranslatedOp result;
+        result.input_tensors = { a_tensor, b_tensor };
+        result.output_tensors = { out_tensor };
+        result.input_buffer_descs = { a_tensor.ToBufferDesc(), b_tensor.ToBufferDesc() };
+        result.input_tensor_descs.resize(2);
+        result.output_buffer_descs = { out_tensor.ToBufferDesc() };
+        result.output_tensor_descs.resize(1);
+        result.desc_storage = storage;
+        result.op_desc = { DML_OPERATOR_ELEMENT_WISE_MULTIPLY, storage.get() };
+        result.fixup = [storage](TranslatedOp& self) {
+            RebuildTensorDescPointers(self);
+            storage->ATensor = &self.input_tensor_descs[0];
+            storage->BTensor = &self.input_tensor_descs[1];
+            storage->OutputTensor = &self.output_tensor_descs[0];
+        };
+        result.FixupPointers();
+        return result;
+    }
+
+    if (type == EinsumOpType::Transpose) {
+        // Single input projected to the product tensor via strides; identity copy
+        // writes it out contiguously in output-label order.
+        auto in0 = eq.ComponentLabels(eq.components[0]);
+        std::vector<uint32_t> is, ist;
+        ProjectToProductTensor(in_sizes[0], in0, product_dims, false, is, ist);
+        // Reorder product axes into output-label order for both sizes and strides.
+        std::vector<uint32_t> proj_sizes, proj_strides;
+        GatherEinsumAxes(is, ist, out_labels, proj_sizes, proj_strides);
+        auto in_tensor = MakeEinsumTensor(proj_sizes, proj_strides, dtype,
+            ComputeAlignedTotalBytes(in_sizes[0], dtype));
+        auto out_tensor = MakeTensorInfo(out_src_sizes, dtype);
+
+        auto storage = std::make_shared<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>();
+        storage->ScaleBias = nullptr;
+        TranslatedOp result;
+        result.input_tensors = { in_tensor };
+        result.output_tensors = { out_tensor };
+        result.input_buffer_descs = { in_tensor.ToBufferDesc() };
+        result.input_tensor_descs.resize(1);
+        result.output_buffer_descs = { out_tensor.ToBufferDesc() };
+        result.output_tensor_descs.resize(1);
+        result.desc_storage = storage;
+        result.op_desc = { DML_OPERATOR_ELEMENT_WISE_IDENTITY, storage.get() };
+        result.fixup = [storage](TranslatedOp& self) {
+            RebuildTensorDescPointers(self);
+            storage->InputTensor = &self.input_tensor_descs[0];
+            storage->OutputTensor = &self.output_tensor_descs[0];
+        };
+        result.FixupPointers();
+        return result;
+    }
+
+    if (type == EinsumOpType::ReduceSum) {
+        // Single input projected to the product tensor; reduce along axes absent
+        // from the output (product axes whose size-1 in the reduced output tensor).
+        auto in0 = eq.ComponentLabels(eq.components[0]);
+        std::vector<uint32_t> is, ist;
+        ProjectToProductTensor(in_sizes[0], in0, product_dims, false, is, ist);
+        auto in_tensor = MakeEinsumTensor(is, ist, dtype,
+            ComputeAlignedTotalBytes(in_sizes[0], dtype));
+        // Output reprojected WITH strides (is_reduced=true), mirroring ORT's
+        // ReprojectTensorDescToProductTensor(output, isReduced=true): the ONNX output's
+        // packed strides scatter into product axes by output label, so the REDUCE writes
+        // results in output-label order (not product order). Reduced axes are the size-1
+        // product axes of this projection (matches ORT GetReductionAxes).
+        std::vector<uint32_t> os, ost;
+        ProjectToProductTensor(out_src_sizes, out_labels, product_dims,
+                               /*is_reduced*/ true, os, ost);
+        std::vector<uint32_t> reduced_axes;
+        for (uint32_t a = 0; a < os.size(); ++a) if (os[a] == 1u) reduced_axes.push_back(a);
+        // Pad reduced-axis indices to the 4D-padded rank used by in_tensor.
+        size_t pad = in_tensor.sizes.size() > product_dims.size()
+            ? in_tensor.sizes.size() - product_dims.size() : 0;
+        for (auto& a : reduced_axes) a += static_cast<uint32_t>(pad);
+        auto out_tensor = MakeEinsumTensor(os, ost, dtype,
+            ComputeAlignedTotalBytes(out_src_sizes, dtype));
+
+        struct EinsumReduceStorage {
+            DML_REDUCE_OPERATOR_DESC desc{};
+            std::vector<uint32_t> axes_vec;
+        };
+        auto storage = std::make_shared<EinsumReduceStorage>();
+        storage->desc.Function = DML_REDUCE_FUNCTION_SUM;
+        storage->axes_vec = reduced_axes;
+        storage->desc.AxisCount = static_cast<UINT>(storage->axes_vec.size());
+        storage->desc.Axes = storage->axes_vec.data();
+
+        TranslatedOp result;
+        result.input_tensors = { in_tensor };
+        result.output_tensors = { out_tensor };
+        result.input_buffer_descs = { in_tensor.ToBufferDesc() };
+        result.input_tensor_descs.resize(1);
+        result.output_buffer_descs = { out_tensor.ToBufferDesc() };
+        result.output_tensor_descs.resize(1);
+        result.desc_storage = storage;
+        result.op_desc = { DML_OPERATOR_REDUCE, &storage->desc };
+        result.fixup = [storage](TranslatedOp& self) {
+            RebuildTensorDescPointers(self);
+            storage->desc.InputTensor = &self.input_tensor_descs[0];
+            storage->desc.OutputTensor = &self.output_tensor_descs[0];
+            storage->desc.Axes = storage->axes_vec.data();
+        };
+        result.FixupPointers();
+        return result;
+    }
+
+    // MultiplyReduceSum: primary MUL into the product tensor -> sub REDUCE(SUM) to output.
+    {
+        auto in0 = eq.ComponentLabels(eq.components[0]);
+        auto in1 = eq.ComponentLabels(eq.components[1]);
+        std::vector<uint32_t> as, ast, bs, bst;
+        ProjectToProductTensor(in_sizes[0], in0, product_dims, false, as, ast);
+        ProjectToProductTensor(in_sizes[1], in1, product_dims, false, bs, bst);
+        auto a_tensor = MakeEinsumTensor(as, ast, dtype, ComputeAlignedTotalBytes(in_sizes[0], dtype));
+        auto b_tensor = MakeEinsumTensor(bs, bst, dtype, ComputeAlignedTotalBytes(in_sizes[1], dtype));
+        // Intermediate product tensor (contiguous), passed mul -> reduce.
+        auto prod_tensor = MakeTensorInfo(product_dims, dtype);
+
+        // Output reprojected WITH strides (is_reduced=true) so the REDUCE writes in
+        // output-label order, not product order (mirrors ORT; same fix as ReduceSum).
+        // Reduced axes = the size-1 product axes of this projection.
+        std::vector<uint32_t> os, ost;
+        ProjectToProductTensor(out_src_sizes, out_labels, product_dims,
+                               /*is_reduced*/ true, os, ost);
+        std::vector<uint32_t> reduced_axes;
+        for (uint32_t a = 0; a < os.size(); ++a) if (os[a] == 1u) reduced_axes.push_back(a);
+        size_t pad = prod_tensor.sizes.size() > product_dims.size()
+            ? prod_tensor.sizes.size() - product_dims.size() : 0;
+        for (auto& a : reduced_axes) a += static_cast<uint32_t>(pad);
+        auto out_tensor = MakeEinsumTensor(os, ost, dtype,
+            ComputeAlignedTotalBytes(out_src_sizes, dtype));
+
+        // Primary: MUL(a, b) -> product tensor.
+        auto mul_store = std::make_shared<DML_ELEMENT_WISE_MULTIPLY_OPERATOR_DESC>();
+        TranslatedOp result;
+        result.input_tensors = { a_tensor, b_tensor };
+        result.output_tensors = { prod_tensor };
+        result.input_buffer_descs = { a_tensor.ToBufferDesc(), b_tensor.ToBufferDesc() };
+        result.input_tensor_descs.resize(2);
+        result.output_buffer_descs = { prod_tensor.ToBufferDesc() };
+        result.output_tensor_descs.resize(1);
+        result.desc_storage = mul_store;
+        result.op_desc = { DML_OPERATOR_ELEMENT_WISE_MULTIPLY, mul_store.get() };
+        result.fixup = [mul_store](TranslatedOp& self) {
+            RebuildTensorDescPointers(self);
+            mul_store->ATensor = &self.input_tensor_descs[0];
+            mul_store->BTensor = &self.input_tensor_descs[1];
+            mul_store->OutputTensor = &self.output_tensor_descs[0];
+        };
+        result.FixupPointers();
+
+        // Sub 0: REDUCE(SUM) of the product -> output. Input comes from primary output.
+        struct EinsumReduceStorage {
+            DML_REDUCE_OPERATOR_DESC desc{};
+            std::vector<uint32_t> axes_vec;
+        };
+        auto red_store = std::make_shared<EinsumReduceStorage>();
+        red_store->desc.Function = DML_REDUCE_FUNCTION_SUM;
+        red_store->axes_vec = reduced_axes;
+        red_store->desc.AxisCount = static_cast<UINT>(red_store->axes_vec.size());
+        red_store->desc.Axes = red_store->axes_vec.data();
+
+        SubNode reduce_node;
+        reduce_node.input_tensors = { prod_tensor };
+        reduce_node.output_tensors = { out_tensor };
+        reduce_node.input_buffer_descs = { prod_tensor.ToBufferDesc() };
+        reduce_node.input_tensor_descs.resize(1);
+        reduce_node.output_buffer_descs = { out_tensor.ToBufferDesc() };
+        reduce_node.output_tensor_descs.resize(1);
+        reduce_node.desc_storage = red_store;
+        reduce_node.op_desc = { DML_OPERATOR_REDUCE, &red_store->desc };
+        reduce_node.input_from = { {-1, 0} };  // from primary output
+        reduce_node.fixup = [red_store](SubNode& self) {
+            RebuildSubNodePointers(self);
+            red_store->desc.InputTensor = &self.input_tensor_descs[0];
+            red_store->desc.OutputTensor = &self.output_tensor_descs[0];
+            red_store->desc.Axes = red_store->axes_vec.data();
+        };
+        reduce_node.FixupPointers();
+
+        result.sub_nodes = { std::move(reduce_node) };
+        return result;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -10123,6 +10697,7 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["Tanh"]    = TranslateUnaryActivation<DML_ACTIVATION_TANH_OPERATOR_DESC,    DML_OPERATOR_ACTIVATION_TANH>;
 
     registry["MatMul"]    = TranslateMatMul;
+    registry["Einsum"]    = TranslateEinsum;
     registry["Softmax"]   = TranslateSoftmax;
     registry["Reshape"]   = TranslateReshape;
     registry["Flatten"]   = TranslateShapeOnly;
