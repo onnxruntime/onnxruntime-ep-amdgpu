@@ -41,6 +41,10 @@ OrtStatus* SyncNotification::Activate() const noexcept {
 }
 
 OrtStatus* SyncNotification::WaitOnDevice(OrtSyncStream* consumer_stream) const noexcept {
+    // ORT passes no stream when the consumer is stream-less (e.g. a CPU node reading an EP output).
+    if (consumer_stream == nullptr) {
+        return WaitOnHost();
+    }
     const auto handle{static_cast<hipStream_t>(ort_api.SyncStream_GetHandle(consumer_stream))};
     return HIP_CALL(hipStreamWaitEvent(handle, event_));
 }
