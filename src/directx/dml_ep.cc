@@ -485,6 +485,13 @@ ONNXTensorElementDataType ExecutionProviderPlugin::GetElementTypeFromMLDataType(
     if (ml_type == DT::GetTensorType<uint64_t>())                  return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64;
     if (ml_type == DT::GetTensorType<bool>())                      return ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;
     if (ml_type == DT::GetTensorType<std::string>())               return ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING;
+    // Sub-byte 4-bit types. Without these cases the int4/uint4 type constraints on the
+    // Quantize/DequantizeLinear v21 kernels fall through to UNDEFINED and get silently dropped
+    // when building the ABI-safe OrtKernelRegistry (ConvertKernelRegistryToOrtKernelRegistry).
+    // The session's kernel lookup then cannot match an int4 Q/DQ node, so IsNodeSupportedByDml
+    // returns false and the node is never claimed — "Unable to compile any nodes" for int4 models.
+    if (ml_type == DT::GetTensorType<onnxruntime::Int4x2>())        return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT4;
+    if (ml_type == DT::GetTensorType<onnxruntime::UInt4x2>())       return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT4;
     return ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
 }
 
