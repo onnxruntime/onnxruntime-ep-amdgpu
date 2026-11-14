@@ -595,6 +595,13 @@ constexpr static std::array<SupportedTensorDataTypes, 1> supportedTypeListUInt8t
 constexpr static std::array<SupportedTensorDataTypes, 1> supportedTypeListAllIntegers = {SupportedTensorDataTypes::Ints8to64};
 constexpr static std::array<SupportedTensorDataTypes, 1> supportedTypeListNumericDefault = { SupportedTensorDataTypes::NumericDefault };
 constexpr static std::array<SupportedTensorDataTypes, 1> supportedTypeListAllScalars = {SupportedTensorDataTypes::AllScalars};
+// AllScalars plus the 4-bit sub-byte types, for structural/passthrough ops that only move or
+// reinterpret data (Reshape is a passthrough — no DML op created — so int4/uint4 is always safe).
+// AllScalars itself predates int4 and omits UInt4/Int4; without this an inserted int4 Reshape
+// (WebNN dequantize/quantize int4 odd-size/broadcast cases) lands on no provider and
+// transformer_memcpy throws "Provider type for Reshape node is not set".
+constexpr static std::array<SupportedTensorDataTypes, 1> supportedTypeListAllScalarsInt4 = {
+    SupportedTensorDataTypes::AllScalars | SupportedTensorDataTypes::UInt4 | SupportedTensorDataTypes::Int4};
 constexpr static std::array<SupportedTensorDataTypes, 1> supportedTypeListAllScalarsAndSequences = {SupportedTensorDataTypes::AllScalars | SupportedTensorDataTypes::AllSequences};
 constexpr static std::array<SupportedTensorDataTypes, 2> supportedTypeListEyeLike = { SupportedTensorDataTypes::AllScalars, SupportedTensorDataTypes::AllScalars};
 constexpr static std::array<SupportedTensorDataTypes, 1> supportedTypeListBool = {SupportedTensorDataTypes::Bool};
@@ -873,11 +880,11 @@ constexpr static OperatorRegistrationInformation operatorRegistrationInformation
     {REG_INFO_COPY(11,  Unsqueeze,                          typeNameListDefault,            supportedTypeListAllScalars,            DmlGraphSupport::Supported)},
     {REG_INFO_COPY(13,  Unsqueeze,                          typeNameListDefault,            supportedTypeListAllScalars,            DmlGraphSupport::Supported,     requiredConstantCpuInputs(1))},
     {REG_INFO_COPY(21,  Unsqueeze,                          typeNameListDefault,            supportedTypeListAllScalars,            DmlGraphSupport::Supported,     requiredConstantCpuInputs(1))},
-    {REG_INFO_COPY( 7,  Reshape,                            typeNameListDefault,            supportedTypeListAllScalars,            DmlGraphSupport::Supported,     requiredConstantCpuInputs(1))},
-    {REG_INFO_COPY(13,  Reshape,                            typeNameListDefault,            supportedTypeListAllScalars,            DmlGraphSupport::Supported,     requiredConstantCpuInputs(1))},
-    {REG_INFO_COPY(14,  Reshape,                            typeNameListDefault,            supportedTypeListAllScalars,            DmlGraphSupport::Supported,     requiredConstantCpuInputs(1))},
-    {REG_INFO_COPY(19,  Reshape,                            typeNameListDefault,            supportedTypeListAllScalars,            DmlGraphSupport::Supported,     requiredConstantCpuInputs(1))},
-    {REG_INFO_COPY(21,  Reshape,                            typeNameListDefault,            supportedTypeListAllScalars,            DmlGraphSupport::Supported,     requiredConstantCpuInputs(1))},
+    {REG_INFO_COPY( 7,  Reshape,                            typeNameListDefault,            supportedTypeListAllScalarsInt4,            DmlGraphSupport::Supported,     requiredConstantCpuInputs(1))},
+    {REG_INFO_COPY(13,  Reshape,                            typeNameListDefault,            supportedTypeListAllScalarsInt4,            DmlGraphSupport::Supported,     requiredConstantCpuInputs(1))},
+    {REG_INFO_COPY(14,  Reshape,                            typeNameListDefault,            supportedTypeListAllScalarsInt4,            DmlGraphSupport::Supported,     requiredConstantCpuInputs(1))},
+    {REG_INFO_COPY(19,  Reshape,                            typeNameListDefault,            supportedTypeListAllScalarsInt4,            DmlGraphSupport::Supported,     requiredConstantCpuInputs(1))},
+    {REG_INFO_COPY(21,  Reshape,                            typeNameListDefault,            supportedTypeListAllScalarsInt4,            DmlGraphSupport::Supported,     requiredConstantCpuInputs(1))},
 
     // Elementwise
     {REG_INFO(      7,  Sqrt,                               typeNameListDefault,            supportedTypeListFloat16to32,           DmlGraphSupport::Supported)},
