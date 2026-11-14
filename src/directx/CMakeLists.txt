@@ -234,6 +234,12 @@ add_library(directx-ep MODULE
     op_activation_ep_fusion.cc
     dml_op_translators.cc
     full_graph_fusion.cc
+    dml_ep_ctx.cc
+    # DML graph (de)serialization for the WebNN EPContext path (restored post-#144; sole callers
+    # are FullGraphFusion::Compile generate + CompileEpContext consume).
+    external/DirectMLHelpers/DmlGraphSerialization.cc
+    external/DirectMLHelpers/DmlGraphDeserialization.cc
+    external/DirectMLHelpers/ApiTraits.cc  # FromString specializations (restored post-#144; consume path)
 
     #---- DirectML EP sources ----
     DmlExecutionProvider/CommandQueue.cc
@@ -502,8 +508,11 @@ target_include_directories(directx-ep PRIVATE
 set_target_properties(directx-ep PROPERTIES OBJECT_PATH_MAX 4096)
 
 # Fix C1041 PDB contention: serialize writes to the shared .pdb file
-# and use /Z7 (embedded debug info) to avoid shared PDB file entirely
-target_compile_options(directx-ep PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:/FS>)
+# and use /Z7 (embedded debug info) to avoid shared PDB file entirely.
+# /FS is an MSVC-only driver flag; skip it under the ROCm clang++ (GNU) driver.
+if(MSVC)
+    target_compile_options(directx-ep PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:/FS>)
+endif()
 set_target_properties(directx-ep PROPERTIES MSVC_DEBUG_INFORMATION_FORMAT $<$<CONFIG:Debug,RelWithDebInfo>:Embedded>)
 
 target_link_libraries(directx-ep

@@ -2571,6 +2571,30 @@ HRESULT AbiSafeKernelCreationContext::GetAttribute(
     return S_OK;
 }
 
+// String-array node attributes can't be read via the ORT C API KernelInfo. They are captured at
+// GetCapability keyed by node name (see dml_ep.cc) and served from the EP here. Returns nullptr if
+// absent (then the caller falls back to the normal paths).
+static const std::vector<std::string>* LookupNodeStringArrayAttr(
+    const PluginDmlExecutionProviderImpl* ep,
+    const OrtKernelInfo* kernel_info,
+    const OrtApi* ort_api,
+    const char* attr_name) {
+    if (!ep || !kernel_info || !ort_api || !attr_name) return nullptr;
+    size_t size = 0;
+    if (OrtStatus* st = ort_api->KernelInfo_GetNodeName(kernel_info, nullptr, &size)) {
+        ort_api->ReleaseStatus(st);
+        return nullptr;
+    }
+    if (size == 0) return nullptr;
+    std::string node(size, '\0');
+    if (OrtStatus* st = ort_api->KernelInfo_GetNodeName(kernel_info, node.data(), &size)) {
+        ort_api->ReleaseStatus(st);
+        return nullptr;
+    }
+    node.resize(std::strlen(node.c_str()));  // drop padding/null terminator
+    return ep->GetNodeStringArrayAttr(node, attr_name);
+}
+
 HRESULT AbiSafeKernelCreationContext::GetAttributeElementCount(
     const char* name,
     MLOperatorAttributeType type,
@@ -2642,7 +2666,12 @@ HRESULT AbiSafeKernelCreationContext::GetAttributeElementCount(
         }
 
         case MLOperatorAttributeType::StringArray:
-            // String arrays not directly supported by ORT C API — fall through to default_attributes_
+            // String arrays can't be read via the ORT C API — serve from the EP's captured map,
+            // else fall through to default_attributes_.
+            if (auto* v = LookupNodeStringArrayAttr(execution_provider_, kernel_info_, ort_api_, name)) {
+                *elementCount = static_cast<uint32_t>(v->size());
+                return S_OK;
+            }
             break;
 
         default:
@@ -2676,6 +2705,14 @@ HRESULT AbiSafeKernelCreationContext::GetStringAttributeElementLength(
     uint32_t* attributeElementByteSize) const noexcept {
 
     if (!name || !attributeElementByteSize) return E_POINTER;
+
+    // String-array attributes (e.g. RNN "activations") are served from the EP's captured map.
+    if (auto* v = LookupNodeStringArrayAttr(execution_provider_, kernel_info_, ort_api_, name)) {
+        if (elementIndex < v->size()) {
+            *attributeElementByteSize = static_cast<uint32_t>((*v)[elementIndex].size() + 1);
+            return S_OK;
+        }
+    }
 
     // ORT C API only supports single strings (elementIndex == 0)
     if (elementIndex == 0) {
@@ -2711,6 +2748,16 @@ HRESULT AbiSafeKernelCreationContext::GetStringAttributeElement(
     char* attributeElement) const noexcept {
 
     if (!name || !attributeElement) return E_POINTER;
+
+    // String-array attributes (e.g. RNN "activations") are served from the EP's captured map.
+    if (auto* v = LookupNodeStringArrayAttr(execution_provider_, kernel_info_, ort_api_, name)) {
+        if (elementIndex < v->size()) {
+            const std::string& s = (*v)[elementIndex];
+            if (attributeElementByteSize < s.size() + 1) return E_INVALIDARG;
+            strcpy_s(attributeElement, attributeElementByteSize, s.c_str());
+            return S_OK;
+        }
+    }
 
     // ORT C API only supports single strings (elementIndex == 0)
     if (elementIndex == 0) {

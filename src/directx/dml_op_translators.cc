@@ -49,6 +49,9 @@ DML_TENSOR_DATA_TYPE OnnxDtypeToDml(ONNXTensorElementDataType onnx_dtype) {
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:  return DML_TENSOR_DATA_TYPE_UINT32;
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:  return DML_TENSOR_DATA_TYPE_UINT64;
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:   return DML_TENSOR_DATA_TYPE_UINT8;
+    // Packed sub-byte quantized types (WebNN int4/uint4 Quantize/DequantizeLinear).
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT4:   return DML_TENSOR_DATA_TYPE_UINT4;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT4:    return DML_TENSOR_DATA_TYPE_INT4;
     default: return DML_TENSOR_DATA_TYPE_UNKNOWN;
     }
 }
@@ -71,11 +74,17 @@ std::vector<uint32_t> ComputePackedStrides(const std::vector<uint32_t>& sizes) {
 }
 
 uint64_t ComputeAlignedTotalBytes(const std::vector<uint32_t>& sizes, DML_TENSOR_DATA_TYPE dtype) {
-    size_t elem_size = DmlDataTypeSize(dtype);
-    if (elem_size == 0) return 0;
     uint64_t elem_count = 1;
     for (uint32_t s : sizes) elem_count *= s;
-    uint64_t bytes = elem_count * elem_size;
+    uint64_t bytes;
+    if (dtype == DML_TENSOR_DATA_TYPE_UINT4 || dtype == DML_TENSOR_DATA_TYPE_INT4) {
+        // Sub-byte: two packed 4-bit values per byte (odd counts round up).
+        bytes = (elem_count + 1) / 2;
+    } else {
+        size_t elem_size = DmlDataTypeSize(dtype);
+        if (elem_size == 0) return 0;
+        bytes = elem_count * elem_size;
+    }
     bytes = std::max<uint64_t>(bytes, 4);
     bytes = (bytes + 3) & ~3ull;
     return bytes;
@@ -394,6 +403,88 @@ static std::optional<TranslatedOp> TranslateUnaryActivation(
     return result;
 }
 
+// High-precision unary wrapper: for fp16 inputs, compute the op in fp32
+// (Cast fp16->fp32 -> Op -> Cast fp32->fp16) via a DML graph. DML's native fp16
+// transcendentals (e.g. Tan) can miss the WebNN ULP budget; doing the math in
+// fp32 and rounding once brings the result within tolerance. fp32/other inputs
+// use the plain single-op path.
+template <typename DescType, DML_OPERATOR_TYPE OpType>
+static std::optional<TranslatedOp> TranslateUnaryActivationHP(
+    const OrtApi& ort_api,
+    const NodeView& node,
+    const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
+    const std::unordered_map<std::string, const OrtValue*>& initializers) {
+    auto inputs = GetInputNames(ort_api, node);
+    auto outputs = GetOutputNames(ort_api, node);
+    if (inputs.empty() || outputs.empty()) return std::nullopt;
+    auto* in_info = LookupShape(value_shapes, inputs[0]);
+    if (!in_info) return std::nullopt;
+    if (in_info->data_type != DML_TENSOR_DATA_TYPE_FLOAT16)
+        return TranslateUnaryActivation<DescType, OpType>(ort_api, node, value_shapes, initializers);
+
+    DmlTensorInfo t16 = MakeTensorInfo(in_info->sizes, DML_TENSOR_DATA_TYPE_FLOAT16);
+    DmlTensorInfo t32 = MakeTensorInfo(in_info->sizes, DML_TENSOR_DATA_TYPE_FLOAT32);
+
+    // Primary: Cast fp16 -> fp32
+    auto cast_in = std::make_shared<DML_CAST_OPERATOR_DESC>();
+    TranslatedOp result;
+    result.input_tensors  = { t16 };
+    result.output_tensors = { t32 };
+    result.input_buffer_descs  = { t16.ToBufferDesc() };
+    result.input_tensor_descs.resize(1);
+    result.output_buffer_descs = { t32.ToBufferDesc() };
+    result.output_tensor_descs.resize(1);
+    result.desc_storage = cast_in;
+    result.op_desc = { DML_OPERATOR_CAST, cast_in.get() };
+    result.fixup = [cast_in](TranslatedOp& self) {
+        RebuildTensorDescPointers(self);
+        cast_in->InputTensor  = &self.input_tensor_descs[0];
+        cast_in->OutputTensor = &self.output_tensor_descs[0];
+    };
+    result.FixupPointers();
+
+    // Sub 0: Op in fp32
+    auto op_store = std::make_shared<DescType>();
+    SubNode op_node;
+    op_node.input_tensors  = { t32 };
+    op_node.output_tensors = { t32 };
+    op_node.input_buffer_descs  = { t32.ToBufferDesc() };
+    op_node.input_tensor_descs.resize(1);
+    op_node.output_buffer_descs = { t32.ToBufferDesc() };
+    op_node.output_tensor_descs.resize(1);
+    op_node.desc_storage = op_store;
+    op_node.op_desc = { OpType, op_store.get() };
+    op_node.input_from = { {-1, 0} };
+    op_node.fixup = [op_store](SubNode& self) {
+        RebuildSubNodePointers(self);
+        op_store->InputTensor  = &self.input_tensor_descs[0];
+        op_store->OutputTensor = &self.output_tensor_descs[0];
+    };
+    op_node.FixupPointers();
+
+    // Sub 1: Cast fp32 -> fp16
+    auto cast_out = std::make_shared<DML_CAST_OPERATOR_DESC>();
+    SubNode cast_node;
+    cast_node.input_tensors  = { t32 };
+    cast_node.output_tensors = { t16 };
+    cast_node.input_buffer_descs  = { t32.ToBufferDesc() };
+    cast_node.input_tensor_descs.resize(1);
+    cast_node.output_buffer_descs = { t16.ToBufferDesc() };
+    cast_node.output_tensor_descs.resize(1);
+    cast_node.desc_storage = cast_out;
+    cast_node.op_desc = { DML_OPERATOR_CAST, cast_out.get() };
+    cast_node.input_from = { {0, 0} };
+    cast_node.fixup = [cast_out](SubNode& self) {
+        RebuildSubNodePointers(self);
+        cast_out->InputTensor  = &self.input_tensor_descs[0];
+        cast_out->OutputTensor = &self.output_tensor_descs[0];
+    };
+    cast_node.FixupPointers();
+
+    result.sub_nodes = { std::move(op_node), std::move(cast_node) };
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // MatMul → DML_OPERATOR_GEMM
 // ---------------------------------------------------------------------------
@@ -445,17 +536,45 @@ static std::optional<TranslatedOp> TranslateMatMul(
         if (b_sizes[d] == 1) { b_sizes[d] = bd; b_strides[d] = 0; }
     }
 
-    // Pad to 4D.
+    // DML GEMM is 4D max (2 batch dims). For rank > 4 (N-D batched matmul) collapse the batch
+    // dims (all but the last 2) down to <= 2 by merging adjacent dims that are mergeable in BOTH
+    // inputs — contiguous (stride[i] == size[i+1]*stride[i+1]) or both broadcast (stride 0). This
+    // handles the broadcast variants (a broadcast dim stays stride-0 across the merge). If no
+    // adjacent pair is mergeable in both, bail out (rare).
+    auto merge_dim = [](std::vector<uint32_t>& sz, std::vector<uint32_t>& st, size_t i) {
+        uint32_t new_stride = (st[i] == 0 && st[i + 1] == 0) ? 0u : st[i + 1];
+        sz[i] = sz[i] * sz[i + 1];
+        st[i] = new_stride;
+        sz.erase(sz.begin() + i + 1);
+        st.erase(st.begin() + i + 1);
+    };
+    while (a_sizes.size() > 4) {
+        size_t nbatch = a_sizes.size() - 2;
+        bool merged = false;
+        for (size_t i = 0; i + 1 < nbatch; ++i) {
+            bool a_ok = (a_strides[i] == a_sizes[i + 1] * a_strides[i + 1]) || (a_strides[i] == 0 && a_strides[i + 1] == 0);
+            bool b_ok = (b_strides[i] == b_sizes[i + 1] * b_strides[i + 1]) || (b_strides[i] == 0 && b_strides[i + 1] == 0);
+            if (a_ok && b_ok) { merge_dim(a_sizes, a_strides, i); merge_dim(b_sizes, b_strides, i); merged = true; break; }
+        }
+        if (!merged) return std::nullopt;
+    }
+
+    // Pad UP to 4D (DML GEMM minimum). The M/K/N and batch handling below is rank-agnostic.
     while (a_sizes.size() < 4) { a_sizes.insert(a_sizes.begin(), 1u); a_strides.insert(a_strides.begin(), 0u); }
     while (b_sizes.size() < 4) { b_sizes.insert(b_sizes.begin(), 1u); b_strides.insert(b_strides.begin(), 0u); }
 
-    uint32_t M = a_sizes[2];
-    uint32_t K_a = a_sizes[3];
-    uint32_t K_b = b_sizes[2];
-    uint32_t N = b_sizes[3];
+    size_t rank = a_sizes.size();  // == b_sizes.size() after rank equalization + padding
+    uint32_t M = a_sizes[rank - 2];
+    uint32_t K_a = a_sizes[rank - 1];
+    uint32_t K_b = b_sizes[rank - 2];
+    uint32_t N = b_sizes[rank - 1];
     if (K_a != K_b) return std::nullopt;
 
-    std::vector<uint32_t> c_sizes = { a_sizes[0], a_sizes[1], M, N };
+    // Output batch dims = broadcast of A/B batch dims; matmul replaces the last two dims.
+    std::vector<uint32_t> c_sizes;
+    for (size_t d = 0; d + 2 < rank; ++d) c_sizes.push_back(std::max(a_sizes[d], b_sizes[d]));
+    c_sizes.push_back(M);
+    c_sizes.push_back(N);
 
     uint64_t a_bytes = ComputeAlignedTotalBytes(a_info->sizes, dtype);
     uint64_t b_bytes = ComputeAlignedTotalBytes(b_info->sizes, dtype);
@@ -469,9 +588,12 @@ static std::optional<TranslatedOp> TranslateMatMul(
     b_tensor.strides = b_strides;
 
     auto* out_edge = LookupShape(value_shapes, outputs[0]);
-    auto c_tensor = out_edge ? MakeTensorInfo(out_edge->sizes, dtype)
-                             : MakeTensorInfo(c_sizes, dtype);
-    if (!out_edge) c_tensor.total_bytes = c_bytes;
+    // For a collapsed N-D matmul the ONNX output edge is >4D; use the collapsed 4D c_sizes for the
+    // DML output desc (same contiguous buffer, row-major order preserved).
+    bool use_collapsed = (out_edge && out_edge->sizes.size() > 4);
+    auto c_tensor = (out_edge && !use_collapsed) ? MakeTensorInfo(out_edge->sizes, dtype)
+                                                 : MakeTensorInfo(c_sizes, dtype);
+    if (!out_edge || use_collapsed) c_tensor.total_bytes = c_bytes;
 
     auto storage = std::make_shared<DML_GEMM_OPERATOR_DESC>();
     storage->CTensor = nullptr;
@@ -1313,6 +1435,193 @@ static std::optional<TranslatedOp> TranslateReduce(
     return result;
 }
 
+// Numerically stable ReduceLogSumExp = max + log(sum(exp(x - max))).
+// DML_REDUCE_FUNCTION_LOG_SUM_EXP on this backend evaluates exp(x) directly and
+// overflows to +/-Inf for large-magnitude inputs, so decompose into a DML graph:
+//   m = ReduceMax(x)         (keepdims, for broadcast)
+//   s = x - m                (<= 0, so exp(s) is in (0,1] and cannot overflow)
+//   l = ReduceLogSumExp(s)   (now stable)
+//   y = l + m
+static std::optional<TranslatedOp> TranslateReduceLogSumExpStable(
+    const OrtApi& ort_api,
+    const NodeView& node,
+    const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
+    const std::unordered_map<std::string, const OrtValue*>& initializers) {
+    auto inputs = GetInputNames(ort_api, node);
+    auto outputs = GetOutputNames(ort_api, node);
+    if (inputs.empty() || outputs.empty()) return std::nullopt;
+    auto* in_info = LookupShape(value_shapes, inputs[0]);
+    if (!in_info) return std::nullopt;
+
+    OrtNodeAdapter adapter(node, ort_api);
+    int64_t noop_with_empty_axes = adapter.GetAttributeInt("noop_with_empty_axes", 0);
+
+    // Axes resolution mirrors TranslateReduce (opset-13 input vs opset<13 attr).
+    std::vector<int64_t> axes_i64;
+    if (inputs.size() > 1 && !inputs[1].empty()) {
+        auto it = initializers.find(inputs[1]);
+        if (it != initializers.end() && it->second) {
+            OrtTensorTypeAndShapeInfo* tsi = nullptr;
+            ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(it->second), &tsi);
+            if (tsi) {
+                size_t count = 0;
+                ort_api.GetTensorShapeElementCount(tsi, &count);
+                ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
+                void* data = nullptr;
+                OrtStatus* st = ort_api.GetTensorMutableData(const_cast<OrtValue*>(it->second), &data);
+                if (st) { ort_api.ReleaseStatus(st); }
+                else if (data && count > 0) {
+                    auto* vals = static_cast<const int64_t*>(data);
+                    axes_i64.assign(vals, vals + count);
+                }
+            }
+        }
+    } else {
+        axes_i64 = adapter.GetAttributeInts("axes");
+    }
+
+    size_t padded_rank = in_info->sizes.size();
+    size_t orig_rank = in_info->original_rank ? in_info->original_rank : padded_rank;
+    size_t pad_offset = padded_rank - orig_rank;
+    std::vector<uint32_t> axes;
+    if (axes_i64.empty()) {
+        if (noop_with_empty_axes) return std::nullopt;
+        axes.resize(padded_rank);
+        std::iota(axes.begin(), axes.end(), 0u);
+    } else {
+        for (int64_t a : axes_i64) {
+            if (a < 0) a += static_cast<int64_t>(orig_rank);
+            a += static_cast<int64_t>(pad_offset);
+            axes.push_back(static_cast<uint32_t>(a));
+        }
+    }
+
+    // full = input shape; red = reduced shape with keepdims (reduced axes -> 1),
+    // used both as the broadcast source for the subtract and as the final output
+    // buffer (same element layout as the squeezed ONNX output).
+    std::vector<uint32_t> full = in_info->sizes;
+    std::vector<uint32_t> red = full;
+    for (uint32_t ax : axes) if (ax < red.size()) red[ax] = 1u;
+
+    auto dt = in_info->data_type;
+    DmlTensorInfo t_full = MakeTensorInfo(full, dt);
+    DmlTensorInfo t_red  = MakeTensorInfo(red, dt);
+
+    auto bc = BroadcastShapes(t_full, t_red);  // subtract: x (full) - m (red broadcast to full)
+    if (!bc) return std::nullopt;
+
+    // ---- Primary: Identity(x) so sub_nodes can reference the original x via {-1,0}. ----
+    auto id_storage = std::make_shared<DML_ELEMENT_WISE_IDENTITY_OPERATOR_DESC>();
+    TranslatedOp result;
+    result.input_tensors  = { t_full };
+    result.output_tensors = { t_full };
+    result.input_buffer_descs  = { t_full.ToBufferDesc() };
+    result.input_tensor_descs.resize(1);
+    result.output_buffer_descs = { t_full.ToBufferDesc() };
+    result.output_tensor_descs.resize(1);
+    result.desc_storage = id_storage;
+    result.op_desc = { DML_OPERATOR_ELEMENT_WISE_IDENTITY, id_storage.get() };
+    result.fixup = [id_storage](TranslatedOp& self) {
+        RebuildTensorDescPointers(self);
+        id_storage->InputTensor  = &self.input_tensor_descs[0];
+        id_storage->OutputTensor = &self.output_tensor_descs[0];
+    };
+    result.FixupPointers();
+
+    struct ReduceDesc { DML_REDUCE_OPERATOR_DESC desc{}; std::vector<uint32_t> axes_vec; };
+
+    // ---- Sub 0: m = ReduceMax(x) ----
+    auto max_store = std::make_shared<ReduceDesc>();
+    max_store->axes_vec = axes;
+    max_store->desc.Function = DML_REDUCE_FUNCTION_MAX;
+    max_store->desc.AxisCount = static_cast<UINT>(max_store->axes_vec.size());
+    max_store->desc.Axes = max_store->axes_vec.data();
+    SubNode max_node;
+    max_node.input_tensors  = { t_full };
+    max_node.output_tensors = { t_red };
+    max_node.input_buffer_descs  = { t_full.ToBufferDesc() };
+    max_node.input_tensor_descs.resize(1);
+    max_node.output_buffer_descs = { t_red.ToBufferDesc() };
+    max_node.output_tensor_descs.resize(1);
+    max_node.desc_storage = max_store;
+    max_node.op_desc = { DML_OPERATOR_REDUCE, &max_store->desc };
+    max_node.input_from = { {-1, 0} };
+    max_node.fixup = [max_store](SubNode& self) {
+        RebuildSubNodePointers(self);
+        max_store->desc.InputTensor  = &self.input_tensor_descs[0];
+        max_store->desc.OutputTensor = &self.output_tensor_descs[0];
+        max_store->desc.Axes = max_store->axes_vec.data();
+    };
+    max_node.FixupPointers();
+
+    // ---- Sub 1: s = x - m  (m broadcast from red to full) ----
+    auto sub_store = std::make_shared<DML_ELEMENT_WISE_SUBTRACT_OPERATOR_DESC>();
+    SubNode sub_node;
+    sub_node.input_tensors  = { bc->a, bc->b };
+    sub_node.output_tensors = { t_full };
+    sub_node.input_buffer_descs  = { bc->a.ToBufferDesc(), bc->b.ToBufferDesc() };
+    sub_node.input_tensor_descs.resize(2);
+    sub_node.output_buffer_descs = { t_full.ToBufferDesc() };
+    sub_node.output_tensor_descs.resize(1);
+    sub_node.desc_storage = sub_store;
+    sub_node.op_desc = { DML_OPERATOR_ELEMENT_WISE_SUBTRACT, sub_store.get() };
+    sub_node.input_from = { {-1, 0}, {0, 0} };  // A = x (primary), B = m (sub0)
+    sub_node.fixup = [sub_store](SubNode& self) {
+        RebuildSubNodePointers(self);
+        sub_store->ATensor      = &self.input_tensor_descs[0];
+        sub_store->BTensor      = &self.input_tensor_descs[1];
+        sub_store->OutputTensor = &self.output_tensor_descs[0];
+    };
+    sub_node.FixupPointers();
+
+    // ---- Sub 2: l = ReduceLogSumExp(s) ----
+    auto lse_store = std::make_shared<ReduceDesc>();
+    lse_store->axes_vec = axes;
+    lse_store->desc.Function = DML_REDUCE_FUNCTION_LOG_SUM_EXP;
+    lse_store->desc.AxisCount = static_cast<UINT>(lse_store->axes_vec.size());
+    lse_store->desc.Axes = lse_store->axes_vec.data();
+    SubNode lse_node;
+    lse_node.input_tensors  = { t_full };
+    lse_node.output_tensors = { t_red };
+    lse_node.input_buffer_descs  = { t_full.ToBufferDesc() };
+    lse_node.input_tensor_descs.resize(1);
+    lse_node.output_buffer_descs = { t_red.ToBufferDesc() };
+    lse_node.output_tensor_descs.resize(1);
+    lse_node.desc_storage = lse_store;
+    lse_node.op_desc = { DML_OPERATOR_REDUCE, &lse_store->desc };
+    lse_node.input_from = { {1, 0} };  // from sub_node (subtract)
+    lse_node.fixup = [lse_store](SubNode& self) {
+        RebuildSubNodePointers(self);
+        lse_store->desc.InputTensor  = &self.input_tensor_descs[0];
+        lse_store->desc.OutputTensor = &self.output_tensor_descs[0];
+        lse_store->desc.Axes = lse_store->axes_vec.data();
+    };
+    lse_node.FixupPointers();
+
+    // ---- Sub 3: y = l + m  (both red; output buffer == squeezed ONNX output) ----
+    auto add_store = std::make_shared<DML_ELEMENT_WISE_ADD_OPERATOR_DESC>();
+    SubNode add_node;
+    add_node.input_tensors  = { t_red, t_red };
+    add_node.output_tensors = { t_red };
+    add_node.input_buffer_descs  = { t_red.ToBufferDesc(), t_red.ToBufferDesc() };
+    add_node.input_tensor_descs.resize(2);
+    add_node.output_buffer_descs = { t_red.ToBufferDesc() };
+    add_node.output_tensor_descs.resize(1);
+    add_node.desc_storage = add_store;
+    add_node.op_desc = { DML_OPERATOR_ELEMENT_WISE_ADD, add_store.get() };
+    add_node.input_from = { {2, 0}, {0, 0} };  // A = l (sub2), B = m (sub0)
+    add_node.fixup = [add_store](SubNode& self) {
+        RebuildSubNodePointers(self);
+        add_store->ATensor      = &self.input_tensor_descs[0];
+        add_store->BTensor      = &self.input_tensor_descs[1];
+        add_store->OutputTensor = &self.output_tensor_descs[0];
+    };
+    add_node.FixupPointers();
+
+    result.sub_nodes = { std::move(max_node), std::move(sub_node), std::move(lse_node), std::move(add_node) };
+    return result;
+}
+
 // ArgMax / ArgMin share same descriptor layout: AxisCount/Axes array, not a single Axis.
 template <DML_OPERATOR_TYPE OpType, typename DescType>
 static std::optional<TranslatedOp> TranslateArgMaxMin(
@@ -1596,6 +1905,14 @@ static std::optional<TranslatedOp> TranslateConvImpl(
     }
 
     auto k = ReadConvKernelArgs(adapter, x_sizes);
+    // kernel_shape is optional in ONNX; ReadConvKernelArgs defaults missing dims to 1. For
+    // Conv/ConvTranspose the kernel spatial size IS the filter's spatial dims, so derive it from
+    // the (already layout-normalized NCHW) filter. Without this, a node that omits the attribute
+    // (e.g. WebNN-lowered ConvTranspose) gets kernel_shape=[1,1] -> wrong output size and padding
+    // derivation -> wrong crop (outputs the top-left instead of the cropped region).
+    if (w_sizes.size() >= 2u + k.spatial_dim_count) {
+        k.kernel_shape.assign(w_sizes.begin() + 2, w_sizes.begin() + 2 + k.spatial_dim_count);
+    }
     DML_TENSOR_DATA_TYPE dtype = x_info->data_type;
 
     // Resolve auto_pad for forward convolution (computes padding from input dims).
@@ -1666,10 +1983,18 @@ static std::optional<TranslatedOp> TranslateConvImpl(
     // For backward conv, recompute DML padding from the known output shape.
     // Matches ORT's InitializeKernelAndShapesTransposed logic: uses raw windowSize,
     // not dilated kernel size, for the padding derivation.
+    //
+    // ONNX output_padding does NOT append zeros — it enlarges the output by keeping
+    // more of the real transpose convolution, i.e. it REDUCES the end crop. So derive
+    // the base symmetric padding from the output shape MINUS output_padding, then
+    // reduce end padding by output_padding. Any residual that cannot be absorbed by
+    // the end crop (e.g. output_padding with no padding at all) falls through to DML's
+    // OutputPadding field (which does append zeros) — stored back into k.output_padding.
     if (direction == DML_CONVOLUTION_DIRECTION_BACKWARD) {
         for (uint32_t d = 0; d < k.spatial_dim_count; ++d) {
             uint32_t in_d = x_sizes[2 + d];
-            uint32_t out_d = out_sizes[2 + d];
+            uint32_t op_d = d < k.output_padding.size() ? k.output_padding[d] : 0u;
+            uint32_t out_d = out_sizes[2 + d] - op_d;
             uint32_t window_size = k.kernel_shape[d];
             uint32_t st = k.strides[d];
             int32_t paddings = static_cast<int32_t>((in_d - 1) * st + window_size) - static_cast<int32_t>(out_d);
@@ -1680,6 +2005,9 @@ static std::optional<TranslatedOp> TranslateConvImpl(
                 k.start_padding[d] = static_cast<uint32_t>(paddings + 1) / 2;
             }
             k.end_padding[d] = static_cast<uint32_t>(paddings) - k.start_padding[d];
+            uint32_t reduce = std::min(op_d, k.end_padding[d]);
+            k.end_padding[d] -= reduce;
+            if (d < k.output_padding.size()) k.output_padding[d] = op_d - reduce;  // residual → DML OutputPadding
         }
     }
 
@@ -1725,9 +2053,11 @@ static std::optional<TranslatedOp> TranslateConvImpl(
     storage->dilations    = k.dilations;
     storage->start_pad    = k.start_padding;
     storage->end_pad      = k.end_padding;
-    // ORT zeros output_padding before sending to DML — the ONNX output_padding
-    // is only used to compute the output shape, not passed to the DML operator.
+    // Pass ONNX output_padding to DML's OutputPadding (end-side only); the backward
+    // padding recompute above excludes it so start/end padding stays the real ONNX pads.
     storage->out_pad.assign(k.spatial_dim_count, 0u);
+    for (uint32_t d = 0; d < k.spatial_dim_count && d < k.output_padding.size(); ++d)
+        storage->out_pad[d] = k.output_padding[d];
 
     // Parse fused activation (DmlFusedConv/DmlFusedConvTranspose set these attributes).
     std::string fused_act = adapter.GetAttributeString("activation", "");
@@ -1843,11 +2173,12 @@ static std::optional<TranslatedOp> TranslateAveragePool(
     uint32_t spatial = static_cast<uint32_t>(in_sizes.size()) - 2;
     if (spatial < 1) spatial = 1;
 
-    std::vector<uint32_t> window_size, strides, start_pad, end_pad;
+    std::vector<uint32_t> window_size, strides, start_pad, end_pad, dilations;
     if (global) {
         // Pool over entire spatial extent.
         for (uint32_t i = 0; i < spatial; ++i) window_size.push_back(in_sizes[2 + i]);
         strides.assign(spatial, 1u);
+        dilations.assign(spatial, 1u);
         start_pad.assign(spatial, 0u);
         end_pad.assign(spatial, 0u);
     } else {
@@ -1888,7 +2219,14 @@ static std::optional<TranslatedOp> TranslateAveragePool(
     storage->strides     = strides;
     storage->start_pad   = start_pad;
     storage->end_pad     = end_pad;
-    storage->dilations.assign(spatial, 1u);
+    // Honor the dilations attribute (WebNN averagePool2d / ONNX AveragePool opset-19)
+    // instead of hardcoding 1 — otherwise dilated windows average the wrong elements.
+    if (!global) {
+        auto di = adapter.GetAttributeInts("dilations");
+        for (int64_t v : di) dilations.push_back(static_cast<uint32_t>(v));
+        while (dilations.size() < spatial) dilations.push_back(1u);
+    }
+    storage->dilations = dilations;
     storage->desc.DimensionCount = spatial;
     storage->desc.WindowSize     = storage->window_size.data();
     storage->desc.Strides        = storage->strides.data();
@@ -1977,8 +2315,32 @@ static std::optional<TranslatedOp> TranslateMaxPool(
         }
     }
 
-    auto in_tensor  = MakeTensorInfo(in_sizes,  in_info->data_type);
-    auto out_tensor = MakeTensorInfo(out_sizes, in_info->data_type);
+    // DML MAX_POOLING2 pads with -FLT_MAX, so an output cell whose window lies wholly in
+    // padding (which outputShapeRounding=ceil can create) would emit -FLT_MAX. WebNN defines
+    // such ceil cells as 0. Compute the DML-native (floor) pooling, then zero-pad the result
+    // up to the requested (ceil) output size so the trailing all-padding cells become 0.
+    // Count output cells whose window actually touches real input; trailing cells (which
+    // outputShapeRounding=ceil can create) have an all-padding window that DML fills with
+    // -FLT_MAX but WebNN defines as 0. Pool only the valid cells (adjusting end padding so
+    // DML emits exactly that many), then zero-pad up to the requested output size.
+    std::vector<uint32_t> valid_sizes = out_sizes;
+    std::vector<uint32_t> tail_pad(in_sizes.size(), 0u);
+    bool needs_zero_pad = false;
+    for (uint32_t d = 0; d < spatial; ++d) {
+        uint32_t dk = (window_size[d] - 1) * dilations[d] + 1;
+        // #windows whose start (o*stride - start_pad) is < in_size = ceil((in+start)/stride)
+        uint32_t valid = (in_sizes[2 + d] + start_pad[d] + strides[d] - 1) / strides[d];
+        if (valid > out_sizes[2 + d]) valid = out_sizes[2 + d];
+        if (valid < 1) valid = 1;
+        valid_sizes[2 + d] = valid;
+        if (valid < out_sizes[2 + d]) { tail_pad[2 + d] = out_sizes[2 + d] - valid; needs_zero_pad = true; }
+        int64_t need_end = static_cast<int64_t>(valid - 1) * strides[d] + dk
+                           - static_cast<int64_t>(in_sizes[2 + d]) - static_cast<int64_t>(start_pad[d]);
+        end_pad[d] = need_end > 0 ? static_cast<uint32_t>(need_end) : 0u;
+    }
+
+    auto in_tensor   = MakeTensorInfo(in_sizes,    in_info->data_type);
+    auto pool_tensor = MakeTensorInfo(valid_sizes, in_info->data_type);
 
     struct MaxPoolStorage {
         DML_MAX_POOLING2_OPERATOR_DESC desc{};
@@ -2000,10 +2362,10 @@ static std::optional<TranslatedOp> TranslateMaxPool(
 
     TranslatedOp result;
     result.input_tensors = { in_tensor };
-    result.output_tensors = { out_tensor };
+    result.output_tensors = { pool_tensor };
     result.input_buffer_descs = { in_tensor.ToBufferDesc() };
     result.input_tensor_descs.resize(1);
-    result.output_buffer_descs = { out_tensor.ToBufferDesc() };
+    result.output_buffer_descs = { pool_tensor.ToBufferDesc() };
     result.output_tensor_descs.resize(1);
     result.desc_storage = storage;
     result.op_desc = { DML_OPERATOR_MAX_POOLING2, &storage->desc };
@@ -2018,6 +2380,42 @@ static std::optional<TranslatedOp> TranslateMaxPool(
         storage->desc.EndPadding   = storage->end_pad.data();
     };
     result.FixupPointers();
+
+    if (needs_zero_pad) {
+        // Sub 0: zero-pad the floor-size pooling result up to the ceil output size.
+        auto ceil_tensor = MakeTensorInfo(out_sizes, in_info->data_type);
+        struct PadStorage {
+            DML_PADDING_OPERATOR_DESC desc{};
+            std::vector<uint32_t> start_pad, end_pad;
+        };
+        auto pstore = std::make_shared<PadStorage>();
+        pstore->start_pad.assign(out_sizes.size(), 0u);
+        pstore->end_pad = tail_pad;
+        pstore->desc.PaddingMode    = DML_PADDING_MODE_CONSTANT;
+        pstore->desc.PaddingValue   = 0.0f;
+        pstore->desc.DimensionCount = static_cast<UINT>(out_sizes.size());
+        pstore->desc.StartPadding   = pstore->start_pad.data();
+        pstore->desc.EndPadding     = pstore->end_pad.data();
+        SubNode pad_node;
+        pad_node.input_tensors  = { pool_tensor };
+        pad_node.output_tensors = { ceil_tensor };
+        pad_node.input_buffer_descs  = { pool_tensor.ToBufferDesc() };
+        pad_node.input_tensor_descs.resize(1);
+        pad_node.output_buffer_descs = { ceil_tensor.ToBufferDesc() };
+        pad_node.output_tensor_descs.resize(1);
+        pad_node.desc_storage = pstore;
+        pad_node.op_desc = { DML_OPERATOR_PADDING, &pstore->desc };
+        pad_node.input_from = { {-1, 0} };
+        pad_node.fixup = [pstore](SubNode& self) {
+            RebuildSubNodePointers(self);
+            pstore->desc.InputTensor  = &self.input_tensor_descs[0];
+            pstore->desc.OutputTensor = &self.output_tensor_descs[0];
+            pstore->desc.StartPadding = pstore->start_pad.data();
+            pstore->desc.EndPadding   = pstore->end_pad.data();
+        };
+        pad_node.FixupPointers();
+        result.sub_nodes = { std::move(pad_node) };
+    }
     return result;
 }
 
@@ -3399,11 +3797,35 @@ static std::optional<TranslatedOp> TranslateBatchNorm(
     OrtNodeAdapter adapter(node, ort_api);
     float epsilon = adapter.GetAttributeFloat("epsilon", 1e-5f);
 
-    auto x_tensor   = MakeTensorInfo(x_info->sizes, x_info->data_type);
-    auto out_tensor = MakeTensorInfo(x_info->sizes, x_info->data_type);
+    // DML BATCH_NORMALIZATION normalizes DML axis 1 (the NCHW channel), with the
+    // mean/var/scale/bias tensors placed at axis 1. The framework left-pads low-rank ONNX
+    // shapes to 4D BEFORE we see them (e.g. 2D [N,C] -> [1,1,N,C]), which moves the ONNX
+    // channel (axis 1) to a trailing axis. Using sizes[1] then reads a size-1 padding dim as
+    // the channel -> scale/mean collapse to a scalar and mean[0]/var[0] is applied to every
+    // element (wrong for 1D/2D/3D inputs; 4D needs no padding so it worked). Recover the true
+    // ONNX shape via original_rank and rebuild NCHW = [N, C, spatial_product, 1] so the
+    // channel is back at axis 1. Buffer layout is unchanged (row-major, channel-major order).
+    uint32_t orank = x_info->original_rank;
+    std::vector<uint32_t> x_dml;
+    uint32_t C;
+    if (orank >= 2 && orank < 4 && x_info->sizes.size() >= orank) {
+        std::vector<uint32_t> onnx(x_info->sizes.end() - orank, x_info->sizes.end());
+        uint32_t N = onnx[0];
+        C = onnx[1];
+        uint32_t S = 1;
+        for (size_t i = 2; i < onnx.size(); ++i) S *= onnx[i];
+        x_dml = { N, C, S, 1u };
+    } else {
+        // rank>=4 (or unknown): the ONNX channel is already at DML axis 1.
+        x_dml.assign(x_info->sizes.begin(), x_info->sizes.end());
+        C = x_info->sizes.size() > 1 ? x_info->sizes[1] : 1u;
+    }
+
+    auto x_tensor   = MakeTensorInfo(x_dml, x_info->data_type);
+    auto out_tensor = MakeTensorInfo(x_dml, x_info->data_type);
 
     uint32_t dim_count = static_cast<uint32_t>(x_tensor.sizes.size());
-    std::vector<uint32_t> c_shape = {x_info->sizes[1]};
+    std::vector<uint32_t> c_shape = {C};
     auto scale_tensor = MakeTensorInfoAtAxis(c_shape, scale_info->data_type, 1, dim_count);
     auto b_tensor     = MakeTensorInfoAtAxis(c_shape, b_info->data_type,     1, dim_count);
     auto mean_tensor  = MakeTensorInfoAtAxis(c_shape, mean_info->data_type,  1, dim_count);
@@ -3425,6 +3847,11 @@ static std::optional<TranslatedOp> TranslateBatchNorm(
     result.input_tensor_descs.resize(5);
     result.output_buffer_descs = { out_tensor.ToBufferDesc() };
     result.output_tensor_descs.resize(1);
+    // DML slots are [Input, Mean, Variance, Scale, Bias] but ONNX inputs are
+    // [X(0), scale(1), B(2), input_mean(3), input_var(4)]. Without this map the data
+    // wiring defaults to identity (Mean<-scale, Variance<-B, ...), producing garbage
+    // (e.g. batch-norm const value 104605.46875). Map each DML slot to its ONNX input.
+    result.input_name_reorder = { 0, 3, 4, 1, 2 };
     result.desc_storage = storage;
     result.op_desc = { DML_OPERATOR_BATCH_NORMALIZATION, &storage->desc };
     result.fixup = [storage](TranslatedOp& self) {
@@ -3980,6 +4407,51 @@ static std::optional<TranslatedOp> TranslateClip(
     return result;
 }
 
+// Integer Relu = Clip to [0, type-max]. DML_OPERATOR_ACTIVATION_RELU is float-only, so integer
+// Relu (e.g. WebNN relu on int64) must route through the integer-capable CLIP op instead.
+static std::optional<TranslatedOp> TranslateReluInt(
+    const OrtApi& ort_api,
+    const NodeView& node,
+    const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
+    const std::unordered_map<std::string, const OrtValue*>&) {
+    auto inputs  = GetInputNames(ort_api, node);
+    auto outputs = GetOutputNames(ort_api, node);
+    if (inputs.empty() || outputs.empty()) return std::nullopt;
+    auto* in_info = LookupShape(value_shapes, inputs[0]);
+    if (!in_info) return std::nullopt;
+    auto t = MakeTensorInfo(in_info->sizes, in_info->data_type);
+    DML_SCALAR_UNION mn{}, mx{};
+    switch (in_info->data_type) {
+    case DML_TENSOR_DATA_TYPE_INT8:  mn.Int8  = 0; mx.Int8  = INT8_MAX;  break;
+    case DML_TENSOR_DATA_TYPE_INT16: mn.Int16 = 0; mx.Int16 = INT16_MAX; break;
+    case DML_TENSOR_DATA_TYPE_INT32: mn.Int32 = 0; mx.Int32 = INT32_MAX; break;
+    case DML_TENSOR_DATA_TYPE_INT64: mn.Int64 = 0; mx.Int64 = INT64_MAX; break;
+    default: return std::nullopt;
+    }
+    struct S { DML_ELEMENT_WISE_CLIP1_OPERATOR_DESC desc{}; };
+    auto storage = std::make_shared<S>();
+    storage->desc.ScaleBias      = nullptr;
+    storage->desc.MinMaxDataType = in_info->data_type;
+    storage->desc.Min            = mn;
+    storage->desc.Max            = mx;
+    TranslatedOp result;
+    result.input_tensors  = { t };
+    result.output_tensors = { t };
+    result.input_buffer_descs  = { t.ToBufferDesc() };
+    result.input_tensor_descs.resize(1);
+    result.output_buffer_descs = { t.ToBufferDesc() };
+    result.output_tensor_descs.resize(1);
+    result.desc_storage = storage;
+    result.op_desc = { DML_OPERATOR_ELEMENT_WISE_CLIP1, &storage->desc };
+    result.fixup = [storage](TranslatedOp& self) {
+        RebuildTensorDescPointers(self);
+        storage->desc.InputTensor  = &self.input_tensor_descs[0];
+        storage->desc.OutputTensor = &self.output_tensor_descs[0];
+    };
+    result.FixupPointers();
+    return result;
+}
+
 static std::optional<TranslatedOp> TranslateQuantizeLinear(
     const OrtApi& ort_api,
     const NodeView& node,
@@ -4003,8 +4475,29 @@ static std::optional<TranslatedOp> TranslateQuantizeLinear(
     }
 
     auto x_tensor     = MakeTensorInfo(x_info->sizes, x_info->data_type);
-    auto scale_tensor = MakeTensorInfo(scale_info->sizes, scale_info->data_type);
     auto out_tensor   = MakeTensorInfo(x_info->sizes, out_dtype);
+
+    // ONNX QuantizeLinear's `axis` says which input dimension a per-axis (1D) scale/zeroPoint
+    // applies to. DML broadcasts the quantization tensors by shape, so a 1D scale must be placed
+    // at the quant axis — MakeTensorInfo left-pads it to the LAST axis, which is only correct when
+    // axis == last dim (hence axis=1/2 failed, axis=3 worked). Scalar and blocked (multi-dim) scales
+    // broadcast correctly as-is.
+    OrtNodeAdapter qadapter(node, ort_api);
+    int64_t q_axis = qadapter.GetAttributeInt("axis", 1);
+    int64_t q_block = qadapter.GetAttributeInt("block_size", 0);
+    uint32_t q_padded_rank = static_cast<uint32_t>(x_tensor.sizes.size());
+    uint32_t q_orig_rank = x_info->original_rank ? x_info->original_rank : q_padded_rank;
+    int64_t q_norm_axis = q_axis < 0 ? q_axis + static_cast<int64_t>(q_orig_rank) : q_axis;
+    uint32_t q_padded_axis = (q_norm_axis >= 0 && static_cast<uint32_t>(q_norm_axis) < q_orig_rank)
+        ? static_cast<uint32_t>(q_norm_axis) + (q_padded_rank - q_orig_rank) : 1u;
+    auto make_quant_param = [&](const DmlTensorInfo* info) -> DmlTensorInfo {
+        uint32_t total = 1; for (auto s : info->sizes) total *= s;
+        bool per_axis = (info->original_rank <= 1) && (total > 1) && (q_block == 0);
+        if (per_axis)
+            return MakeTensorInfoAtAxis({total}, info->data_type, q_padded_axis, q_padded_rank);
+        return MakeTensorInfo(info->sizes, info->data_type);
+    };
+    auto scale_tensor = make_quant_param(scale_info);
 
     // DML_QUANTIZE_OPERATOR_DESC uses a QuantizationTensors array: [scale] or [scale, zero_point]
     struct QLStorage {
@@ -4019,7 +4512,7 @@ static std::optional<TranslatedOp> TranslateQuantizeLinear(
     TranslatedOp result;
     if (has_zp) {
         auto* zp_info = LookupShape(value_shapes, inputs[2]);
-        auto zp_tensor = MakeTensorInfo(zp_info->sizes, zp_info->data_type);
+        auto zp_tensor = make_quant_param(zp_info);
         result.input_tensors  = { x_tensor, scale_tensor, zp_tensor };
         result.input_buffer_descs = { x_tensor.ToBufferDesc(), scale_tensor.ToBufferDesc(), zp_tensor.ToBufferDesc() };
         result.input_tensor_descs.resize(3);
@@ -4067,8 +4560,25 @@ static std::optional<TranslatedOp> TranslateDequantizeLinear(
 
     // Output shape = input shape. Output dtype = scale dtype (float32 or float16).
     auto x_tensor     = MakeTensorInfo(x_info->sizes, x_info->data_type);
-    auto scale_tensor = MakeTensorInfo(scale_info->sizes, scale_info->data_type);
     auto out_tensor   = MakeTensorInfo(x_info->sizes, scale_info->data_type);
+
+    // Place a per-axis (1D) scale/zeroPoint at the ONNX `axis` (see TranslateQuantizeLinear).
+    OrtNodeAdapter dqadapter(node, ort_api);
+    int64_t dq_axis = dqadapter.GetAttributeInt("axis", 1);
+    int64_t dq_block = dqadapter.GetAttributeInt("block_size", 0);
+    uint32_t dq_padded_rank = static_cast<uint32_t>(x_tensor.sizes.size());
+    uint32_t dq_orig_rank = x_info->original_rank ? x_info->original_rank : dq_padded_rank;
+    int64_t dq_norm_axis = dq_axis < 0 ? dq_axis + static_cast<int64_t>(dq_orig_rank) : dq_axis;
+    uint32_t dq_padded_axis = (dq_norm_axis >= 0 && static_cast<uint32_t>(dq_norm_axis) < dq_orig_rank)
+        ? static_cast<uint32_t>(dq_norm_axis) + (dq_padded_rank - dq_orig_rank) : 1u;
+    auto make_quant_param = [&](const DmlTensorInfo* info) -> DmlTensorInfo {
+        uint32_t total = 1; for (auto s : info->sizes) total *= s;
+        bool per_axis = (info->original_rank <= 1) && (total > 1) && (dq_block == 0);
+        if (per_axis)
+            return MakeTensorInfoAtAxis({total}, info->data_type, dq_padded_axis, dq_padded_rank);
+        return MakeTensorInfo(info->sizes, info->data_type);
+    };
+    auto scale_tensor = make_quant_param(scale_info);
 
     struct DQLStorage {
         DML_DEQUANTIZE_OPERATOR_DESC desc{};
@@ -4082,7 +4592,7 @@ static std::optional<TranslatedOp> TranslateDequantizeLinear(
     TranslatedOp result;
     if (has_zp) {
         auto* zp_info = LookupShape(value_shapes, inputs[2]);
-        auto zp_tensor = MakeTensorInfo(zp_info->sizes, zp_info->data_type);
+        auto zp_tensor = make_quant_param(zp_info);
         result.input_tensors  = { x_tensor, scale_tensor, zp_tensor };
         result.input_buffer_descs = { x_tensor.ToBufferDesc(), scale_tensor.ToBufferDesc(), zp_tensor.ToBufferDesc() };
         result.input_tensor_descs.resize(3);
@@ -5138,7 +5648,16 @@ static std::optional<TranslatedOp> TranslateTrilu(
         }
     }
 
-    auto t_info = MakeTensorInfo(in_info->sizes, in_info->data_type);
+    // DML_OPERATOR_DIAGONAL_MATRIX1 is 4D-max. Trilu masks the last two dims (the matrix); the
+    // leading dims are batch. For rank > 4 collapse the batch dims (contiguous — single tensor, no
+    // broadcast) into one so the op fits 4D. Buffer layout is unchanged.
+    auto in_sizes = in_info->sizes;
+    if (in_sizes.size() > 4) {
+        uint32_t batch = 1;
+        for (size_t i = 0; i + 2 < in_sizes.size(); ++i) batch *= in_sizes[i];
+        in_sizes = { batch, in_sizes[in_sizes.size() - 2], in_sizes[in_sizes.size() - 1] };
+    }
+    auto t_info = MakeTensorInfo(in_sizes, in_info->data_type);
 
     struct Storage {
         DML_DIAGONAL_MATRIX1_OPERATOR_DESC desc{};
@@ -8642,12 +9161,13 @@ static std::optional<TranslatedOp> TranslateLpPool(
     uint32_t spatial = static_cast<uint32_t>(in_sizes.size()) - 2;
     if (spatial < 1) spatial = 1;
 
-    std::vector<uint32_t> window_size, strides, start_pad, end_pad;
+    std::vector<uint32_t> window_size, strides, start_pad, end_pad, dilations;
     if (global) {
         for (uint32_t i = 0; i < spatial; ++i) window_size.push_back(in_sizes[2 + i]);
         strides.assign(spatial, 1u);
         start_pad.assign(spatial, 0u);
         end_pad.assign(spatial, 0u);
+        dilations.assign(spatial, 1u);
     } else {
         auto ks = adapter.GetAttributeInts("kernel_shape");
         for (int64_t v : ks) window_size.push_back(static_cast<uint32_t>(v));
@@ -8663,6 +9183,11 @@ static std::optional<TranslatedOp> TranslateLpPool(
             start_pad.assign(spatial, 0u);
             end_pad.assign(spatial, 0u);
         }
+        // Honor the dilations attribute (WebNN l2Pool2d / ONNX LpPool opset-18) instead of
+        // hardcoding 1 — otherwise dilated windows pool the wrong elements (wrong result).
+        auto di = adapter.GetAttributeInts("dilations");
+        for (int64_t v : di) dilations.push_back(static_cast<uint32_t>(v));
+        while (dilations.size() < spatial) dilations.push_back(1u);
     }
 
     auto* out_edge = LookupShape(value_shapes, outputs[0]);
@@ -8674,23 +9199,112 @@ static std::optional<TranslatedOp> TranslateLpPool(
             out_sizes[2 + d] = (in_sizes[2 + d] + start_pad[d] + end_pad[d] - window_size[d]) / strides[d] + 1;
     }
 
+    // fp16 overflow guard: Lp/L2 pooling sums p-th powers; in fp16 the accumulator
+    // overflows to Inf for larger inputs (e.g. the WebNN l2Pool2d padding cases).
+    // Compute in fp32 via a Cast(fp16->fp32) -> LpPool1(fp32) -> Cast(fp32->fp16) graph.
+    if (in_info->data_type == DML_TENSOR_DATA_TYPE_FLOAT16) {
+        DmlTensorInfo t16_in  = MakeTensorInfo(in_sizes,  DML_TENSOR_DATA_TYPE_FLOAT16);
+        DmlTensorInfo t32_in  = MakeTensorInfo(in_sizes,  DML_TENSOR_DATA_TYPE_FLOAT32);
+        DmlTensorInfo t32_out = MakeTensorInfo(out_sizes, DML_TENSOR_DATA_TYPE_FLOAT32);
+        DmlTensorInfo t16_out = MakeTensorInfo(out_sizes, DML_TENSOR_DATA_TYPE_FLOAT16);
+
+        // Primary: Cast fp16 -> fp32 (input shape)
+        auto cast_in = std::make_shared<DML_CAST_OPERATOR_DESC>();
+        TranslatedOp result;
+        result.input_tensors  = { t16_in };
+        result.output_tensors = { t32_in };
+        result.input_buffer_descs  = { t16_in.ToBufferDesc() };
+        result.input_tensor_descs.resize(1);
+        result.output_buffer_descs = { t32_in.ToBufferDesc() };
+        result.output_tensor_descs.resize(1);
+        result.desc_storage = cast_in;
+        result.op_desc = { DML_OPERATOR_CAST, cast_in.get() };
+        result.fixup = [cast_in](TranslatedOp& self) {
+            RebuildTensorDescPointers(self);
+            cast_in->InputTensor  = &self.input_tensor_descs[0];
+            cast_in->OutputTensor = &self.output_tensor_descs[0];
+        };
+        result.FixupPointers();
+
+        // Sub 0: LP_POOLING1 in fp32 (in_sizes -> out_sizes)
+        struct LpPoolStorageHP {
+            DML_LP_POOLING1_OPERATOR_DESC desc{};
+            std::vector<uint32_t> window_size, strides, start_pad, end_pad, dilations;
+        };
+        auto hp = std::make_shared<LpPoolStorageHP>();
+        hp->window_size = window_size; hp->strides = strides;
+        hp->start_pad = start_pad; hp->end_pad = end_pad; hp->dilations = dilations;
+        hp->desc.DimensionCount = spatial;
+        hp->desc.WindowSize   = hp->window_size.data();
+        hp->desc.Strides      = hp->strides.data();
+        hp->desc.StartPadding = hp->start_pad.data();
+        hp->desc.EndPadding   = hp->end_pad.data();
+        hp->desc.Dilations    = hp->dilations.data();
+        hp->desc.P            = static_cast<UINT>(p_val);
+        SubNode op_node;
+        op_node.input_tensors  = { t32_in };
+        op_node.output_tensors = { t32_out };
+        op_node.input_buffer_descs  = { t32_in.ToBufferDesc() };
+        op_node.input_tensor_descs.resize(1);
+        op_node.output_buffer_descs = { t32_out.ToBufferDesc() };
+        op_node.output_tensor_descs.resize(1);
+        op_node.desc_storage = hp;
+        op_node.op_desc = { DML_OPERATOR_LP_POOLING1, &hp->desc };
+        op_node.input_from = { {-1, 0} };
+        op_node.fixup = [hp](SubNode& self) {
+            RebuildSubNodePointers(self);
+            hp->desc.InputTensor  = &self.input_tensor_descs[0];
+            hp->desc.OutputTensor = &self.output_tensor_descs[0];
+            hp->desc.WindowSize   = hp->window_size.data();
+            hp->desc.Strides      = hp->strides.data();
+            hp->desc.StartPadding = hp->start_pad.data();
+            hp->desc.EndPadding   = hp->end_pad.data();
+            hp->desc.Dilations    = hp->dilations.data();
+        };
+        op_node.FixupPointers();
+
+        // Sub 1: Cast fp32 -> fp16 (output shape)
+        auto cast_out = std::make_shared<DML_CAST_OPERATOR_DESC>();
+        SubNode cast_node;
+        cast_node.input_tensors  = { t32_out };
+        cast_node.output_tensors = { t16_out };
+        cast_node.input_buffer_descs  = { t32_out.ToBufferDesc() };
+        cast_node.input_tensor_descs.resize(1);
+        cast_node.output_buffer_descs = { t16_out.ToBufferDesc() };
+        cast_node.output_tensor_descs.resize(1);
+        cast_node.desc_storage = cast_out;
+        cast_node.op_desc = { DML_OPERATOR_CAST, cast_out.get() };
+        cast_node.input_from = { {0, 0} };
+        cast_node.fixup = [cast_out](SubNode& self) {
+            RebuildSubNodePointers(self);
+            cast_out->InputTensor  = &self.input_tensor_descs[0];
+            cast_out->OutputTensor = &self.output_tensor_descs[0];
+        };
+        cast_node.FixupPointers();
+
+        result.sub_nodes = { std::move(op_node), std::move(cast_node) };
+        return result;
+    }
+
     auto in_tensor  = MakeTensorInfo(in_sizes,  in_info->data_type);
     auto out_tensor = MakeTensorInfo(out_sizes, in_info->data_type);
 
     struct LpPoolStorage {
-        DML_LP_POOLING_OPERATOR_DESC desc{};
-        std::vector<uint32_t> window_size, strides, start_pad, end_pad;
+        DML_LP_POOLING1_OPERATOR_DESC desc{};
+        std::vector<uint32_t> window_size, strides, start_pad, end_pad, dilations;
     };
     auto storage = std::make_shared<LpPoolStorage>();
     storage->window_size = window_size;
     storage->strides     = strides;
     storage->start_pad   = start_pad;
     storage->end_pad     = end_pad;
+    storage->dilations   = dilations;
     storage->desc.DimensionCount = spatial;
     storage->desc.WindowSize     = storage->window_size.data();
     storage->desc.Strides        = storage->strides.data();
     storage->desc.StartPadding   = storage->start_pad.data();
     storage->desc.EndPadding     = storage->end_pad.data();
+    storage->desc.Dilations      = storage->dilations.data();
     storage->desc.P              = static_cast<UINT>(p_val);
 
     TranslatedOp result;
@@ -8701,7 +9315,7 @@ static std::optional<TranslatedOp> TranslateLpPool(
     result.output_buffer_descs = { out_tensor.ToBufferDesc() };
     result.output_tensor_descs.resize(1);
     result.desc_storage = storage;
-    result.op_desc = { DML_OPERATOR_LP_POOLING, &storage->desc };
+    result.op_desc = { DML_OPERATOR_LP_POOLING1, &storage->desc };
     result.fixup = [storage](TranslatedOp& self) {
         RebuildTensorDescPointers(self);
         storage->desc.InputTensor  = &self.input_tensor_descs[0];
@@ -8710,6 +9324,7 @@ static std::optional<TranslatedOp> TranslateLpPool(
         storage->desc.Strides      = storage->strides.data();
         storage->desc.StartPadding = storage->start_pad.data();
         storage->desc.EndPadding   = storage->end_pad.data();
+        storage->desc.Dilations    = storage->dilations.data();
     };
     result.FixupPointers();
     return result;
@@ -10118,7 +10733,19 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["Sub"] = TranslateBinaryElementwise<DML_ELEMENT_WISE_SUBTRACT_OPERATOR_DESC, DML_OPERATOR_ELEMENT_WISE_SUBTRACT>;
     registry["Div"] = TranslateBinaryElementwise<DML_ELEMENT_WISE_DIVIDE_OPERATOR_DESC, DML_OPERATOR_ELEMENT_WISE_DIVIDE>;
 
-    registry["Relu"]    = TranslateUnaryActivation<DML_ACTIVATION_RELU_OPERATOR_DESC,    DML_OPERATOR_ACTIVATION_RELU>;
+    registry["Relu"]    = [](const OrtApi& api, const NodeView& node,
+        const std::unordered_map<std::string, DmlTensorInfo>& vs,
+        const std::unordered_map<std::string, const OrtValue*>& init) -> std::optional<TranslatedOp> {
+        auto ins = GetInputNames(api, node);
+        const DmlTensorInfo* in = ins.empty() ? nullptr : LookupShape(vs, ins[0]);
+        if (in) {
+            auto dt = in->data_type;
+            if (dt == DML_TENSOR_DATA_TYPE_INT8 || dt == DML_TENSOR_DATA_TYPE_INT16 ||
+                dt == DML_TENSOR_DATA_TYPE_INT32 || dt == DML_TENSOR_DATA_TYPE_INT64)
+                return TranslateReluInt(api, node, vs, init);  // DML activation RELU is float-only
+        }
+        return TranslateUnaryActivation<DML_ACTIVATION_RELU_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_RELU>(api, node, vs, init);
+    };
     registry["Sigmoid"] = TranslateUnaryActivation<DML_ACTIVATION_SIGMOID_OPERATOR_DESC, DML_OPERATOR_ACTIVATION_SIGMOID>;
     registry["Tanh"]    = TranslateUnaryActivation<DML_ACTIVATION_TANH_OPERATOR_DESC,    DML_OPERATOR_ACTIVATION_TANH>;
 
@@ -10147,7 +10774,7 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["Sin"]        = TranslateUnaryActivation<DML_ELEMENT_WISE_SIN_OPERATOR_DESC,           DML_OPERATOR_ELEMENT_WISE_SIN>;
     registry["Sinh"]       = TranslateUnaryActivation<DML_ELEMENT_WISE_SINH_OPERATOR_DESC,          DML_OPERATOR_ELEMENT_WISE_SINH>;
     registry["Sqrt"]       = TranslateUnaryActivation<DML_ELEMENT_WISE_SQRT_OPERATOR_DESC,          DML_OPERATOR_ELEMENT_WISE_SQRT>;
-    registry["Tan"]        = TranslateUnaryActivation<DML_ELEMENT_WISE_TAN_OPERATOR_DESC,           DML_OPERATOR_ELEMENT_WISE_TAN>;
+    registry["Tan"]        = TranslateUnaryActivationHP<DML_ELEMENT_WISE_TAN_OPERATOR_DESC,         DML_OPERATOR_ELEMENT_WISE_TAN>;
     registry["Acos"]       = TranslateUnaryActivation<DML_ELEMENT_WISE_ACOS_OPERATOR_DESC,          DML_OPERATOR_ELEMENT_WISE_ACOS>;
     registry["Acosh"]      = TranslateUnaryActivation<DML_ELEMENT_WISE_ACOSH_OPERATOR_DESC,         DML_OPERATOR_ELEMENT_WISE_ACOSH>;
     registry["Asin"]       = TranslateUnaryActivation<DML_ELEMENT_WISE_ASIN_OPERATOR_DESC,          DML_OPERATOR_ELEMENT_WISE_ASIN>;
@@ -10318,6 +10945,14 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
         auto* x_info     = LookupShape(vs, inputs[0]);
         auto* slope_info = LookupShape(vs, inputs[1]);
         if (!x_info || !slope_info) return std::nullopt;
+        // DML_OPERATOR_ACTIVATION_PARAMETERIZED_RELU is a float/<=32-bit-int activation and
+        // hard-fails (crashes session creation) on 64-bit integers. Decline so the node is not
+        // claimed rather than crashing. (Full int64 support needs a clip/mul/add decomposition —
+        // see branch wip/prelu-int64-decomposition.)
+        if (x_info->data_type == DML_TENSOR_DATA_TYPE_INT64 ||
+            x_info->data_type == DML_TENSOR_DATA_TYPE_UINT64) {
+            return std::nullopt;
+        }
         auto bc = BroadcastShapes(*x_info, *slope_info);
         if (!bc) return std::nullopt;
         auto* out_edge = LookupShape(vs, outputs[0]);
@@ -10358,7 +10993,7 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["ReduceL1"]         = TranslateReduce<DML_REDUCE_FUNCTION_L1>;
     registry["ReduceL2"]         = TranslateReduce<DML_REDUCE_FUNCTION_L2>;
     registry["ReduceLogSum"]     = TranslateReduce<DML_REDUCE_FUNCTION_LOG_SUM>;
-    registry["ReduceLogSumExp"]  = TranslateReduce<DML_REDUCE_FUNCTION_LOG_SUM_EXP>;
+    registry["ReduceLogSumExp"]  = TranslateReduceLogSumExpStable;
     registry["ReduceSumSquare"]  = TranslateReduce<DML_REDUCE_FUNCTION_SUM_SQUARE>;
     registry["ArgMax"]    = TranslateArgMaxMin<DML_OPERATOR_ARGMAX, DML_ARGMAX_OPERATOR_DESC>;
     registry["ArgMin"]    = TranslateArgMaxMin<DML_OPERATOR_ARGMIN, DML_ARGMIN_OPERATOR_DESC>;

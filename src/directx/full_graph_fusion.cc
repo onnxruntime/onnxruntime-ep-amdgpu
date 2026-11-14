@@ -1,6 +1,9 @@
 ﻿// Copyright (c) Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
+#include <cstdio>
+#include <cstring>
+#include <tuple>
 #include "full_graph_fusion.h"
 #include "fusion_utils.h"
 #include "ort_node_adapter.h"
@@ -25,6 +28,20 @@
 #include <numeric>
 #include <unordered_set>
 #include "dml_perf_timer.h"
+
+// DirectML helpers for EPContext graph serialization (SchemaHelpers::ConvertOperatorDesc,
+// DmlSerializedGraphDesc, SerializeDmlGraph). Include order mirrors DmlExecutionProvider/precomp.h.
+#include "external/DirectMLHelpers/ApiTraits.h"
+#include "external/DirectMLHelpers/ApiHelpers.h"
+#include "external/DirectMLHelpers/DirectMLSchema.h"
+#include "external/DirectMLHelpers/AbstractOperatorDesc.h"
+#include "external/DirectMLHelpers/GeneratedSchemaTypes.h"
+#include "external/DirectMLHelpers/SchemaHelpers.h"
+#include "external/DirectMLHelpers/GeneratedSchemaHelpers.h"
+#include "external/DirectMLHelpers/DmlSerializedGraphDesc.h"
+#include "external/DirectMLHelpers/DmlGraphSerialization.h"
+#include "external/DirectMLHelpers/DmlGraphDeserialization.h"
+#include "external/DirectMLHelpers/DmlGraphDescConverter.h"  // GraphDescBuilder::GraphDesc + DmlGraphFusionHelper::ConvertGraphDesc (lifted from #144-trimmed helpers)
 
 namespace dml_ep {
 
@@ -1694,8 +1711,12 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     const OrtGraph*                                          fused_subgraph,
     const std::unordered_map<std::string, const OrtValue*>&  initializers,
     PluginDmlExecutionProviderImpl*                          provider,
-    const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes)
+    const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes,
+    std::string*                                            out_serialized_graph,
+    bool                                                    compile_only)
 {
+    // compile_only requires a serialized-graph sink (the blob is the only product).
+    if (compile_only && out_serialized_graph == nullptr) return nullptr;
     // -----------------------------------------------------------------------
     // Step 1–3: Enumerate subgraph I/O, merge initializers, pre-seed shapes.
     // -----------------------------------------------------------------------
@@ -1974,31 +1995,37 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     // Step 6: Create IDMLOperator for each compiled node.
     // -----------------------------------------------------------------------
 
+    // compile_only (AOT): do NOT touch the device. Skip GetDmlDevice + CreateOperator;
+    // the assembly below only reads translator op_descs + edge indices, and the one
+    // device deref (op_node_descs .Get()) yields harmless nulls since CompileGraph is
+    // also skipped. dml_device/dml_device1 stay null and are unused on this path.
     ComPtr<IDMLDevice> dml_device;
-    if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf()))) return nullptr;
     ComPtr<IDMLDevice1> dml_device1;
-    if (FAILED(dml_device.As(&dml_device1))) return nullptr;
+    if (!compile_only) {
+        if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf()))) return nullptr;
+        if (FAILED(dml_device.As(&dml_device1))) return nullptr;
 
-    for (size_t i = 0; i < compiled_nodes.size(); ++i) {
-        if (!node_is_live[i]) continue;
-        auto& compiled_node = compiled_nodes[i];
-        HRESULT hr = dml_device->CreateOperator(
-            &compiled_node.translated->op_desc, IID_PPV_ARGS(compiled_node.translated->dml_operator.GetAddressOf()));
-        if (FAILED(hr)) {
-            DML_PERF_LOG("[Compile] FAIL: CreateOperator HR=", Hex(static_cast<uint32_t>(hr)),
-                " op=", compiled_node.op_type, "\n");
-            return nullptr;
-        }
-        DML_PERF_LOG("[Compile] CreateOperator OK: op=", compiled_node.op_type, "\n");
-
-        for (size_t s = 0; s < compiled_node.translated->sub_nodes.size(); ++s) {
-            auto& sn = compiled_node.translated->sub_nodes[s];
-            hr = dml_device->CreateOperator(
-                &sn.op_desc, IID_PPV_ARGS(sn.dml_operator.GetAddressOf()));
+        for (size_t i = 0; i < compiled_nodes.size(); ++i) {
+            if (!node_is_live[i]) continue;
+            auto& compiled_node = compiled_nodes[i];
+            HRESULT hr = dml_device->CreateOperator(
+                &compiled_node.translated->op_desc, IID_PPV_ARGS(compiled_node.translated->dml_operator.GetAddressOf()));
             if (FAILED(hr)) {
-                DML_PERF_LOG("[Compile] FAIL: CreateOperator sub_node[", s, "] HR=",
-                    Hex(static_cast<uint32_t>(hr)), " op=", compiled_node.op_type, "\n");
+                DML_PERF_LOG("[Compile] FAIL: CreateOperator HR=", Hex(static_cast<uint32_t>(hr)),
+                    " op=", compiled_node.op_type, "\n");
                 return nullptr;
+            }
+            DML_PERF_LOG("[Compile] CreateOperator OK: op=", compiled_node.op_type, "\n");
+
+            for (size_t s = 0; s < compiled_node.translated->sub_nodes.size(); ++s) {
+                auto& sn = compiled_node.translated->sub_nodes[s];
+                hr = dml_device->CreateOperator(
+                    &sn.op_desc, IID_PPV_ARGS(sn.dml_operator.GetAddressOf()));
+                if (FAILED(hr)) {
+                    DML_PERF_LOG("[Compile] FAIL: CreateOperator sub_node[", s, "] HR=",
+                        Hex(static_cast<uint32_t>(hr)), " op=", compiled_node.op_type, "\n");
+                    return nullptr;
+                }
             }
         }
     }
@@ -2322,6 +2349,118 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     graph_desc.OutputEdges = output_edges.data();
     graph_desc.IntermediateEdgeCount = static_cast<UINT>(intermediate_edges.size());
     graph_desc.IntermediateEdges = intermediate_edges.data();
+
+    // EPContext generation: serialize this DML graph so a later session can reload it
+    // (DeserializeDmlGraph + TryCreateCompiledOperator) without re-translating from ONNX.
+    // Mirrors the in-tree DmlGraphFusionHelper serialization, adapted to FullGraphFusion's
+    // node/edge storage: operator nodes (base + sub_nodes) in op_node_descs order, then
+    // constant nodes; edges are copied from the already-wired storage.
+    if (out_serialized_graph) {
+        try {
+            DmlSerializedGraphDesc sdesc;
+            sdesc.InputCount = graph_desc.InputCount;
+            sdesc.OutputCount = graph_desc.OutputCount;
+
+            for (size_t i = 0; i < compiled_nodes.size(); ++i) {
+                if (!node_is_live[i]) continue;
+                sdesc.Nodes.push_back(DmlSerializedGraphNode{
+                    SchemaHelpers::ConvertOperatorDesc(compiled_nodes[i].translated->op_desc),
+                    "n" + std::to_string(sdesc.Nodes.size())});
+                for (const auto& sn : compiled_nodes[i].translated->sub_nodes)
+                    sdesc.Nodes.push_back(DmlSerializedGraphNode{
+                        SchemaHelpers::ConvertOperatorDesc(sn.op_desc),
+                        "n" + std::to_string(sdesc.Nodes.size())});
+            }
+            for (size_t c = 0; c < input_map.constant_nodes.size(); ++c) {
+                ConstantData cdata{
+                    const_cast<std::byte*>(reinterpret_cast<const std::byte*>(const_node_descs[c].Data)),
+                    static_cast<uint64_t>(const_node_descs[c].DataSize)};
+                sdesc.Nodes.push_back(DmlSerializedGraphNode{
+                    DmlSerializedGraphNodeConstantVariant{cdata}, "c" + std::to_string(c)});
+            }
+
+            // SerializeDmlGraph requires input/output graph edges to carry the graph
+            // input/output tensor name. Invert the name->index maps to recover them.
+            std::unordered_map<uint32_t, std::string> in_name_by_idx, out_name_by_idx;
+            for (const auto& [n, idx] : input_map.dml_input_map)
+                in_name_by_idx[static_cast<uint32_t>(idx)] = n;
+            for (const auto& [n, idx] : subgraph.graph_output_map)
+                out_name_by_idx[static_cast<uint32_t>(idx)] = n;
+
+            // Weights stay as OWNED_BY_DML graph inputs (bound at init on reload) — the
+            // in-tree pattern. DML CompileGraph rejects large inline constant nodes, so the
+            // weight DATA is framed into the blob trailer instead and uploaded on reload.
+            for (const auto& e : input_edge_storage) {
+                auto it = in_name_by_idx.find(e.GraphInputIndex);
+                std::string nm = (it != in_name_by_idx.end()) ? it->second
+                    : ("graph_input_" + std::to_string(e.GraphInputIndex));
+                sdesc.InputEdges.push_back(DmlInputSerializedGraphEdge{
+                    e.GraphInputIndex, e.ToNodeIndex, e.ToNodeInputIndex, std::move(nm)});
+            }
+            for (const auto& e : intermediate_edge_storage)
+                sdesc.IntermediateEdges.push_back(DmlIntermediateSerializedGraphEdge{
+                    e.FromNodeIndex, e.FromNodeOutputIndex, e.ToNodeIndex, e.ToNodeInputIndex,
+                    "intermediate_" + std::to_string(e.FromNodeIndex) + "_" +
+                        std::to_string(e.FromNodeOutputIndex)});
+            for (const auto& e : output_edge_storage) {
+                auto it = out_name_by_idx.find(e.GraphOutputIndex);
+                std::string nm = (it != out_name_by_idx.end()) ? it->second
+                    : ("graph_output_" + std::to_string(e.GraphOutputIndex));
+                sdesc.OutputEdges.push_back(DmlOutputSerializedGraphEdge{
+                    e.FromNodeIndex, e.FromNodeOutputIndex, e.GraphOutputIndex, std::move(nm)});
+            }
+
+            auto fb = SerializeDmlGraph(sdesc);
+
+            // Blob framing (ep_cache_context):
+            //   [u64 fb_size][fb bytes][u32 W][W x (u32 dml_input_idx, u64 size)][weight data...]
+            // Weights are the OWNED_BY_DML DML inputs; their bytes travel here so the reload
+            // path can upload + bind them at InitializeOperator (no external initializers).
+            auto append_pod = [](std::string& s, auto v) {
+                s.append(reinterpret_cast<const char*>(&v), sizeof(v)); };
+            std::string& out = *out_serialized_graph;
+            out.clear();
+            append_pod(out, static_cast<uint64_t>(fb.size()));
+            out.append(reinterpret_cast<const char*>(fb.data()), fb.size());
+
+            std::vector<std::tuple<uint32_t, const char*, uint64_t>> weights;  // idx, data, size
+            for (const auto& wname : input_map.ordered_initializer_names) {
+                auto di = input_map.dml_input_map.find(wname);
+                if (di == input_map.dml_input_map.end()) continue;
+                auto vs = subgraph.value_shapes.find(wname);
+                auto iv = subgraph.all_initializers.find(wname);
+                if (vs == subgraph.value_shapes.end() || iv == subgraph.all_initializers.end() || !iv->second)
+                    throw std::runtime_error("EPContext serialize: missing weight data for '" + wname + "'");
+                void* raw = nullptr;
+                if (ort_api.GetTensorMutableData(const_cast<OrtValue*>(iv->second), &raw) != nullptr || raw == nullptr)
+                    throw std::runtime_error("EPContext serialize: GetTensorMutableData failed for '" + wname + "'");
+                weights.emplace_back(static_cast<uint32_t>(di->second),
+                    reinterpret_cast<const char*>(raw), static_cast<uint64_t>(vs->second.total_bytes));
+            }
+            append_pod(out, static_cast<uint32_t>(weights.size()));
+            for (auto& [idx, data, size] : weights) { append_pod(out, idx); append_pod(out, size); }
+            for (auto& [idx, data, size] : weights) out.append(data, static_cast<size_t>(size));
+        } catch (const std::exception&) {
+            out_serialized_graph->clear();  // serialization failed -> caller skips EPContext node
+        } catch (...) {
+            out_serialized_graph->clear();
+        }
+    }
+
+    // compile_only (AOT / compiler-process): the serialized blob is the only product.
+    // Skip all device-bound work below (CompileGraph, binding props, init upload, Flush)
+    // and return a stub compute-info so the caller emits the EPContext node. Compute is
+    // never run on this path — the blob is dispatched by a separate device-ful session.
+    if (compile_only) {
+        if (out_serialized_graph->empty()) return nullptr;  // serialize failed -> skip node
+        auto* info = new FullGraphNodeComputeInfo();
+        info->state = nullptr;  // no runtime kernel in compile-only
+        info->Compute = [](OrtNodeComputeInfo*, void*, OrtKernelContext*) noexcept -> OrtStatus* {
+            return OrtGetApiBase()->GetApi(ORT_API_VERSION)->CreateStatus(ORT_EP_FAIL,
+                "compile-only (AOT) EP: Compute is unavailable; dispatch the EPContext blob in a device-ful session");
+        };
+        return info;
+    }
 
     ComPtr<IDMLCompiledOperator> compiled_op;
     static constexpr size_t kMinNodeCountForDescriptorsVolatile = 5;
@@ -4353,6 +4492,229 @@ static bool CompileFromSnapshot(
     DML_PERF_LOG("[RuntimeFusion] CompileFromSnapshot OK: variant compiled\n");
     return true;
 }
+// ---------------------------------------------------------------------------
+// FullGraphFusion::CompileEpContext — Tier-0 EPContext reload (consume)
+//
+// Rebuild a compute kernel directly from the serialized DML graph embedded in an
+// EPContext node, skipping ONNX translation. The blob is self-contained (weights
+// embedded as inline constant nodes), so the DML graph has only runtime inputs.
+// ---------------------------------------------------------------------------
+OrtNodeComputeInfo* FullGraphFusion::CompileEpContext(
+    const OrtApi&                    ort_api,
+    const std::string&               serialized_graph,
+    const OrtNode*                   fused_node,
+    PluginDmlExecutionProviderImpl*  provider)
+{
+    using Microsoft::WRL::ComPtr;
+    if (serialized_graph.empty() || fused_node == nullptr || provider == nullptr) return nullptr;
+
+    auto elem_size = [](ONNXTensorElementDataType t) -> size_t {
+        switch (t) {
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32: return 4;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16: return 2;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64: return 8;
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+            case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL: return 1;
+            default: return 0;
+        }
+    };
+
+    try {
+        // 1. Parse the framed blob: [u64 fb_size][fb][u32 W][W x (u32 idx,u64 size)][weight data].
+        const char* base = serialized_graph.data();
+        const size_t blob_size = serialized_graph.size();
+        if (blob_size < sizeof(uint64_t)) return nullptr;
+        uint64_t fb_size = 0; std::memcpy(&fb_size, base, sizeof(fb_size));
+        size_t off = sizeof(uint64_t);
+        if (off + fb_size > blob_size) return nullptr;
+
+        std::vector<std::unique_ptr<std::byte[]>> rawData;
+        DmlSerializedGraphDesc desc = DeserializeDmlGraph(
+            reinterpret_cast<const uint8_t*>(base + off), rawData);
+        off += static_cast<size_t>(fb_size);
+
+        // Weight trailer: index table, then concatenated data.
+        struct WInfo { uint32_t idx; uint64_t size; const char* data; };
+        std::vector<WInfo> weights;
+        if (off + sizeof(uint32_t) <= blob_size) {
+            uint32_t W = 0; std::memcpy(&W, base + off, sizeof(W)); off += sizeof(W);
+            weights.resize(W);
+            for (uint32_t i = 0; i < W; ++i) {
+                if (off + 12 > blob_size) return nullptr;
+                std::memcpy(&weights[i].idx,  base + off, 4); off += 4;
+                std::memcpy(&weights[i].size, base + off, 8); off += 8;
+            }
+            for (uint32_t i = 0; i < W; ++i) {
+                if (off + weights[i].size > blob_size) return nullptr;
+                weights[i].data = base + off; off += static_cast<size_t>(weights[i].size);
+            }
+        }
+
+        const uint32_t input_count  = desc.InputCount;
+        const uint32_t output_count = desc.OutputCount;
+
+        // DML input index of each weight (owned, bound at init, not a runtime input).
+        std::unordered_set<uint32_t> weight_idx_set;
+        for (const auto& w : weights) weight_idx_set.insert(w.idx);
+
+        // DML_TENSOR_FLAG_OWNED_BY_DML does not survive the SerializeDmlGraph flatbuffer
+        // round-trip, so re-apply it to every operator input fed by a weight graph input.
+        // Without it DML treats the weights as regular inputs and the init bindings fault.
+        for (const auto& e : desc.InputEdges) {
+            if (!weight_idx_set.count(e.GraphInputIndex)) continue;
+            if (e.ToNodeIndex >= desc.Nodes.size()) continue;
+            if (!std::holds_alternative<AbstractOperatorDesc>(desc.Nodes[e.ToNodeIndex].Desc)) continue;
+            auto tensors = std::get<AbstractOperatorDesc>(desc.Nodes[e.ToNodeIndex].Desc).GetInputTensors();
+            if (e.ToNodeInputIndex < tensors.size() && tensors[e.ToNodeInputIndex])
+                tensors[e.ToNodeInputIndex]->flags |= DML_TENSOR_FLAG_OWNED_BY_DML;
+        }
+
+        // runtime input tensor name -> DML graph input index.
+        std::unordered_map<std::string, uint32_t> input_name_to_idx;
+        for (const auto& e : desc.InputEdges)
+            if (!e.Name.empty()) input_name_to_idx.emplace(e.Name, e.GraphInputIndex);
+
+        // 2. Convert the serialized graph into a DML_GRAPH_DESC. Passing null index maps
+        //    = "the caller owns DML bindings" (sequential graph input indices).
+        GraphDescBuilder::GraphDesc gd;
+        static_cast<DmlSerializedGraphDesc&>(gd) = std::move(desc);
+        gd.reuseCommandList = false;
+
+        ComPtr<IDMLDevice> device;
+        if (FAILED(provider->GetDmlDevice(device.GetAddressOf())) || !device) return nullptr;
+        ComPtr<IDMLDevice1> device1;
+        if (FAILED(device.As(&device1))) return nullptr;
+
+        StackAllocator<1024> allocator;
+        DML_GRAPH_DESC dmlGraphDesc = {};
+        std::vector<ComPtr<IDMLOperator>> dmlOperators;
+        std::vector<DML_GRAPH_NODE_DESC> dmlGraphNodes;
+        std::vector<DML_GRAPH_EDGE_DESC> dmlInputEdges, dmlOutputEdges, dmlIntermediateEdges;
+        DmlGraphFusionHelper::ConvertGraphDesc<1024>(
+            gd, input_count, output_count, device.Get(), allocator,
+            /*serializedGraphInputIndexToSubgraphInputIndex*/ nullptr,
+            /*serializedGraphLargeConstantNameToSubgraphInputIndex*/ nullptr,
+            dmlGraphDesc, dmlOperators, dmlGraphNodes,
+            dmlInputEdges, dmlOutputEdges, dmlIntermediateEdges);
+
+        // 3. Compile the DML graph (weights are OWNED_BY_DML inputs, not inline constants).
+        DML_EXECUTION_FLAGS flags = DML_EXECUTION_FLAG_NONE;
+        if (!provider->MetacommandsEnabled()) flags |= DML_EXECUTION_FLAG_DISABLE_META_COMMANDS;
+        ComPtr<IDMLCompiledOperator> compiled_op;
+        if (FAILED(device1->CompileGraph(&dmlGraphDesc, flags, IID_PPV_ARGS(compiled_op.GetAddressOf())))
+            || !compiled_op)
+            return nullptr;
+
+        // 4. Persistent resource, then upload each weight to a GPU resource and bind it as
+        //    an init input (OWNED_BY_DML data is baked into the persistent resource at init).
+        ComPtr<ID3D12Resource> persistent_resource;
+        ComPtr<IUnknown> persistent_allocator;
+        std::optional<DML_BUFFER_BINDING> persistent_binding;
+        auto bp = compiled_op->GetBindingProperties();
+        if (bp.PersistentResourceSize > 0) {
+            if (FAILED(provider->AllocatePooledResource(
+                    static_cast<size_t>(bp.PersistentResourceSize), AllocatorRoundingMode::Disabled,
+                    persistent_resource.GetAddressOf(), persistent_allocator.GetAddressOf())))
+                return nullptr;
+            persistent_binding = DML_BUFFER_BINDING{ persistent_resource.Get(), 0, bp.PersistentResourceSize };
+        }
+
+        std::vector<DML_BUFFER_BINDING> init_bindings(input_count, DML_BUFFER_BINDING{});
+        std::vector<ComPtr<ID3D12Resource>> weight_resources;
+        std::vector<ComPtr<IUnknown>>       weight_allocs;
+        weight_resources.reserve(weights.size());
+        weight_allocs.reserve(weights.size());
+        for (const auto& w : weights) {
+            if (w.idx >= input_count || w.size == 0) continue;
+            ComPtr<ID3D12Resource> res; ComPtr<IUnknown> alloc;
+            if (FAILED(provider->AllocatePooledResource(static_cast<size_t>(w.size),
+                    AllocatorRoundingMode::Disabled, res.GetAddressOf(), alloc.GetAddressOf())))
+                return nullptr;
+            if (FAILED(provider->UploadToResource(res.Get(), w.data, w.size)))
+                return nullptr;
+            init_bindings[w.idx] = DML_BUFFER_BINDING{ res.Get(), 0, w.size };
+            weight_resources.push_back(std::move(res));
+            weight_allocs.push_back(std::move(alloc));
+        }
+
+        const DML_BUFFER_BINDING* persistent_ptr = persistent_binding ? &*persistent_binding : nullptr;
+        if (FAILED(provider->InitializeOperator(compiled_op.Get(), persistent_ptr,
+                gsl::make_span(init_bindings))))
+            return nullptr;
+        provider->Flush();
+        provider->QueueReference(compiled_op.Get());
+        if (persistent_allocator) provider->QueueReference(persistent_allocator.Get());
+        for (auto& a : weight_allocs)    if (a) provider->QueueReference(a.Get());
+        for (auto& r : weight_resources) if (r) provider->QueueReference(r.Get());
+
+        // 5. Build kernel state. Weights are OWNED (baked into the persistent resource at
+        //    init) so Compute skips them; only the EPContext node's own inputs are bound at
+        //    run time. I/O byte sizes and output dims come from the node's value infos.
+        auto ks = std::make_unique<FullGraphKernelState>();
+        ks->provider = provider;
+        ks->ort_api = &ort_api;
+        ks->compiled_op = std::move(compiled_op);
+        ks->persistent_resource = std::move(persistent_resource);
+        ks->persistent_allocator = std::move(persistent_allocator);
+        ks->persistent_binding = persistent_binding;
+        ks->num_runtime_inputs = input_count;
+        ks->num_initializers = 0;
+        ks->runtime_input_bytes.assign(input_count, 0);
+        ks->runtime_input_is_owned.assign(input_count, false);
+        for (uint32_t i : weight_idx_set) if (i < input_count) ks->runtime_input_is_owned[i] = true;
+        for (uint32_t i = 0; i < input_count; ++i) ks->dml_inputs_with_edges.insert(i);
+
+        Ort::ConstNode node{fused_node};
+        auto node_inputs  = node.GetInputs();
+        auto node_outputs = node.GetOutputs();
+
+        ks->num_subgraph_inputs = node_inputs.size();
+        ks->subgraph_to_dml_input.assign(node_inputs.size(), SIZE_MAX);
+        for (size_t i = 0; i < node_inputs.size(); ++i) {
+            std::string nm = node_inputs[i].GetName();
+            auto it = input_name_to_idx.find(nm);
+            if (it == input_name_to_idx.end()) continue;  // not a wired DML input
+            const uint32_t dml_idx = it->second;
+            ks->subgraph_to_dml_input[i] = dml_idx;
+            auto tti = node_inputs[i].TypeInfo().GetTensorTypeAndShapeInfo();
+            auto shape = tti.GetShape();
+            size_t n = elem_size(tti.GetElementType());
+            for (auto d : shape) n *= (d > 0 ? static_cast<size_t>(d) : 1);
+            if (dml_idx < input_count) ks->runtime_input_bytes[dml_idx] = n;
+        }
+
+        ks->num_outputs = node_outputs.size();
+        ks->output_dims.resize(node_outputs.size());
+        ks->output_bytes.resize(node_outputs.size(), 0);
+        for (size_t i = 0; i < node_outputs.size(); ++i) {
+            auto tti = node_outputs[i].TypeInfo().GetTensorTypeAndShapeInfo();
+            auto shape = tti.GetShape();
+            size_t n = elem_size(tti.GetElementType());
+            for (auto d : shape) {
+                int64_t dim = (d > 0 ? d : 1);
+                ks->output_dims[i].push_back(dim);
+                n *= static_cast<size_t>(dim);
+            }
+            ks->output_bytes[i] = n;
+        }
+
+        auto* info = new FullGraphNodeComputeInfo();
+        info->state = std::move(ks);
+        return info;
+    } catch (const std::exception&) {
+        return nullptr;
+    } catch (...) {
+        return nullptr;
+    }
+}
 
 bool FullGraphFusion::TryTranslateNodes(
     const OrtApi&                                            ort_api,
@@ -4639,6 +5001,14 @@ bool FullGraphFusion::TryCompilePartition(
     if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf()))) {
         DiagLog("[TryCompilePartition] GetDmlDevice failed\n");
         return false;
+    }
+    // Device-less AOT / compiler process: GetDmlDevice returns S_OK with a NULL device.
+    // There is nothing to pre-flight against; report "pass" (the partition is claimed and
+    // validated at consume-time CompileGraph on the real device). Without this guard the
+    // ComPtr::As<IDMLDevice1> below QueryInterfaces a null IDMLDevice and crashes.
+    if (!dml_device) {
+        DiagLog("[TryCompilePartition] no live DML device (device-less); skip pre-flight\n");
+        return true;
     }
     ComPtr<IDMLDevice1> dml_device1;
     if (FAILED(dml_device.As(&dml_device1))) {
