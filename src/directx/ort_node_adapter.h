@@ -180,6 +180,7 @@ public:
     const char* GetAttributeString(const char* name, const char* default_value = "") const;
     std::vector<float> GetAttributeFloats(const char* name) const;
     std::vector<int64_t> GetAttributeInts(const char* name) const;
+    std::vector<std::string> GetAttributeStrings(const char* name) const;
 
     //==========================================================================
     // Subgraphs

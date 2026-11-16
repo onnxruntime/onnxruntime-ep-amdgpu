@@ -6,9 +6,12 @@
 #include "ort_node_adapter.h"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <numeric>
 
 namespace dml_ep {
@@ -10721,6 +10724,258 @@ static std::optional<TranslatedOp> TranslateQLinearConcat(
 }
 
 // ---------------------------------------------------------------------------
+// LSTM → DML_OPERATOR_LSTM
+// ORT ref: DmlExecutionProvider/Operators/DmlOperatorRecurrentNeuralNetwork.cc
+//          (class DmlOperatorLongShortTermUnit).
+//
+// WebNN's ORT backend (Chromium services/webnn/ort/graph_builder_ort.cc,
+// AddLstmOperation) lowers BOTH `lstm` and `lstmCell` to a single ONNX LSTM node
+// (lstmCell == LSTM with seq_length==1). ONNX input order:
+//   0 X, 1 W, 2 R, 3 B(opt), 4 sequence_lens(opt, WebNN always ""),
+//   5 initial_h(opt), 6 initial_c(opt), 7 P/peephole(opt).
+// DML input slots follow the DML_LSTM_OPERATOR_DESC field order:
+//   0 Input, 1 Weight, 2 Recurrence, 3 Bias, 4 HiddenInit, 5 CellMemInit,
+//   6 SequenceLengths, 7 Peephole. input_name_reorder + dml_input_slot_indices
+//   carry the ONNX→DML permutation and skip absent optionals.
+// ONNX outputs (order matches DML output slots): 0 Y(full seq, opt), 1 Y_h, 2 Y_c.
+//   All three DML outputs are ALWAYS materialized so the DML output count is a
+//   fixed 3 and slot indices stay 0/1/2; an unrequested ONNX output simply gets
+//   no graph-output edge (DML permits dangling node outputs).
+// Value-shapes are 4D leading-1 padded, which coincides with the exact DML tensor
+// shapes (X→[1,seq,batch,in], B→[1,1,dir,8h], h0→[1,dir,batch,hid], …), so inputs
+// are copied straight through.
+// ---------------------------------------------------------------------------
+
+union LstmActivationUnion {
+    DML_ACTIVATION_SIGMOID_OPERATOR_DESC           sigmoid;
+    DML_ACTIVATION_TANH_OPERATOR_DESC              tanh_desc;
+    DML_ACTIVATION_RELU_OPERATOR_DESC              relu;
+    DML_ACTIVATION_LEAKY_RELU_OPERATOR_DESC        leaky_relu;
+    DML_ACTIVATION_THRESHOLDED_RELU_OPERATOR_DESC  thresholded_relu;
+    DML_ACTIVATION_ELU_OPERATOR_DESC               elu;
+    DML_ACTIVATION_SCALED_TANH_OPERATOR_DESC       scaled_tanh;
+    DML_ACTIVATION_HARD_SIGMOID_OPERATOR_DESC      hard_sigmoid;
+    DML_ACTIVATION_SOFTSIGN_OPERATOR_DESC          softsign;
+    DML_ACTIVATION_SOFTPLUS_OPERATOR_DESC          softplus;
+    DML_ACTIVATION_LINEAR_OPERATOR_DESC            linear;  // Affine
+};
+
+struct LstmStorage {
+    DML_LSTM_OPERATOR_DESC            desc{};
+    std::vector<LstmActivationUnion>  act_unions;
+    std::vector<DML_OPERATOR_DESC>    act_descs;
+};
+
+static inline bool LstmNameEquals(const std::string& a, const char* b) {
+    size_t n = std::strlen(b);
+    if (a.size() != n) return false;
+    for (size_t i = 0; i < n; ++i)
+        if (std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)b[i]))
+            return false;
+    return true;
+}
+
+static std::optional<TranslatedOp> TranslateLstm(
+    const OrtApi& ort_api,
+    const NodeView& node,
+    const std::unordered_map<std::string, DmlTensorInfo>& value_shapes,
+    const std::unordered_map<std::string, const OrtValue*>&) {
+    auto inputs  = GetInputNames(ort_api, node);
+    auto outputs = GetOutputNames(ort_api, node);
+    if (inputs.size() < 3 || outputs.empty()) return std::nullopt;
+
+    OrtNodeAdapter adapter(node, ort_api);
+
+    // layout=1 (batchwise) is unsupported (DML and the ORT CPU LSTM don't support
+    // it either). WebNN always emits the default layout=0.
+    if (adapter.GetAttributeInt("layout", 0) != 0) return std::nullopt;
+
+    const DmlTensorInfo* x_info = LookupShape(value_shapes, inputs[0]);
+    const DmlTensorInfo* r_info = LookupShape(value_shapes, inputs[2]);
+    if (!x_info || !r_info) return std::nullopt;
+    if (x_info->sizes.size() < 3 || r_info->sizes.size() < 1) return std::nullopt;
+    DML_TENSOR_DATA_TYPE dtype = x_info->data_type;
+
+    // Direction / num_directions.
+    std::string dir_s = adapter.GetAttributeString("direction", "forward");
+    DML_RECURRENT_NETWORK_DIRECTION direction = DML_RECURRENT_NETWORK_DIRECTION_FORWARD;
+    uint32_t num_directions = 1;
+    if (LstmNameEquals(dir_s, "reverse")) {
+        direction = DML_RECURRENT_NETWORK_DIRECTION_BACKWARD;
+    } else if (LstmNameEquals(dir_s, "bidirectional")) {
+        direction = DML_RECURRENT_NETWORK_DIRECTION_BIDIRECTIONAL;
+        num_directions = 2;
+    }
+
+    // Dims from the 4D leading-1-padded value shapes:
+    //   X=[1,seq,batch,in]; R=[1,dir,4*hid,hid].
+    auto fromEnd = [](const std::vector<uint32_t>& v, size_t k) { return v[v.size() - k]; };
+    uint32_t input_size  = fromEnd(x_info->sizes, 1);
+    (void)input_size;
+    uint32_t batch_size  = fromEnd(x_info->sizes, 2);
+    uint32_t seq_length  = fromEnd(x_info->sizes, 3);
+    uint32_t hidden_size = static_cast<uint32_t>(adapter.GetAttributeInt(
+        "hidden_size", static_cast<int64_t>(fromEnd(r_info->sizes, 1))));
+
+    // --- Activations: 3 per direction (f gate, g cell, h out). ---
+    std::vector<std::string> acts = adapter.GetAttributeStrings("activations");
+    uint32_t needed = 3u * num_directions;
+    if (acts.empty()) {
+        const char* def[3] = {"Sigmoid", "Tanh", "Tanh"};
+        for (uint32_t d = 0; d < num_directions; ++d)
+            for (uint32_t k = 0; k < 3; ++k) acts.push_back(def[k]);
+    } else if (acts.size() == 3 && num_directions == 2) {
+        acts.push_back(acts[0]); acts.push_back(acts[1]); acts.push_back(acts[2]);
+    }
+    if (acts.size() < needed) acts.resize(needed, "Tanh");
+
+    std::vector<float> alphas = adapter.GetAttributeFloats("activation_alpha");
+    std::vector<float> betas  = adapter.GetAttributeFloats("activation_beta");
+    size_t ca = 0, cb = 0;
+    auto nextAlpha = [&](float def) { return ca < alphas.size() ? alphas[ca++] : def; };
+    auto nextBeta  = [&](float def) { return cb < betas.size()  ? betas[cb++]  : def; };
+
+    auto storage = std::make_shared<LstmStorage>();
+    storage->act_unions.assign(needed, LstmActivationUnion{});
+    storage->act_descs.assign(needed, DML_OPERATOR_DESC{});
+    for (uint32_t i = 0; i < needed; ++i) {
+        const std::string& a = acts[i];
+        LstmActivationUnion& u = storage->act_unions[i];
+        DML_OPERATOR_DESC& d = storage->act_descs[i];
+        if (LstmNameEquals(a, "Sigmoid")) {
+            u.sigmoid = {}; d = { DML_OPERATOR_ACTIVATION_SIGMOID, &u.sigmoid };
+        } else if (LstmNameEquals(a, "Tanh")) {
+            u.tanh_desc = {}; d = { DML_OPERATOR_ACTIVATION_TANH, &u.tanh_desc };
+        } else if (LstmNameEquals(a, "Relu")) {
+            u.relu = {}; d = { DML_OPERATOR_ACTIVATION_RELU, &u.relu };
+        } else if (LstmNameEquals(a, "LeakyRelu")) {
+            u.leaky_relu = {}; u.leaky_relu.Alpha = nextAlpha(0.01f);
+            d = { DML_OPERATOR_ACTIVATION_LEAKY_RELU, &u.leaky_relu };
+        } else if (LstmNameEquals(a, "ThresholdedRelu")) {
+            u.thresholded_relu = {}; u.thresholded_relu.Alpha = nextAlpha(1.0f);
+            d = { DML_OPERATOR_ACTIVATION_THRESHOLDED_RELU, &u.thresholded_relu };
+        } else if (LstmNameEquals(a, "Elu")) {
+            u.elu = {}; u.elu.Alpha = nextAlpha(1.0f);
+            d = { DML_OPERATOR_ACTIVATION_ELU, &u.elu };
+        } else if (LstmNameEquals(a, "ScaledTanh")) {
+            u.scaled_tanh = {}; u.scaled_tanh.Alpha = nextAlpha(1.0f); u.scaled_tanh.Beta = nextBeta(1.0f);
+            d = { DML_OPERATOR_ACTIVATION_SCALED_TANH, &u.scaled_tanh };
+        } else if (LstmNameEquals(a, "HardSigmoid")) {
+            u.hard_sigmoid = {}; u.hard_sigmoid.Alpha = nextAlpha(0.2f); u.hard_sigmoid.Beta = nextBeta(0.5f);
+            d = { DML_OPERATOR_ACTIVATION_HARD_SIGMOID, &u.hard_sigmoid };
+        } else if (LstmNameEquals(a, "Softsign")) {
+            u.softsign = {}; d = { DML_OPERATOR_ACTIVATION_SOFTSIGN, &u.softsign };
+        } else if (LstmNameEquals(a, "Softplus")) {
+            u.softplus = {}; d = { DML_OPERATOR_ACTIVATION_SOFTPLUS, &u.softplus };
+        } else if (LstmNameEquals(a, "Affine")) {
+            u.linear = {}; u.linear.Alpha = nextAlpha(1.0f); u.linear.Beta = nextBeta(0.0f);
+            d = { DML_OPERATOR_ACTIVATION_LINEAR, &u.linear };
+        } else {
+            return std::nullopt;  // unknown activation → decline cleanly
+        }
+    }
+
+    // --- clip / input_forget (WebNN sets neither) ---
+    float clip_sentinel = adapter.GetAttributeFloat("clip", std::numeric_limits<float>::quiet_NaN());
+    bool use_clip = !std::isnan(clip_sentinel);
+    float clip = use_clip ? clip_sentinel : 0.0f;
+    bool couple = adapter.GetAttributeInt("input_forget", 0) != 0;
+
+    // --- Inputs in DML slot order (0..7), present-only. ---
+    struct SlotMap { int dml_slot; int onnx_idx; };
+    const SlotMap slotmap[8] = {
+        {0, 0}, {1, 1}, {2, 2}, {3, 3}, {4, 5}, {5, 6}, {6, 4}, {7, 7},
+    };
+
+    TranslatedOp result;
+    std::array<int, 8> packed_of_slot;
+    packed_of_slot.fill(-1);
+
+    for (const auto& sm : slotmap) {
+        if (sm.onnx_idx >= static_cast<int>(inputs.size())) continue;
+        const std::string& nm = inputs[sm.onnx_idx];
+        if (nm.empty()) continue;
+        const DmlTensorInfo* info = LookupShape(value_shapes, nm);
+        if (!info) {
+            if (sm.dml_slot <= 2) return std::nullopt;  // X/W/R mandatory
+            continue;
+        }
+        DmlTensorInfo t = *info;
+        if (sm.dml_slot == 6 && t.data_type != DML_TENSOR_DATA_TYPE_UINT32)
+            t.data_type = DML_TENSOR_DATA_TYPE_UINT32;  // DML requires unsigned seq lens
+        packed_of_slot[sm.dml_slot] = static_cast<int>(result.input_tensors.size());
+        result.input_tensors.push_back(t);
+        result.input_buffer_descs.push_back(t.ToBufferDesc());
+        result.input_name_reorder.push_back(static_cast<size_t>(sm.onnx_idx));
+        result.dml_input_slot_indices.push_back(static_cast<size_t>(sm.dml_slot));
+    }
+    if (packed_of_slot[0] < 0 || packed_of_slot[1] < 0 || packed_of_slot[2] < 0)
+        return std::nullopt;  // X/W/R all required
+    result.input_tensor_descs.resize(result.input_tensors.size());
+
+    // --- Outputs ---
+    // ONNX LSTM declares 3 outputs in a fixed order: 0 Y(full seq), 1 Y_h, 2 Y_c.
+    // Whether each is REQUESTED is per the (non-empty) output name. We keep
+    // output_tensors DENSE (size 3, indexed by ONNX slot — the fusion write-back
+    // seeds value_shapes[output_names[k]] = output_tensors[k]), but in the fixup we
+    // only wire a DML OUTPUT tensor pointer for the requested slots and leave the
+    // rest null. DML then produces exactly the requested outputs at their FIXED
+    // schema indices (OutputSequence=0, OutputSingle=1, OutputCellSingle=2), so an
+    // unrequested output is never produced (no dangling node output) and the
+    // requested ones keep stable indices that match the default edge routing
+    // (from_output_index == ONNX output slot). lstmCell always leaves Y empty.
+    auto makeOut = [&](int onnx_out_idx, const std::vector<uint32_t>& fallback) -> DmlTensorInfo {
+        if (onnx_out_idx < static_cast<int>(outputs.size()) && !outputs[onnx_out_idx].empty()) {
+            const DmlTensorInfo* oi = LookupShape(value_shapes, outputs[onnx_out_idx]);
+            if (oi) return *oi;
+        }
+        return MakeTensorInfo(fallback, dtype);
+    };
+    bool want_y  = outputs.size() > 0 && !outputs[0].empty();
+    bool want_yh = outputs.size() > 1 && !outputs[1].empty();
+    bool want_yc = outputs.size() > 2 && !outputs[2].empty();
+    DmlTensorInfo y_info  = makeOut(0, {seq_length, num_directions, batch_size, hidden_size});
+    DmlTensorInfo yh_info = makeOut(1, {num_directions, batch_size, hidden_size});
+    DmlTensorInfo yc_info = makeOut(2, {num_directions, batch_size, hidden_size});
+    result.output_tensors = { y_info, yh_info, yc_info };
+    result.output_buffer_descs = { y_info.ToBufferDesc(), yh_info.ToBufferDesc(), yc_info.ToBufferDesc() };
+    result.output_tensor_descs.resize(3);
+
+    storage->desc.Direction         = direction;
+    storage->desc.ClipThreshold     = clip;
+    storage->desc.UseClipThreshold  = use_clip ? TRUE : FALSE;
+    storage->desc.CoupleInputForget = couple ? TRUE : FALSE;
+
+    result.desc_storage = storage;
+    result.op_desc = { DML_OPERATOR_LSTM, &storage->desc };
+
+    result.fixup = [storage, packed_of_slot, want_y, want_yh, want_yc](TranslatedOp& self) {
+        RebuildTensorDescPointers(self);
+        auto slotDesc = [&](int slot) -> const DML_TENSOR_DESC* {
+            int p = packed_of_slot[slot];
+            return p >= 0 ? &self.input_tensor_descs[p] : nullptr;
+        };
+        storage->desc.InputTensor            = slotDesc(0);
+        storage->desc.WeightTensor           = slotDesc(1);
+        storage->desc.RecurrenceTensor       = slotDesc(2);
+        storage->desc.BiasTensor             = slotDesc(3);
+        storage->desc.HiddenInitTensor       = slotDesc(4);
+        storage->desc.CellMemInitTensor      = slotDesc(5);
+        storage->desc.SequenceLengthsTensor  = slotDesc(6);
+        storage->desc.PeepholeTensor         = slotDesc(7);
+        storage->desc.OutputSequenceTensor   = want_y  ? &self.output_tensor_descs[0] : nullptr;
+        storage->desc.OutputSingleTensor     = want_yh ? &self.output_tensor_descs[1] : nullptr;
+        storage->desc.OutputCellSingleTensor = want_yc ? &self.output_tensor_descs[2] : nullptr;
+        for (size_t i = 0; i < storage->act_unions.size(); ++i)
+            storage->act_descs[i].Desc = &storage->act_unions[i];
+        storage->desc.ActivationDescs     = storage->act_descs.data();
+        storage->desc.ActivationDescCount = static_cast<UINT>(storage->act_descs.size());
+    };
+    result.FixupPointers();
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // Registry builder
 // ---------------------------------------------------------------------------
 
@@ -11209,6 +11464,7 @@ OpTranslatorRegistry BuildOpTranslatorRegistry() {
     registry["LpNormalization"]       = TranslateLpNormalization;
     registry["EyeLike"]               = TranslateEyeLike;
     registry["ReverseSequence"]       = TranslateReverseSequence;
+    registry["LSTM"]                  = TranslateLstm;
     registry["Crop"]                  = TranslateCrop;
     registry["MaxRoiPool"]            = TranslateMaxRoiPool;
     registry["MaxUnpool"]             = TranslateMaxUnpool;

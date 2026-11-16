@@ -1948,6 +1948,14 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     for (size_t node_idx = 0; node_idx < compiled_nodes.size(); ++node_idx) {
         if (!node_is_live[node_idx]) continue;
         auto& compiled_node = compiled_nodes[node_idx];
+        // DML's recurrent operators (LSTM/GRU/RNN) reject DML_TENSOR_FLAG_OWNED_BY_DML on
+        // their weight/recurrence/bias tensors — IDMLDevice::CreateOperator fails E_INVALIDARG
+        // (verified: NONE compiles, OWNED_BY_DML does not). Conv/Gemm accept owned weights, but
+        // these do not. Leave their initializer inputs as ordinary runtime-bound graph inputs
+        // (ORT supplies the initializer data at dispatch), matching the pre-flight TryCompilePartition
+        // graph which already compiles them unflagged.
+        if (compiled_node.op_type == "LSTM" || compiled_node.op_type == "GRU" || compiled_node.op_type == "RNN")
+            continue;
         size_t dml_input_count = compiled_node.translated->input_tensors.size();
         for (size_t s = 0; s < compiled_node.input_names.size() && s < dml_input_count; ++s) {
             size_t name_idx = compiled_node.translated->input_name_reorder.empty()
@@ -2652,6 +2660,51 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
             (it != subgraph.value_shapes.end()) ? it->second.total_bytes : 0;
         if (owned_graph_input_indices.count(dml_idx))
             kernel_state->runtime_input_is_owned[dml_idx] = true;
+    }
+
+    // Mode-B initializers that are NOT owned (e.g. LSTM/GRU/RNN weights — DML's recurrent
+    // CreateOperator rejects OWNED_BY_DML on them, so Step 5 skips the owned flag). They are
+    // DML graph inputs with no binding path otherwise: the runtime-input loop only covers
+    // subgraph graph inputs, and owned init-baking is skipped. Without binding, the LSTM reads
+    // unbound VRAM -> GPU TDR (0x887A0005). Route them through the shared-initializer mechanism:
+    // upload the constant data once here, bind it every dispatch in FullGraph_Compute (Flags=NONE).
+    {
+        bool uploaded_any = false;
+        for (const auto& name : input_map.ordered_initializer_names) {
+            auto di_it = input_map.dml_input_map.find(name);
+            if (di_it == input_map.dml_input_map.end()) continue;
+            size_t dml_idx = di_it->second;
+            if (owned_graph_input_indices.count(dml_idx)) continue;          // owned -> baked at init
+            if (kernel_state->shared_initializers.count(name)) continue;     // already uploaded
+            auto init_it = subgraph.all_initializers.find(name);
+            if (init_it == subgraph.all_initializers.end() || !init_it->second) continue;
+            void* cpu_ptr = nullptr;
+            OrtStatus* st = ort_api.GetTensorMutableData(const_cast<OrtValue*>(init_it->second), &cpu_ptr);
+            if (st || !cpu_ptr) { if (st) ort_api.ReleaseStatus(st); continue; }
+            OrtTensorTypeAndShapeInfo* tsi = nullptr;
+            ort_api.GetTensorTypeAndShape(const_cast<OrtValue*>(init_it->second), &tsi);
+            size_t elem_count = 0; ONNXTensorElementDataType dt = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+            if (tsi) {
+                DML_EP_RELEASE_IGNORED_STATUS(ort_api, ort_api.GetTensorShapeElementCount(tsi, &elem_count));
+                ort_api.GetTensorElementType(tsi, &dt);
+                ort_api.ReleaseTensorTypeAndShapeInfo(tsi);
+            }
+            uint64_t actual_bytes = static_cast<uint64_t>(elem_count) * DmlDataTypeSize(OnnxDtypeToDml(dt));
+            auto shape_it = subgraph.value_shapes.find(name);
+            uint64_t bytes = (shape_it != subgraph.value_shapes.end()) ? shape_it->second.total_bytes : 0;
+            if (bytes == 0) continue;
+            uint64_t upload_bytes = std::min(bytes, actual_bytes > 0 ? actual_bytes : bytes);
+            FullGraphKernelState::SharedInitializer si;
+            if (FAILED(provider->AllocatePooledResource(static_cast<size_t>(bytes),
+                    AllocatorRoundingMode::Disabled, si.gpu_resource.GetAddressOf(),
+                    si.allocator_ref.GetAddressOf()))) continue;
+            if (FAILED(provider->UploadToResource(si.gpu_resource.Get(), cpu_ptr, upload_bytes))) continue;
+            si.bytes = bytes;
+            kernel_state->shared_initializers[name] = std::move(si);
+            kernel_state->shared_initializer_slots.emplace_back(dml_idx, name);
+            uploaded_any = true;
+        }
+        if (uploaded_any) { provider->WaitForOutstandingWork(); provider->TrimUploadHeap(); }
     }
 
     kernel_state->num_outputs     = num_graph_outputs;
@@ -5284,6 +5337,14 @@ bool FullGraphFusion::TryCompilePartition(
     // Output edges for operator nodes.
     for (size_t node_idx = 0; node_idx < compiled_nodes.size(); ++node_idx) {
         for (size_t k = 0; k < compiled_nodes[node_idx].output_names.size(); ++k) {
+            // Skip absent optional outputs: an op may declare an output slot with an
+            // empty name (e.g. LSTM's Y sequence output when return_sequence=false, or
+            // lstmCell which never emits Y). The translator leaves that DML output
+            // tensor null, so there is no DML output at index k to source an edge from;
+            // emitting one makes CompileGraph fail E_INVALIDARG and the whole partition
+            // is (wrongly) rejected. The real Compile path keys off graph_output_map,
+            // which already excludes empty names — mirror that here.
+            if (compiled_nodes[node_idx].output_names[k].empty()) continue;
             size_t pdi = dml_node_offset[node_idx];
             UINT foi;
             const auto& osrc = compiled_nodes[node_idx].translated->output_source;
