@@ -118,6 +118,22 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
             D3D_FEATURE_LEVEL_12_1
         };
 
+        // compile-only / virtual device (AOT path): d3d12Device is null. Skip all live
+        // feature queries and device-bound heap creation — the generate path serializes
+        // the DML graph IR without touching hardware. Capability is served statically
+        // (GetSupportedDeviceDataTypeMask) and the device-bound compile is deferred to
+        // the consume/dispatch session.
+        if (!d3d12Device)
+        {
+            m_isMcdmDevice = false;
+            m_areCustomHeapsSupported = true;
+            m_native16BitShaderOpsSupported = true;
+            THROW_IF_ERROR(ort_api.CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeCPU, &m_cpuMemInfo));
+            THROW_IF_ERROR(ort_api.CreateMemoryInfo_V2("GPU", OrtMemoryInfoDeviceType_GPU, amd::VendorId,
+                0, OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator, &m_gpuMemInfo));
+            return;
+        }
+
         featureLevels.NumFeatureLevels = ARRAYSIZE(featureLevelsList);
         featureLevels.pFeatureLevelsRequested = featureLevelsList;
         ORT_THROW_IF_FAILED(d3d12Device->CheckFeatureSupport(
@@ -212,6 +228,13 @@ PluginDmlExecutionProviderImpl::~PluginDmlExecutionProviderImpl() {
     }
 
     std::vector<OrtAllocator*> PluginDmlExecutionProviderImpl::CreatePreferredAllocators() {
+        // compile-only / virtual device (AOT path): no D3D12 device → no GPU buffer
+        // allocator. The generate path never allocates/binds GPU tensors (it only
+        // serializes graph IR), so serve a CPU allocator only.
+        if (!m_d3d12Device) {
+            if (!m_cpuInputAllocator) m_cpuInputAllocator = std::make_shared<CpuAllocator>(m_cpuMemInfo);
+            return std::vector<OrtAllocator*>{ m_cpuInputAllocator.get() };
+        }
         if (!m_allocator)
         {
             // Create an allocator for D3D12 buffers used to hold tensor data. The returned buffers from the allocator

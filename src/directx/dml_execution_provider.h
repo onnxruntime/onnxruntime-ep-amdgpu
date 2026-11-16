@@ -59,6 +59,20 @@ namespace dml_ep {
 
         void ReleaseCompletedReferences();
 
+        // String-array node attributes (e.g. RNN "activations") captured at GetCapability time.
+        // The ORT C API KernelInfo cannot read string-array attributes, so the DML operator path
+        // would otherwise drop them. Keyed by node name, then attribute name.
+        void SetNodeStringArrayAttr(const std::string& node, const std::string& attr, std::vector<std::string> values) {
+            m_nodeStringArrayAttrs[node][attr] = std::move(values);
+        }
+        const std::vector<std::string>* GetNodeStringArrayAttr(const std::string& node, const std::string& attr) const {
+            auto n = m_nodeStringArrayAttrs.find(node);
+            if (n == m_nodeStringArrayAttrs.end()) return nullptr;
+            auto a = n->second.find(attr);
+            return a == n->second.end() ? nullptr : &a->second;
+        }
+        void ClearNodeStringArrayAttrs() { m_nodeStringArrayAttrs.clear(); }
+
         OrtStatus* CopyTensorsPlugin(const OrtValue** src_tensors_ptr,
                                     OrtValue** dst_tensors_ptr, OrtSyncStream** streams_ptr,
                                     size_t num_tensors);
@@ -232,6 +246,8 @@ namespace dml_ep {
         bool m_graphCaptureEnabled = false;
 
         std::unordered_map<int, std::vector<std::unique_ptr<DmlReusedCommandListState>>> m_capturedGraphs;
+        // node name -> (attr name -> string-array values); see Set/GetNodeStringArrayAttr.
+        std::unordered_map<std::string, std::unordered_map<std::string, std::vector<std::string>>> m_nodeStringArrayAttrs;
         std::unordered_set<int> m_graphCapturingDone;
         bool m_sessionInitialized = false;
         bool m_cpuSyncSpinningEnabled = false;

@@ -49,7 +49,13 @@ public:
         bool enableHostAccessible = false,
         // Opt-in for runtime (deferred, dynamic-shape) graph fusion (ep.directml.enable_graph_capture).
         // Selects the ORT-style runtime fusion path over static fusion (see GetCapabilityImpl).
-        bool enableGraphCapture = false);
+        bool enableGraphCapture = false,
+        // EPContext generation: when ORT drives a compile-and-dump pass (ep.context_enable=1),
+        // emit an EPContext node embedding the serialized DML graph (WebNN no-recompile path).
+        bool enableEpContext = false,
+        // compile-only / virtual device (Track-2 AOT): device-less serialize-only generate.
+        // The EP is created with no D3D12/DML device; CompileImpl serializes the graph IR only.
+        bool compileOnly = false);
 
     ~ExecutionProviderPlugin();
 
@@ -287,6 +293,8 @@ private:
     bool m_sessionInitialized = false;
     bool m_cpuSyncSpinningEnabled = false;
     bool m_memoryArenaDisabled = false;
+    bool m_epContextEnable = false;  // ep.context_enable: emit EPContext nodes in CompileImpl
+    bool m_compileOnly = false;      // ep.directml.compile_only: device-less serialize-only generate (AOT)
 
     int m_currentGraphAnnotationId = 0;
     std::unordered_set<int> m_graphCapturingDone;
