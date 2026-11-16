@@ -2299,6 +2299,37 @@ Ort::Status ResolveComputeIO(ComputeState& compute_state,
     // Integer key for the per-shape hot caches and the cached_programs lookup.
     const ShapeKey shape_key{hash::ShapeKeyOf(input_shapes_hash)};
 
+    // Session creation compiled `program` for these static shapes but did not record its
+    // key, so on the first call adopt it when its parameter shapes match this call's inputs
+    // instead of recompiling it in ResolveProgram.
+    if (!shapes_unchanged && input_shapes_match && !compute_state.has_active_program_shape_key) {
+        const auto prog_shapes{compute_state.program.get_parameter_shapes()};
+        bool same{prog_shapes.size() > 0};
+        for (const auto& pname : prog_shapes.names()) {
+            const std::string name{pname};
+            const auto it{compute_state.input_name_indices.find(name)};
+            if (it == compute_state.input_name_indices.end()) {
+                continue;
+            }
+            auto shape{kernel_context.GetInput(it->second).GetTensorTypeAndShapeInfo().GetShape()};
+            ApplyEffectiveShape(shape, name, dyn, seq);
+            auto prog_lengths{prog_shapes[pname].lengths()};
+            const auto prog_strides{prog_shapes[pname].strides()};
+            if (prog_lengths.size() == 1 && prog_lengths.front() == 1 &&
+                prog_strides.size() == 1 && prog_strides.front() == 0) {
+                prog_lengths.clear();
+            }
+            if (std::vector<std::size_t>{shape.begin(), shape.end()} != prog_lengths) {
+                same = false;
+                break;
+            }
+        }
+        if (same) {
+            compute_state.active_program_shape_key = shape_key;
+            compute_state.has_active_program_shape_key = true;
+        }
+    }
+
     // The active program matches iff its compiled key equals this call's.  (shapes_
     // unchanged already set true; the first call left it false so it compiles below.)
     if (!shapes_unchanged && input_shapes_match) {
