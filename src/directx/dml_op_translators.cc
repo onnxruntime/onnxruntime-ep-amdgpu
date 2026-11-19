@@ -440,7 +440,11 @@ struct EinsumEquation {
 
 static uint32_t EinsumBitMaskFromIndices(const std::vector<uint32_t>& indices) {
     uint32_t mask = 0;
-    for (uint32_t i : indices) if (i < 32) mask |= (1u << i);
+    for (uint32_t i : indices) {
+        if (i < 32) {
+            mask |= (1u << i);
+        }
+    }
     return mask;
 }
 
@@ -460,7 +464,9 @@ static EinsumEquation ParseEinsumEquation(const std::string& equation) {
         if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
             auto [it, inserted] = label_map.insert({ch, current_label_index});
             if (inserted) {
-                if (found_output) return eq;  // output label not seen in any input -> invalid
+                if (found_output) {
+                    return eq;  // output label not seen in any input -> invalid
+                }
                 ++current_label_index;
             } else if (!found_output) {
                 repeated_labels.insert(ch);
@@ -477,8 +483,12 @@ static EinsumEquation ParseEinsumEquation(const std::string& equation) {
                 break;
             case '-':
                 ++pos;  // consume '>'
-                if (pos >= equation.size() || equation[pos] != '>') return eq;  // malformed
-                if (found_output) return eq;                                    // multiple '->'
+                if (pos >= equation.size() || equation[pos] != '>') {
+                    return eq;  // malformed
+                }
+                if (found_output) {
+                    return eq;  // multiple '->'
+                }
                 found_output = true;
                 break;
             case '.':
@@ -495,9 +505,11 @@ static EinsumEquation ParseEinsumEquation(const std::string& equation) {
 done:
     if (!found_output) {
         // Implicit output: all non-repeated labels in ASCII order (numpy convention).
-        for (auto& kv : label_map)
-            if (repeated_labels.count(kv.first) == 0)
+        for (auto& kv : label_map) {
+            if (repeated_labels.count(kv.first) == 0) {
                 eq.label_indices.push_back(kv.second);
+            }
+        }
         current.label_end = static_cast<uint32_t>(eq.label_indices.size());
         eq.components.push_back(current);
     }
@@ -508,27 +520,34 @@ done:
 
 // Port of EinSumHelper::DetermineRecognizedOperatorType (OperatorHelper.cc).
 static EinsumOpType DetermineEinsumOpType(const EinsumEquation& eq) {
-    if (!eq.valid || eq.components.empty()) return EinsumOpType::None;
+    if (!eq.valid || eq.components.empty()) {
+        return EinsumOpType::None;
+    }
 
     constexpr size_t kMaxComponents = 3;  // 2 inputs + 1 output
-    if (eq.components.size() > kMaxComponents) return EinsumOpType::None;
+    if (eq.components.size() > kMaxComponents) {
+        return EinsumOpType::None;
+    }
 
     if (eq.components.size() == 2) {  // 1 input, 1 output
         auto output_labels = eq.ComponentLabels(eq.components.back());
-        if (output_labels.size() <= eq.unique_label_count)
+        if (output_labels.size() <= eq.unique_label_count) {
             return EinsumOpType::ReduceSum;   // "ij->i", "iji->", ...
+        }
         return EinsumOpType::Transpose;       // "ij->ji", "ii->i" (diagonal), identity
     }
     if (eq.components.size() == 3) {  // 2 inputs, 1 output
         auto in0 = eq.ComponentLabels(eq.components[0]);
         auto in1 = eq.ComponentLabels(eq.components[1]);
         auto out = eq.ComponentLabels(eq.components[2]);
-        if (out.size() == eq.unique_label_count)
+        if (out.size() == eq.unique_label_count) {
             return EinsumOpType::Multiply;    // no reduction
+        }
         if (out.size() + 1 == eq.unique_label_count
             && out.size() <= 4
-            && EinsumBitMaskFromIndices(in0) != EinsumBitMaskFromIndices(in1))
+            && EinsumBitMaskFromIndices(in0) != EinsumBitMaskFromIndices(in1)) {
             return EinsumOpType::MatMul;      // exactly 1 reduced axis, distinct input axes
+        }
         return EinsumOpType::MultiplyReduceSum;
     }
     return EinsumOpType::None;
@@ -541,7 +560,9 @@ static EinsumOpType DetermineEinsumOpType(const EinsumEquation& eq) {
 // unknown -> treat sizes as-is.
 static std::vector<uint32_t> EinsumOriginalSizes(const DmlTensorInfo& info) {
     size_t orig = info.original_rank;
-    if (orig == 0 || orig >= info.sizes.size()) return info.sizes;
+    if (orig == 0 || orig >= info.sizes.size()) {
+        return info.sizes;
+    }
     return std::vector<uint32_t>(info.sizes.end() - orig, info.sizes.end());
 }
 
@@ -553,19 +574,31 @@ static bool ComputeEinsumProductDimensions(
     product_dims.assign(eq.unique_label_count, 0u);
     std::vector<bool> seen(eq.unique_label_count, false);
     for (size_t ci = 0; ci + 1 < eq.components.size(); ++ci) {
-        if (ci >= input_infos.size() || !input_infos[ci]) return false;
+        if (ci >= input_infos.size() || !input_infos[ci]) {
+            return false;
+        }
         auto labels = eq.ComponentLabels(eq.components[ci]);
         auto sizes = EinsumOriginalSizes(*input_infos[ci]);  // un-padded ONNX sizes
-        if (labels.size() != sizes.size()) return false;
+        if (labels.size() != sizes.size()) {
+            return false;
+        }
         for (size_t i = 0; i < labels.size(); ++i) {
             uint32_t lbl = labels[i];
-            if (lbl >= product_dims.size()) return false;
-            if (seen[lbl] && product_dims[lbl] != sizes[i]) return false;
+            if (lbl >= product_dims.size()) {
+                return false;
+            }
+            if (seen[lbl] && product_dims[lbl] != sizes[i]) {
+                return false;
+            }
             product_dims[lbl] = sizes[i];
             seen[lbl] = true;
         }
     }
-    for (bool s : seen) if (!s) return false;
+    for (bool s : seen) {
+        if (!s) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -648,43 +681,61 @@ static std::optional<TranslatedOp> TranslateEinsum(
     const std::unordered_map<std::string, const OrtValue*>&) {
     auto inputs = GetInputNames(ort_api, node);
     auto outputs = GetOutputNames(ort_api, node);
-    if (inputs.empty() || outputs.empty()) return std::nullopt;
+    if (inputs.empty() || outputs.empty()) {
+        return std::nullopt;
+    }
 
     OrtNodeAdapter adapter(node, ort_api);
     std::string equation = adapter.GetAttributeString("equation", "");
-    if (equation.empty()) return std::nullopt;
+    if (equation.empty()) {
+        return std::nullopt;
+    }
 
     EinsumEquation eq = ParseEinsumEquation(equation);
     EinsumOpType type = DetermineEinsumOpType(eq);
-    if (type == EinsumOpType::None) return std::nullopt;  // lockstep with QueryEinSum
+    if (type == EinsumOpType::None) {
+        return std::nullopt;  // lockstep with QueryEinSum
+    }
 
     // Component count must match actual tensor count (N inputs + 1 output).
-    if (eq.components.size() != inputs.size() + 1) return std::nullopt;
+    if (eq.components.size() != inputs.size() + 1) {
+        return std::nullopt;
+    }
 
     std::vector<const DmlTensorInfo*> in_infos(inputs.size(), nullptr);
     for (size_t i = 0; i < inputs.size(); ++i) {
         in_infos[i] = LookupShape(value_shapes, inputs[i]);
-        if (!in_infos[i]) return std::nullopt;
+        if (!in_infos[i]) {
+            return std::nullopt;
+        }
     }
     auto* out_edge = LookupShape(value_shapes, outputs[0]);
     DML_TENSOR_DATA_TYPE dtype = in_infos[0]->data_type;
 
     std::vector<uint32_t> product_dims;
-    if (!ComputeEinsumProductDimensions(eq, in_infos, product_dims)) return std::nullopt;
+    if (!ComputeEinsumProductDimensions(eq, in_infos, product_dims)) {
+        return std::nullopt;
+    }
 
     auto out_labels = eq.ComponentLabels(eq.components.back());
 
     // Un-padded (original-rank) sizes correlated with equation labels. value_shapes
     // stores 4D-padded sizes; all label-indexed size reads below must use these.
     std::vector<std::vector<uint32_t>> in_sizes(in_infos.size());
-    for (size_t i = 0; i < in_infos.size(); ++i) in_sizes[i] = EinsumOriginalSizes(*in_infos[i]);
+    for (size_t i = 0; i < in_infos.size(); ++i) {
+        in_sizes[i] = EinsumOriginalSizes(*in_infos[i]);
+    }
     // Output source sizes in output-label order: the ONNX output shape (un-padded) if
     // present, else derived from the product dims per output label.
     std::vector<uint32_t> out_src_sizes;
-    if (out_edge) out_src_sizes = EinsumOriginalSizes(*out_edge);
+    if (out_edge) {
+        out_src_sizes = EinsumOriginalSizes(*out_edge);
+    }
     if (out_src_sizes.size() != out_labels.size()) {
         out_src_sizes.clear();
-        for (uint32_t lbl : out_labels) out_src_sizes.push_back(product_dims[lbl]);
+        for (uint32_t lbl : out_labels) {
+            out_src_sizes.push_back(product_dims[lbl]);
+        }
     }
 
     if (type == EinsumOpType::MatMul) {
@@ -698,7 +749,9 @@ static std::optional<TranslatedOp> TranslateEinsum(
         auto find_and_clear = [](uint32_t& current, uint32_t constraint) -> uint32_t {
             // Lowest set bit of (current & ~constraint); 32 if none (matches ORT).
             uint32_t axis = CountLeastSignificantZeros(current & ~constraint);
-            if (axis < 32) current &= ~(1u << axis);
+            if (axis < 32) {
+                current &= ~(1u << axis);
+            }
             return axis;
         };
         uint32_t remaining = ~0u;
@@ -852,11 +905,17 @@ static std::optional<TranslatedOp> TranslateEinsum(
         ProjectToProductTensor(out_src_sizes, out_labels, product_dims,
                                /*is_reduced*/ true, os, ost);
         std::vector<uint32_t> reduced_axes;
-        for (uint32_t a = 0; a < os.size(); ++a) if (os[a] == 1u) reduced_axes.push_back(a);
+        for (uint32_t a = 0; a < os.size(); ++a) {
+            if (os[a] == 1u) {
+                reduced_axes.push_back(a);
+            }
+        }
         // Pad reduced-axis indices to the 4D-padded rank used by in_tensor.
         size_t pad = in_tensor.sizes.size() > product_dims.size()
             ? in_tensor.sizes.size() - product_dims.size() : 0;
-        for (auto& a : reduced_axes) a += static_cast<uint32_t>(pad);
+        for (auto& a : reduced_axes) {
+            a += static_cast<uint32_t>(pad);
+        }
         auto out_tensor = MakeEinsumTensor(os, ost, dtype,
             ComputeAlignedTotalBytes(out_src_sizes, dtype));
 
@@ -908,10 +967,16 @@ static std::optional<TranslatedOp> TranslateEinsum(
         ProjectToProductTensor(out_src_sizes, out_labels, product_dims,
                                /*is_reduced*/ true, os, ost);
         std::vector<uint32_t> reduced_axes;
-        for (uint32_t a = 0; a < os.size(); ++a) if (os[a] == 1u) reduced_axes.push_back(a);
+        for (uint32_t a = 0; a < os.size(); ++a) {
+            if (os[a] == 1u) {
+                reduced_axes.push_back(a);
+            }
+        }
         size_t pad = prod_tensor.sizes.size() > product_dims.size()
             ? prod_tensor.sizes.size() - product_dims.size() : 0;
-        for (auto& a : reduced_axes) a += static_cast<uint32_t>(pad);
+        for (auto& a : reduced_axes) {
+            a += static_cast<uint32_t>(pad);
+        }
         auto out_tensor = MakeEinsumTensor(os, ost, dtype,
             ComputeAlignedTotalBytes(out_src_sizes, dtype));
 

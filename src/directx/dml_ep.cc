@@ -1160,7 +1160,9 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
         partitioner.ResolveShapesToFixpoint();
         partitioner.GroupAndClaimStaticPartitions(useRuntimeFusion);
         if (useRuntimeFusion)
+        {
             partitioner.ClaimDynamicPartitions();
+        }
 
         const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes = partitioner.resolvedShapes();
         const std::unordered_set<size_t>& tier0ClaimedNodeIds = partitioner.claimedNodeIds();
@@ -1200,427 +1202,571 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
 // inference, until resolved_shapes / resolved_values stop growing (bounded at 10).
 // ===================================================================
 void TierZeroPartitioner::ResolveShapesToFixpoint() {
-            for (int iter = 0; iter < 10; ++iter) {
-                size_t prev_resolved = resolved_shapes.size();
-                size_t prev_resolved_values = resolved_values.size();
+    for (int iter = 0; iter < 10; ++iter) {
+        size_t prev_resolved = resolved_shapes.size();
+        size_t prev_resolved_values = resolved_values.size();
 
-                // Re-run Upsample resolution with accumulated resolved_shapes.
-                // The inner while(changed) loop and resolved_values cache make
-                // this cheap on repeat iterations — only newly-resolvable nodes
-                // trigger work.
-                {
-                    bool changed = true;
-                    int pass = 0;
-                    while (changed) {
-                        changed = false;
-                        pass++;
-                        for (const OrtNode* node : nodesInTopologicalOrder) {
-                            const char* op_type = nullptr;
-                            ep->ort_api.Node_GetOperatorType(node, &op_type);
-                            if (!op_type) continue;
+        // Re-run Upsample resolution with accumulated resolved_shapes.
+        // The inner while(changed) loop and resolved_values cache make
+        // this cheap on repeat iterations — only newly-resolvable nodes
+        // trigger work.
+        {
+            bool changed = true;
+            int pass = 0;
+            while (changed) {
+                changed = false;
+                pass++;
+                for (const OrtNode* node : nodesInTopologicalOrder) {
+                    const char* op_type = nullptr;
+                    ep->ort_api.Node_GetOperatorType(node, &op_type);
+                    if (!op_type)
+                    {
+                        continue;
+                    }
 
-                            size_t num_outputs = 0;
-                            ep->ort_api.Node_GetNumOutputs(node, &num_outputs);
-                            if (num_outputs == 0) continue;
+                    size_t num_outputs = 0;
+                    ep->ort_api.Node_GetNumOutputs(node, &num_outputs);
+                    if (num_outputs == 0)
+                    {
+                        continue;
+                    }
 
-                            std::vector<const OrtValueInfo*> out_vis(num_outputs, nullptr);
-                            ep->ort_api.Node_GetOutputs(node, out_vis.data(), num_outputs);
+                    std::vector<const OrtValueInfo*> out_vis(num_outputs, nullptr);
+                    ep->ort_api.Node_GetOutputs(node, out_vis.data(), num_outputs);
 
-                            size_t num_inputs = 0;
-                            ep->ort_api.Node_GetNumInputs(node, &num_inputs);
-                            std::vector<const OrtValueInfo*> in_vis(num_inputs, nullptr);
-                            if (num_inputs > 0)
-                                ep->ort_api.Node_GetInputs(node, in_vis.data(), num_inputs);
+                    size_t num_inputs = 0;
+                    ep->ort_api.Node_GetNumInputs(node, &num_inputs);
+                    std::vector<const OrtValueInfo*> in_vis(num_inputs, nullptr);
+                    if (num_inputs > 0)
+                    {
+                        ep->ort_api.Node_GetInputs(node, in_vis.data(), num_inputs);
+                    }
 
-                            auto input_names = fusion_utils::GetNodeInputNames(ep->ort_api, node);
-                            auto output_names = fusion_utils::GetNodeOutputNames(ep->ort_api, node);
+                    auto input_names = fusion_utils::GetNodeInputNames(ep->ort_api, node);
+                    auto output_names = fusion_utils::GetNodeOutputNames(ep->ort_api, node);
 
-                            for (size_t i = 0; i < input_names.size() && i < num_inputs; ++i) {
-                                if (input_names[i].empty() && in_vis[i]) {
-                                    const char* vi_name = nullptr;
-                                    ep->ort_api.GetValueInfoName(in_vis[i], &vi_name);
-                                    if (vi_name) input_names[i] = vi_name;
-                                }
-                            }
-                            for (size_t i = 0; i < output_names.size() && i < num_outputs; ++i) {
-                                if (output_names[i].empty() && out_vis[i]) {
-                                    const char* vi_name = nullptr;
-                                    ep->ort_api.GetValueInfoName(out_vis[i], &vi_name);
-                                    if (vi_name) output_names[i] = vi_name;
-                                }
-                            }
-
-                            size_t nid = 0;
-                            ep->ort_api.Node_GetId(node, &nid);
-
-                            // Evaluate chain nodes.
+                    for (size_t i = 0; i < input_names.size() && i < num_inputs; ++i) {
+                        if (input_names[i].empty() && in_vis[i]) {
+                            const char* vi_name = nullptr;
+                            ep->ort_api.GetValueInfoName(in_vis[i], &vi_name);
+                            if (vi_name)
                             {
-                            bool should_evaluate = false;
-                            static const std::unordered_set<std::string> chain_ops = {
-                                "Cast", "Concat", "Div", "Mul", "Gather", "Slice", "Shape",
-                            };
-                            bool is_chain_op = chain_ops.count(op_type) != 0;
-
-                            if (!output_names.empty() && !resolved_values.count(output_names[0])) {
-                                bool is_shape_op = std::strcmp(op_type, "Shape") == 0;
-                                should_evaluate = cpuPreferredNodes.count(nid) || is_shape_op;
-                                if (!should_evaluate && num_inputs > 0 && is_chain_op) {
-                                    bool all_inputs_resolved = true;
-                                    for (auto& nm : input_names) {
-                                        if (nm.empty()) continue;
-                                        if (!resolved_values.count(nm)) { all_inputs_resolved = false; break; }
-                                    }
-                                    if (all_inputs_resolved) should_evaluate = true;
-                                }
+                                input_names[i] = vi_name;
                             }
+                        }
+                    }
+                    for (size_t i = 0; i < output_names.size() && i < num_outputs; ++i) {
+                        if (output_names[i].empty() && out_vis[i]) {
+                            const char* vi_name = nullptr;
+                            ep->ort_api.GetValueInfoName(out_vis[i], &vi_name);
+                            if (vi_name)
+                            {
+                                output_names[i] = vi_name;
+                            }
+                        }
+                    }
 
-                            if (should_evaluate) {
-                                if (std::strcmp(op_type, "Shape") == 0 && num_inputs > 0) {
-                                    auto in_name = fusion_utils::GetValueInfoName(ep->ort_api,in_vis[0]);
-                                    auto dims = GetStaticDims(in_vis[0]);
-                                    DML_PERF_LOG("[ShapeResolve] iter=", iter, " Shape: in='", in_name,
-                                        "' out='", output_names[0], "' dims=", (dims.empty() ? "EMPTY" : "OK"),
-                                        " resolved_shapes_has=", resolved_shapes.count(in_name), "\n");
-                                    if (!dims.empty()) {
-                                        std::vector<float> fvals(dims.size());
-                                        for (size_t i = 0; i < dims.size(); ++i) fvals[i] = static_cast<float>(dims[i]);
-                                        resolved_values[output_names[0]] = fvals;
-                                        changed = true;
+                    size_t nid = 0;
+                    ep->ort_api.Node_GetId(node, &nid);
+
+                    // Evaluate chain nodes.
+                    {
+                    bool should_evaluate = false;
+                    static const std::unordered_set<std::string> chain_ops = {
+                        "Cast", "Concat", "Div", "Mul", "Gather", "Slice", "Shape",
+                    };
+                    bool is_chain_op = chain_ops.count(op_type) != 0;
+
+                    if (!output_names.empty() && !resolved_values.count(output_names[0])) {
+                        bool is_shape_op = std::strcmp(op_type, "Shape") == 0;
+                        should_evaluate = cpuPreferredNodes.count(nid) || is_shape_op;
+                        if (!should_evaluate && num_inputs > 0 && is_chain_op) {
+                            bool all_inputs_resolved = true;
+                            for (auto& nm : input_names) {
+                                if (nm.empty())
+                                {
+                                    continue;
+                                }
+                                if (!resolved_values.count(nm)) { all_inputs_resolved = false; break; }
+                            }
+                            if (all_inputs_resolved)
+                            {
+                                should_evaluate = true;
+                            }
+                        }
+                    }
+
+                    if (should_evaluate) {
+                        if (std::strcmp(op_type, "Shape") == 0 && num_inputs > 0) {
+                            auto in_name = fusion_utils::GetValueInfoName(ep->ort_api,in_vis[0]);
+                            auto dims = GetStaticDims(in_vis[0]);
+                            DML_PERF_LOG("[ShapeResolve] iter=", iter, " Shape: in='", in_name,
+                                "' out='", output_names[0], "' dims=", (dims.empty() ? "EMPTY" : "OK"),
+                                " resolved_shapes_has=", resolved_shapes.count(in_name), "\n");
+                            if (!dims.empty()) {
+                                std::vector<float> fvals(dims.size());
+                                for (size_t i = 0; i < dims.size(); ++i)
+                                {
+                                    fvals[i] = static_cast<float>(dims[i]);
+                                }
+                                resolved_values[output_names[0]] = fvals;
+                                changed = true;
+                            }
+                        } else if (std::strcmp(op_type, "Gather") == 0 && input_names.size() >= 2) {
+                            auto* data = GetResolvedValues(input_names[0]);
+                            auto* indices = GetResolvedValues(input_names[1]);
+                            if (data && indices) {
+                                std::vector<float> out;
+                                for (float idx : *indices) {
+                                    int i = static_cast<int>(idx);
+                                    if (i < 0)
+                                    {
+                                        i += static_cast<int>(data->size());
                                     }
-                                } else if (std::strcmp(op_type, "Gather") == 0 && input_names.size() >= 2) {
-                                    auto* data = GetResolvedValues(input_names[0]);
-                                    auto* indices = GetResolvedValues(input_names[1]);
-                                    if (data && indices) {
-                                        std::vector<float> out;
-                                        for (float idx : *indices) {
-                                            int i = static_cast<int>(idx);
-                                            if (i < 0) i += static_cast<int>(data->size());
-                                            if (i >= 0 && i < static_cast<int>(data->size())) out.push_back((*data)[i]);
-                                        }
-                                        if (!out.empty()) { resolved_values[output_names[0]] = out; changed = true;}
-                                    }
-                                } else if (std::strcmp(op_type, "Cast") == 0 && input_names.size() >= 1) {
-                                    auto* vals = GetResolvedValues(input_names[0]);
-                                    if (vals) { resolved_values[output_names[0]] = *vals; changed = true;}
-                                } else if (std::strcmp(op_type, "Slice") == 0 && !input_names.empty()) {
-                                    auto* data = GetResolvedValues(input_names[0]);
-                                    const std::vector<float>* starts = nullptr;
-                                    const std::vector<float>* ends = nullptr;
-                                    if (input_names.size() >= 3) {
-                                        starts = GetResolvedValues(input_names[1]);
-                                        ends = GetResolvedValues(input_names[2]);
-                                    }
-                                    // Opset 1 Slice: starts/ends are attributes.
-                                    std::vector<float> attr_starts_v, attr_ends_v;
-                                    if (!starts || !ends) {
-                                        OrtNodeAdapter adapter(node, ep->ort_api);
-                                        auto s_attr = adapter.GetAttributeInts("starts");
-                                        auto e_attr = adapter.GetAttributeInts("ends");
-                                        if (!s_attr.empty() && !e_attr.empty()) {
-                                            for (auto v : s_attr) attr_starts_v.push_back(static_cast<float>(v));
-                                            for (auto v : e_attr) attr_ends_v.push_back(static_cast<float>(v));
-                                            starts = &attr_starts_v;
-                                            ends = &attr_ends_v;
-                                        }
-                                    }
-                                    if (data && starts && ends && !starts->empty() && !ends->empty()) {
-                                        int s = static_cast<int>((*starts)[0]);
-                                        int e = static_cast<int>((*ends)[0]);
-                                        if (s < 0) s += static_cast<int>(data->size());
-                                        if (e < 0) e += static_cast<int>(data->size());
-                                        if (e > static_cast<int>(data->size())) e = static_cast<int>(data->size());
-                                        std::vector<float> out;
-                                        for (int i = s; i < e; ++i) out.push_back((*data)[i]);
-                                        if (!out.empty()) { resolved_values[output_names[0]] = out; changed = true;}
-                                    }
-                                } else if (std::strcmp(op_type, "Mul") == 0 && input_names.size() >= 2) {
-                                    auto* a = GetResolvedValues(input_names[0]);
-                                    auto* b = GetResolvedValues(input_names[1]);
-                                    if (a && b) {
-                                        size_t len = std::max(a->size(), b->size());
-                                        std::vector<float> out(len);
-                                        for (size_t i = 0; i < len; ++i)
-                                            out[i] = (*a)[i % a->size()] * (*b)[i % b->size()];
-                                        resolved_values[output_names[0]] = out;
-                                        changed = true;
-                                    }
-                                } else if (std::strcmp(op_type, "Div") == 0 && input_names.size() >= 2) {
-                                    auto* a = GetResolvedValues(input_names[0]);
-                                    auto* b = GetResolvedValues(input_names[1]);
-                                    if (a && b) {
-                                        size_t len = std::max(a->size(), b->size());
-                                        std::vector<float> out(len);
-                                        for (size_t i = 0; i < len; ++i) {
-                                            float bv = (*b)[i % b->size()];
-                                            out[i] = (bv != 0.0f) ? (*a)[i % a->size()] / bv : 0.0f;
-                                        }
-                                        resolved_values[output_names[0]] = out;
-                                        changed = true;
-                                    }
-                                } else if (std::strcmp(op_type, "Concat") == 0) {
-                                    std::vector<float> out;
-                                    bool all_resolved = true;
-                                    for (auto& nm : input_names) {
-                                        auto* v = GetResolvedValues(nm);
-                                        if (!v) { all_resolved = false; break; }
-                                        out.insert(out.end(), v->begin(), v->end());
-                                    }
-                                    if (all_resolved && !out.empty()) {
-                                        resolved_values[output_names[0]] = out;
-                                        changed = true;
+                                    if (i >= 0 && i < static_cast<int>(data->size()))
+                                    {
+                                        out.push_back((*data)[i]);
                                     }
                                 }
-                                continue;
+                                if (!out.empty()) { resolved_values[output_names[0]] = out; changed = true;}
                             }
+                        } else if (std::strcmp(op_type, "Cast") == 0 && input_names.size() >= 1) {
+                            auto* vals = GetResolvedValues(input_names[0]);
+                            if (vals) { resolved_values[output_names[0]] = *vals; changed = true;}
+                        } else if (std::strcmp(op_type, "Slice") == 0 && !input_names.empty()) {
+                            auto* data = GetResolvedValues(input_names[0]);
+                            const std::vector<float>* starts = nullptr;
+                            const std::vector<float>* ends = nullptr;
+                            if (input_names.size() >= 3) {
+                                starts = GetResolvedValues(input_names[1]);
+                                ends = GetResolvedValues(input_names[2]);
                             }
-
-                            // Resolve Upsample/Resize output shapes.
-                            if (!NeedsShapeResolution(out_vis[0])) continue;
-
-                            bool is_upsample = std::strcmp(op_type, "Upsample") == 0;
-                            bool is_resize = std::strcmp(op_type, "Resize") == 0;
-                            if (!is_upsample && !is_resize) continue;
-
-                            auto in_dims = GetStaticDims(in_vis[0]);
-                            if (in_dims.empty()) continue;
-                            size_t rank = in_dims.size();
-
-                            std::vector<float> scales;
-                            std::vector<int64_t> out_dims;
-
-                            size_t scales_idx = (is_upsample || num_inputs == 2) ? 1 : 2;
-                            size_t sizes_idx = (is_resize && num_inputs >= 4) ? 3 : SIZE_MAX;
-
-                            if (is_upsample && num_inputs == 1) {
+                            // Opset 1 Slice: starts/ends are attributes.
+                            std::vector<float> attr_starts_v, attr_ends_v;
+                            if (!starts || !ends) {
                                 OrtNodeAdapter adapter(node, ep->ort_api);
-                                scales = adapter.GetAttributeFloats("scales");
-                            }
-
-                            if (scales.empty() && out_dims.empty()) {
-                                if (sizes_idx < input_names.size() && !input_names[sizes_idx].empty()) {
-                                    auto s = GetInitializerFloats(input_names[sizes_idx], rank);
-                                    if (!s.empty()) {
-                                        out_dims.resize(rank);
-                                        for (size_t d = 0; d < rank; ++d) out_dims[d] = static_cast<int64_t>(s[d]);
+                                auto s_attr = adapter.GetAttributeInts("starts");
+                                auto e_attr = adapter.GetAttributeInts("ends");
+                                if (!s_attr.empty() && !e_attr.empty()) {
+                                    for (auto v : s_attr)
+                                    {
+                                        attr_starts_v.push_back(static_cast<float>(v));
                                     }
-                                }
-                                if (out_dims.empty() && scales_idx < input_names.size() && !input_names[scales_idx].empty()) {
-                                    scales = GetInitializerFloats(input_names[scales_idx], rank);
-                                    if (scales.empty()) {
-                                        auto* rv = GetResolvedValues(input_names[scales_idx]);
-                                        if (rv && rv->size() == rank) scales = *rv;
+                                    for (auto v : e_attr)
+                                    {
+                                        attr_ends_v.push_back(static_cast<float>(v));
                                     }
+                                    starts = &attr_starts_v;
+                                    ends = &attr_ends_v;
                                 }
                             }
-
-                            // Backward walk for scales (same as before).
-                            if (scales.empty() && out_dims.empty() && scales_idx < num_inputs && in_vis[scales_idx]) {
-                                struct PendingEval { const OrtNode* node; std::vector<const OrtValueInfo*> inputs; std::string out_name; };
-                                std::vector<PendingEval> eval_stack;
-                                const OrtValueInfo* cur_vi = in_vis[scales_idx];
-                                for (int hop = 0; hop < 5 && cur_vi; ++hop) {
-                                    const char* cur_name = nullptr;
-                                    ep->ort_api.GetValueInfoName(cur_vi, &cur_name);
-                                    if (cur_name && resolved_values.count(cur_name)) break;
-                                    const OrtNode* producer = nullptr;
-                                    for (const OrtNode* n : nodesInTopologicalOrder) {
-                                        size_t n_out = 0;
-                                        ep->ort_api.Node_GetNumOutputs(n, &n_out);
-                                        std::vector<const OrtValueInfo*> n_out_vis(n_out, nullptr);
-                                        if (n_out > 0) ep->ort_api.Node_GetOutputs(n, n_out_vis.data(), n_out);
-                                        for (size_t o = 0; o < n_out; ++o) {
-                                            if (n_out_vis[o] == cur_vi) { producer = n; break; }
-                                        }
-                                        if (producer) break;
-                                    }
-                                    if (!producer) break;
-                                    const char* prod_op = nullptr;
-                                    ep->ort_api.Node_GetOperatorType(producer, &prod_op);
-                                    size_t p_nin = 0;
-                                    ep->ort_api.Node_GetNumInputs(producer, &p_nin);
-                                    std::vector<const OrtValueInfo*> p_in_vis(p_nin, nullptr);
-                                    if (p_nin > 0) ep->ort_api.Node_GetInputs(producer, p_in_vis.data(), p_nin);
-                                    eval_stack.push_back({producer, p_in_vis, cur_name ? std::string(cur_name) : ""});
-                                    cur_vi = (p_nin > 0) ? p_in_vis[0] : nullptr;
+                            if (data && starts && ends && !starts->empty() && !ends->empty()) {
+                                int s = static_cast<int>((*starts)[0]);
+                                int e = static_cast<int>((*ends)[0]);
+                                if (s < 0)
+                                {
+                                    s += static_cast<int>(data->size());
                                 }
-                                for (int i = static_cast<int>(eval_stack.size()) - 1; i >= 0; --i) {
-                                    auto& pe = eval_stack[i];
-                                    const char* pe_op = nullptr;
-                                    ep->ort_api.Node_GetOperatorType(pe.node, &pe_op);
-                                    if (!pe_op) continue;
-                                    std::vector<std::string> pe_input_names;
-                                    for (auto* vi : pe.inputs) {
-                                        const char* vn = nullptr;
-                                        if (vi) ep->ort_api.GetValueInfoName(vi, &vn);
-                                        pe_input_names.push_back(vn ? std::string(vn) : "");
-                                    }
-                                    if (std::strcmp(pe_op, "Cast") == 0 && !pe_input_names.empty()) {
-                                        auto* v = GetResolvedValues(pe_input_names[0]);
-                                        if (v) { resolved_values[pe.out_name] = *v; changed = true; }
-                                    } else if (std::strcmp(pe_op, "Concat") == 0) {
-                                        std::vector<float> cat;
-                                        bool ok = true;
-                                        for (auto& nm : pe_input_names) {
-                                            auto* v = GetResolvedValues(nm);
-                                            if (!v) { ok = false; break; }
-                                            cat.insert(cat.end(), v->begin(), v->end());
-                                        }
-                                        if (ok && !cat.empty()) { resolved_values[pe.out_name] = cat; changed = true; }
-                                    } else if (std::strcmp(pe_op, "Div") == 0 && pe_input_names.size() >= 2) {
-                                        auto* a = GetResolvedValues(pe_input_names[0]);
-                                        auto* b = GetResolvedValues(pe_input_names[1]);
-                                        if (a && b) {
-                                            size_t len = std::max(a->size(), b->size());
-                                            std::vector<float> out(len);
-                                            for (size_t d = 0; d < len; ++d) {
-                                                float bv = (*b)[d % b->size()];
-                                                out[d] = (bv != 0.0f) ? (*a)[d % a->size()] / bv : 0.0f;
-                                            }
-                                            resolved_values[pe.out_name] = out;
-                                            changed = true;
-                                        }
-                                    }
+                                if (e < 0)
+                                {
+                                    e += static_cast<int>(data->size());
                                 }
-                                const char* scales_name = nullptr;
-                                ep->ort_api.GetValueInfoName(in_vis[scales_idx], &scales_name);
-                                if (scales_name) {
-                                    auto* rv = GetResolvedValues(scales_name);
-                                    if (rv && rv->size() == rank) scales = *rv;
+                                if (e > static_cast<int>(data->size()))
+                                {
+                                    e = static_cast<int>(data->size());
                                 }
+                                std::vector<float> out;
+                                for (int i = s; i < e; ++i)
+                                {
+                                    out.push_back((*data)[i]);
+                                }
+                                if (!out.empty()) { resolved_values[output_names[0]] = out; changed = true;}
                             }
-
-                            if (scales.empty() && out_dims.empty() && is_resize && num_inputs >= 3 &&
-                                input_names.size() > 2 && !input_names[2].empty()) {
-                                scales = GetInitializerFloats(input_names[2], rank);
-                                if (scales.empty()) {
-                                    auto* rv = GetResolvedValues(input_names[2]);
-                                    if (rv && rv->size() == rank) scales = *rv;
+                        } else if (std::strcmp(op_type, "Mul") == 0 && input_names.size() >= 2) {
+                            auto* a = GetResolvedValues(input_names[0]);
+                            auto* b = GetResolvedValues(input_names[1]);
+                            if (a && b) {
+                                size_t len = std::max(a->size(), b->size());
+                                std::vector<float> out(len);
+                                for (size_t i = 0; i < len; ++i)
+                                {
+                                    out[i] = (*a)[i % a->size()] * (*b)[i % b->size()];
                                 }
+                                resolved_values[output_names[0]] = out;
+                                changed = true;
                             }
-
-                            if (out_dims.empty() && !scales.empty() && scales.size() == rank) {
-                                out_dims.resize(rank);
-                                for (size_t d = 0; d < rank; ++d)
-                                    out_dims[d] = static_cast<int64_t>(in_dims[d] * scales[d]);
+                        } else if (std::strcmp(op_type, "Div") == 0 && input_names.size() >= 2) {
+                            auto* a = GetResolvedValues(input_names[0]);
+                            auto* b = GetResolvedValues(input_names[1]);
+                            if (a && b) {
+                                size_t len = std::max(a->size(), b->size());
+                                std::vector<float> out(len);
+                                for (size_t i = 0; i < len; ++i) {
+                                    float bv = (*b)[i % b->size()];
+                                    out[i] = (bv != 0.0f) ? (*a)[i % a->size()] / bv : 0.0f;
+                                }
+                                resolved_values[output_names[0]] = out;
+                                changed = true;
                             }
-
-                            if (!out_dims.empty()) {
-                                DML_PERF_LOG("[ShapeResolve] iter=", iter, " ", op_type, ": resolved output dims=[");
-                                for (size_t d = 0; d < out_dims.size(); ++d)
-                                    DML_PERF_LOG(d > 0 ? "," : "", out_dims[d]);
-                                DML_PERF_LOG("]\n");
-                                SetResolvedDims(out_vis[0], out_dims);
-                                if (!output_names.empty() && !output_names[0].empty()) {
-                                    auto upsample_out_name = fusion_utils::GetValueInfoName(ep->ort_api,out_vis[0]);
-                                    if (output_names[0] != upsample_out_name)
-                                        resolved_shapes[output_names[0]] = out_dims;
-                                }
-                                // Propagate through ORT-inserted output Cast.
-                                for (const OrtNode* consumer : nodesInTopologicalOrder) {
-                                    const char* c_op = nullptr;
-                                    ep->ort_api.Node_GetOperatorType(consumer, &c_op);
-                                    if (!c_op || std::strcmp(c_op, "Cast") != 0) continue;
-                                    auto c_inputs = fusion_utils::GetNodeInputNames(ep->ort_api, consumer);
-                                    if (c_inputs.empty()) continue;
-                                    auto upsample_out_name = fusion_utils::GetValueInfoName(ep->ort_api,out_vis[0]);
-                                    bool matches = (c_inputs[0] == upsample_out_name);
-                                    if (!matches && !output_names.empty()) matches = (c_inputs[0] == output_names[0]);
-                                    if (!matches) {
-                                        size_t c_nin = 0;
-                                        ep->ort_api.Node_GetNumInputs(consumer, &c_nin);
-                                        if (c_nin > 0) {
-                                            std::vector<const OrtValueInfo*> c_in(c_nin, nullptr);
-                                            ep->ort_api.Node_GetInputs(consumer, c_in.data(), c_nin);
-                                            if (fusion_utils::GetValueInfoName(ep->ort_api,c_in[0]) == upsample_out_name) matches = true;
-                                        }
-                                    }
-                                    if (!matches) continue;
-                                    auto c_outputs = fusion_utils::GetNodeOutputNames(ep->ort_api, consumer);
-                                    size_t c_nout = 0;
-                                    ep->ort_api.Node_GetNumOutputs(consumer, &c_nout);
-                                    std::vector<const OrtValueInfo*> c_out_vis(c_nout, nullptr);
-                                    if (c_nout > 0) ep->ort_api.Node_GetOutputs(consumer, c_out_vis.data(), c_nout);
-                                    for (size_t co = 0; co < c_nout && co < c_outputs.size(); ++co) {
-                                        if (!c_outputs[co].empty()) resolved_shapes[c_outputs[co]] = out_dims;
-                                        auto co_vi_name = fusion_utils::GetValueInfoName(ep->ort_api,c_out_vis[co]);
-                                        if (!co_vi_name.empty() && co_vi_name != c_outputs[co])
-                                            resolved_shapes[co_vi_name] = out_dims;
-                                    }
-                                    break;
-                                }
+                        } else if (std::strcmp(op_type, "Concat") == 0) {
+                            std::vector<float> out;
+                            bool all_resolved = true;
+                            for (auto& nm : input_names) {
+                                auto* v = GetResolvedValues(nm);
+                                if (!v) { all_resolved = false; break; }
+                                out.insert(out.end(), v->begin(), v->end());
+                            }
+                            if (all_resolved && !out.empty()) {
+                                resolved_values[output_names[0]] = out;
                                 changed = true;
                             }
                         }
+                        continue;
                     }
-                    DML_PERF_LOG("[ShapeResolve] iter=", iter, " completed: resolved_values=",
-                        resolved_values.size(), " resolved_shapes=", resolved_shapes.size(), "\n");
-                }
-
-                // Graph-wide forward shape propagation: run TryTranslateNodes over
-                // all translatable, DML-supported, non-CPU-preferred nodes. Its
-                // write-back exports computed output shapes into resolved_shapes so
-                // downstream ops (and Phase 2's boundary test) can see them without
-                // any group being claimed. Untranslatable nodes are boundaries in
-                // Phase 2 anyway; TryTranslateNodes tolerates them internally, but
-                // we pre-filter so a single unsupported op never aborts the pass.
-                {
-                    std::vector<const OrtNode*> translatable;
-                    translatable.reserve(nodesInTopologicalOrder.size());
-                    for (const OrtNode* node : nodesInTopologicalOrder) {
-                        size_t nid = 0;
-                        ep->ort_api.Node_GetId(node, &nid);
-                        if (cpuPreferredNodes.count(nid)) continue;
-                        if (!ep->IsNodeSupportedByDml(node, graph_support_info, deviceDataTypeMask)) continue;
-                        if (!HasTranslator(tier0_registry, ep->ort_api, node)) continue;
-                        translatable.push_back(node);
-                    }
-                    if (!translatable.empty()) {
-                        FullGraphFusion::TryTranslateNodes(ep->ort_api, graph,
-                            ep->m_graphInitializerMap, translatable, resolved_shapes, &resolved_shapes);
                     }
 
-                    // Stage C — authoritative shape inference. For each node, run its OWN
-                    // registered IMLOperatorShapeInferrer fed from resolved inputs; the
-                    // result is guaranteed == the kernel's output shape, so it OVERRIDES any
-                    // stale declared-VI-derived entry. This corrects exporter-stale shapes
-                    // (e.g. DeepLab's Transpose output declared 513 vs computed 512) so
-                    // whole-graph fusion is not aborted by an in/out shape contradiction.
-                    for (const OrtNode* node : translatable) {
-                        size_t nid = 0; ep->ort_api.Node_GetId(node, &nid);
-                        // Dirty-tracking: skip only nodes we have ALREADY authoritatively
-                        // inferred (success below). We must NOT skip merely because the outputs
-                        // are present in resolved_shapes — those entries may be the stale
-                        // declared-VI seeds this pass exists to OVERRIDE (e.g. DeepLab's 513).
-                        if (shape_infer_done.count(nid)) continue;
-                        auto out_names = fusion_utils::GetNodeOutputNames(ep->ort_api, node);
-                        if (out_names.empty()) { shape_infer_done.insert(nid); continue; }
+                    // Resolve Upsample/Resize output shapes.
+                    if (!NeedsShapeResolution(out_vis[0]))
+                    {
+                        continue;
+                    }
 
-                        auto inferred = ExecutionProviderPlugin::InferNodeOutputShapes(ep, node, resolved_shapes);
-                        if (!inferred) continue;  // inputs not ready yet -> retry next iteration
-                        for (size_t o = 0; o < out_names.size() && o < inferred->size(); ++o) {
-                            if (out_names[o].empty()) continue;
-                            auto& dims = (*inferred)[o];
-                            auto existing = resolved_shapes.find(out_names[o]);
-                            if (existing == resolved_shapes.end() || existing->second != dims) {
-                                DML_PERF_LOG("[ShapeInfer] authoritative '", out_names[o], "' op=",
-                                    [&]{ const char* o2=nullptr; ep->ort_api.Node_GetOperatorType(node,&o2); return o2?o2:"?"; }(),
-                                    " dims=[");
-                                for (size_t d = 0; d < dims.size(); ++d) DML_PERF_LOG(d?",":"", dims[d]);
-                                DML_PERF_LOG("]\n");
-                                resolved_shapes[out_names[o]] = std::move(dims);
+                    bool is_upsample = std::strcmp(op_type, "Upsample") == 0;
+                    bool is_resize = std::strcmp(op_type, "Resize") == 0;
+                    if (!is_upsample && !is_resize)
+                    {
+                        continue;
+                    }
+
+                    auto in_dims = GetStaticDims(in_vis[0]);
+                    if (in_dims.empty())
+                    {
+                        continue;
+                    }
+                    size_t rank = in_dims.size();
+
+                    std::vector<float> scales;
+                    std::vector<int64_t> out_dims;
+
+                    size_t scales_idx = (is_upsample || num_inputs == 2) ? 1 : 2;
+                    size_t sizes_idx = (is_resize && num_inputs >= 4) ? 3 : SIZE_MAX;
+
+                    if (is_upsample && num_inputs == 1) {
+                        OrtNodeAdapter adapter(node, ep->ort_api);
+                        scales = adapter.GetAttributeFloats("scales");
+                    }
+
+                    if (scales.empty() && out_dims.empty()) {
+                        if (sizes_idx < input_names.size() && !input_names[sizes_idx].empty()) {
+                            auto s = GetInitializerFloats(input_names[sizes_idx], rank);
+                            if (!s.empty()) {
+                                out_dims.resize(rank);
+                                for (size_t d = 0; d < rank; ++d)
+                                {
+                                    out_dims[d] = static_cast<int64_t>(s[d]);
+                                }
                             }
                         }
-                        shape_infer_done.insert(nid);  // succeeded -> never re-run this node
+                        if (out_dims.empty() && scales_idx < input_names.size() && !input_names[scales_idx].empty()) {
+                            scales = GetInitializerFloats(input_names[scales_idx], rank);
+                            if (scales.empty()) {
+                                auto* rv = GetResolvedValues(input_names[scales_idx]);
+                                if (rv && rv->size() == rank)
+                                {
+                                    scales = *rv;
+                                }
+                            }
+                        }
+                    }
+
+                    // Backward walk for scales (same as before).
+                    if (scales.empty() && out_dims.empty() && scales_idx < num_inputs && in_vis[scales_idx]) {
+                        struct PendingEval { const OrtNode* node; std::vector<const OrtValueInfo*> inputs; std::string out_name; };
+                        std::vector<PendingEval> eval_stack;
+                        const OrtValueInfo* cur_vi = in_vis[scales_idx];
+                        for (int hop = 0; hop < 5 && cur_vi; ++hop) {
+                            const char* cur_name = nullptr;
+                            ep->ort_api.GetValueInfoName(cur_vi, &cur_name);
+                            if (cur_name && resolved_values.count(cur_name))
+                            {
+                                break;
+                            }
+                            const OrtNode* producer = nullptr;
+                            for (const OrtNode* n : nodesInTopologicalOrder) {
+                                size_t n_out = 0;
+                                ep->ort_api.Node_GetNumOutputs(n, &n_out);
+                                std::vector<const OrtValueInfo*> n_out_vis(n_out, nullptr);
+                                if (n_out > 0)
+                                {
+                                    ep->ort_api.Node_GetOutputs(n, n_out_vis.data(), n_out);
+                                }
+                                for (size_t o = 0; o < n_out; ++o) {
+                                    if (n_out_vis[o] == cur_vi) { producer = n; break; }
+                                }
+                                if (producer)
+                                {
+                                    break;
+                                }
+                            }
+                            if (!producer)
+                            {
+                                break;
+                            }
+                            const char* prod_op = nullptr;
+                            ep->ort_api.Node_GetOperatorType(producer, &prod_op);
+                            size_t p_nin = 0;
+                            ep->ort_api.Node_GetNumInputs(producer, &p_nin);
+                            std::vector<const OrtValueInfo*> p_in_vis(p_nin, nullptr);
+                            if (p_nin > 0)
+                            {
+                                ep->ort_api.Node_GetInputs(producer, p_in_vis.data(), p_nin);
+                            }
+                            eval_stack.push_back({producer, p_in_vis, cur_name ? std::string(cur_name) : ""});
+                            cur_vi = (p_nin > 0) ? p_in_vis[0] : nullptr;
+                        }
+                        for (int i = static_cast<int>(eval_stack.size()) - 1; i >= 0; --i) {
+                            auto& pe = eval_stack[i];
+                            const char* pe_op = nullptr;
+                            ep->ort_api.Node_GetOperatorType(pe.node, &pe_op);
+                            if (!pe_op)
+                            {
+                                continue;
+                            }
+                            std::vector<std::string> pe_input_names;
+                            for (auto* vi : pe.inputs) {
+                                const char* vn = nullptr;
+                                if (vi)
+                                {
+                                    ep->ort_api.GetValueInfoName(vi, &vn);
+                                }
+                                pe_input_names.push_back(vn ? std::string(vn) : "");
+                            }
+                            if (std::strcmp(pe_op, "Cast") == 0 && !pe_input_names.empty()) {
+                                auto* v = GetResolvedValues(pe_input_names[0]);
+                                if (v) { resolved_values[pe.out_name] = *v; changed = true; }
+                            } else if (std::strcmp(pe_op, "Concat") == 0) {
+                                std::vector<float> cat;
+                                bool ok = true;
+                                for (auto& nm : pe_input_names) {
+                                    auto* v = GetResolvedValues(nm);
+                                    if (!v) { ok = false; break; }
+                                    cat.insert(cat.end(), v->begin(), v->end());
+                                }
+                                if (ok && !cat.empty()) { resolved_values[pe.out_name] = cat; changed = true; }
+                            } else if (std::strcmp(pe_op, "Div") == 0 && pe_input_names.size() >= 2) {
+                                auto* a = GetResolvedValues(pe_input_names[0]);
+                                auto* b = GetResolvedValues(pe_input_names[1]);
+                                if (a && b) {
+                                    size_t len = std::max(a->size(), b->size());
+                                    std::vector<float> out(len);
+                                    for (size_t d = 0; d < len; ++d) {
+                                        float bv = (*b)[d % b->size()];
+                                        out[d] = (bv != 0.0f) ? (*a)[d % a->size()] / bv : 0.0f;
+                                    }
+                                    resolved_values[pe.out_name] = out;
+                                    changed = true;
+                                }
+                            }
+                        }
+                        const char* scales_name = nullptr;
+                        ep->ort_api.GetValueInfoName(in_vis[scales_idx], &scales_name);
+                        if (scales_name) {
+                            auto* rv = GetResolvedValues(scales_name);
+                            if (rv && rv->size() == rank)
+                            {
+                                scales = *rv;
+                            }
+                        }
+                    }
+
+                    if (scales.empty() && out_dims.empty() && is_resize && num_inputs >= 3 &&
+                        input_names.size() > 2 && !input_names[2].empty()) {
+                        scales = GetInitializerFloats(input_names[2], rank);
+                        if (scales.empty()) {
+                            auto* rv = GetResolvedValues(input_names[2]);
+                            if (rv && rv->size() == rank)
+                            {
+                                scales = *rv;
+                            }
+                        }
+                    }
+
+                    if (out_dims.empty() && !scales.empty() && scales.size() == rank) {
+                        out_dims.resize(rank);
+                        for (size_t d = 0; d < rank; ++d)
+                        {
+                            out_dims[d] = static_cast<int64_t>(in_dims[d] * scales[d]);
+                        }
+                    }
+
+                    if (!out_dims.empty()) {
+                        DML_PERF_LOG("[ShapeResolve] iter=", iter, " ", op_type, ": resolved output dims=[");
+                        for (size_t d = 0; d < out_dims.size(); ++d)
+                        {
+                            DML_PERF_LOG(d > 0 ? "," : "", out_dims[d]);
+                        }
+                        DML_PERF_LOG("]\n");
+                        SetResolvedDims(out_vis[0], out_dims);
+                        if (!output_names.empty() && !output_names[0].empty()) {
+                            auto upsample_out_name = fusion_utils::GetValueInfoName(ep->ort_api,out_vis[0]);
+                            if (output_names[0] != upsample_out_name)
+                            {
+                                resolved_shapes[output_names[0]] = out_dims;
+                            }
+                        }
+                        // Propagate through ORT-inserted output Cast.
+                        for (const OrtNode* consumer : nodesInTopologicalOrder) {
+                            const char* c_op = nullptr;
+                            ep->ort_api.Node_GetOperatorType(consumer, &c_op);
+                            if (!c_op || std::strcmp(c_op, "Cast") != 0)
+                            {
+                                continue;
+                            }
+                            auto c_inputs = fusion_utils::GetNodeInputNames(ep->ort_api, consumer);
+                            if (c_inputs.empty())
+                            {
+                                continue;
+                            }
+                            auto upsample_out_name = fusion_utils::GetValueInfoName(ep->ort_api,out_vis[0]);
+                            bool matches = (c_inputs[0] == upsample_out_name);
+                            if (!matches && !output_names.empty())
+                            {
+                                matches = (c_inputs[0] == output_names[0]);
+                            }
+                            if (!matches) {
+                                size_t c_nin = 0;
+                                ep->ort_api.Node_GetNumInputs(consumer, &c_nin);
+                                if (c_nin > 0) {
+                                    std::vector<const OrtValueInfo*> c_in(c_nin, nullptr);
+                                    ep->ort_api.Node_GetInputs(consumer, c_in.data(), c_nin);
+                                    if (fusion_utils::GetValueInfoName(ep->ort_api,c_in[0]) == upsample_out_name)
+                                    {
+                                        matches = true;
+                                    }
+                                }
+                            }
+                            if (!matches)
+                            {
+                                continue;
+                            }
+                            auto c_outputs = fusion_utils::GetNodeOutputNames(ep->ort_api, consumer);
+                            size_t c_nout = 0;
+                            ep->ort_api.Node_GetNumOutputs(consumer, &c_nout);
+                            std::vector<const OrtValueInfo*> c_out_vis(c_nout, nullptr);
+                            if (c_nout > 0)
+                            {
+                                ep->ort_api.Node_GetOutputs(consumer, c_out_vis.data(), c_nout);
+                            }
+                            for (size_t co = 0; co < c_nout && co < c_outputs.size(); ++co) {
+                                if (!c_outputs[co].empty())
+                                {
+                                    resolved_shapes[c_outputs[co]] = out_dims;
+                                }
+                                auto co_vi_name = fusion_utils::GetValueInfoName(ep->ort_api,c_out_vis[co]);
+                                if (!co_vi_name.empty() && co_vi_name != c_outputs[co])
+                                {
+                                    resolved_shapes[co_vi_name] = out_dims;
+                                }
+                            }
+                            break;
+                        }
+                        changed = true;
                     }
                 }
-
-                // Fixpoint: stop when neither map grows.
-                bool made_progress = resolved_shapes.size() > prev_resolved
-                    || resolved_values.size() > prev_resolved_values;
-                DML_PERF_LOG("[Tier0] ShapeFixpoint iter=", iter, " resolved_shapes=", resolved_shapes.size(),
-                    " resolved_values=", resolved_values.size(), " progress=", made_progress, "\n");
-                if (!made_progress) break;
             }
+            DML_PERF_LOG("[ShapeResolve] iter=", iter, " completed: resolved_values=",
+                resolved_values.size(), " resolved_shapes=", resolved_shapes.size(), "\n");
+        }
+
+        // Graph-wide forward shape propagation: run TryTranslateNodes over
+        // all translatable, DML-supported, non-CPU-preferred nodes. Its
+        // write-back exports computed output shapes into resolved_shapes so
+        // downstream ops (and Phase 2's boundary test) can see them without
+        // any group being claimed. Untranslatable nodes are boundaries in
+        // Phase 2 anyway; TryTranslateNodes tolerates them internally, but
+        // we pre-filter so a single unsupported op never aborts the pass.
+        {
+            std::vector<const OrtNode*> translatable;
+            translatable.reserve(nodesInTopologicalOrder.size());
+            for (const OrtNode* node : nodesInTopologicalOrder) {
+                size_t nid = 0;
+                ep->ort_api.Node_GetId(node, &nid);
+                if (cpuPreferredNodes.count(nid))
+                {
+                    continue;
+                }
+                if (!ep->IsNodeSupportedByDml(node, graph_support_info, deviceDataTypeMask))
+                {
+                    continue;
+                }
+                if (!HasTranslator(tier0_registry, ep->ort_api, node))
+                {
+                    continue;
+                }
+                translatable.push_back(node);
+            }
+            if (!translatable.empty()) {
+                FullGraphFusion::TryTranslateNodes(ep->ort_api, graph,
+                    ep->m_graphInitializerMap, translatable, resolved_shapes, &resolved_shapes);
+            }
+
+            // Stage C — authoritative shape inference. For each node, run its OWN
+            // registered IMLOperatorShapeInferrer fed from resolved inputs; the
+            // result is guaranteed == the kernel's output shape, so it OVERRIDES any
+            // stale declared-VI-derived entry. This corrects exporter-stale shapes
+            // (e.g. DeepLab's Transpose output declared 513 vs computed 512) so
+            // whole-graph fusion is not aborted by an in/out shape contradiction.
+            for (const OrtNode* node : translatable) {
+                size_t nid = 0; ep->ort_api.Node_GetId(node, &nid);
+                // Dirty-tracking: skip only nodes we have ALREADY authoritatively
+                // inferred (success below). We must NOT skip merely because the outputs
+                // are present in resolved_shapes — those entries may be the stale
+                // declared-VI seeds this pass exists to OVERRIDE (e.g. DeepLab's 513).
+                if (shape_infer_done.count(nid))
+                {
+                    continue;
+                }
+                auto out_names = fusion_utils::GetNodeOutputNames(ep->ort_api, node);
+                if (out_names.empty()) { shape_infer_done.insert(nid); continue; }
+
+                auto inferred = ExecutionProviderPlugin::InferNodeOutputShapes(ep, node, resolved_shapes);
+                if (!inferred)  // inputs not ready yet -> retry next iteration
+                {
+                    continue;
+                }
+                for (size_t o = 0; o < out_names.size() && o < inferred->size(); ++o) {
+                    if (out_names[o].empty())
+                    {
+                        continue;
+                    }
+                    auto& dims = (*inferred)[o];
+                    auto existing = resolved_shapes.find(out_names[o]);
+                    if (existing == resolved_shapes.end() || existing->second != dims) {
+                        DML_PERF_LOG("[ShapeInfer] authoritative '", out_names[o], "' op=",
+                            [&]{ const char* o2=nullptr; ep->ort_api.Node_GetOperatorType(node,&o2); return o2?o2:"?"; }(),
+                            " dims=[");
+                        for (size_t d = 0; d < dims.size(); ++d)
+                        {
+                            DML_PERF_LOG(d?",":"", dims[d]);
+                        }
+                        DML_PERF_LOG("]\n");
+                        resolved_shapes[out_names[o]] = std::move(dims);
+                    }
+                }
+                shape_infer_done.insert(nid);  // succeeded -> never re-run this node
+            }
+        }
+
+        // Fixpoint: stop when neither map grows.
+        bool made_progress = resolved_shapes.size() > prev_resolved
+            || resolved_values.size() > prev_resolved_values;
+        DML_PERF_LOG("[Tier0] ShapeFixpoint iter=", iter, " resolved_shapes=", resolved_shapes.size(),
+            " resolved_values=", resolved_values.size(), " progress=", made_progress, "\n");
+        if (!made_progress)
+        {
+            break;
+        }
+    }
 }
 
 // ===================================================================
@@ -1640,7 +1786,10 @@ void TierZeroPartitioner::GroupAndClaimStaticPartitions(bool useRuntimeFusion) {
             };
 
             for (const OrtNode* node : nodesInTopologicalOrder) {
-                if (useRuntimeFusion) break;  // static grouping skipped — Phase 4 owns the graph
+                if (useRuntimeFusion)  // static grouping skipped — Phase 4 owns the graph
+                {
+                    break;
+                }
                 size_t nid = 0;
                 ep->ort_api.Node_GetId(node, &nid);
 
@@ -1658,11 +1807,17 @@ void TierZeroPartitioner::GroupAndClaimStaticPartitions(bool useRuntimeFusion) {
                     size_t num_inputs = 0;
                     ep->ort_api.Node_GetNumInputs(node, &num_inputs);
                     std::vector<const OrtValueInfo*> input_value_infos(num_inputs, nullptr);
-                    if (num_inputs > 0) ep->ort_api.Node_GetInputs(node, input_value_infos.data(), num_inputs);
+                    if (num_inputs > 0)
+                    {
+                        ep->ort_api.Node_GetInputs(node, input_value_infos.data(), num_inputs);
+                    }
                     size_t num_outputs = 0;
                     ep->ort_api.Node_GetNumOutputs(node, &num_outputs);
                     std::vector<const OrtValueInfo*> output_value_infos(num_outputs, nullptr);
-                    if (num_outputs > 0) ep->ort_api.Node_GetOutputs(node, output_value_infos.data(), num_outputs);
+                    if (num_outputs > 0)
+                    {
+                        ep->ort_api.Node_GetOutputs(node, output_value_infos.data(), num_outputs);
+                    }
                     static const std::string kEmptyName;
                     auto in_name  = [&](size_t k) -> const std::string& {
                         return k < input_names.size() ? input_names[k] : kEmptyName; };
@@ -1670,9 +1825,19 @@ void TierZeroPartitioner::GroupAndClaimStaticPartitions(bool useRuntimeFusion) {
                         return k < output_names.size() ? output_names[k] : kEmptyName; };
                     bool any_dynamic = false;
                     for (size_t k = 0; k < num_inputs && !any_dynamic; ++k)
-                        if (HasDynamicShape(input_value_infos[k], in_name(k))) any_dynamic = true;
+                    {
+                        if (HasDynamicShape(input_value_infos[k], in_name(k)))
+                        {
+                            any_dynamic = true;
+                        }
+                    }
                     for (size_t k = 0; k < num_outputs && !any_dynamic; ++k)
-                        if (HasDynamicShape(output_value_infos[k], out_name(k))) any_dynamic = true;
+                    {
+                        if (HasDynamicShape(output_value_infos[k], out_name(k)))
+                        {
+                            any_dynamic = true;
+                        }
+                    }
                     if (any_dynamic) {
                         is_fuseable = false;
                         DML_PERF_LOG("[Tier0] BOUNDARY node=", nid, " reason=dynamic_shape\n");
@@ -1693,11 +1858,19 @@ void TierZeroPartitioner::GroupAndClaimStaticPartitions(bool useRuntimeFusion) {
                 std::vector<size_t> open_upstream;
                 for (const auto& name : input_names) {
                     auto it = output_to_group.find(name);
-                    if (it == output_to_group.end()) continue;
+                    if (it == output_to_group.end())
+                    {
+                        continue;
+                    }
                     size_t gid = it->second;
-                    if (groups[gid].finalized) continue;
+                    if (groups[gid].finalized)
+                    {
+                        continue;
+                    }
                     if (std::find(open_upstream.begin(), open_upstream.end(), gid) == open_upstream.end())
+                    {
                         open_upstream.push_back(gid);
+                    }
                 }
 
                 size_t target_gid;
@@ -1708,17 +1881,26 @@ void TierZeroPartitioner::GroupAndClaimStaticPartitions(bool useRuntimeFusion) {
                     for (size_t k = 1; k < open_upstream.size(); ++k) {
                         size_t src = open_upstream[k];
                         for (auto* n : groups[src].nodes)
+                        {
                             groups[target_gid].nodes.push_back(n);
+                        }
                         groups[src].nodes.clear();
                         groups[src].finalized = true;
                         for (auto& [name, gid] : output_to_group)
-                            if (gid == src) gid = target_gid;
+                        {
+                            if (gid == src)
+                            {
+                                gid = target_gid;
+                            }
+                        }
                     }
                 }
 
                 groups[target_gid].nodes.push_back(node);
                 for (const auto& name : output_names)
+                {
                     output_to_group[name] = target_gid;
+                }
             }
 
             // ===================================================================
@@ -1729,7 +1911,10 @@ void TierZeroPartitioner::GroupAndClaimStaticPartitions(bool useRuntimeFusion) {
             // guard. On any failure the group is skipped and its nodes fall through
             // to Tier-2/Tier-1 (they are absent from tier0ClaimedNodeIds).
             for (auto& g : groups) {
-                if (g.nodes.empty() || g.claimed) continue;
+                if (g.nodes.empty() || g.claimed)
+                {
+                    continue;
+                }
 
                 std::string group_ops;
                 for (const OrtNode* n : g.nodes) {
@@ -1776,7 +1961,10 @@ void TierZeroPartitioner::GroupAndClaimStaticPartitions(bool useRuntimeFusion) {
                     ep->m_tier0GroupHashes.insert(HashNodeIds(node_ids));
                     g.claimed = true;
                 }
-                if (st) ep->ort_api.ReleaseStatus(st);
+                if (st)
+                {
+                    ep->ort_api.ReleaseStatus(st);
+                }
             }
 }
 
@@ -1800,7 +1988,10 @@ void TierZeroPartitioner::ClaimDynamicPartitions() {
                 for (const OrtNode* node : nodesInTopologicalOrder) {
                     size_t nid = 0;
                     ep->ort_api.Node_GetId(node, &nid);
-                    if (tier0ClaimedNodeIds.count(nid)) continue;  // already static-claimed
+                    if (tier0ClaimedNodeIds.count(nid))  // already static-claimed
+                    {
+                        continue;
+                    }
 
                     auto input_names  = fusion_utils::GetNodeInputNames(ep->ort_api, node);
                     auto output_names = fusion_utils::GetNodeOutputNames(ep->ort_api, node);
@@ -1815,7 +2006,9 @@ void TierZeroPartitioner::ClaimDynamicPartitions() {
                         for (const auto& name : input_names) {
                             auto it = doutput_to_group.find(name);
                             if (it != doutput_to_group.end() && !dgroups[it->second].finalized)
+                            {
                                 dgroups[it->second].finalized = true;
+                            }
                         }
                         continue;
                     }
@@ -1823,11 +2016,19 @@ void TierZeroPartitioner::ClaimDynamicPartitions() {
                     std::vector<size_t> open_upstream;
                     for (const auto& name : input_names) {
                         auto it = doutput_to_group.find(name);
-                        if (it == doutput_to_group.end()) continue;
+                        if (it == doutput_to_group.end())
+                        {
+                            continue;
+                        }
                         size_t gid = it->second;
-                        if (dgroups[gid].finalized) continue;
+                        if (dgroups[gid].finalized)
+                        {
+                            continue;
+                        }
                         if (std::find(open_upstream.begin(), open_upstream.end(), gid) == open_upstream.end())
+                        {
                             open_upstream.push_back(gid);
+                        }
                     }
 
                     size_t target_gid;
@@ -1838,24 +2039,39 @@ void TierZeroPartitioner::ClaimDynamicPartitions() {
                         for (size_t k = 1; k < open_upstream.size(); ++k) {
                             size_t src = open_upstream[k];
                             for (auto* n : dgroups[src].nodes)
+                            {
                                 dgroups[target_gid].nodes.push_back(n);
+                            }
                             dgroups[src].nodes.clear();
                             dgroups[src].finalized = true;
                             for (auto& [name, gid] : doutput_to_group)
-                                if (gid == src) gid = target_gid;
+                            {
+                                if (gid == src)
+                                {
+                                    gid = target_gid;
+                                }
+                            }
                         }
                     }
                     dgroups[target_gid].nodes.push_back(node);
                     for (const auto& name : output_names)
+                    {
                         doutput_to_group[name] = target_gid;
+                    }
                 }
 
                 // Admit + claim each dynamic group (shape-blind).
                 for (auto& g : dgroups) {
-                    if (g.nodes.empty() || g.claimed) continue;
+                    if (g.nodes.empty() || g.claimed)
+                    {
+                        continue;
+                    }
                     // A single-node dynamic group buys nothing over per-op dispatch and
                     // adds snapshot/compile overhead; require at least 2 nodes to fuse.
-                    if (g.nodes.size() < 2) continue;
+                    if (g.nodes.size() < 2)
+                    {
+                        continue;
+                    }
 
                     if (!FullGraphFusion::ValidateTier0Structural(ep->ort_api, g.nodes,
                             resolved_shapes, ep->m_graphInitializerMap)) {
@@ -1930,11 +2146,16 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
                 ep->ort_api.Graph_GetNumNodes(graphs[i], &num_nodes);
                 std::vector<const OrtNode*> sg_nodes(num_nodes, nullptr);
                 if (num_nodes > 0)
+                {
                     ep->ort_api.Graph_GetNodes(graphs[i], sg_nodes.data(), num_nodes);
+                }
                 std::vector<size_t> sg_ids;
                 sg_ids.reserve(num_nodes);
                 for (const OrtNode* n : sg_nodes) {
-                    if (n) sg_ids.push_back(fusion_utils::GetNodeId(ep->ort_api, n));
+                    if (n)
+                    {
+                        sg_ids.push_back(fusion_utils::GetNodeId(ep->ort_api, n));
+                    }
                 }
                 std::sort(sg_ids.begin(), sg_ids.end());
                 size_t sg_hash = HashNodeIds(sg_ids);
@@ -1964,11 +2185,18 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
                 ep->ort_api.Graph_GetNumNodes(graphs[i], &num_nodes);
                 std::vector<const OrtNode*> sg_nodes(num_nodes, nullptr);
                 if (num_nodes > 0)
+                {
                     ep->ort_api.Graph_GetNodes(graphs[i], sg_nodes.data(), num_nodes);
+                }
                 std::vector<size_t> sg_ids;
                 sg_ids.reserve(num_nodes);
                 for (const OrtNode* n : sg_nodes)
-                    if (n) sg_ids.push_back(fusion_utils::GetNodeId(ep->ort_api, n));
+                {
+                    if (n)
+                    {
+                        sg_ids.push_back(fusion_utils::GetNodeId(ep->ort_api, n));
+                    }
+                }
                 std::sort(sg_ids.begin(), sg_ids.end());
                 size_t sg_hash = HashNodeIds(sg_ids);
 
@@ -2012,11 +2240,17 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CompileImpl(_In_ OrtEp* this_pt
                 size_t nm = 0;
                 ep->ort_api.Graph_GetNumNodes(graphs[i], &nm);
                 std::vector<const OrtNode*> sg_nodes(nm, nullptr);
-                if (nm > 0) ep->ort_api.Graph_GetNodes(graphs[i], sg_nodes.data(), nm);
+                if (nm > 0)
+                {
+                    ep->ort_api.Graph_GetNodes(graphs[i], sg_nodes.data(), nm);
+                }
                 std::string diag = "CompileImpl: no fusion rule matched (";
                 diag += std::to_string(nm) + " nodes: ";
                 for (const OrtNode* n : sg_nodes) {
-                    if (n == nullptr) continue;
+                    if (n == nullptr)
+                    {
+                        continue;
+                    }
                     const char* op = nullptr;
                     ep->ort_api.Node_GetOperatorType(n, &op);
                     size_t nid = 0;
@@ -2180,11 +2414,17 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::CreateAllocatorImpl(_In_ OrtEp*
         // noexcept ABI boundary (session-init): CreatePreferredAllocators builds D3D12-backed allocators
         // and can throw bad_alloc or a resource-creation failure. Convert to OrtStatus.
         auto& impl = *static_cast<ExecutionProviderPlugin*>(this_ptr);
-        if (allocator != nullptr) *allocator = nullptr;
+        if (allocator != nullptr)
+        {
+            *allocator = nullptr;
+        }
         return impl.ort_api.CreateStatus(ORT_FAIL, MakeString("CreateAllocator failed: ", e.what()).c_str());
     } catch (...) {
         auto& impl = *static_cast<ExecutionProviderPlugin*>(this_ptr);
-        if (allocator != nullptr) *allocator = nullptr;
+        if (allocator != nullptr)
+        {
+            *allocator = nullptr;
+        }
         return impl.ort_api.CreateStatus(ORT_FAIL, "CreateAllocator failed: unknown exception");
     }
 }
@@ -2244,7 +2484,10 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::OnSessionInitializationEndImpl(
 
 bool ExecutionProviderPlugin::IsCpuAllocator(const OrtMemoryInfo* memory_info)
 {
-    if (memory_info == nullptr) return false;
+    if (memory_info == nullptr)
+    {
+        return false;
+    }
     OrtMemoryInfoDeviceType device_type;
     ort_api.MemoryInfoGetDeviceType(memory_info, &device_type);
     return device_type == OrtMemoryInfoDeviceType_CPU;
@@ -2252,7 +2495,10 @@ bool ExecutionProviderPlugin::IsCpuAllocator(const OrtMemoryInfo* memory_info)
 
 bool ExecutionProviderPlugin::IsGpuAllocator(const OrtMemoryInfo* memory_info)
 {
-    if (memory_info == nullptr) return false;
+    if (memory_info == nullptr)
+    {
+        return false;
+    }
     OrtMemoryInfoDeviceType device_type;
     ort_api.MemoryInfoGetDeviceType(memory_info, &device_type);
     return device_type == OrtMemoryInfoDeviceType_GPU;
@@ -2379,7 +2625,10 @@ std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const O
     // in RegisterOperatorKernel, not via InputMemoryType in the kernel def.
     for (auto& [consumer_id, kernel_def] : node_to_kernel) {
         const OrtNode* consumer_node = id_to_node.count(consumer_id) ? id_to_node[consumer_id] : nullptr;
-        if (!consumer_node || !kernel_def) continue;
+        if (!consumer_node || !kernel_def)
+        {
+            continue;
+        }
 
         // Look up reg_info to get requiredConstantCpuInputs for this kernel.
         const char* op_name = ep_api.KernelDef_GetOperatorType(kernel_def);
@@ -2387,22 +2636,36 @@ std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const O
         int since_ver = 0, until_ver = 0;
         OrtStatus* ver_st = ep_api.KernelDef_GetSinceVersion(kernel_def, &since_ver, &until_ver);
         if (ver_st) { ort_api.ReleaseStatus(ver_st); continue; }
-        if (!op_name || !domain) continue;
+        if (!op_name || !domain)
+        {
+            continue;
+        }
         std::string regKey = std::string(domain) + "::" + std::string(op_name) +
                              "::" + std::to_string(since_ver);
         auto reg_it = m_internalRegInfoMap->find(regKey);
-        if (reg_it == m_internalRegInfoMap->end() || !reg_it->second) continue;
+        if (reg_it == m_internalRegInfoMap->end() || !reg_it->second)
+        {
+            continue;
+        }
         const auto& required_cpu_inputs = reg_it->second->requiredConstantCpuInputs;
-        if (required_cpu_inputs.empty()) continue;
+        if (required_cpu_inputs.empty())
+        {
+            continue;
+        }
 
         size_t nodeNumInputs = 0;
         ort_api.Node_GetNumInputs(consumer_node, &nodeNumInputs);
         std::vector<const OrtValueInfo*> inputInfos(nodeNumInputs, nullptr);
         if (nodeNumInputs > 0)
+        {
             ort_api.Node_GetInputs(consumer_node, inputInfos.data(), nodeNumInputs);
+        }
 
         for (uint32_t cpu_idx : required_cpu_inputs) {
-            if (cpu_idx >= nodeNumInputs || !inputInfos[cpu_idx]) continue;
+            if (cpu_idx >= nodeNumInputs || !inputInfos[cpu_idx])
+            {
+                continue;
+            }
 
             // This input is a required CPU constant — seed it and trace back to its producer.
             cpu_output_args.insert(inputInfos[cpu_idx]);
@@ -2412,11 +2675,16 @@ std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const O
             OrtStatus* ps = ort_api.ValueInfo_GetValueProducer(
                 inputInfos[cpu_idx], &producer_node, &producer_output_idx);
             if (ps) { ort_api.ReleaseStatus(ps); continue; }
-            if (!producer_node) continue;
+            if (!producer_node)
+            {
+                continue;
+            }
             size_t producer_id = 0;
             ort_api.Node_GetId(producer_node, &producer_id);
             if (provider_nodes.count(producer_id))
+            {
                 candidates.push(producer_id);
+            }
         }
     }
 
@@ -2436,7 +2704,9 @@ std::unordered_set<size_t> ExecutionProviderPlugin::GetCpuPreferredNodes(const O
 
         auto p = visited.insert(cur);
         if (!p.second)
+        {
             continue;
+        }
 
         const OrtNode* candidateNode = nullptr;
         auto it = id_to_node.find(cur);
