@@ -17,7 +17,8 @@ namespace mgx_ep {
 
 bool load_compiled_program(migraphx::program& prog, const fs::path& path);
 
-void save_compiled_program(const migraphx::program& prog, const fs::path& path);
+// Returns false (and fills *error when given) instead of throwing; see the .cc.
+bool save_compiled_program(const migraphx::program& prog, const fs::path& path, std::string* error = nullptr);
 
 bool program_outputs_are_standard(const migraphx::program& prog);
 

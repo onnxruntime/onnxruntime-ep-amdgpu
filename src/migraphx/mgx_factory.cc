@@ -4,6 +4,9 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <filesystem>
+#include <system_error>
 #endif
 
 #include "common/env_var.h"
@@ -21,6 +24,28 @@
 #include "mgx_kernel_reg.h"
 
 namespace mgx_ep {
+
+namespace {
+
+#ifndef _WIN32
+// WSL2 paravirtualizes the GPU through this node. Sysfs and PCI discovery then
+// see no AMD GPU, while the HIP runtime still enumerates one.
+bool HasDxgDevice() {
+    std::error_code error_code;
+    return std::filesystem::exists("/dev/dxg", error_code);
+}
+#endif
+
+bool HasAmdGpu(const std::vector<Ort::ConstHardwareDevice>& devices) {
+    for (const auto& device : devices) {
+        if (device.VendorId() == amd::VendorId && device.Type() == OrtHardwareDeviceType_GPU) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
 
 ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const char* ep_name, const Ort::Logger& default_logger)
         : OrtEpFactory{NegotiatedOrtApiVersion()}, ApiPtrs{api_ptrs}, default_logger_{default_logger}, ep_name_{ep_name}
@@ -122,12 +147,52 @@ try {
         pinned_memory_infos_.insert_or_assign(i, MemoryInfoPtr{memory_info, ort_api.ReleaseMemoryInfo});
     }
     num_ep_devices = 0;
+
+#ifndef _WIN32
+    // The loop below only claims AMD GPUs already present in the platform list.
+    // On WSL that list has none, so add one AMD GPU descriptor per HIP device and
+    // let the same loop register them.
+    std::vector<Ort::ConstHardwareDevice> wsl_devices;
+    if (!HasAmdGpu(devices) && HasDxgDevice()) {
+        wsl_devices.reserve(devices.size() + static_cast<size_t>(num_hip_devices));
+        wsl_devices.insert(wsl_devices.end(), devices.begin(), devices.end());
+        for (int i{}; i < num_hip_devices; ++i) {
+            hipDeviceProp_t device_prop;
+            HIP_RETURN_IF_ERROR(hipGetDeviceProperties(&device_prop, i));
+            const OrtHardwareDevice* device{};
+            RETURN_IF_ERROR(GetOrCreateRuntimeDiscoveredDevice(i, device_prop, device));
+            wsl_devices.emplace_back(Ort::ConstHardwareDevice{device});
+        }
+    }
+    const std::vector<Ort::ConstHardwareDevice>& hardware_devices{!wsl_devices.empty() ? wsl_devices : devices};
+#else
+    const std::vector<Ort::ConstHardwareDevice>& hardware_devices{devices};
+#endif
+
+    auto register_device = [&](Ort::ConstHardwareDevice device, int device_id,
+        const hipDeviceProp_t& device_prop) -> Ort::Status {
+        Ort::KeyValuePairs ep_metadata;
+        ep_metadata.Add("arch", device_prop.gcnArchName);
+        Ort::KeyValuePairs ep_options;
+        Ort::EpDevice ep_device{*this, device, ep_metadata.GetConst(), ep_options.GetConst()};
+        const OrtMemoryInfo* pinned_memory_info{pinned_memory_infos_.at(device_id).get()};
+        RETURN_IF_ERROR(ep_api.EpDevice_AddAllocatorInfo(ep_device, pinned_memory_info));
+        pinned_memory_devices_.emplace_back(ep_api.MemoryInfo_GetMemoryDevice(pinned_memory_info));
+
+        const OrtMemoryInfo* gpu_memory_info{gpu_memory_infos_.at(device_id).get()};
+        RETURN_IF_ERROR(ep_api.EpDevice_AddAllocatorInfo(ep_device, gpu_memory_info));
+        gpu_memory_devices_.emplace_back(ep_api.MemoryInfo_GetMemoryDevice(gpu_memory_info));
+
+        ep_devices[num_ep_devices++] = ep_device.release();
+        return STATUS_OK;
+    };
+
     int device_id{};
-    for (size_t i{}; i < devices.size(); ++i) {
+    for (size_t i{}; i < hardware_devices.size(); ++i) {
         if (device_id >= num_hip_devices || num_ep_devices >= ep_devices.size()) {
             break;
         }
-        Ort::ConstHardwareDevice device(devices[i]);
+        Ort::ConstHardwareDevice device(hardware_devices[i]);
         if (device.VendorId() == amd::VendorId && device.Type() == OrtHardwareDeviceType_GPU) {
             const auto metadata{device.Metadata().GetKeyValuePairs()};
             hipDeviceProp_t device_prop;
@@ -140,22 +205,44 @@ try {
 #else
             // TODO: required metadata for unique device identification on Linux operating system.
 #endif
-            Ort::KeyValuePairs ep_metadata;
-            ep_metadata.Add("arch", device_prop.gcnArchName);
-            Ort::KeyValuePairs ep_options;
-            Ort::EpDevice ep_device{*this, device, ep_metadata.GetConst(), ep_options.GetConst()};
-            const OrtMemoryInfo* pinned_memory_info{pinned_memory_infos_.at(device_id).get()};
-            RETURN_IF_ERROR(ep_api.EpDevice_AddAllocatorInfo(ep_device, pinned_memory_info));
-            pinned_memory_devices_.emplace_back(ep_api.MemoryInfo_GetMemoryDevice(pinned_memory_info));
-
-            const OrtMemoryInfo* gpu_memory_info{gpu_memory_infos_.at(device_id).get()};
-            RETURN_IF_ERROR(ep_api.EpDevice_AddAllocatorInfo(ep_device, gpu_memory_info));
-            gpu_memory_devices_.emplace_back(ep_api.MemoryInfo_GetMemoryDevice(gpu_memory_info));
-
-            ep_devices[num_ep_devices++] = ep_device.release();
+            RETURN_IF_ERROR(register_device(device, device_id, device_prop));
             ++device_id;
         }
     }
+
+    return STATUS_OK;
+} catch (const Ort::Exception& e) {
+    return Ort::Status{e};
+} catch (const std::exception& e) {
+    return Ort::Status{e.what(), ORT_EP_FAIL};
+}
+
+Ort::Status ProviderFactory::GetOrCreateRuntimeDiscoveredDevice(int device_id, const hipDeviceProp_t& device_prop,
+    const OrtHardwareDevice*& device)
+try {
+    if (static_cast<size_t>(device_id) >= runtime_discovered_devices_.size()) {
+        runtime_discovered_devices_.resize(device_id + 1);
+    }
+    if (auto& cached{runtime_discovered_devices_[device_id]}; cached) {
+        device = cached.get();
+        return STATUS_OK;
+    }
+
+    Ort::KeyValuePairs metadata;
+    metadata.Add("hip_runtime_discovered", "1");
+    metadata.Add("Discrete", device_prop.integrated == 0 ? "1" : "0");
+    metadata.Add("gcn_arch_name", device_prop.gcnArchName);
+    char pci_bus_id[32]{};
+    if (hipDeviceGetPCIBusId(pci_bus_id, static_cast<int>(sizeof(pci_bus_id)), device_id) == hipSuccess &&
+            pci_bus_id[0] != '\0') {
+        metadata.Add("pci_bus_id", pci_bus_id);
+    }
+
+    OrtHardwareDevice* created{};
+    RETURN_IF_ERROR(ep_api.CreateHardwareDevice(OrtHardwareDeviceType_GPU, amd::VendorId,
+        /*device_id*/ 0, amd::Vendor, metadata, &created));
+    runtime_discovered_devices_[device_id] = HardwareDevicePtr{created, ep_api.ReleaseHardwareDevice};
+    device = created;
     return STATUS_OK;
 } catch (const Ort::Exception& e) {
     return Ort::Status{e};

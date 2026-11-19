@@ -34,6 +34,9 @@ private:
     Ort::Status GetSupportedDevices(const std::vector<Ort::ConstHardwareDevice>& devices,
         const gsl::span<OrtEpDevice*>& ep_devices, size_t& num_ep_devices);
 
+    Ort::Status GetOrCreateRuntimeDiscoveredDevice(int device_id, const hipDeviceProp_t& device_prop,
+        const OrtHardwareDevice*& device);
+
     Ort::Status CreateEp(const std::vector<Ort::ConstHardwareDevice>& devices,
         const std::vector<Ort::ConstKeyValuePairs>& ep_metadata_pairs,
         const Ort::ConstSessionOptions& session_options, const Ort::Logger& logger, OrtEp*& ep);
@@ -79,6 +82,10 @@ private:
 
     MemoryDeviceList pinned_memory_devices_;
     MemoryDeviceList gpu_memory_devices_;
+
+    // Owned here because the OrtEpDevice registered from it only borrows the pointer.
+    using HardwareDevicePtr = std::unique_ptr<OrtHardwareDevice, std::function<void(OrtHardwareDevice*)>>;
+    std::vector<HardwareDevicePtr> runtime_discovered_devices_;
 
     AllocatorMap<hip::PinnedAllocator> pinned_allocators_;
     AllocatorMap<hip::Allocator> gpu_allocators_;
