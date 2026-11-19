@@ -476,13 +476,6 @@ static OrtStatus* ORT_API_CALL BiasGelu_Compute(
     }
 }
 
-static void ORT_API_CALL BiasGelu_ReleaseState(
-    OrtNodeComputeInfo* /*this_ptr*/,
-    void* compute_state) noexcept
-{
-    delete static_cast<BiasGeluKernelState*>(compute_state);
-}
-
 struct BiasGeluNodeComputeInfo : OrtNodeComputeInfo {
     BiasGeluKernelState* state = nullptr;
 

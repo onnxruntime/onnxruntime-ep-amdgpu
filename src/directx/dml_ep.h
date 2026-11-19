@@ -23,10 +23,16 @@ namespace dml_ep {
 
 class DMLDataTransfer;
 
-class ExecutionProviderPlugin 
+// Runs the Tier-0 shape-resolution + partition-claiming phases of GetCapabilityImpl.
+// Defined file-locally in dml_ep.cc; needs access to the plugin's private kernel-support
+// helpers and the m_tier0*/m_resolvedShapes/m_dynamicShapePrepChains members.
+class TierZeroPartitioner;
+
+class ExecutionProviderPlugin
     : public OrtEp
     , public ApiPtrs
 {
+    friend class TierZeroPartitioner;
 public:
     // Owned CPU-preferred shape-math chain feeding a dynamic partition's boundary
     // inputs (public so the file-scope CaptureShapePrepChain helper can build it).
@@ -186,6 +192,19 @@ private:
 
     uint32_t GetSupportedDeviceDataTypeMask() const;
     std::unordered_set<size_t> GetCpuPreferredNodes(const OrtGraph* graph, OrtEpGraphSupportInfo* graph_support_info, gsl::span<const OrtNode*> tentative_nodes);
+
+    // Tier-2 pattern fusion + per-op (Tier-1) single-node fallback for every node not
+    // already claimed by a Tier-0 partition. Runs ApplyFusions (excluding CPU-preferred
+    // and excludedNodeIds), then adds each remaining DML-supported node as a single node.
+    // excludedNodeIds is the set of Tier-0-claimed node ids (empty when no Tier-0
+    // partition was claimed).
+    void ApplyTier2FusionAndPerOpFallback(
+        const OrtGraph* graph,
+        OrtEpGraphSupportInfo* graph_support_info,
+        const std::vector<const OrtNode*>& nodesInTopologicalOrder,
+        const std::unordered_set<size_t>& cpuPreferredNodes,
+        const std::unordered_set<size_t>& excludedNodeIds,
+        uint32_t deviceDataTypeMask);
 
     bool IsCpuAllocator(const OrtMemoryInfo* memory_info);
     bool IsGpuAllocator(const OrtMemoryInfo* memory_info);

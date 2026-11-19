@@ -610,6 +610,18 @@ struct DmlAbiKernel {
     // For shape-change detection between Compute calls.
     EdgeShapes input_shapes_of_kernel_inference;
 
+    // Per-input "is a graph constant/initializer" mask, sized to the input count and populated
+    // at kernel creation via KernelInfoGetConstantInput_tensor. A constant input's shape is
+    // frozen for the session (ONNX guarantee), so the per-Compute shape-change guard skips
+    // re-reading these inputs and trusts their baseline slot in input_shapes_of_kernel_inference.
+    std::vector<bool> input_is_constant;
+
+    // Reused scratch for the per-Compute shape read, so the hot-path guard allocates nothing.
+    // Seeded once from the full baseline (all inputs); each call overwrites only the non-constant
+    // slots in place, leaving constant slots equal to baseline. Must stay a DISTINCT buffer from
+    // input_shapes_of_kernel_inference (the change check compares the two).
+    EdgeShapes shape_check_scratch;
+
     // Snapshots of required constant CPU input values from the last kernel creation. Indexed by input
     // index (sparse — only indices in required_constant_cpu_inputs are populated). Used to detect value
     // changes between calls when shapes are unchanged. Only the tensor (non-sequence) case is needed

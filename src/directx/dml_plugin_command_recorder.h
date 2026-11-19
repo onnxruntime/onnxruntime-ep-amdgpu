@@ -69,6 +69,14 @@ namespace dml_ep {
             m_currentDescriptorHeap = nullptr;
         }
 
+        // Reserve a persistent (never-recycled) descriptor range from the shared pool,
+        // for command-list reuse. The returned range lives in the same heap the recorder's
+        // per-op work binds, so a reuse list that binds this heap causes no heap switch.
+        DescriptorRange ReservePersistentDescriptors(uint32_t numDescriptors)
+        {
+            return m_descriptorPool.ReservePersistent(numDescriptors);
+        }
+
     private:
         void CloseAndExecute(_In_opt_ ID3D12GraphicsCommandList* commandList);
 
