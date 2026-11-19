@@ -48,22 +48,34 @@ namespace gpu_ep {
 
 namespace {
 
-telemetry::Backend BackendForProfile(Profile profile) noexcept {
+Backend BackendForProfile(Profile profile) noexcept {
     switch (profile) {
         case Profile::Hip:
-            return telemetry::Backend::Hip;
+            return Backend::Hip;
 #ifdef USE_DML
         case Profile::Eager:
         case Profile::DirectX:
-            return telemetry::Backend::DirectML;
+            return Backend::DirectML;
 #endif
         case Profile::Auto:
         case Profile::Optimized:
         case Profile::MIGraphX:
         default:
             // Without DirectML support the wrapper always runs on MIGraphX.
-            return telemetry::Backend::MIGraphX;
+            return Backend::MIGraphX;
     }
+}
+
+telemetry::Backend ToTelemetryBackend(Backend backend) noexcept {
+    switch (backend) {
+        case Backend::DirectML:
+            return telemetry::Backend::DirectML;
+        case Backend::MIGraphX:
+            return telemetry::Backend::MIGraphX;
+        case Backend::Hip:
+            return telemetry::Backend::Hip;
+    }
+    return telemetry::Backend::Unknown;
 }
 
 }  // namespace
@@ -135,8 +147,8 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
     const auto config_entries = key_value_pairs.GetKeyValuePairs();
     const std::string ep_prefix{"ep." + lowercase + "."};
 
-    OrtSessionOptions* local_session_options{};
-    THROW_IF_ERROR(ort_api.CreateSessionOptions(&local_session_options));
+    // Owned, so every throw below (e.g. a session routed to an unavailable backend) releases it.
+    Ort::SessionOptions local_session_options;
 
     ProviderOptions provider_options;
     for (const auto& [key, value] : config_entries) {
@@ -209,11 +221,10 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
         return chosen;
     };
 
-#ifdef USE_DML
-    const auto create_directx_backend = [&] {
-        THROW_IF_ERROR(factory.CreateDirectXBackend(local_session_options, logger, backend_ep_));
+    const auto create_backend = [&](Backend backend) {
+        THROW_IF_ERROR(factory.CreateBackend(backend, local_session_options, logger,
+            backend_ep_, backend_ep_factory_, backend_get_telemetry_));
     };
-#endif
 
     const auto create_hip_backend = [&] {
         // Hip shares the AMDGPU EP name: forward ep.<amdgpu>.* except owned "profile".
@@ -226,7 +237,7 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
             }
             THROW_IF_ERROR(ort_api.AddSessionConfigEntry(local_session_options, key.c_str(), value.c_str()));
         }
-        THROW_IF_ERROR(factory.CreateHipBackend(local_session_options, logger, backend_ep_));
+        create_backend(Backend::Hip);
     };
 
     const auto create_migraphx_backend = [&] {
@@ -330,38 +341,28 @@ ExecutionProvider::ExecutionProvider(ProviderFactory& factory, std::string_view 
                 get_name(mgx_ep::provider_option::kStaticPadOutputs).c_str(),
                 info.static_pad_outputs.value().c_str()));
         }
-        THROW_IF_ERROR(factory.CreateMIGraphXBackend(local_session_options, logger, backend_ep_));
+        create_backend(Backend::MIGraphX);
     };
 
     // Explicit profile is honored; Auto/Optimized derives from (ASIC, model_arch). select_backend()
     // (inside route_by_heuristic) applies both, so the result covers every profile value.
     const Profile effective = route_by_heuristic();
+    // DirectML not built (e.g. Linux): DirectML/Eager profiles map to MIGraphX here.
     backend_ = BackendForProfile(effective);
 
-#ifdef USE_DML
-    if (effective == Profile::Eager) {
-        create_directx_backend();
-    } else if (effective == Profile::DirectX) {
-        create_directx_backend();
-    } else if (effective == Profile::MIGraphX) {
-        create_migraphx_backend();
-    } else if (effective == Profile::Hip) {
-        create_hip_backend();
-    } else {
-        create_migraphx_backend();
+    // A routed backend that failed to load fails session creation with its stored load error,
+    // whether it was chosen explicitly or by Auto.
+    switch (backend_) {
+        case Backend::DirectML:
+            create_backend(Backend::DirectML);
+            break;
+        case Backend::Hip:
+            create_hip_backend();
+            break;
+        case Backend::MIGraphX:
+            create_migraphx_backend();
+            break;
     }
-#else
-    // DirectML not built (e.g. Linux): DirectML/Eager profiles fall back to MIGraphX.
-    if (effective == Profile::Hip) {
-        create_hip_backend();
-    } else {
-        create_migraphx_backend();
-    }
-#endif
-    // Capture per-EP now: the shared factory_ backend field is overwritten by a later
-    // umbrella EP (different backend). See PR for the cross-backend UAF details.
-    backend_ep_factory_ = factory_.GetBackendFactory();
-    ort_api.ReleaseSessionOptions(local_session_options);
 }
 
 ExecutionProvider::~ExecutionProvider() {
@@ -410,14 +411,13 @@ void ExecutionProvider::LogTelemetry(const Ort::ConstGraph& graph) const noexcep
         // Generic, backend-agnostic fields collected by the wrapper.
         telemetry::Record record;
         record.SetEpVersion(factory_.GetVersion())
-              .SetBackend(backend_)
+              .SetBackend(ToTelemetryBackend(backend_))
               .SetParentProcess(telemetry::ParentProcessName());
         const std::filesystem::path model_path{graph.GetModelPath()};
         if (model_path.has_filename()) {
             record.SetModelName(model_path.filename().string());
         }
-        if (const telemetry::GetBackendDataFn collect = factory_.GetBackendTelemetryFn();
-                collect != nullptr) {
+        if (const telemetry::GetBackendDataFn collect = backend_get_telemetry_; collect != nullptr) {
             telemetry::BackendData data{};
             if (collect(backend_ep_, &data)) {
                 record.Merge(data);

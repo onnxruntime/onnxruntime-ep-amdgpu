@@ -35,7 +35,9 @@ Ort::Status LoadDynamicLibrary(const PathString& path, void** handle) {
     *handle = LoadLibraryExW(lib.native().c_str(), nullptr,
                             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (*handle == nullptr) {
-        return MAKE_STATUS(ORT_FAIL, "LoadDynamicLibrary(): failed to load library");
+        const auto error_code = GetLastError();
+        return MAKE_STATUS(ORT_FAIL, "LoadDynamicLibrary(): failed to load library '", PathToUTF8String(lib.native()),
+            "' (", error_code, ": ", std::system_category().message(error_code), ")");
     }
     return STATUS_OK;
 }

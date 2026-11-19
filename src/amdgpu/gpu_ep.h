@@ -45,11 +45,14 @@ private:
 
     ProviderFactory& factory_;
     OrtEp* backend_ep_{};
-    // Backend factory that created this EP's backend_ep_; captured per-EP (see PR for why).
+    // Backend factory that created this EP's backend_ep_, and that backend's telemetry
+    // collector. Held per-EP: the factory's shared slot is overwritten by every later
+    // umbrella EP, possibly on a different backend (see PR for the cross-backend UAF details).
     OrtEpFactory* backend_ep_factory_{};
+    telemetry::GetBackendDataFn backend_get_telemetry_{};
 
     std::string ep_name_;
-    telemetry::Backend backend_{telemetry::Backend::Unknown};
+    Backend backend_{Backend::MIGraphX};
     std::optional<telemetry::Logger> telemetry_;
     mutable std::once_flag telemetry_once_;
     const Ort::Logger logger_{};
