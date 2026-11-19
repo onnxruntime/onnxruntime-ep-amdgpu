@@ -1384,6 +1384,7 @@ static void CopyArgumentPacked(void* dst, const migraphx::argument& src, hipStre
     const auto element_bytes{migraphx::shape{shape.type()}.bytes()};
     std::size_t row_elements{1};
     auto axis{lengths.size()};
+    // Fold trailing axes that are contiguous in memory into one row.
     while (axis > 0 && (lengths[axis - 1] == 1 || strides[axis - 1] == row_elements)) {
         row_elements *= lengths[--axis];
     }
@@ -1398,6 +1399,7 @@ static void CopyArgumentPacked(void* dst, const migraphx::argument& src, hipStre
     if (const auto row_stride{strides[axis - 1]}; row_stride >= row_elements) {
         rows = lengths[--axis];
         src_pitch = row_stride * element_bytes;
+        // Fold outer axes that keep a uniform pitch into the same 2D copy.
         while (axis > 0 && (lengths[axis - 1] == 1 || strides[axis - 1] == row_stride * rows)) {
             rows *= lengths[--axis];
         }

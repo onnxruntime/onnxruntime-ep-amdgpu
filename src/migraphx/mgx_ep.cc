@@ -115,6 +115,7 @@ struct DynamicOutputScratch {
     }
 
     ~DynamicOutputScratch() {
+        // Stream-ordered: each free runs after the program and the copy-out that use the buffer.
         for (auto* buffer : buffers) {
             (void)hipFreeAsync(buffer, stream);
         }
@@ -462,6 +463,11 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
         // MIGraphX takes runtime starts/ends/axes only when steps are absent or all ones;
         // GetInputs() keeps omitted optional inputs as null, so index 4 is always steps.
         const auto raw_inputs{node.GetInputs()};
+        // MIGraphX's slice op cannot combine run-time axes with other bound inputs.
+        if (raw_inputs.size() > 3 && raw_inputs[3] != nullptr &&
+            !CanEvalNodeArgument(graph, node, {3})) {
+            return true;
+        }
         const bool unit_steps{raw_inputs.size() < 5 || raw_inputs[4] == nullptr ||
             IsAllOnesInitializer(raw_inputs[4])};
         if (!unit_steps) {
@@ -505,15 +511,11 @@ bool IsUnsupportedOpMode(const Ort::ConstGraph& graph, const Ort::ConstNode& nod
             return true;
         }
     } else if (op_type == "TopK") {
-        // Runtime K needs ROCm/AMDMIGraphX#4880, first in MIGraphX 2.17. Since #5150 the
-        // parser also rejects runtime K over a dynamic (non-symbolic) data shape.
-        constexpr bool runtime_k_supported{MIGRAPHX_VERSION_MAJOR > 2 ||
-            (MIGRAPHX_VERSION_MAJOR == 2 && MIGRAPHX_VERSION_MINOR >= 17)};
+        // Run-time K over data with an unknown dim needs ROCm/AMDMIGraphX#5569; drop this once it merges.
         if (!CanEvalNodeArgument(graph, node, {1})) {
             const auto data_shape{GetTensorShape(inputs[0])};
-            const bool static_data{data_shape.has_value() && !data_shape->empty() &&
-                ranges::all_of(*data_shape, [](int64_t dim) { return dim >= 0; })};
-            if (!runtime_k_supported || !static_data) {
+            if (!data_shape.has_value() || data_shape->empty() ||
+                !ranges::all_of(*data_shape, [](int64_t dim) { return dim >= 0; })) {
                 return true;
             }
         }
@@ -1341,6 +1343,7 @@ try {
     // shapes and staging bind so the hot path reuses them (no per-call rebuild/rebind).
     std::size_t prewarmed{0};
     for (auto& [shape_key, prog] : cs.cached_programs) {
+        // Dynamic-output programs always run eagerly, so there is no graph or staging to prewarm.
         if (program_has_dynamic_outputs(prog)) {
             continue;
         }
@@ -1520,6 +1523,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
         }
         const auto output_shapes{program.get_output_shapes()};
         for (const auto& [n, s] : zip(output_names, output_shapes)) {
+            // A dynamic output has no fixed lengths to pin; it is sized at run time.
             if (!s.dynamic()) {
                 onnx_options.set_input_parameter_shape(n, s.lengths());
             }
@@ -1649,6 +1653,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
                 compute_state.has_input_shapes = true;
                 const auto output_shapes{compute_state.program.get_output_shapes()};
                 for (const auto& [n, s] : zip(output_names, output_shapes)) {
+                    // A dynamic output has no fixed lengths to pin; it is sized at run time.
                     if (!s.dynamic()) {
                         compute_state.onnx_options.set_input_parameter_shape(n, s.lengths());
                     }
@@ -2629,6 +2634,8 @@ Ort::Status RunEager(ComputeState& compute_state,
                 // #output_N indexes the MIGraphX program; GetOutput uses the name remap.
                 const auto mgx_index{static_cast<size_t>(oi)};
                     auto output_shape{output_shapes[mgx_index]};
+                    // The ORT output size is unknown until the run: bind max-size scratch and let
+                    // CopyUnboundOutputsToOrt copy the actual result out afterwards.
                     if (output_shape.dynamic()) {
                         const auto scratch_shape{param_shapes[name.c_str()]};
                         compute_params.add(name.c_str(), migraphx::argument{scratch_shape,
@@ -2896,6 +2903,7 @@ try {
                     const auto sub{name.substr(pos + name_prefix.length())};
                     auto output_index{ToInteger<size_t>(Trim(sub, std::isdigit))};
                     auto output_shape{output_shapes[output_index]};
+                    // Same as RunEager: max-size scratch now, actual result copied out after the run.
                     if (output_shape.dynamic()) {
                         const auto scratch_shape{param_shapes[name.c_str()]};
                         compute_params.add(name.c_str(), migraphx::argument{scratch_shape,
