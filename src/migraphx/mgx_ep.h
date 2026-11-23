@@ -459,6 +459,8 @@ struct ComputeState {
     // path matches with one integer compare.  Set on (re)compile or cache swap.
     ShapeKey active_program_shape_key{};
     bool has_active_program_shape_key{};
+    // Active program has a dynamic output, which only the eager path can size at run time.
+    bool program_has_dynamic_outputs{};
     // Raw input data pointers gathered during the per-call input-shape scan (by ORT
     // input index), reused by the coalesced input copy.  Rewritten every call.
     std::vector<const void*> cur_input_data{};

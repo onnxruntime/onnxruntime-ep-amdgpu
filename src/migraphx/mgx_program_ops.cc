@@ -15,9 +15,16 @@
 namespace mgx_ep {
 
 bool program_outputs_are_standard(const migraphx::program& prog) {
+    // Dynamic outputs are copied out from their runtime shape, so only static ones must be standard.
     const auto outputs{prog.get_output_shapes()};
     return std::all_of(outputs.begin(), outputs.end(),
-        [](const migraphx::shape& shape) { return shape.standard(); });
+        [](const migraphx::shape& shape) { return shape.dynamic() || shape.standard(); });
+}
+
+bool program_has_dynamic_outputs(const migraphx::program& prog) {
+    const auto outputs{prog.get_output_shapes()};
+    return std::any_of(outputs.begin(), outputs.end(),
+        [](const migraphx::shape& shape) { return shape.dynamic(); });
 }
 
 bool load_compiled_program(migraphx::program& prog, const fs::path& path)
