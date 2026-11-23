@@ -141,20 +141,26 @@ static std::unique_ptr<PluginReusableCommandList> BuildReusableCommandList(
 
     DML_BINDING_PROPERTIES binding_props = compiled_op->GetBindingProperties();
 
-    // Descriptor heap sized to the compiled op's requirement (shader-visible).
-    D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
-    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    heap_desc.NumDescriptors = binding_props.RequiredDescriptorCount;
-    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    if (FAILED(d3d_device->CreateDescriptorHeap(
-            &heap_desc, IID_PPV_ARGS(state->heap.ReleaseAndGetAddressOf()))))
+    // Reserve a PERSISTENT descriptor range from the recorder's SHARED pool, rather than
+    // creating a private heap. The reuse list binds this same heap the recorder's per-op
+    // scratch binds, so replaying it does not force a descriptor-heap switch against
+    // surrounding per-op work (the dominant cost when a graph interleaves fused partitions
+    // with per-op fallback ops). The range is never recycled, so the handles baked into
+    // the recorded command list below stay valid for the heap's lifetime.
+    ID3D12DescriptorHeap* shared_heap = nullptr;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle = {};
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle = {};
+    if (!provider->ReservePersistentDescriptors(
+            binding_props.RequiredDescriptorCount, &shared_heap, &cpu_handle, &gpu_handle) ||
+        !shared_heap)
         return nullptr;
+    state->heap = shared_heap;  // keep-alive ref on the shared heap
 
-    // Binding table over that heap, dispatchable = the compiled graph op.
+    // Binding table over the reserved range, dispatchable = the compiled graph op.
     DML_BINDING_TABLE_DESC bt_desc = {};
     bt_desc.Dispatchable = compiled_op;
-    bt_desc.CPUDescriptorHandle = state->heap->GetCPUDescriptorHandleForHeapStart();
-    bt_desc.GPUDescriptorHandle = state->heap->GetGPUDescriptorHandleForHeapStart();
+    bt_desc.CPUDescriptorHandle = cpu_handle;
+    bt_desc.GPUDescriptorHandle = gpu_handle;
     bt_desc.SizeInDescriptors = binding_props.RequiredDescriptorCount;
     if (FAILED(dml_device->CreateBindingTable(
             &bt_desc, IID_PPV_ARGS(state->bindingTable.ReleaseAndGetAddressOf()))))
@@ -177,23 +183,11 @@ static std::unique_ptr<PluginReusableCommandList> BuildReusableCommandList(
         state->bindingTable->BindPersistentResource(&persistent_desc);
     }
 
-    // Temporary resource: allocate ONCE and own it for the list's lifetime (§T).
-    if (binding_props.TemporaryResourceSize > 0) {
-        ComPtr<ID3D12Resource> temp_resource;
-        ComPtr<IUnknown> temp_allocator;
-        if (FAILED(provider->AllocatePooledResource(
-                static_cast<size_t>(binding_props.TemporaryResourceSize),
-                AllocatorRoundingMode::Disabled,
-                temp_resource.GetAddressOf(),
-                temp_allocator.GetAddressOf())) || !temp_resource)
-            return nullptr;
-        DML_BUFFER_BINDING temp_binding = {
-            temp_resource.Get(), 0, binding_props.TemporaryResourceSize };
-        DML_BINDING_DESC temp_desc = { DML_BINDING_TYPE_BUFFER, &temp_binding };
-        state->bindingTable->BindTemporaryResource(&temp_desc);
-        state->temporaryResource = std::move(temp_resource);
-        state->temporaryAllocator = std::move(temp_allocator);
-    }
+    // Temporary resource: NOT allocated here. It is allocated per-execution from the
+    // bucketized pool in ExecuteReusableCommandList and re-bound each inference (§T),
+    // mirroring ORT so peak temp VRAM stays at one recycled buffer instead of one per
+    // list in the in-flight ring. Record only its size for the execute path.
+    state->temporaryResourceSize = binding_props.TemporaryResourceSize;
 
     ID3D12DescriptorHeap* heaps[] = { state->heap.Get() };
     state->graphicsCommandList->SetDescriptorHeaps(1, heaps);
@@ -248,7 +242,36 @@ static HRESULT ExecuteReusableCommandList(
         list.bindingTable->BindOutputs(
             gsl::narrow_cast<uint32_t>(output_descs.size()), output_descs.data());
 
-    // Temp is bound once at build time and owned by the list (§T) — nothing to do here.
+    // Temp: allocate PER-EXECUTION from the bucketized pool, bind (dirty-tested), and
+    // QueueReference the pooled allocation so it is not recycled until this submission's
+    // GPU work completes (§T), mirroring ORT's ExecuteReusableCommandList. The temp
+    // allocation is kept alive across the submit below via temp_allocator.
+    ComPtr<IUnknown> temp_allocator;
+    if (list.temporaryResourceSize > 0) {
+        ComPtr<ID3D12Resource> temp_resource;
+        // Rounding ENABLED: round the temp size up to a pooled bucket so repeated
+        // same-size allocations recycle the SAME physical buffer across inferences
+        // (DmlBucketizedBufferAllocator::AllocImpl). With Disabled, a non-bucket-sized
+        // temp takes the un-pooled branch and commits a fresh VRAM resource every
+        // inference, which also forces a queue drain. Mirrors ORT's AllocateTemporaryData,
+        // which uses the allocator's default rounding (Enabled after session init).
+        if (FAILED(provider->AllocatePooledResource(
+                static_cast<size_t>(list.temporaryResourceSize),
+                AllocatorRoundingMode::Enabled,
+                temp_resource.GetAddressOf(),
+                temp_allocator.GetAddressOf())) || !temp_resource)
+            return E_OUTOFMEMORY;
+
+        uint64_t temp_id = provider->TryGetPooledAllocationId(
+            temp_allocator.Get(), /*isInternalOperator=*/false);
+        if (!temp_id || list.tempBindingAllocId != temp_id) {
+            DML_BUFFER_BINDING temp_binding = {
+                temp_resource.Get(), 0, list.temporaryResourceSize };
+            DML_BINDING_DESC temp_desc = { DML_BINDING_TYPE_BUFFER, &temp_binding };
+            list.bindingTable->BindTemporaryResource(&temp_desc);
+        }
+        list.tempBindingAllocId = temp_id;
+    }
 
     // Submit the prebuilt closed list; capture the fence/value gating its next reuse.
     ComPtr<ID3D12Fence> fence;
@@ -259,12 +282,14 @@ static HRESULT ExecuteReusableCommandList(
     list.fence = fence;
     list.completionValue = completion_value;
 
-    // Keep objects alive until the submitted GPU work completes.
+    // Keep objects alive until the submitted GPU work completes. QueueReference on the
+    // pooled temp allocation defers its bucket return (synchronous on ComPtr release)
+    // until the fence drains, so the next same-size Alloc can safely recycle it.
     provider->QueueReference(list.graphicsCommandList.Get());
     provider->QueueReference(list.heap.Get());
     provider->QueueReference(list.bindingTable.Get());
     if (list.persistentAllocator) provider->QueueReference(list.persistentAllocator.Get());
-    if (list.temporaryAllocator) provider->QueueReference(list.temporaryAllocator.Get());
+    if (temp_allocator) provider->QueueReference(temp_allocator.Get());
     return S_OK;
 }
 
@@ -1685,8 +1710,130 @@ static void DrainDmlDebugMessages(PluginDmlExecutionProviderImpl* provider,
     }
 }
 
+// Derive the DML graph execution flags from the live compiled nodes.
+//   - DESCRIPTORS_VOLATILE for graphs of >= 5 nodes (command-list reuse needs it).
+//   - ALLOW_HALF_PRECISION_COMPUTATION when every tensor is fp16 and none is fp32,
+//     matching ORT's DmlOperator::GetExecutionFlags() to enable fp16 metacommand
+//     fast-paths. (See feedback_dml_exec_flags — the fp16 flag's presence is
+//     load-bearing for Conv metacommand performance.)
+static DML_EXECUTION_FLAGS DeriveGraphExecutionFlags(
+    const std::vector<CompiledNode>& compiled_nodes,
+    const std::vector<bool>& node_is_live)
+{
+    static constexpr size_t kMinNodeCountForDescriptorsVolatile = 5;
+    DML_EXECUTION_FLAGS exec_flags = DML_EXECUTION_FLAG_NONE;
+    if (compiled_nodes.size() >= kMinNodeCountForDescriptorsVolatile)
+        exec_flags |= DML_EXECUTION_FLAG_DESCRIPTORS_VOLATILE;
+
+    bool has_fp16 = false, has_fp32 = false;
+    for (size_t i = 0; i < compiled_nodes.size(); ++i) {
+        if (!node_is_live[i]) continue;
+        const auto& compiled_node = compiled_nodes[i];
+        for (const auto& t : compiled_node.translated->input_tensors)
+            if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT16) has_fp16 = true;
+            else if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT32) has_fp32 = true;
+        for (const auto& t : compiled_node.translated->output_tensors)
+            if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT16) has_fp16 = true;
+            else if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT32) has_fp32 = true;
+    }
+    if (has_fp16 && !has_fp32)
+        exec_flags |= DML_EXECUTION_FLAG_ALLOW_HALF_PRECISION_COMPUTATION;
+
+    return exec_flags;
+}
+
+// ===========================================================================
+// FullGraphCompiler — compiles one fused subgraph partition into a DML graph +
+// FullGraphNodeComputeInfo. Holds the ~18 interdependent locals that the 12
+// Steps thread through one another as members, so each Step is an independently
+// readable method rather than a slice of one 800-line function. Run() drives the
+// Steps in order; any Step returning false means "abort this partition" and Run()
+// returns nullptr (per-op fallback), matching the original inline early-returns.
+// All Step bodies are verbatim moves of the original inline code.
+// ===========================================================================
+class FullGraphCompiler {
+public:
+    FullGraphCompiler(const OrtApi& ort_api,
+                      const OrtGraph* fused_subgraph,
+                      const std::unordered_map<std::string, const OrtValue*>& initializers,
+                      PluginDmlExecutionProviderImpl* provider,
+                      const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes)
+        : ort_api(ort_api), fused_subgraph(fused_subgraph), initializers(initializers),
+          provider(provider), resolved_shapes(resolved_shapes) {}
+
+    OrtNodeComputeInfo* Run();
+
+private:
+    bool TranslateNodes();          // Step 1-4 + dead-node strip
+    bool MarkOwnedInitializers();   // Step 5
+    bool CreateDmlOperators();      // Step 6
+    void BuildInputMap();           // Step 7
+    void BuildNodeDescriptors();    // Step 8
+    bool WireEdges();               // Step 9
+    bool CompileDmlGraph();         // Step 10
+    bool AllocateAndUpload();       // Step 11
+    OrtNodeComputeInfo* BuildKernelState();  // Step 12
+
+    const OrtApi& ort_api;
+    const OrtGraph* fused_subgraph;
+    const std::unordered_map<std::string, const OrtValue*>& initializers;
+    PluginDmlExecutionProviderImpl* provider;
+    const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes;
+
+    SubgraphInfo subgraph;
+    size_t num_graph_inputs = 0;
+    size_t num_graph_outputs = 0;
+
+    std::vector<CompiledNode> compiled_nodes;
+    std::unordered_map<std::string, std::pair<size_t, size_t>> value_producer;
+    std::unordered_map<std::string, std::string> graph_input_aliases;
+    std::unordered_set<std::string> consumed_initializer_names;
+    std::unordered_set<std::string> dml_consumed_names;
+    std::vector<bool> node_is_live;
+
+    ComPtr<IDMLDevice> dml_device;
+    ComPtr<IDMLDevice1> dml_device1;
+
+    DmlInputMapResult input_map;
+    std::unordered_set<size_t> owned_graph_input_indices;
+
+    size_t total_dml_nodes = 0;
+    std::vector<size_t> dml_node_offset;
+    std::vector<DML_OPERATOR_GRAPH_NODE_DESC> op_node_descs;
+    std::vector<DML_CONSTANT_DATA_GRAPH_NODE_DESC> const_node_descs;
+    std::vector<DML_GRAPH_NODE_DESC> graph_nodes;
+    size_t const_node_base = 0;
+
+    std::vector<DML_INPUT_GRAPH_EDGE_DESC> input_edge_storage;
+    std::vector<DML_INTERMEDIATE_GRAPH_EDGE_DESC> intermediate_edge_storage;
+    std::vector<DML_OUTPUT_GRAPH_EDGE_DESC> output_edge_storage;
+    std::vector<DML_GRAPH_EDGE_DESC> input_edges;
+    std::vector<DML_GRAPH_EDGE_DESC> intermediate_edges;
+    std::vector<DML_GRAPH_EDGE_DESC> output_edges;
+    std::unordered_set<size_t> dml_inputs_with_edges;
+
+    ComPtr<IDMLCompiledOperator> compiled_op;
+    DML_EXECUTION_FLAGS exec_flags = DML_EXECUTION_FLAG_NONE;
+    ComPtr<ID3D12Resource> persistent_resource;
+    ComPtr<IUnknown> persistent_allocator;
+    std::optional<DML_BUFFER_BINDING> persistent_binding;
+    std::vector<InitBinding> const_graph_input_bindings;
+};
+
+OrtNodeComputeInfo* FullGraphCompiler::Run() {
+    if (!TranslateNodes())        return nullptr;
+    if (!MarkOwnedInitializers()) return nullptr;
+    if (!CreateDmlOperators())    return nullptr;
+    BuildInputMap();
+    BuildNodeDescriptors();
+    if (!WireEdges())             return nullptr;
+    if (!CompileDmlGraph())       return nullptr;
+    if (!AllocateAndUpload())     return nullptr;
+    return BuildKernelState();
+}
+
 // ---------------------------------------------------------------------------
-// FullGraphFusion::Compile
+// FullGraphFusion::Compile — thin driver over FullGraphCompiler.
 // ---------------------------------------------------------------------------
 
 OrtNodeComputeInfo* FullGraphFusion::Compile(
@@ -1696,13 +1843,24 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     PluginDmlExecutionProviderImpl*                          provider,
     const std::unordered_map<std::string, std::vector<int64_t>>& resolved_shapes)
 {
+    FullGraphCompiler compiler(ort_api, fused_subgraph, initializers, provider, resolved_shapes);
+    return compiler.Run();
+}
+
+// ---------------------------------------------------------------------------
+// FullGraphCompiler Step implementations (verbatim moves from the original
+// inline Compile body).
+// ---------------------------------------------------------------------------
+
+bool FullGraphCompiler::TranslateNodes()
+{
     // -----------------------------------------------------------------------
     // Step 1–3: Enumerate subgraph I/O, merge initializers, pre-seed shapes.
     // -----------------------------------------------------------------------
 
-    SubgraphInfo subgraph = BuildSubgraphInfo(ort_api, fused_subgraph, initializers, resolved_shapes);
-    const size_t num_graph_inputs  = subgraph.graph_input_vis.size();
-    const size_t num_graph_outputs = subgraph.graph_output_vis.size();
+    subgraph = BuildSubgraphInfo(ort_api, fused_subgraph, initializers, resolved_shapes);
+    num_graph_inputs  = subgraph.graph_input_vis.size();
+    num_graph_outputs = subgraph.graph_output_vis.size();
 
     // -----------------------------------------------------------------------
     // Step 4: Translate each node.
@@ -1710,13 +1868,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
 
     OpTranslatorRegistry registry = BuildOpTranslatorRegistry();
 
-    std::vector<CompiledNode> compiled_nodes;
     compiled_nodes.reserve(64);
-
-    std::unordered_map<std::string, std::pair<size_t, size_t>> value_producer;
-    std::unordered_map<std::string, std::string> graph_input_aliases;
-    std::unordered_set<std::string> consumed_initializer_names;
-    std::unordered_set<std::string> dml_consumed_names;
 
     size_t num_nodes = 0;
     ort_api.Graph_GetNumNodes(fused_subgraph, &num_nodes);
@@ -1731,13 +1883,13 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         ort_api.Node_GetOperatorType(node, &op_type);
         if (!op_type) {
             DML_PERF_LOG("[Compile] FAIL: null op_type\n");
-            return nullptr;
+            return false;
         }
 
         auto reg_it = registry.find(op_type);
         if (reg_it == registry.end()) {
             DML_PERF_LOG("[Compile] FAIL: no translator for op=", op_type, "\n");
-            return nullptr;
+            return false;
         }
 
         auto input_names  = fusion_utils::GetNodeInputNames(ort_api, node);
@@ -1750,7 +1902,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         auto translated = reg_it->second(ort_api, NodeView{ort_api, node}, subgraph.value_shapes, subgraph.all_initializers);
         if (!translated) {
             DML_PERF_LOG("[Compile] FAIL: translator returned nullopt for op=", op_type, "\n");
-            return nullptr;
+            return false;
         }
 
         DML_PERF_LOG("[Compile] OK: op=", op_type, "\n");
@@ -1858,7 +2010,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     // value_producer). Nodes with refcount 0 are dead leaves. Killing a leaf
     // decrements its input producers' refcounts — if a producer hits 0, it
     // cascades. Single O(N) pass via work queue.
-    std::vector<bool> node_is_live(compiled_nodes.size(), true);
+    node_is_live.assign(compiled_nodes.size(), true);
     {
         for (const auto& [name, _] : subgraph.graph_output_map)
             dml_consumed_names.insert(name);
@@ -1913,16 +2065,14 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
             }
         }
     }
+    return true;
+}
 
-    // -----------------------------------------------------------------------
-    // Step 5: Mark OWNED_BY_DML initializer inputs.
-    //
-    // Passthrough aliases (e.g. Reshape output → original initializer) are
-    // resolved so bias tensors flowing through elided Reshape nodes are
-    // correctly recognized. Small initializers (<= kMaxConstNodeDataSize bytes)
-    // are excluded — they become constant graph nodes with embedded data.
-    // -----------------------------------------------------------------------
-
+// -----------------------------------------------------------------------
+// Step 5: Mark OWNED_BY_DML initializer inputs.
+// -----------------------------------------------------------------------
+bool FullGraphCompiler::MarkOwnedInitializers()
+{
     uint32_t owned_count = 0;
     for (size_t node_idx = 0; node_idx < compiled_nodes.size(); ++node_idx) {
         if (!node_is_live[node_idx]) continue;
@@ -1969,15 +2119,16 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         }
         consumed_initializer_names = std::move(filtered_consumed);
     }
+    return true;
+}
 
-    // -----------------------------------------------------------------------
-    // Step 6: Create IDMLOperator for each compiled node.
-    // -----------------------------------------------------------------------
-
-    ComPtr<IDMLDevice> dml_device;
-    if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf()))) return nullptr;
-    ComPtr<IDMLDevice1> dml_device1;
-    if (FAILED(dml_device.As(&dml_device1))) return nullptr;
+// -----------------------------------------------------------------------
+// Step 6: Create IDMLOperator for each compiled node.
+// -----------------------------------------------------------------------
+bool FullGraphCompiler::CreateDmlOperators()
+{
+    if (FAILED(provider->GetDmlDevice(dml_device.GetAddressOf()))) return false;
+    if (FAILED(dml_device.As(&dml_device1))) return false;
 
     for (size_t i = 0; i < compiled_nodes.size(); ++i) {
         if (!node_is_live[i]) continue;
@@ -1987,7 +2138,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         if (FAILED(hr)) {
             DML_PERF_LOG("[Compile] FAIL: CreateOperator HR=", Hex(static_cast<uint32_t>(hr)),
                 " op=", compiled_node.op_type, "\n");
-            return nullptr;
+            return false;
         }
         DML_PERF_LOG("[Compile] CreateOperator OK: op=", compiled_node.op_type, "\n");
 
@@ -1998,35 +2149,26 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
             if (FAILED(hr)) {
                 DML_PERF_LOG("[Compile] FAIL: CreateOperator sub_node[", s, "] HR=",
                     Hex(static_cast<uint32_t>(hr)), " op=", compiled_node.op_type, "\n");
-                return nullptr;
+                return false;
             }
         }
     }
+    return true;
+}
 
-    // -----------------------------------------------------------------------
-    // Step 7: Build DML graph input map and constant nodes.
-    //
-    // Initializers reach Compile in two modes depending on ORT partitioning:
-    //
-    // Mode A — Initializers as fused subgraph graph inputs. ORT lists both
-    //   runtime tensors and initializers in Graph_GetInputs (e.g. 52 weights +
-    //   1 runtime input = 53 graph inputs). all_initializers is a subset.
-    //
-    // Mode B — Initializers via all_initializers only. ORT only exposes true
-    //   runtime inputs in the subgraph graph input list. Weights arrive only
-    //   through the session-level initializers map and are not in graph_input_vis.
-    //
-    // BuildDmlInputMap handles both modes and assigns compact DML index slots.
-    // -----------------------------------------------------------------------
-
-    DmlInputMapResult input_map = BuildDmlInputMap(
+// -----------------------------------------------------------------------
+// Step 7: Build DML graph input map and constant nodes (handles both the
+// initializers-as-graph-inputs and initializers-via-all_initializers modes).
+// -----------------------------------------------------------------------
+void FullGraphCompiler::BuildInputMap()
+{
+    input_map = BuildDmlInputMap(
         ort_api, subgraph.graph_input_vis,
         consumed_initializer_names, subgraph.value_shapes, subgraph.all_initializers);
 
     // Build owned_graph_input_indices: DML graph input indices whose tensors
     // carry DML_TENSOR_FLAG_OWNED_BY_DML. Uses input_map.dml_input_map so both Mode A
     // and Mode B initializers are covered.
-    std::unordered_set<size_t> owned_graph_input_indices;
     for (auto& compiled_node : compiled_nodes) {
         size_t dml_input_count = compiled_node.translated->input_tensors.size();
         for (size_t s = 0; s < compiled_node.input_names.size() && s < dml_input_count; ++s) {
@@ -2044,22 +2186,26 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Step 8: Build DML graph node descriptors.
-    // dml_node_offset[i] = index in graph_nodes of compiled_nodes[i]'s primary
-    // node. Sub_nodes follow immediately after.
-    // -----------------------------------------------------------------------
+    return;
+}
 
-    size_t total_dml_nodes = 0;
-    std::vector<size_t> dml_node_offset(compiled_nodes.size(), SIZE_MAX);
+// -----------------------------------------------------------------------
+// Step 8: Build DML graph node descriptors.
+// dml_node_offset[i] = index in graph_nodes of compiled_nodes[i]'s primary
+// node. Sub_nodes follow immediately after.
+// -----------------------------------------------------------------------
+void FullGraphCompiler::BuildNodeDescriptors()
+{
+    total_dml_nodes = 0;
+    dml_node_offset.assign(compiled_nodes.size(), SIZE_MAX);
     for (size_t i = 0; i < compiled_nodes.size(); ++i) {
         if (!node_is_live[i]) continue;
         dml_node_offset[i] = total_dml_nodes;
         total_dml_nodes += 1 + compiled_nodes[i].translated->sub_nodes.size();
     }
 
-    std::vector<DML_OPERATOR_GRAPH_NODE_DESC> op_node_descs(total_dml_nodes);
-    std::vector<DML_GRAPH_NODE_DESC> graph_nodes(total_dml_nodes);
+    op_node_descs.assign(total_dml_nodes, {});
+    graph_nodes.assign(total_dml_nodes, {});
     for (size_t i = 0; i < compiled_nodes.size(); ++i) {
         if (!node_is_live[i]) continue;
         size_t base = dml_node_offset[i];
@@ -2073,22 +2219,20 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     }
 
     // Append constant graph nodes for small initializers (inline data).
-    std::vector<DML_CONSTANT_DATA_GRAPH_NODE_DESC> const_node_descs(input_map.constant_nodes.size());
+    const_node_descs.assign(input_map.constant_nodes.size(), {});
     for (size_t c = 0; c < input_map.constant_nodes.size(); ++c) {
         const_node_descs[c].Data = input_map.constant_nodes[c].data.data();
         const_node_descs[c].DataSize = input_map.constant_nodes[c].data.size();
         graph_nodes.push_back({ DML_GRAPH_NODE_TYPE_CONSTANT, &const_node_descs[c] });
     }
-    size_t const_node_base = total_dml_nodes; // operator nodes before constants
+    const_node_base = total_dml_nodes; // operator nodes before constants
+}
 
-    // -----------------------------------------------------------------------
-    // Step 9: Wire edges.
-    // -----------------------------------------------------------------------
-
-    std::vector<DML_INPUT_GRAPH_EDGE_DESC> input_edge_storage;
-    std::vector<DML_INTERMEDIATE_GRAPH_EDGE_DESC> intermediate_edge_storage;
-    std::vector<DML_OUTPUT_GRAPH_EDGE_DESC> output_edge_storage;
-
+// -----------------------------------------------------------------------
+// Step 9: Wire edges.
+// -----------------------------------------------------------------------
+bool FullGraphCompiler::WireEdges()
+{
     for (size_t node_idx = 0; node_idx < compiled_nodes.size(); ++node_idx) {
         if (!node_is_live[node_idx]) continue;
         const auto& compiled_node = compiled_nodes[node_idx];
@@ -2173,7 +2317,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
 
             DML_PERF_LOG("[Compile] FAIL: unresolved input '", name,
                 "' for op=", compiled_node.op_type, " slot=", input_slot, "\n");
-            return nullptr; // unresolved input
+            return false; // unresolved input
         }
 
         // Wire internal edges for sub_nodes.
@@ -2259,7 +2403,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         auto prod_it = value_producer.find(resolved);
         if (prod_it == value_producer.end()) {
             DML_PERF_LOG("[Compile] FAIL: unresolved output '", name, "' (resolved='", resolved, "')\n");
-            return nullptr;
+            return false;
         }
 
         size_t prod_compiled_idx = prod_it->second.first;
@@ -2290,27 +2434,30 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     // Track which DML graph input indices have actual edges. Inputs with no
     // edges (e.g. shape params consumed at translation time) must not be bound
     // at dispatch — DML rejects bindings for edgeless inputs.
-    std::unordered_set<size_t> dml_inputs_with_edges;
     for (const auto& ie : input_edge_storage)
         dml_inputs_with_edges.insert(ie.GraphInputIndex);
 
     // Wrap storage in typed edge descriptors.
-    std::vector<DML_GRAPH_EDGE_DESC> input_edges(input_edge_storage.size());
+    input_edges.assign(input_edge_storage.size(), {});
     for (size_t i = 0; i < input_edge_storage.size(); ++i)
         input_edges[i] = { DML_GRAPH_EDGE_TYPE_INPUT, &input_edge_storage[i] };
 
-    std::vector<DML_GRAPH_EDGE_DESC> intermediate_edges(intermediate_edge_storage.size());
+    intermediate_edges.assign(intermediate_edge_storage.size(), {});
     for (size_t i = 0; i < intermediate_edge_storage.size(); ++i)
         intermediate_edges[i] = { DML_GRAPH_EDGE_TYPE_INTERMEDIATE, &intermediate_edge_storage[i] };
 
-    std::vector<DML_GRAPH_EDGE_DESC> output_edges(output_edge_storage.size());
+    output_edges.assign(output_edge_storage.size(), {});
     for (size_t i = 0; i < output_edge_storage.size(); ++i)
         output_edges[i] = { DML_GRAPH_EDGE_TYPE_OUTPUT, &output_edge_storage[i] };
 
-    // -----------------------------------------------------------------------
-    // Step 10: Compile the DML graph.
-    // -----------------------------------------------------------------------
+    return true;
+}
 
+// -----------------------------------------------------------------------
+// Step 10: Compile the DML graph.
+// -----------------------------------------------------------------------
+bool FullGraphCompiler::CompileDmlGraph()
+{
     DML_GRAPH_DESC graph_desc{};
     graph_desc.InputCount = static_cast<UINT>(input_map.total_dml_inputs);
     graph_desc.OutputCount = static_cast<UINT>(num_graph_outputs);
@@ -2323,30 +2470,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
     graph_desc.IntermediateEdgeCount = static_cast<UINT>(intermediate_edges.size());
     graph_desc.IntermediateEdges = intermediate_edges.data();
 
-    ComPtr<IDMLCompiledOperator> compiled_op;
-    static constexpr size_t kMinNodeCountForDescriptorsVolatile = 5;
-    DML_EXECUTION_FLAGS exec_flags = DML_EXECUTION_FLAG_NONE;
-    if (compiled_nodes.size() >= kMinNodeCountForDescriptorsVolatile)
-        exec_flags |= DML_EXECUTION_FLAG_DESCRIPTORS_VOLATILE;
-
-    // Match ORT's DmlOperator::GetExecutionFlags(): allow half precision when all
-    // tensors in the graph are fp16 (no fp32).  This enables metacommand fast-paths
-    // on hardware that supports them.
-    {
-        bool has_fp16 = false, has_fp32 = false;
-        for (size_t i = 0; i < compiled_nodes.size(); ++i) {
-            if (!node_is_live[i]) continue;
-            const auto& compiled_node = compiled_nodes[i];
-            for (const auto& t : compiled_node.translated->input_tensors)
-                if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT16) has_fp16 = true;
-                else if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT32) has_fp32 = true;
-            for (const auto& t : compiled_node.translated->output_tensors)
-                if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT16) has_fp16 = true;
-                else if (t.data_type == DML_TENSOR_DATA_TYPE_FLOAT32) has_fp32 = true;
-        }
-        if (has_fp16 && !has_fp32)
-            exec_flags |= DML_EXECUTION_FLAG_ALLOW_HALF_PRECISION_COMPUTATION;
-    }
+    exec_flags = DeriveGraphExecutionFlags(compiled_nodes, node_is_live);
 
     DML_PERF_LOG("[Compile] CompileGraph: nodes=", graph_desc.NodeCount,
         " inputs=", graph_desc.InputCount,
@@ -2386,17 +2510,16 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         DML_PERF_LOG("[Compile] FAIL: CompileGraph returned HR=0x", Hex(static_cast<uint32_t>(hr)),
             "  nodes=", compiled_nodes.size(), "\n");
         DrainDmlDebugMessages(provider, "CompileGraph");
-        return nullptr;
+        return false;
     }
+    return true;
+}
 
-    // -----------------------------------------------------------------------
-    // Step 11: Allocate persistent resource and upload initializers.
-    // -----------------------------------------------------------------------
-
-    ComPtr<ID3D12Resource> persistent_resource;
-    ComPtr<IUnknown> persistent_allocator;
-    std::optional<DML_BUFFER_BINDING> persistent_binding;
-
+// -----------------------------------------------------------------------
+// Step 11: Allocate persistent resource and upload initializers.
+// -----------------------------------------------------------------------
+bool FullGraphCompiler::AllocateAndUpload()
+{
     auto binding_props = compiled_op->GetBindingProperties();
     UINT64 persistent_size = binding_props.PersistentResourceSize;
     DML_PERF_LOG("[Compile] BindingProperties: persistent=", persistent_size,
@@ -2407,17 +2530,17 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
                 static_cast<size_t>(persistent_size), AllocatorRoundingMode::Disabled,
                 persistent_resource.GetAddressOf(),
                 persistent_allocator.GetAddressOf())))
-            return nullptr;
+            return false;
         persistent_binding = DML_BUFFER_BINDING{
             persistent_resource.Get(), 0, persistent_size };
     }
 
-    std::vector<InitBinding> const_graph_input_bindings(input_map.total_dml_inputs);
+    const_graph_input_bindings.assign(input_map.total_dml_inputs, InitBinding{});
     if (!UploadInitializers(
             ort_api, provider, input_map, owned_graph_input_indices,
             subgraph.graph_input_vis, subgraph.value_shapes, subgraph.all_initializers,
             const_graph_input_bindings))
-        return nullptr;
+        return false;
 
     // Build init input bindings array indexed by DML graph input index.
     std::vector<DML_BUFFER_BINDING> init_input_bindings(input_map.total_dml_inputs, DML_BUFFER_BINDING{});
@@ -2435,7 +2558,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
             compiled_op.Get(), persistent_ptr,
             gsl::make_span(init_input_bindings)))) {
         DrainDmlDebugMessages(provider, "InitializeOperator");
-        return nullptr;
+        return false;
     }
 
     // Flush to execute pending GPU work. If the device was removed (e.g. due
@@ -2450,7 +2573,7 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
             DML_PERF_LOG("[Compile] FAIL: init/flush threw (device removed?): ", e.what(), "\n");
         });
         DrainDmlDebugMessages(provider, "Flush-threw");
-        return nullptr;
+        return false;
     }
 
     provider->QueueReference(compiled_op.Get());
@@ -2460,11 +2583,14 @@ OrtNodeComputeInfo* FullGraphFusion::Compile(
         if (init_binding.gpu_resource) provider->QueueReference(init_binding.gpu_resource.Get());
     }
     const_graph_input_bindings.clear();
+    return true;
+}
 
-    // -----------------------------------------------------------------------
-    // Step 12: Build kernel state.
-    // -----------------------------------------------------------------------
-
+// -----------------------------------------------------------------------
+// Step 12: Build kernel state.
+// -----------------------------------------------------------------------
+OrtNodeComputeInfo* FullGraphCompiler::BuildKernelState()
+{
     auto kernel_state = std::make_unique<FullGraphKernelState>();
     kernel_state->provider = provider;
     kernel_state->ort_api = &ort_api;

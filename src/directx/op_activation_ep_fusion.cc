@@ -1549,23 +1549,13 @@ static OpActivationCompiledKernel CompileMVNActivation(
 // Compute callback — shared for Add, Sum, Gemm (dispatched via base_op_kind).
 // ---------------------------------------------------------------------------
 
-static OrtStatus* ORT_API_CALL OpActivation_Compute(
-    OrtNodeComputeInfo* /*this_ptr*/,
-    void* compute_state,
-    OrtKernelContext* kernel_context) noexcept
+// Multi-input op path: Conv, ConvTranspose, BatchNorm, InstanceNorm, MVN.
+// These use dyn_input_indices / static_gpu_resources instead of the 2-input path.
+static OrtStatus* OpActivation_ComputeMultiInput(
+    OpActivationKernelState* state,
+    const OrtApi& api,
+    OrtKernelContext* kernel_context)
 {
-    auto* state = static_cast<OpActivationKernelState*>(compute_state);
-    if (!state || !state->provider || !state->ort_api) return nullptr;
-    const OrtApi& api = *state->ort_api;
-    try {
-
-    // Multi-input op path: Conv, ConvTranspose, BatchNorm, InstanceNorm, MVN.
-    // These use dyn_input_indices / static_gpu_resources instead of the 2-input path below.
-    if (state->base_op_kind == BaseOpKind::Conv        ||
-        state->base_op_kind == BaseOpKind::ConvTranspose ||
-        state->base_op_kind == BaseOpKind::BatchNorm   ||
-        state->base_op_kind == BaseOpKind::InstanceNorm ||
-        state->base_op_kind == BaseOpKind::MVN)
     {
         size_t num_slots = state->dyn_input_indices.size();
 
@@ -1949,7 +1939,15 @@ static OrtStatus* ORT_API_CALL OpActivation_Compute(
         state->provider->QueueReference(active->compiled_op.Get());
         return nullptr;
     }
+}
 
+// Two-input op path: Add, Sum, Gemm. One side may be a constant initializer
+// (initializer_side 0/1); Gemm optionally carries a bias C.
+static OrtStatus* OpActivation_ComputeTwoInput(
+    OpActivationKernelState* state,
+    const OrtApi& api,
+    OrtKernelContext* kernel_context)
+{
     // Read runtime inputs. When one side is a constant initializer its
     // input_idx is SIZE_MAX — skip GetInput for that side.
     const OrtValue* a_value = nullptr;
@@ -2204,6 +2202,28 @@ static OrtStatus* ORT_API_CALL OpActivation_Compute(
 
     state->provider->QueueReference(active->compiled_op.Get());
     return nullptr;
+}
+
+// Compute callback — dispatches to the multi-input (Conv/norm) or two-input
+// (Add/Sum/Gemm) path based on base_op_kind, under a shared ABI noexcept guard.
+static OrtStatus* ORT_API_CALL OpActivation_Compute(
+    OrtNodeComputeInfo* /*this_ptr*/,
+    void* compute_state,
+    OrtKernelContext* kernel_context) noexcept
+{
+    auto* state = static_cast<OpActivationKernelState*>(compute_state);
+    if (!state || !state->provider || !state->ort_api) return nullptr;
+    const OrtApi& api = *state->ort_api;
+    try {
+        const bool is_multi_input =
+            state->base_op_kind == BaseOpKind::Conv          ||
+            state->base_op_kind == BaseOpKind::ConvTranspose ||
+            state->base_op_kind == BaseOpKind::BatchNorm     ||
+            state->base_op_kind == BaseOpKind::InstanceNorm  ||
+            state->base_op_kind == BaseOpKind::MVN;
+        return is_multi_input
+            ? OpActivation_ComputeMultiInput(state, api, kernel_context)
+            : OpActivation_ComputeTwoInput(state, api, kernel_context);
     }
     catch (const std::exception& e) {
         // noexcept ABI boundary: ExecuteOperator/allocations can throw on device removal or bad_alloc.
@@ -2236,6 +2256,88 @@ struct OpActivationNodeComputeInfo : OrtNodeComputeInfo {
 // ---------------------------------------------------------------------------
 // Compile
 // ---------------------------------------------------------------------------
+
+// Attributes read off the base op node, by kind. Only the fields relevant to
+// `kind` are populated; the rest keep their defaults.
+struct BaseOpAttributes {
+    // Gemm
+    bool  trans_a    = false;
+    bool  trans_b    = false;
+    float gemm_alpha = 1.0f;
+    float gemm_beta  = 1.0f;
+    // Conv / ConvTranspose
+    std::vector<uint32_t> conv_kernel_shape, conv_strides, conv_dilations,
+                          conv_pads, conv_output_padding, conv_output_shape;
+    std::string conv_auto_pad = "NOTSET";
+    uint32_t conv_group = 1;
+    bool conv_has_dynamic_pads = false;
+    // BatchNorm / InstanceNorm / MVN
+    float norm_epsilon = 1e-5f;
+    bool  bn_spatial   = true;
+    bool  mvn_normalize_variance = true;
+    bool  mvn_across_channels    = false;
+    std::vector<int32_t> mvn_explicit_axes;
+};
+
+// Read the base op's ONNX attributes into a BaseOpAttributes, dispatched by kind.
+static BaseOpAttributes ReadBaseOpAttributes(
+    const OrtApi& ort_api, const OrtNode* base_node, BaseOpKind kind)
+{
+    BaseOpAttributes a;
+
+    if (kind == BaseOpKind::Gemm) {
+        OrtNodeAdapter adapter(base_node, ort_api);
+        a.trans_a    = adapter.GetAttributeInt("transA", 0) != 0;
+        a.trans_b    = adapter.GetAttributeInt("transB", 0) != 0;
+        a.gemm_alpha = adapter.GetAttributeFloat("alpha", 1.0f);
+        a.gemm_beta  = adapter.GetAttributeFloat("beta",  1.0f);
+    }
+
+    if (kind == BaseOpKind::Conv || kind == BaseOpKind::ConvTranspose) {
+        OrtNodeAdapter adapter(base_node, ort_api);
+        auto to_u32 = [](const std::vector<int64_t>& v) {
+            std::vector<uint32_t> out(v.size());
+            for (size_t i = 0; i < v.size(); ++i) out[i] = static_cast<uint32_t>(v[i]);
+            return out;
+        };
+        a.conv_kernel_shape   = to_u32(adapter.GetAttributeInts("kernel_shape"));
+        a.conv_strides        = to_u32(adapter.GetAttributeInts("strides"));
+        a.conv_dilations      = to_u32(adapter.GetAttributeInts("dilations"));
+        a.conv_pads           = to_u32(adapter.GetAttributeInts("pads"));
+        a.conv_output_padding = to_u32(adapter.GetAttributeInts("output_padding"));
+        a.conv_output_shape   = to_u32(adapter.GetAttributeInts("output_shape")); // ConvTranspose explicit output
+        a.conv_auto_pad       = adapter.GetAttributeString("auto_pad", "NOTSET");
+        a.conv_group          = static_cast<uint32_t>(adapter.GetAttributeInt("group", 1));
+
+        // Dynamic-pads Conv (opset 11): pads is input[2] instead of an attribute,
+        // bias shifts to input[3]. Detect by checking for 4+ inputs with empty pads attr.
+        size_t n_inputs = 0;
+        ort_api.Node_GetNumInputs(base_node, &n_inputs);
+        if (n_inputs >= 4 && a.conv_pads.empty()) {
+            a.conv_has_dynamic_pads = true;
+        }
+    }
+
+    if (kind == BaseOpKind::BatchNorm || kind == BaseOpKind::InstanceNorm) {
+        OrtNodeAdapter adapter(base_node, ort_api);
+        // ORT DML defaults: BatchNorm epsilon = 0.0f (DmlOperatorBatchNormalization.cpp),
+        // InstanceNorm epsilon = 1e-5f (DmlOperatorInstanceNormalization.cpp).
+        const float epsilon_default = (kind == BaseOpKind::BatchNorm) ? 0.0f : 1e-5f;
+        a.norm_epsilon = adapter.GetAttributeFloat("epsilon", epsilon_default);
+        if (kind == BaseOpKind::BatchNorm)
+            a.bn_spatial = adapter.GetAttributeInt("spatial", 1) != 0;
+    }
+
+    if (kind == BaseOpKind::MVN) {
+        OrtNodeAdapter adapter(base_node, ort_api);
+        a.mvn_normalize_variance = adapter.GetAttributeInt("normalize_variance", 1) != 0;
+        a.mvn_across_channels    = adapter.GetAttributeInt("across_channels", 0) != 0;
+        auto raw_axes = adapter.GetAttributeInts("axes");
+        for (auto v : raw_axes) a.mvn_explicit_axes.push_back(static_cast<int32_t>(v));
+    }
+
+    return a;
+}
 
 OrtNodeComputeInfo* OpActivationFusionRule::Compile(
     const OrtApi&                                            ort_api,
@@ -2300,71 +2402,26 @@ OrtNodeComputeInfo* OpActivationFusionRule::Compile(
         return nullptr;
     }
 
-    // Read Gemm attributes if needed.
-    bool  trans_a    = false;
-    bool  trans_b    = false;
-    float gemm_alpha = 1.0f;
-    float gemm_beta  = 1.0f;
-    if (kind == BaseOpKind::Gemm) {
-        OrtNodeAdapter adapter(base_node, ort_api);
-        trans_a    = adapter.GetAttributeInt("transA", 0) != 0;
-        trans_b    = adapter.GetAttributeInt("transB", 0) != 0;
-        gemm_alpha = adapter.GetAttributeFloat("alpha", 1.0f);
-        gemm_beta  = adapter.GetAttributeFloat("beta",  1.0f);
-    }
-
-    // Read Conv / ConvTranspose attributes.
-    std::vector<uint32_t> conv_kernel_shape, conv_strides, conv_dilations, conv_pads, conv_output_padding, conv_output_shape;
-    std::string conv_auto_pad;
-    uint32_t conv_group = 1;
-    bool conv_has_dynamic_pads = false;
-    if (kind == BaseOpKind::Conv || kind == BaseOpKind::ConvTranspose) {
-        OrtNodeAdapter adapter(base_node, ort_api);
-        auto to_u32 = [](const std::vector<int64_t>& v) {
-            std::vector<uint32_t> out(v.size());
-            for (size_t i = 0; i < v.size(); ++i) out[i] = static_cast<uint32_t>(v[i]);
-            return out;
-        };
-        conv_kernel_shape   = to_u32(adapter.GetAttributeInts("kernel_shape"));
-        conv_strides        = to_u32(adapter.GetAttributeInts("strides"));
-        conv_dilations      = to_u32(adapter.GetAttributeInts("dilations"));
-        conv_pads           = to_u32(adapter.GetAttributeInts("pads"));
-        conv_output_padding = to_u32(adapter.GetAttributeInts("output_padding"));
-        conv_output_shape   = to_u32(adapter.GetAttributeInts("output_shape")); // ConvTranspose explicit output
-        conv_auto_pad       = adapter.GetAttributeString("auto_pad", "NOTSET");
-        conv_group          = static_cast<uint32_t>(adapter.GetAttributeInt("group", 1));
-
-        // Dynamic-pads Conv (opset 11): pads is input[2] instead of an attribute,
-        // bias shifts to input[3]. Detect by checking for 4+ inputs with empty pads attr.
-        size_t n_inputs = 0;
-        ort_api.Node_GetNumInputs(base_node, &n_inputs);
-        if (n_inputs >= 4 && conv_pads.empty()) {
-            conv_has_dynamic_pads = true;
-        }
-    }
-
-    // Read BatchNorm / InstanceNorm / MVN attributes.
-    float norm_epsilon = 1e-5f;
-    bool  bn_spatial   = true;
-    bool  mvn_normalize_variance = true;
-    bool  mvn_across_channels    = false;
-    std::vector<int32_t> mvn_explicit_axes;
-    if (kind == BaseOpKind::BatchNorm || kind == BaseOpKind::InstanceNorm) {
-        OrtNodeAdapter adapter(base_node, ort_api);
-        // ORT DML defaults: BatchNorm epsilon = 0.0f (DmlOperatorBatchNormalization.cpp),
-        // InstanceNorm epsilon = 1e-5f (DmlOperatorInstanceNormalization.cpp).
-        const float epsilon_default = (kind == BaseOpKind::BatchNorm) ? 0.0f : 1e-5f;
-        norm_epsilon = adapter.GetAttributeFloat("epsilon", epsilon_default);
-        if (kind == BaseOpKind::BatchNorm)
-            bn_spatial = adapter.GetAttributeInt("spatial", 1) != 0;
-    }
-    if (kind == BaseOpKind::MVN) {
-        OrtNodeAdapter adapter(base_node, ort_api);
-        mvn_normalize_variance = adapter.GetAttributeInt("normalize_variance", 1) != 0;
-        mvn_across_channels    = adapter.GetAttributeInt("across_channels", 0) != 0;
-        auto raw_axes = adapter.GetAttributeInts("axes");
-        for (auto v : raw_axes) mvn_explicit_axes.push_back(static_cast<int32_t>(v));
-    }
+    // Read base-op attributes (Gemm / Conv / norm) by kind.
+    BaseOpAttributes attrs = ReadBaseOpAttributes(ort_api, base_node, kind);
+    const bool  trans_a    = attrs.trans_a;
+    const bool  trans_b    = attrs.trans_b;
+    const float gemm_alpha = attrs.gemm_alpha;
+    const float gemm_beta  = attrs.gemm_beta;
+    const std::vector<uint32_t>& conv_kernel_shape   = attrs.conv_kernel_shape;
+    const std::vector<uint32_t>& conv_strides        = attrs.conv_strides;
+    const std::vector<uint32_t>& conv_dilations      = attrs.conv_dilations;
+    std::vector<uint32_t>&       conv_pads           = attrs.conv_pads;  // mutated below for dynamic-pads Conv
+    const std::vector<uint32_t>& conv_output_padding = attrs.conv_output_padding;
+    const std::vector<uint32_t>& conv_output_shape   = attrs.conv_output_shape;
+    const std::string& conv_auto_pad = attrs.conv_auto_pad;
+    const uint32_t conv_group = attrs.conv_group;
+    const bool conv_has_dynamic_pads = attrs.conv_has_dynamic_pads;
+    const float norm_epsilon = attrs.norm_epsilon;
+    const bool  bn_spatial   = attrs.bn_spatial;
+    const std::vector<int32_t>& mvn_explicit_axes = attrs.mvn_explicit_axes;
+    const bool mvn_normalize_variance = attrs.mvn_normalize_variance;
+    const bool mvn_across_channels    = attrs.mvn_across_channels;
 
     // Resolve graph input indices.  ORT may reorder fused subgraph inputs.
     // One input (typically the weight B) may be a constant initializer — it

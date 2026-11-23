@@ -128,14 +128,21 @@ bool AllNodesHaveTranslators(
 // NOT be re-executed until its prior GPU submission completes — the ring's fence
 // gate enforces this (FullGraph_Compute).
 //
-// Temp ownership (correctness §T): the plugin's AllocatePooledResource frees
-// synchronously (resource returns to the bucket on ComPtr release, NOT gated on GPU
-// completion), unlike ORT's completion-gated AllocateTemporaryData. So the temporary
-// resource is allocated ONCE at build time and held here for the list's whole
-// lifetime; it is never returned to the pool while a replay may still read it.
+// Temp handling (correctness §T): the temporary resource is allocated PER-EXECUTION
+// from the bucketized pool in ExecuteReusableCommandList and re-bound (dirty-tested by
+// tempBindingAllocId), mirroring ORT's DmlGraphFusionHelper::ExecuteReusableCommandList.
+// DESCRIPTORS_VOLATILE (the >=5-node reuse gate) lets DML read the temp binding at
+// GPU-dispatch time, so a once-recorded list picks up each inference's freshly-bound
+// temp. The pooled allocation is QueueReference'd until the submission's fence drains,
+// so the bucket (which returns bucket-sized resources synchronously on ComPtr release)
+// cannot recycle it while the GPU is still reading it. Net resident temp = one buffer,
+// recycled across partitions and inferences, same as the non-reuse path.
 struct PluginReusableCommandList {
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList>   graphicsCommandList;
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator>      commandAllocator;
+    // SHARED descriptor heap owned by the recorder's DescriptorPool (a persistent
+    // reserved range). Held as a ComPtr only to keep it alive; the list binds this same
+    // heap the recorder's per-op work binds, so replay causes no descriptor-heap switch.
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>        heap;
     Microsoft::WRL::ComPtr<IDMLBindingTable>            bindingTable;
 
@@ -143,14 +150,16 @@ struct PluginReusableCommandList {
     Microsoft::WRL::ComPtr<ID3D12Resource>              persistentResource;
     Microsoft::WRL::ComPtr<IUnknown>                    persistentAllocator;
 
-    // Per-list owned temporary resource (bound once at build; see §T above).
-    Microsoft::WRL::ComPtr<ID3D12Resource>              temporaryResource;
-    Microsoft::WRL::ComPtr<IUnknown>                    temporaryAllocator;
+    // Temp size captured at build (from the compiled op's binding properties); 0 = none.
+    // The buffer itself is allocated per-execution (see §T above), not owned here.
+    uint64_t                                            temporaryResourceSize = 0;
 
     // Pooled allocation IDs from the previous replay, per binding slot. A slot is
     // re-bound only when its ID changes (0 = unknown/non-pooled -> always rebind).
     std::vector<uint64_t>                               inputBindingAllocIds;
     std::vector<uint64_t>                               outputBindingAllocIds;
+    // Pooled alloc ID of the temp bound on the previous replay (same dirty-test).
+    uint64_t                                            tempBindingAllocId = 0;
 
     // Fence + value of this list's last submission: the gate for safe reuse.
     Microsoft::WRL::ComPtr<ID3D12Fence>                 fence;
