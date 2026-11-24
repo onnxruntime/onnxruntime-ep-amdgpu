@@ -3442,26 +3442,44 @@ static std::optional<TranslatedOp> TranslatePad(
     if (mode_str == "wrap")     mode = DML_PADDING_MODE_WRAP;
 
     size_t rank = in_info->sizes.size();
-    // pads input: [begin_0, begin_1, ..., end_0, end_1, ...]
+    // ONNX pads = [begin_0..begin_{P-1}, end_0..end_{P-1}] where P = pad_rank is the
+    // number of *padded* axes. P usually equals the input rank, but in a fused Q/DQ
+    // subgraph ORT may rank-promote the Pad's input/output tensors (e.g. 2D [2,3] ->
+    // 4D [1,1,2,3]) while leaving the pads tensor at its original length (2*2=4). Using
+    // the input rank to index the pads then reads past the end -> garbage EndPadding ->
+    // DML CreateOperator E_INVALIDARG. So derive pad_rank from the pads length itself and
+    // align the pads to the TRAILING pad_rank axes (leading axes get 0 padding).
     std::vector<uint32_t> start_pad(rank, 0u), end_pad(rank, 0u);
+    auto apply_pads = [&](auto&& read, size_t count) {
+        size_t pad_rank = count / 2;                      // padded axes
+        if (pad_rank == 0 || pad_rank > rank) pad_rank = std::min(pad_rank, rank);
+        size_t off = rank - pad_rank;                     // leading axes stay 0
+        for (size_t i = 0; i < pad_rank; ++i) {
+            start_pad[off + i] = static_cast<uint32_t>(read(i));
+            end_pad[off + i]   = static_cast<uint32_t>(read(pad_rank + i));
+        }
+    };
     if (inputs.size() > 1 && !inputs[1].empty()) {
-        // Opset 11+: pads from input[1] tensor
+        // Opset 11+: pads from input[1] tensor. Its length (2*pad_rank) is authoritative.
         auto it = initializers.find(inputs[1]);
         if (it != initializers.end() && it->second) {
             void* data = nullptr;
             ort_api.GetTensorMutableData(const_cast<OrtValue*>(it->second), &data);
             if (data) {
-                auto* pads = static_cast<const int64_t*>(data);
-                for (size_t i = 0; i < rank; ++i) start_pad[i] = static_cast<uint32_t>(pads[i]);
-                for (size_t i = 0; i < rank; ++i) end_pad[i]   = static_cast<uint32_t>(pads[rank + i]);
+                const int64_t* pads = static_cast<const int64_t*>(data);
+                size_t pads_count = 2 * rank;             // fallback
+                if (auto* pinfo = LookupShape(value_shapes, inputs[1])) {
+                    size_t n = 1; for (uint32_t s : pinfo->sizes) n *= s;
+                    if (n > 0) pads_count = n;
+                }
+                apply_pads([&](size_t j){ return pads[j]; }, pads_count);
             }
         }
     } else {
-        // Opset 7: pads from attribute
+        // Opset 7: pads from attribute.
         auto pads_attr = adapter.GetAttributeInts("pads");
-        if (pads_attr.size() >= 2 * rank) {
-            for (size_t i = 0; i < rank; ++i) start_pad[i] = static_cast<uint32_t>(pads_attr[i]);
-            for (size_t i = 0; i < rank; ++i) end_pad[i]   = static_cast<uint32_t>(pads_attr[rank + i]);
+        if (pads_attr.size() >= 2) {
+            apply_pads([&](size_t j){ return pads_attr[j]; }, pads_attr.size());
         }
     }
 
@@ -3481,8 +3499,18 @@ static std::optional<TranslatedOp> TranslatePad(
         for (size_t d = 0; d < rank; ++d) out_sizes[d] = in_info->sizes[d] + start_pad[d] + end_pad[d];
     }
 
-    auto in_tensor  = MakeTensorInfo(in_info->sizes, in_info->data_type);
-    auto out_tensor = MakeTensorInfo(out_sizes, in_info->data_type);
+    // The padding arrays and DimensionCount above are expanded to padded_rank
+    // (>=4D). DML requires the input/output tensor ranks to match
+    // DimensionCount, so expand the tensor shapes to the same rank by
+    // prepending leading 1s. For inputs already >=4D this is a no-op
+    // (pad_count==0). Without this, a sub-4D Pad (e.g. 2D [2,3] inside a Q/DQ
+    // subgraph) builds a 4D desc over 2D tensors -> CreateOperator E_INVALIDARG.
+    std::vector<uint32_t> in_sizes_4d(pad_count, 1u), out_sizes_4d(pad_count, 1u);
+    in_sizes_4d.insert(in_sizes_4d.end(), in_info->sizes.begin(), in_info->sizes.end());
+    out_sizes_4d.insert(out_sizes_4d.end(), out_sizes.begin(), out_sizes.end());
+
+    auto in_tensor  = MakeTensorInfo(in_sizes_4d, in_info->data_type);
+    auto out_tensor = MakeTensorInfo(out_sizes_4d, in_info->data_type);
 
     struct PadStorage {
         DML_PADDING1_OPERATOR_DESC desc{};
@@ -3492,9 +3520,39 @@ static std::optional<TranslatedOp> TranslatePad(
     auto storage = std::make_shared<PadStorage>();
     storage->start_pad = dml_start;
     storage->end_pad   = dml_end;
+    // Constant pad value: ONNX Pad opset 11+ carries it as input[2] (a scalar of the
+    // data dtype); opset 7 as the 'value' float attribute. Defaults to 0. Without this
+    // the border is always padded with 0 (correct only when value==0), so a constant
+    // pad with value!=0 produces wrong output (e.g. 0 instead of the expected fill).
+    DML_SCALAR_UNION pad_value{};  // zero-initialized
+    if (inputs.size() > 2 && !inputs[2].empty()) {
+        auto cit = initializers.find(inputs[2]);
+        if (cit != initializers.end() && cit->second) {
+            void* cdata = nullptr;
+            ort_api.GetTensorMutableData(const_cast<OrtValue*>(cit->second), &cdata);
+            if (cdata) {
+                switch (in_info->data_type) {
+                    case DML_TENSOR_DATA_TYPE_FLOAT32: pad_value.Float32 = *static_cast<const float*>(cdata); break;
+                    case DML_TENSOR_DATA_TYPE_FLOAT16: pad_value.UInt16  = *static_cast<const uint16_t*>(cdata); break;
+                    case DML_TENSOR_DATA_TYPE_INT32:   pad_value.Int32   = *static_cast<const int32_t*>(cdata); break;
+                    case DML_TENSOR_DATA_TYPE_UINT32:  pad_value.UInt32  = *static_cast<const uint32_t*>(cdata); break;
+                    case DML_TENSOR_DATA_TYPE_INT64:   pad_value.Int64   = *static_cast<const int64_t*>(cdata); break;
+                    case DML_TENSOR_DATA_TYPE_UINT64:  pad_value.UInt64  = *static_cast<const uint64_t*>(cdata); break;
+                    case DML_TENSOR_DATA_TYPE_INT16:   pad_value.Int16   = *static_cast<const int16_t*>(cdata); break;
+                    case DML_TENSOR_DATA_TYPE_UINT16:  pad_value.UInt16  = *static_cast<const uint16_t*>(cdata); break;
+                    case DML_TENSOR_DATA_TYPE_INT8:    pad_value.Int8    = *static_cast<const int8_t*>(cdata); break;
+                    case DML_TENSOR_DATA_TYPE_UINT8:   pad_value.UInt8   = *static_cast<const uint8_t*>(cdata); break;
+                    default: break;
+                }
+            }
+        }
+    } else if (in_info->data_type == DML_TENSOR_DATA_TYPE_FLOAT32) {
+        pad_value.Float32 = adapter.GetAttributeFloat("value", 0.0f);
+    }
+
     storage->desc.PaddingMode      = mode;
     storage->desc.PaddingValueDataType = in_info->data_type;
-    storage->desc.PaddingValue     = {};  // zero-initialized DML_SCALAR_UNION
+    storage->desc.PaddingValue     = pad_value;
     storage->desc.DimensionCount   = static_cast<UINT>(padded_rank);
     storage->desc.StartPadding     = storage->start_pad.data();
     storage->desc.EndPadding       = storage->end_pad.data();
