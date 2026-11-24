@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include "dml_ep.h"
+#include "core/framework/abi_safe_attr_utils.h"
 #include "dml_plugin_OperatorRegistration.h"
 #include "dml_bucketized_buffer_allocator.h"
 #include "core/common/inlined_containers.h"
@@ -484,6 +485,13 @@ ONNXTensorElementDataType ExecutionProviderPlugin::GetElementTypeFromMLDataType(
     if (ml_type == DT::GetTensorType<uint64_t>())                  return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64;
     if (ml_type == DT::GetTensorType<bool>())                      return ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;
     if (ml_type == DT::GetTensorType<std::string>())               return ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING;
+    // Sub-byte 4-bit types. Without these cases the int4/uint4 type constraints on the
+    // Quantize/DequantizeLinear v21 kernels fall through to UNDEFINED and get silently dropped
+    // when building the ABI-safe OrtKernelRegistry (ConvertKernelRegistryToOrtKernelRegistry).
+    // The session's kernel lookup then cannot match an int4 Q/DQ node, so IsNodeSupportedByDml
+    // returns false and the node is never claimed — "Unable to compile any nodes" for int4 models.
+    if (ml_type == DT::GetTensorType<onnxruntime::Int4x2>())        return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT4;
+    if (ml_type == DT::GetTensorType<onnxruntime::UInt4x2>())       return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT4;
     return ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
 }
 
@@ -1166,6 +1174,40 @@ OrtStatus* ORT_API_CALL ExecutionProviderPlugin::GetCapabilityImpl(OrtEp* this_p
                         ep->m_graphInitializerMap[name_cstr] = init_value;
                     }
                     if (val_st) ep->ort_api.ReleaseStatus(val_st);
+                }
+            }
+        }
+
+        // Capture string-array node attributes (e.g. RNN "activations"). The ORT C API KernelInfo
+        // cannot read string-array attributes, so the DML operator path would silently drop them and
+        // fall back to defaults (breaking e.g. LSTM/GRU with non-default activations). Stash them here
+        // keyed by node name so the kernel's attribute reader can serve them.
+        if (ep->m_executionProvider) {
+            ep->m_executionProvider->ClearNodeStringArrayAttrs();
+            for (const OrtNode* node : nodesInTopologicalOrder) {
+                if (!node) continue;
+                const char* node_name = nullptr;
+                ep->ort_api.Node_GetName(node, &node_name);
+                if (!node_name) continue;
+                size_t num_attrs = 0;
+                ep->ort_api.Node_GetNumAttributes(node, &num_attrs);
+                if (num_attrs == 0) continue;
+                std::vector<const OrtOpAttr*> attrs(num_attrs, nullptr);
+                ep->ort_api.Node_GetAttributes(node, attrs.data(), num_attrs);
+                for (const OrtOpAttr* attr : attrs) {
+                    if (!attr) continue;
+                    OrtOpAttrType attr_type{};
+                    if (OrtStatus* st = ep->ort_api.OpAttr_GetType(attr, &attr_type)) {
+                        ep->ort_api.ReleaseStatus(st);
+                        continue;
+                    }
+                    if (attr_type != OrtOpAttrType::ORT_OP_ATTR_STRINGS) continue;
+                    try {
+                        auto proto = dml_ep::BuildPluginAttributeProto(attr, ep->ort_api);
+                        if (!proto || proto->strings_size() == 0) continue;
+                        std::vector<std::string> vals(proto->strings().begin(), proto->strings().end());
+                        ep->m_executionProvider->SetNodeStringArrayAttr(node_name, proto->name(), std::move(vals));
+                    } catch (...) {}
                 }
             }
         }
