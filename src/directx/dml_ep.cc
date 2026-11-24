@@ -1308,7 +1308,7 @@ void TierZeroPartitioner::ResolveShapesToFixpoint() {
                             {
                                 shape_as_floats[i] = static_cast<float>(dims[i]);
                             }
-                            resolved_values[output_names[0]] = fvals;
+                            resolved_values[output_names[0]] = shape_as_floats;
                             changed = true;
                         }
                     } else if (std::strcmp(op_type, "Gather") == 0 && input_names.size() >= 2) {
@@ -1470,7 +1470,7 @@ void TierZeroPartitioner::ResolveShapesToFixpoint() {
                         scales = GetInitializerFloats(input_names[scales_idx], rank);
                         if (scales.empty()) {
                             auto* resolved = GetResolvedValues(input_names[scales_idx]);
-                            if (resolved && rv->size() == rank)
+                            if (resolved && resolved->size() == rank)
                             {
                                 scales = *resolved;
                             }
@@ -1551,7 +1551,7 @@ void TierZeroPartitioner::ResolveShapesToFixpoint() {
                                 if (!v) { concat_ok = false; break; }
                                 concat_result.insert(concat_result.end(), v->begin(), v->end());
                             }
-                            if (concat_ok && !cat.empty()) { resolved_values[pending.output_name] = cat; changed = true; }
+                            if (concat_ok && !concat_result.empty()) { resolved_values[pending.output_name] = concat_result; changed = true; }
                         } else if (std::strcmp(pending_op, "Div") == 0 && pending_input_names.size() >= 2) {
                             auto* lhs = GetResolvedValues(pending_input_names[0]);
                             auto* rhs = GetResolvedValues(pending_input_names[1]);
@@ -1571,7 +1571,7 @@ void TierZeroPartitioner::ResolveShapesToFixpoint() {
                     ep->ort_api.GetValueInfoName(in_vis[scales_idx], &scales_name);
                     if (scales_name) {
                         auto* resolved = GetResolvedValues(scales_name);
-                        if (resolved && rv->size() == rank)
+                        if (resolved && resolved->size() == rank)
                         {
                             scales = *resolved;
                         }
@@ -1583,7 +1583,7 @@ void TierZeroPartitioner::ResolveShapesToFixpoint() {
                     scales = GetInitializerFloats(input_names[2], rank);
                     if (scales.empty()) {
                         auto* resolved = GetResolvedValues(input_names[2]);
-                        if (resolved && rv->size() == rank)
+                        if (resolved && resolved->size() == rank)
                         {
                             scales = *resolved;
                         }
