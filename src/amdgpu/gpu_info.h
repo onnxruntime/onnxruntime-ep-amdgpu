@@ -4,6 +4,7 @@
 #pragma once
 
 #include <filesystem>
+#include <string_view>
 #include "common/plugin_ep_utils.h"
 
 namespace fs = std::filesystem;
@@ -18,6 +19,22 @@ enum class Profile {
     DirectX,
     Hip
 };
+
+// Backend EP library a session is delegated to.
+enum class Backend {
+    DirectML,
+    MIGraphX,
+    Hip
+};
+
+constexpr std::string_view ToString(Backend backend) noexcept {
+    switch (backend) {
+        case Backend::DirectML: return "DirectML";
+        case Backend::MIGraphX: return "MIGraphX";
+        case Backend::Hip:      return "Hip";
+    }
+    return "unknown";
+}
 
 struct ProviderInfo {
     Profile profile{Profile::Auto};

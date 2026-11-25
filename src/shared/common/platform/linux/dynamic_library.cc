@@ -15,7 +15,7 @@ Ort::Status LoadDynamicLibrary(const PathString& path, void** handle) {
     *handle = ::dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (*handle == nullptr) {
         const char* const err = ::dlerror();
-        return MAKE_STATUS(ORT_FAIL, "LoadDynamicLibrary(): failed to load library: ",
+        return MAKE_STATUS(ORT_FAIL, "LoadDynamicLibrary(): failed to load library '", path, "': ",
             err != nullptr ? err : "unknown error");
     }
     return STATUS_OK;

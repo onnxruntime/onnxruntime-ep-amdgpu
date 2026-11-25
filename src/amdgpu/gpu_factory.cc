@@ -96,6 +96,50 @@ bool OwnsCustomOpDomains(const ProviderFactory* factory) {
     std::lock_guard lock{g_factories_mutex};
     return !g_factories.empty() && g_factories.front().factory == factory;
 }
+
+// On failure the slot may hold a partially loaded library; the caller resets it.
+Ort::Status OpenBackend(BackendLibrary& backend, const PathString& file, const char* registration_name,
+    const OrtApiBase* ort_api_base, const OrtLogger* default_logger)
+{
+    RETURN_IF_ERROR(LoadDynamicLibrary(file, &backend.library));
+    RETURN_IF_ERROR(GetSymbolFromLibrary(backend.library,
+        "ReleaseEpFactory", reinterpret_cast<void**>(&backend.release)));
+
+    CreateEpFactories_t create_ep_factories{};
+    RETURN_IF_ERROR(GetSymbolFromLibrary(backend.library,
+        "CreateEpFactories", reinterpret_cast<void**>(&create_ep_factories)));
+
+    // Optional: a backend may export a telemetry collector. Absence is fine.
+    if (!GetSymbolFromLibrary(backend.library, telemetry::kGetBackendDataSymbol,
+            reinterpret_cast<void**>(&backend.telemetry)).IsOK()) {
+        backend.telemetry = nullptr;
+    }
+
+    OrtEpFactory* factory{};
+    size_t factories_created{};
+    RETURN_IF_ERROR(create_ep_factories(registration_name, ort_api_base, default_logger,
+        &factory, 1, &factories_created));
+    if (factories_created == 0 || factory == nullptr) {
+        return MAKE_STATUS(ORT_FAIL, "CreateEpFactories() returned no factory");
+    }
+    backend.factory = factory;
+    return STATUS_OK;
+}
+}
+
+void BackendLibrary::Reset() noexcept {
+    if (factory != nullptr && release != nullptr) {
+        if (OrtStatus* status = release(factory)) {
+            Ort::GetApi().ReleaseStatus(status);
+        }
+    }
+    factory = nullptr;
+    if (library != nullptr) {
+        static_cast<void>(UnloadDynamicLibrary(library));
+    }
+    library = nullptr;
+    release = nullptr;
+    telemetry = nullptr;
 }
 
 ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_api_base, const char* ep_name, const OrtLogger* default_logger)
@@ -167,30 +211,18 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
         API_CALL_S(ProviderFactory, this_, GetCustomOpDomains, domains, num_domains);
     };
 
-    size_t factories_created{};
-
+    // Every backend is optional: one that fails to load is logged as a warning here, and only
+    // fails a session that actually routes to it (see ExecutionProvider), so a missing
+    // DirectML or hip runtime does not prevent using the others.
 #ifdef USE_DML
-    THROW_IF_ERROR(LoadDynamicLibrary(directmlBackend, &dml_backend_));
-    THROW_IF_ERROR(GetSymbolFromLibrary(dml_backend_,
-        "ReleaseEpFactory", reinterpret_cast<void**>(&dml_release_ep_factory_)));
-
-    CreateEpFactories_t dml_create_ep_factories{};
-    THROW_IF_ERROR(GetSymbolFromLibrary(dml_backend_,
-        "CreateEpFactories", reinterpret_cast<void**>(&dml_create_ep_factories)));
-
-    // Optional: a backend may export a telemetry collector. Absence is fine.
-    if (!GetSymbolFromLibrary(dml_backend_, telemetry::kGetBackendDataSymbol,
-            reinterpret_cast<void**>(&dml_get_telemetry_)).IsOK()) {
-        dml_get_telemetry_ = nullptr;
-    }
-
     // Pass ep_name_ (e.g. "amdgpu") so the directml backend registers its kernels,
     // allocators, and node assignments under the same name ORT sees for this EP.
     // Using kDirectMLBackend ("directml") would cause a provider name mismatch:
     // ORT would look up kernels under "amdgpu" but find them stamped as "directml".
-    THROW_IF_ERROR(dml_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
-        &dml_ep_factory_, 1, &factories_created));
-    custom_op_backends_.push_back(dml_ep_factory_);
+    LoadBackend(dml_backend_, Backend::DirectML, directmlBackend, ep_name_.c_str(),
+        ort_api_base, default_logger);
+#else
+    dml_backend_.load_error = "the AMDGPU EP was not built with DirectML support";
 #endif
 
 #ifdef _WIN32  
@@ -213,7 +245,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     // Llama-3.2-1B, gfx1201) with prefill and decode latency unchanged and generated
     // token IDs identical to baseline.
     //
-    // This line MUST stay above the LoadDynamicLibrary below, and it cannot be moved
+    // This line MUST stay above the MIGraphX LoadBackend below, and it cannot be moved
     // into the migraphx backend.  MIGraphX reads the variable with std::getenv from
     // src/env.cpp, which lives in migraphx.dll -- a static import of migraphx_c.dll,
     // itself a static import of migraphx-backend.dll.  Every static import is resolved
@@ -228,37 +260,27 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     ::SetEnvironmentVariableA("MIGRAPHX_SHARE_LITERALS", "1");
 #endif
 
-    THROW_IF_ERROR(LoadDynamicLibrary(migraphxBackend, &mgx_backend_));
-    THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
-        "ReleaseEpFactory", reinterpret_cast<void**>(&mgx_release_ep_factory_)));
+    LoadBackend(mgx_backend_, Backend::MIGraphX, migraphxBackend, kMIGraphXBackend,
+        ort_api_base, default_logger);
 
-    CreateEpFactories_t mgx_create_ep_factories{};
-    THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
-        "CreateEpFactories", reinterpret_cast<void**>(&mgx_create_ep_factories)));
+    // hip (morphizen) backend: only present when built with USE_HIP.
+#ifdef USE_HIP
+    LoadBackend(hip_backend_, Backend::Hip, hipBackend, ep_name_.c_str(),
+        ort_api_base, default_logger);
+#else
+    hip_backend_.load_error = "the AMDGPU EP was not built with hip support";
+#endif
 
-    // Optional: a backend may export a telemetry collector. Absence is fine.
-    if (!GetSymbolFromLibrary(mgx_backend_, telemetry::kGetBackendDataSymbol,
-            reinterpret_cast<void**>(&mgx_get_telemetry_)).IsOK()) {
-        mgx_get_telemetry_ = nullptr;
+    if (!dml_backend_.IsLoaded() && !mgx_backend_.IsLoaded() && !hip_backend_.IsLoaded()) {
+        THROW("no AMDGPU EP backend could be loaded. DirectML: ", dml_backend_.load_error,
+            "; MIGraphX: ", mgx_backend_.load_error, "; hip: ", hip_backend_.load_error);
     }
 
-    THROW_IF_ERROR(mgx_create_ep_factories(kMIGraphXBackend, ort_api_base, default_logger,
-        &mgx_ep_factory_, 1, &factories_created));
-
-    // hip (morphizen) backend: optional, only present when built with USE_HIP.
-#ifdef USE_HIP
-    THROW_IF_ERROR(LoadDynamicLibrary(hipBackend, &hip_backend_));
-    THROW_IF_ERROR(GetSymbolFromLibrary(hip_backend_,
-        "ReleaseEpFactory", reinterpret_cast<void**>(&hip_release_ep_factory_)));
-
-    CreateEpFactories_t hip_create_ep_factories{};
-    THROW_IF_ERROR(GetSymbolFromLibrary(hip_backend_,
-        "CreateEpFactories", reinterpret_cast<void**>(&hip_create_ep_factories)));
-
-    THROW_IF_ERROR(hip_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
-        &hip_ep_factory_, 1, &factories_created));
-    custom_op_backends_.push_back(hip_ep_factory_);
-#endif
+    for (const BackendLibrary* backend : {&dml_backend_, &hip_backend_}) {
+        if (backend->IsLoaded()) {
+            custom_op_backends_.push_back(backend->factory);
+        }
+    }
 
     AddLiveFactory(this, ep_name_);
 }
@@ -282,35 +304,47 @@ ProviderFactory::~ProviderFactory() {
     if (pinned_memory_info_) {
         ort_api.ReleaseMemoryInfo(pinned_memory_info_);
     }
-#ifdef USE_DML
-    if (dml_ep_factory_ != nullptr && dml_release_ep_factory_ != nullptr) {
-        if (OrtStatus* status = dml_release_ep_factory_(dml_ep_factory_)) {
-            ort_api.ReleaseStatus(status);
-        }
-        dml_ep_factory_ = nullptr;
+    // The backend slots release their factories and unload their libraries as members.
+}
+
+void ProviderFactory::LoadBackend(BackendLibrary& backend, Backend kind, const PathString& file,
+    const char* registration_name, const OrtApiBase* ort_api_base, const OrtLogger* default_logger)
+{
+    if (Ort::Status status{OpenBackend(backend, file, registration_name, ort_api_base, default_logger)};
+            !status.IsOK()) {
+        backend.Reset();
+        backend.load_error = status.GetErrorMessage();
+        ORT_CXX_LOG_NOEXCEPT(default_logger_, ORT_LOGGING_LEVEL_WARNING,
+            MakeString(ToString(kind), " backend failed to load; sessions routed to it will fail: ",
+                backend.load_error).c_str());
     }
-    if (!UnloadDynamicLibrary(dml_backend_).IsOK()) {
-        /* TODO: log failure while unloading DirectML EP library */
+}
+
+const BackendLibrary& ProviderFactory::FindBackend(Backend backend) const noexcept {
+    switch (backend) {
+        case Backend::DirectML:
+            return dml_backend_;
+        case Backend::Hip:
+            return hip_backend_;
+        case Backend::MIGraphX:
+            break;
     }
-#endif
-    if (mgx_ep_factory_ != nullptr && mgx_release_ep_factory_ != nullptr) {
-        if (OrtStatus* status = mgx_release_ep_factory_(mgx_ep_factory_)) {
-            ort_api.ReleaseStatus(status);
-        }
-        mgx_ep_factory_ = nullptr;
+    return mgx_backend_;
+}
+
+Ort::Status ProviderFactory::CreateBackend(Backend backend, const OrtSessionOptions* session_options,
+    const OrtLogger* logger, OrtEp*& ep, OrtEpFactory*& ep_factory, telemetry::GetBackendDataFn& get_telemetry)
+{
+    const BackendLibrary& library{FindBackend(backend)};
+    if (!library.IsLoaded()) {
+        return MAKE_STATUS(ORT_FAIL, ToString(backend), " backend requested, but it is unavailable: ",
+            library.load_error);
     }
-    if (!UnloadDynamicLibrary(mgx_backend_).IsOK()) {
-        /* TODO: log failure while unloading MIGraphX EP library */
-    }
-    if (hip_ep_factory_ != nullptr && hip_release_ep_factory_ != nullptr) {
-        if (OrtStatus* status = hip_release_ep_factory_(hip_ep_factory_)) {
-            ort_api.ReleaseStatus(status);
-        }
-        hip_ep_factory_ = nullptr;
-    }
-    if (!UnloadDynamicLibrary(hip_backend_).IsOK()) {
-        /* TODO: log failure while unloading hip EP library */
-    }
+    RETURN_IF_ERROR(library.factory->CreateEp(library.factory, nullptr, nullptr, 0, session_options, logger, &ep));
+    ep_factory = library.factory;
+    get_telemetry = library.telemetry;
+    backend_ep_factory_ = library.factory;
+    return STATUS_OK;
 }
 
 const char* ProviderFactory::GetName() const {
