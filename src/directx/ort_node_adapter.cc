@@ -491,6 +491,21 @@ std::vector<int64_t> OrtNodeAdapter::GetAttributeInts(const char* name) const {
     try { return attr->GetInts(); } catch (...) { return {}; }
 }
 
+std::vector<std::string> OrtNodeAdapter::GetAttributeStrings(const char* name) const {
+    if (snapshot_) {
+        const auto* p = SnapshotAttrProto(name);
+        std::vector<std::string> r;
+        if (p && p->type() == ONNX_NAMESPACE::AttributeProto::STRINGS) {
+            r.reserve(p->strings_size());
+            for (int i = 0; i < p->strings_size(); ++i) r.push_back(p->strings(i));
+        }
+        return r;
+    }
+    const OrtOpAttrAdapter* attr = GetAttribute(name);
+    if (!attr) return {};
+    try { return attr->GetStrings(); } catch (...) { return {}; }
+}
+
 const OrtGraphAdapter* OrtNodeAdapter::GetSubgraph(size_t index) const {
     return index < subgraphs_.size() ? subgraphs_[index].get() : nullptr;
 }

@@ -7,6 +7,7 @@
 #endif
 
 #include <algorithm>
+#include <iostream>
 #include <mutex>
 #include <string_view>
 #include <vector>
@@ -19,6 +20,7 @@
 #include "gpu_factory.h"
 
 #include "onnxruntime_ep_device_ep_metadata_keys.h"
+#include "onnxruntime_env_config_keys.h"  // kOrtEnvAllowVirtualDevices (Track-2 AOT virtual device)
 
 #define BACKEND_CALL_T(backend, fn, defval, ...)                       \
     do {                                                               \
@@ -169,6 +171,30 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
 
     size_t factories_created{};
 
+    // When the host registers this EP with a ".virtual" name, ORT sets env config
+    // allow_virtual_devices=1 and we are the WebNN Compiler process: Win32k-locked, GPU-less,
+    // DirectX/DML-only. Load ONLY the DirectML backend. The MIGraphX/HIP backends pull the HIP
+    // runtime (amdhip64 statically imports the win32k-locked user32/gdi32); their eager LoadLibrary
+    // would fail under the Win32k-disable mitigation and abort factory creation (which is exactly
+    // how the compiler-process registration failed before this guard). ORT sets the env config
+    // BEFORE calling CreateEpFactories (Environment::RegisterExecutionProviderLibrary), so it is
+    // readable here, in the factory constructor.
+    bool allow_virtual = false;
+    {
+        OrtKeyValuePairs* env_cfg = nullptr;
+        if (ep_api.GetEnvConfigEntries(&env_cfg) == nullptr && env_cfg != nullptr) {
+            Ort::ConstKeyValuePairs kv{env_cfg};
+            std::vector<const char*> keys, values;
+            kv.GetKeyValuePairs(keys, values);
+            for (size_t idx = 0; idx < keys.size(); ++idx) {
+                if (strcmp(keys[idx], kOrtEnvAllowVirtualDevices) == 0 && strcmp(values[idx], "1") == 0) {
+                    allow_virtual = true;
+                    break;
+                }
+            }
+        }
+    }
+
 #ifdef USE_DML
     THROW_IF_ERROR(LoadDynamicLibrary(directmlBackend, &dml_backend_));
     THROW_IF_ERROR(GetSymbolFromLibrary(dml_backend_,
@@ -228,25 +254,31 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     ::SetEnvironmentVariableA("MIGRAPHX_SHARE_LITERALS", "1");
 #endif
 
-    THROW_IF_ERROR(LoadDynamicLibrary(migraphxBackend, &mgx_backend_));
-    THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
-        "ReleaseEpFactory", reinterpret_cast<void**>(&mgx_release_ep_factory_)));
+    // Skip the MIGraphX backend on the virtual/compiler-process path: migraphx-backend.dll pulls the
+    // HIP runtime (amdhip64 statically imports the win32k-locked user32/gdi32), whose eager load fails
+    // under the Win32k-disable mitigation of the WebNN Compiler process. DirectML-only there.
+    if (!allow_virtual) {
+        THROW_IF_ERROR(LoadDynamicLibrary(migraphxBackend, &mgx_backend_));
+        THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
+            "ReleaseEpFactory", reinterpret_cast<void**>(&mgx_release_ep_factory_)));
 
-    CreateEpFactories_t mgx_create_ep_factories{};
-    THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
-        "CreateEpFactories", reinterpret_cast<void**>(&mgx_create_ep_factories)));
+        CreateEpFactories_t mgx_create_ep_factories{};
+        THROW_IF_ERROR(GetSymbolFromLibrary(mgx_backend_,
+            "CreateEpFactories", reinterpret_cast<void**>(&mgx_create_ep_factories)));
 
-    // Optional: a backend may export a telemetry collector. Absence is fine.
-    if (!GetSymbolFromLibrary(mgx_backend_, telemetry::kGetBackendDataSymbol,
-            reinterpret_cast<void**>(&mgx_get_telemetry_)).IsOK()) {
-        mgx_get_telemetry_ = nullptr;
+        // Optional: a backend may export a telemetry collector. Absence is fine.
+        if (!GetSymbolFromLibrary(mgx_backend_, telemetry::kGetBackendDataSymbol,
+                reinterpret_cast<void**>(&mgx_get_telemetry_)).IsOK()) {
+            mgx_get_telemetry_ = nullptr;
+        }
+
+        THROW_IF_ERROR(mgx_create_ep_factories(kMIGraphXBackend, ort_api_base, default_logger,
+            &mgx_ep_factory_, 1, &factories_created));
     }
-
-    THROW_IF_ERROR(mgx_create_ep_factories(kMIGraphXBackend, ort_api_base, default_logger,
-        &mgx_ep_factory_, 1, &factories_created));
 
     // hip (morphizen) backend: optional, only present when built with USE_HIP.
 #ifdef USE_HIP
+    if (!allow_virtual) {
     THROW_IF_ERROR(LoadDynamicLibrary(hipBackend, &hip_backend_));
     THROW_IF_ERROR(GetSymbolFromLibrary(hip_backend_,
         "ReleaseEpFactory", reinterpret_cast<void**>(&hip_release_ep_factory_)));
@@ -258,6 +290,7 @@ ProviderFactory::ProviderFactory(const ApiPtrs& api_ptrs, const OrtApiBase* ort_
     THROW_IF_ERROR(hip_create_ep_factories(ep_name_.c_str(), ort_api_base, default_logger,
         &hip_ep_factory_, 1, &factories_created));
     custom_op_backends_.push_back(hip_ep_factory_);
+    }  // if (!allow_virtual)
 #endif
 
     AddLiveFactory(this, ep_name_);
@@ -358,6 +391,83 @@ Ort::Status ProviderFactory::GetSupportedDevices(const std::vector<Ort::ConstHar
                 amd::VendorId, device_index, OrtDeviceMemoryType_HOST_ACCESSIBLE, 0, OrtDeviceAllocator, &pinned_memory_info_));
             RETURN_IF_ERROR(ep_api.EpDevice_AddAllocatorInfo(ep_device, pinned_memory_info_));
             ep_devices[num_ep_devices++] = ep_device.release();
+        }
+    }
+
+    // Virtual device (Track-2 AOT / Win32k-locked WebNN Compiler process). When the host
+    // opts into virtual devices (env config allow_virtual_devices=1, auto-set by a ".virtual"
+    // registration name), describe a driver-less virtual GPU from the host-supplied
+    // target_architecture (env key ep_factory.<ep_name>.target_architecture). The DX backend
+    // then compiles device-less (no D3D12/DML device). Mirrors NVIDIA's TRT-RTX EP. We register
+    // it IN ADDITION to any physical device so it is also selectable on a device-ful dev box.
+    if (num_ep_devices < ep_devices.size()) {
+        OrtKeyValuePairs* env_cfg = nullptr;
+        if (ep_api.GetEnvConfigEntries(&env_cfg) == nullptr && env_cfg != nullptr) {
+            bool allow_virtual = false;
+            std::string target_arch;
+            std::string target_device_id_str;
+            const std::string arch_key  = "ep_factory." + ep_name_ + ".target_architecture";
+            const std::string devid_key = "ep_factory." + ep_name_ + ".hardware_device_id";
+            {
+                Ort::ConstKeyValuePairs kv{env_cfg};
+                std::vector<const char*> keys, values;
+                kv.GetKeyValuePairs(keys, values);
+                for (size_t idx = 0; idx < keys.size(); ++idx) {
+                    if (strcmp(keys[idx], kOrtEnvAllowVirtualDevices) == 0 && strcmp(values[idx], "1") == 0)
+                        allow_virtual = true;
+                    else if (arch_key == keys[idx])
+                        target_arch = values[idx];
+                    else if (devid_key == keys[idx])
+                        target_device_id_str = values[idx];
+                }
+            }
+            if (allow_virtual) {
+                OrtKeyValuePairs* md = nullptr;
+                ort_api.CreateKeyValuePairs(&md);
+                ort_api.AddKeyValuePair(md, kOrtHardwareDevice_MetadataKey_IsVirtual, "1");
+                if (!target_arch.empty()) ort_api.AddKeyValuePair(md, "target_architecture", target_arch.c_str());
+                if (virtual_device_) { ep_api.ReleaseHardwareDevice(virtual_device_); virtual_device_ = nullptr; }
+                // Device id for the virtual (compiler-process) device. The host
+                // (Chromium Environment::CreateForCompilerProcess) forwards the selected target device's id as
+                // env config ep_factory.<ep_name>.hardware_device_id, formatted "%04x" (hex, no 0x prefix) -- the
+                // same compiler-device handshake NVIDIA's TRT-RTX EP uses (nv_hardware_device_id). We register the
+                // virtual device with THAT id so a single host device selection matches BOTH the physical
+                // GPU/dispatch process and the driver-less virtual compiler process.
+                //
+                // The compiler process is driver-less, so this handshake is the ONLY source of the real device id --
+                // there is no local GPU to query. If the host supplies no valid id we cannot know which AMD GPU the
+                // user is running and must NOT guess (a hardcoded id would be wrong on every other ASIC): register
+                // no virtual device and fall out gracefully, so the host fails compiler-device selection cleanly
+                // instead of compiling for the wrong device.
+                uint32_t target_device_id = 0;
+                bool have_device_id = false;
+                if (!target_device_id_str.empty()) {
+                    try {
+                        target_device_id = static_cast<uint32_t>(std::stoul(target_device_id_str, nullptr, 16));
+                        have_device_id = true;
+                    } catch (const std::exception&) { /* malformed value -> treat as missing */ }
+                }
+                if (!have_device_id) {
+                    std::cerr << "[amdgpu] virtual-device registration skipped: host supplied no valid ep_factory."
+                              << ep_name_ << ".hardware_device_id; cannot determine the target AMD GPU without the "
+                                 "handshake." << std::endl;
+                } else if (ep_api.CreateHardwareDevice(OrtHardwareDeviceType_GPU, amd::VendorId, target_device_id, "AMD", md, &virtual_device_) == nullptr
+                        && virtual_device_ != nullptr) {
+                    OrtKeyValuePairs* ep_opts = nullptr;
+                    ort_api.CreateKeyValuePairs(&ep_opts);
+                    if (!target_arch.empty()) ort_api.AddKeyValuePair(ep_opts, "target_architecture", target_arch.c_str());
+                    RETURN_IF_ERROR(ort_api.CreateMemoryInfo_V2("default", OrtMemoryInfoDeviceType_GPU,
+                        amd::VendorId, 0, OrtDeviceMemoryType_DEFAULT, 0, OrtDeviceAllocator, &gpu_memory_info_));
+                    OrtEpDevice* vep = nullptr;
+                    if (ep_api.CreateEpDevice(this, virtual_device_, nullptr, ep_opts, &vep) == nullptr && vep != nullptr) {
+                        ep_api.EpDevice_AddAllocatorInfo(vep, gpu_memory_info_);
+                        ep_devices[num_ep_devices++] = vep;
+                    }
+                    ort_api.ReleaseKeyValuePairs(ep_opts);
+                }
+                ort_api.ReleaseKeyValuePairs(md);
+            }
+            ort_api.ReleaseKeyValuePairs(env_cfg);
         }
     }
     return STATUS_OK;
