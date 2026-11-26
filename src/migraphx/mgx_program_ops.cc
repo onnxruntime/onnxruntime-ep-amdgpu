@@ -111,9 +111,24 @@ static std::string build_read_only_problem_cache_option(const std::vector<std::s
     return json;
 }
 
+// Render already-escaped cache paths as the {"binary_cache":"","read_only_binary_cache":"..."}
+// object that migraphx's relaxed-JSON backend-option parser expects. The empty binary_cache turns
+// off the writable cache MIGRAPHX_BINARY_CACHE would otherwise enable, so the EP never writes a
+// binary cache. migraphx takes a single read-only binary cache, so only the highest-priority path
+// is delivered.
+static std::string build_read_only_binary_cache_option(const std::vector<std::string>& binary_cache_paths) {
+    std::string json{R"({"binary_cache":"")"};
+    if (!binary_cache_paths.empty()) {
+        json += R"(,"read_only_binary_cache":")" + binary_cache_paths.front() + '"';
+    }
+    json += '}';
+    return json;
+}
+
 void compile_program(const migraphx::program& prog, const migraphx::target& target, bool exhaustive_tune,
     const std::string& mlss_use_specific_ops, ComputeMode compute_mode,
-    const std::vector<std::string>& problem_cache_paths, bool hiprtc_disable_processes) {
+    const std::vector<std::string>& problem_cache_paths, const std::vector<std::string>& binary_cache_paths,
+    bool hiprtc_disable_processes) {
     migraphx::compile_options options;
     options.set_fast_math(false);
 
@@ -142,6 +157,13 @@ void compile_program(const migraphx::program& prog, const migraphx::target& targ
         const auto json{build_read_only_problem_cache_option(problem_cache_paths)};
         options.set_advance_backend_options("%s", json.c_str());
     }
+    // Compiled kernels are only ever read from the shipped/app-provided binary cache, never
+    // written. Sent even without a read-only cache so MIGRAPHX_BINARY_CACHE cannot make the EP
+    // write one; MIGRAPHX_GPU_OPTIONS still overrides this for building a cache. Passed as a %s
+    // argument so a '%' in a path is not read as a format specifier. migraphx builds without the
+    // binary cache ignore these keys.
+    const auto binary_cache_json{build_read_only_binary_cache_option(binary_cache_paths)};
+    options.set_advance_backend_options("%s", binary_cache_json.c_str());
     // Compile hiprtc kernels in-process (sequentially) instead of spawning
     // migraphx-hiprtc-driver. Only sent when requested; the compiled program is unaffected.
     if (hiprtc_disable_processes) {

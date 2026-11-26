@@ -43,6 +43,7 @@ constexpr auto kComputeMode = "ORT_MIGRAPHX_COMPUTE_MODE"sv;
 constexpr auto kINT8UseNativeCalibrationTable = "ORT_MIGRAPHX_INT8_USE_NATIVE_CALIBRATION_TABLE"sv;
 constexpr auto kExhaustiveTune = "ORT_MIGRAPHX_EXHAUSTIVE_TUNE"sv;
 constexpr auto kProblemCachePath = "ORT_MIGRAPHX_PROBLEM_CACHE"sv;
+constexpr auto kBinaryCachePath = "ORT_MIGRAPHX_BINARY_CACHE"sv;
 constexpr auto kHipGraphEnable = "ORT_MIGRAPHX_HIP_GRAPH_ENABLE"sv;
 constexpr auto kMaxDynamicBatch = "ORT_MIGRAPHX_MAX_DYNAMIC_BATCH"sv;
 constexpr auto kCompileBatches = "ORT_MIGRAPHX_COMPILE_BATCHES"sv;
@@ -302,6 +303,9 @@ struct ComputeState {
     // Ordered read-only problem-cache paths (app override, then DLL-adjacent shipped),
     // JSON-escaped for backend-option delivery.
     std::vector<std::string> problem_cache_paths{};
+    // Ordered read-only binary-cache paths (app override, then DLL-adjacent shipped),
+    // JSON-escaped for backend-option delivery.
+    std::vector<std::string> binary_cache_paths{};
 
     // #output_N (GraphToProto / MIGraphX program order) -> ORT fused-node GetOutput index.
     // Empty means identity (N -> N), used until Compile fills the table.
@@ -567,6 +571,8 @@ private:
     void PrewarmHipGraphs(ComputeState& compute_state) noexcept;
     // Populate problem_cache_paths_ from the app override env var and the DLL-adjacent cache.
     void setup_problem_cache_paths();
+    // Populate binary_cache_paths_ from the app override env var and the DLL-adjacent cache.
+    void setup_binary_cache_paths();
 
     const ProviderFactory& factory_;
 
@@ -601,6 +607,9 @@ private:
     // Ordered read-only problem-cache paths (app override, then DLL-adjacent shipped),
     // JSON-escaped for backend-option delivery.
     std::vector<std::string> problem_cache_paths_{};
+    // Ordered read-only binary-cache paths (app override, then DLL-adjacent shipped),
+    // JSON-escaped for backend-option delivery.
+    std::vector<std::string> binary_cache_paths_{};
     std::string model_arch_{};
     bool int8_calibration_cache_available_{};
     bool int8_use_native_calibration_table_{};

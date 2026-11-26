@@ -117,6 +117,30 @@ if(MIGRAPHX_EP_PROBLEM_CACHE)
     endif()
 endif()
 
+# Optionally ship a read-only binary (compiled-kernel) cache next to the EP: deploy the SQLite
+# database at MIGRAPHX_EP_BINARY_CACHE as binary_cache.db (the name setup_binary_cache_paths
+# discovers beside the module at runtime). It must be built by the same MIGraphX the EP ships
+# with, for the same GPU, or every lookup misses.
+set(MIGRAPHX_EP_BINARY_CACHE "" CACHE FILEPATH
+        "Optional binary-cache SQLite database to deploy beside migraphx-ep as binary_cache.db")
+if(MIGRAPHX_EP_BINARY_CACHE)
+    if(NOT EXISTS "${MIGRAPHX_EP_BINARY_CACHE}")
+        message(FATAL_ERROR "MIGRAPHX_EP_BINARY_CACHE not found: ${MIGRAPHX_EP_BINARY_CACHE}")
+    endif()
+    add_custom_command(TARGET migraphx-ep POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${MIGRAPHX_EP_BINARY_CACHE}"
+                "$<TARGET_FILE_DIR:migraphx-ep>/binary_cache.db"
+            COMMENT "Deploying binary_cache.db beside migraphx-ep")
+    if(WIN32)
+        install(FILES "${MIGRAPHX_EP_BINARY_CACHE}"
+                DESTINATION "." RENAME "binary_cache.db")
+    else()
+        install(FILES "${MIGRAPHX_EP_BINARY_CACHE}"
+                DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME "binary_cache.db")
+    endif()
+endif()
+
 if(USE_AMDGPU)
     set_target_properties(migraphx-ep PROPERTIES OUTPUT_NAME "migraphx-backend")
     target_include_directories(migraphx-ep INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

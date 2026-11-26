@@ -956,8 +956,10 @@ ExecutionProvider::ExecutionProvider(const ProviderFactory& factory, std::string
 
     /* TODO: print configured options for the session */
 
-    // Discover the read-only problem cache; paths are delivered to MIGraphX via the compile API.
+    // Discover the read-only problem and binary caches; paths are delivered to MIGraphX via the
+    // compile API.
     setup_problem_cache_paths();
+    setup_binary_cache_paths();
 
     // Register only after construction succeeds so the factory count is balanced
     // by the destructor.
@@ -1028,6 +1030,31 @@ void ExecutionProvider::setup_problem_cache_paths() {
         const fs::path cache_path{*module_dir / "problem_cache.json"};
         if (fs::exists(cache_path)) {
             problem_cache_paths_.push_back(json_escape(cache_path.string()));
+        }
+    }
+#endif
+}
+
+void ExecutionProvider::setup_binary_cache_paths() {
+    // Ordered read-only search list (highest priority first) of compiled-kernel caches,
+    // delivered to MIGraphX via the compile API (set_advance_backend_options). The EP never
+    // writes a binary cache. Paths are JSON-escaped once here so the delivery builder can drop
+    // them straight into the JSON.
+    binary_cache_paths_.clear();
+
+    // 1. App-provided override (ORT_MIGRAPHX_BINARY_CACHE), if set.
+    if (auto ep_override{platform::GetEnvironmentVar(env_var::kBinaryCachePath)}; !ep_override.empty()) {
+        binary_cache_paths_.push_back(json_escape(ep_override));
+    }
+
+#ifdef _WIN32
+    // 2. Read-only binary_cache.db shipped in this EP module's own install directory
+    //    (deployed there by the MIGRAPHX_EP_BINARY_CACHE CMake option). The .db extension
+    //    makes MIGraphX open it as a single SQLite database.
+    if (const auto module_dir{get_current_module_dir()}) {
+        const fs::path cache_path{*module_dir / "binary_cache.db"};
+        if (fs::exists(cache_path)) {
+            binary_cache_paths_.push_back(json_escape(cache_path.string()));
         }
     }
 #endif
@@ -1506,7 +1533,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             calibrate_and_quantize(program, t_, params, enable_fp16_, enable_bf16_, enable_int8_,
                 enable_fp8_, int8_calibration_cache_available_, dynamic_ranges_);
             compile_program(program, t_, exhaustive_tune_, effective_mlss_use_specific_ops, compute_mode_,
-                problem_cache_paths_, hiprtc_disable_processes_);
+                problem_cache_paths_, binary_cache_paths_, hiprtc_disable_processes_);
             // context_enable needs this file on disk even if caching is otherwise disabled.
             if (!disable_compiled_model_caching_ || context_enable_) {
                 if (std::string error; !save_compiled_program(program, mxr_path, &error) && !mxr_path.empty()) {
@@ -1574,6 +1601,7 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             external_data_dir_,
             effective_mxr_prefix,
             problem_cache_paths_,
+            binary_cache_paths_,
         });
 
     // Propagate hipGraph / dynamic-batch configuration onto the compute state.
@@ -1639,7 +1667,8 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
             RETURN_IF_ERROR(CompileMissingPrograms(pre_plan, input_name_indices, onnx_string,
                 compute_state.cached_programs, t_, enable_fp16_, enable_bf16_, enable_int8_, enable_fp8_,
                 int8_calibration_cache_available_, dynamic_ranges_, exhaustive_tune_,
-                effective_mlss_use_specific_ops, compute_mode_, problem_cache_paths_, hiprtc_disable_processes_,
+                effective_mlss_use_specific_ops, compute_mode_, problem_cache_paths_, binary_cache_paths_,
+                hiprtc_disable_processes_,
                 disable_compiled_model_caching_, model_path, external_data_dir_, effective_cache_dir,
                 effective_mxr_prefix));
         }
@@ -2277,7 +2306,8 @@ void ResolveProgram(ComputeState& compute_state, const Ort::KernelContext& kerne
 
             compile_program(program, compute_state.t, compute_state.exhaustive_tune,
                 compute_state.mlss_use_specific_ops, compute_state.compute_mode,
-                compute_state.problem_cache_paths, compute_state.hiprtc_disable_processes);
+                compute_state.problem_cache_paths, compute_state.binary_cache_paths,
+                compute_state.hiprtc_disable_processes);
             if (!compute_state.disable_compiled_model_caching) {
                 save_compiled_program(program, mxr_path);
             }
