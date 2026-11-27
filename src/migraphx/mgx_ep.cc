@@ -1430,7 +1430,6 @@ Ort::Status ExecutionProvider::CreateNodeComputeInfoFromGraph(const Ort::ConstGr
 
     // Propagate hipGraph / dynamic-batch configuration onto the compute state.
     auto& compute_state{state_it->second};
-    compute_state.mgx_output_to_ort = std::move(mgx_output_to_ort);
     compute_state.in_memory_initializers = std::move(in_memory_initializers);
     compute_state.hip_graph_enable = hip_graph_enable_;
     // Co-residency and dynamic batching both own the program cache's population
