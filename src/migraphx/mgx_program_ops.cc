@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -73,9 +74,23 @@ void calibrate_and_quantize(const migraphx::program& prog, const migraphx::targe
 {
     if ((int8_enable ^ fp8_enable) && int8_calibration_cache_available) {
         const auto param_shapes{prog.get_parameter_shapes()};
+        std::unordered_set<std::string> program_param_names;
+        for (const char* name : param_shapes.names()) {
+            program_param_names.emplace(name);
+        }
+        // The calibration table has one range per tensor, including each graph input. migraphx looks
+        // calibration data up by *program parameter name* and expects a full tensor there, so a scalar
+        // range stored under a parameter's own name (e.g. "input") replaces the real input data and makes
+        // quantization throw "Incorrect shape {float_type, {1}, {0}} for parameter: input".
+        // Keep the ranges, but under a reserved prefix so they can never collide with a parameter name.
+        static constexpr std::string_view kRangeKeyPrefix{"__mgx_ep_dynamic_range__"};
         for (const auto& [key, value] : dynamic_range_map) {
+            const std::string range_key{std::string{kRangeKeyPrefix} + key};
+            if (program_param_names.count(range_key) != 0) {
+                continue;  // a model parameter really uses the reserved prefix; never overwrite it
+            }
             const auto shape{migraphx::shape(migraphx_shape_float_type)};
-            params.add(key.c_str(), migraphx::argument(shape, const_cast<float*>(&value)));
+            params.add(range_key.c_str(), migraphx::argument(shape, const_cast<float*>(&value)));
         }
         if (int8_enable) {
             migraphx::quantize_int8_options options;
